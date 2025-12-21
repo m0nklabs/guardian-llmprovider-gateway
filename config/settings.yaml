@@ -1,0 +1,47 @@
+services_to_stop:
+  - caramba-backend
+  - agent-forge
+
+benchmark:
+  models:
+    - deepseek-r1:32b
+    - gemma2:27b
+    - gpt-oss:20b
+  
+  schedule:
+    start_hour: 4
+    end_hour: 11
+    days: ["mon", "tue", "wed", "thu", "fri"]
+
+proxy:
+  port: 11435
+  target: http://localhost:11434
+  vram_limit_mb: 27000
+
+# Dynamic timeout configuration per model tier (in seconds)
+# Tiers are based on estimated VRAM usage in MB
+timeouts:
+  tiers:
+    # 70B+ models (40GB+ VRAM)
+    tier_70b:
+      min_size_mb: 40000
+      timeout_seconds: 1800  # 30 minutes
+    # 32B models (20-40GB VRAM)  
+    tier_32b:
+      min_size_mb: 20000
+      timeout_seconds: 1200  # 20 minutes
+    # 13B models (10-20GB VRAM)
+    tier_13b:
+      min_size_mb: 10000
+      timeout_seconds: 600   # 10 minutes
+    # 7-8B models (5-10GB VRAM)
+    tier_8b:
+      min_size_mb: 5000
+      timeout_seconds: 360   # 6 minutes
+    # Small models (<5GB VRAM)
+    tier_small:
+      min_size_mb: 0
+      timeout_seconds: 240   # 4 minutes
+  
+  # Global fallback timeout if no tier matches
+  default_timeout: 600

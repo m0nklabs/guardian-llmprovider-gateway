@@ -1,0 +1,98 @@
+{
+  "completed": [
+    {
+      "id": "qwen2.5:0.5b|2048|128",
+      "timestamp": "2025-12-03T22:32:51.925015",
+      "success": true,
+      "metrics": {
+        "tps": 414.9186342392711,
+        "total_duration": 6.79751757,
+        "vram_delta": -120,
+        "peak_vram": 652
+      },
+      "config": {
+        "id": "qwen2.5:0.5b|2048|128",
+        "model": "qwen2.5:0.5b",
+        "ctx": 2048,
+        "batch": 128
+      }
+    },
+    {
+      "id": "qwen2.5:0.5b|2048|256",
+      "timestamp": "2025-12-03T22:33:00.916544",
+      "success": true,
+      "metrics": {
+        "tps": 413.72282535692614,
+        "total_duration": 6.876563133,
+        "vram_delta": 82,
+        "peak_vram": 734
+      },
+      "config": {
+        "id": "qwen2.5:0.5b|2048|256",
+        "model": "qwen2.5:0.5b",
+        "ctx": 2048,
+        "batch": 256
+      }
+    },
+    {
+      "id": "qwen2.5:0.5b|4096|128",
+      "timestamp": "2025-12-03T22:33:08.399736",
+      "success": true,
+      "metrics": {
+        "tps": 427.0488759282574,
+        "total_duration": 5.364677262,
+        "vram_delta": -52,
+        "peak_vram": 682
+      },
+      "config": {
+        "id": "qwen2.5:0.5b|4096|128",
+        "model": "qwen2.5:0.5b",
+        "ctx": 4096,
+        "batch": 128
+      }
+    },
+    {
+      "id": "qwen2.5:0.5b|4096|256",
+      "timestamp": "2025-12-03T22:33:17.012041",
+      "success": true,
+      "metrics": {
+        "tps": 419.8310489048781,
+        "total_duration": 6.496369362,
+        "vram_delta": 90,
+        "peak_vram": 772
+      },
+      "config": {
+        "id": "qwen2.5:0.5b|4096|256",
+        "model": "qwen2.5:0.5b",
+        "ctx": 4096,
+        "batch": 256
+      }
+    }
+  ],
+  "queue": [
+    {
+      "id": "qwen2.5:0.5b|2048|128",
+      "model": "qwen2.5:0.5b",
+      "ctx": 2048,
+      "batch": 128
+    },
+    {
+      "id": "qwen2.5:0.5b|2048|256",
+      "model": "qwen2.5:0.5b",
+      "ctx": 2048,
+      "batch": 256
+    },
+    {
+      "id": "qwen2.5:0.5b|4096|128",
+      "model": "qwen2.5:0.5b",
+      "ctx": 4096,
+      "batch": 128
+    },
+    {
+      "id": "qwen2.5:0.5b|4096|256",
+      "model": "qwen2.5:0.5b",
+      "ctx": 4096,
+      "batch": 256
+    }
+  ]
+}

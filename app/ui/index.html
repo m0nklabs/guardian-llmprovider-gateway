@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ollama Guardian Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { background-color: #0f172a; color: #e2e8f0; }
+        .card { background-color: #1e293b; border-radius: 0.5rem; padding: 1.5rem; }
+        .stat-value { font-size: 2rem; font-weight: bold; color: #38bdf8; }
+        .stat-label { color: #94a3b8; font-size: 0.875rem; }
+        .record-badge { background-color: #f59e0b; color: #000; font-weight: bold; padding: 0.1rem 0.4rem; border-radius: 0.25rem; font-size: 0.75rem; }
+    </style>
+</head>
+<body class="p-6">
+    <div class="max-w-7xl mx-auto">
+        <header class="mb-8 flex justify-between items-center">
+            <div>
+                <h1 class="text-3xl font-bold text-white">🛡️ Ollama Guardian</h1>
+                <p class="text-slate-400">VRAM Scheduler & Optimization Suite</p>
+            </div>
+            <div class="flex gap-4">
+                <div class="text-right">
+                    <div class="text-sm text-slate-400">Status</div>
+                    <div class="text-green-400 font-bold">ACTIVE</div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Stats Grid -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+            <div class="card">
+                <div class="stat-label">VRAM Usage</div>
+                <div class="stat-value" id="vram-usage">--%</div>
+                <div class="text-sm text-slate-500 mt-1" id="vram-detail">-- / -- MB</div>
+            </div>
+            <div class="card">
+                <div class="stat-label">Active Models</div>
+                <div class="stat-value" id="active-models">0</div>
+                <div class="text-sm text-slate-500 mt-1" id="active-list">None</div>
+            </div>
+            <div class="card">
+                <div class="stat-label">Queue Size</div>
+                <div class="stat-value" id="queue-size">0</div>
+            </div>
+            <div class="card">
+                <div class="stat-label">Optimized Requests</div>
+                <div class="stat-value" id="optimized-count">0</div>
+            </div>
+        </div>
+
+        <!-- Main Content -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <!-- Active Combos -->
+            <div class="card lg:col-span-2">
+                <h2 class="text-xl font-bold mb-4 text-white">🎰 Active Combo Cache</h2>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-sm">
+                        <thead class="text-slate-400 border-b border-slate-700">
+                            <tr>
+                                <th class="pb-2">Model</th>
+                                <th class="pb-2">Size (MB)</th>
+                                <th class="pb-2">Last Used</th>
+                                <th class="pb-2">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="combo-table" class="text-slate-300">
+                            <!-- Populated by JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Benchmark Records -->
+            <div class="card">
+                <h2 class="text-xl font-bold mb-4 text-white">🏆 Optimization Records</h2>
+                <div class="space-y-4" id="records-list">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        async function updateStats() {
+            try {
+                const response = await fetch('/api/stats'); 
+                const data = await response.json();
+                
+                // Update VRAM
+                const vramPercent = Math.round((data.vram.used / data.vram.total) * 100);
+                document.getElementById('vram-usage').textContent = `${vramPercent}%`;
+                document.getElementById('vram-detail').textContent = `${data.vram.used} / ${data.vram.total} MB`;
+                
+                // Update Active Models
+                document.getElementById('active-models').textContent = data.active_models.length;
+                document.getElementById('active-list').textContent = data.active_models.join(', ') || 'None';
+                
+                // Update Queue
+                document.getElementById('queue-size').textContent = data.queue_size;
+
+                // Update Optimized Count (Mock for now if not in API)
+                document.getElementById('optimized-count').textContent = data.optimized_count || 0;
+                
+                // Update Combo Table
+                const tbody = document.getElementById('combo-table');
+                tbody.innerHTML = '';
+                if (data.cached_models && data.cached_models.length > 0) {
+                    data.cached_models.forEach(model => {
+                        const row = `
+                            <tr class="border-b border-slate-800 last:border-0">
+                                <td class="py-3 font-medium text-white">${model.name}</td>
+                                <td class="py-3">${model.size_mb} MB</td>
+                                <td class="py-3">${new Date(model.last_used * 1000).toLocaleTimeString()}</td>
+                                <td class="py-3"><span class="px-2 py-1 rounded bg-green-900 text-green-300 text-xs">CACHED</span></td>
+                            </tr>
+                        `;
+                        tbody.innerHTML += row;
+                    });
+                } else {
+                    tbody.innerHTML = '<tr><td colspan="4" class="py-3 text-center text-slate-500">No models in cache</td></tr>';
+                }
+
+                // Update Records List
+                const recordsList = document.getElementById('records-list');
+                recordsList.innerHTML = '';
+                if (data.records && data.records.length > 0) {
+                    data.records.forEach(record => {
+                        const item = `
+                            <div class="flex justify-between items-center border-b border-slate-800 pb-2 last:border-0">
+                                <div>
+                                    <div class="font-bold text-white">${record.model}</div>
+                                    <div class="text-xs text-slate-400">${record.config}</div>
+                                </div>
+                                <div class="text-right">
+                                    <div class="text-xl font-bold text-yellow-400">${record.tps.toFixed(1)} TPS</div>
+                                    <div class="text-xs text-green-400">+${record.improvement}%</div>
+                                </div>
+                            </div>
+                        `;
+                        recordsList.innerHTML += item;
+                    });
+                } else {
+                    recordsList.innerHTML = '<div class="text-center text-slate-500">No records yet</div>';
+                }
+
+            } catch (e) {
+                console.error("Failed to fetch stats", e);
+            }
+        }
+
+        // Poll every 2 seconds
+        setInterval(updateStats, 2000);
+        updateStats(); // Initial call
+    </script>
+</body>
+</html>
