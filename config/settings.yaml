@@ -15,7 +15,7 @@ benchmark:
 
 proxy:
   port: 11435
-  target: http://localhost:11434
+  target: http://localhost:11440
   vram_limit_mb: 27000
 
 # Dynamic timeout configuration per model tier (in seconds)

@@ -58,7 +58,7 @@ def load_config() -> dict:
 CONFIG = load_config()
 
 # Configuration
-OLLAMA_URL = "http://127.0.0.1:11440"
+LLAMA_SERVER_URL = "http://127.0.0.1:11440"
 
 # Total VRAM available (approx 28GB: 12GB + 16GB)
 # We set a safe limit to avoid OOM (Adjusted to 26GB to provide safety buffer for CPU offloading prevention)
@@ -156,7 +156,7 @@ def get_model_timeout(model_name: str) -> int:
 async def unload_model(model_name: str):
     async with httpx.AsyncClient() as client:
         try:
-            await client.post(f"{OLLAMA_URL}/api/generate", json={"model": model_name, "keep_alive": 0})
+            await client.post(f"{LLAMA_SERVER_URL}/api/generate", json={"model": model_name, "keep_alive": 0})
         except Exception as e:
             logger.error(f"Failed to unload {model_name}: {e}")
 
@@ -186,7 +186,7 @@ async def verify_credentials(request: Request):
     raise HTTPException(
         status_code=HTTP_401_UNAUTHORIZED,
         detail="Username (Basic) or token (Bearer) required for identification",
-        headers={"WWW-Authenticate": 'Basic realm="ollama-guardian", Bearer'},
+        headers={"WWW-Authenticate": 'Basic realm="llama-guardian", Bearer'},
     )
 
 # VramScheduler
@@ -244,74 +244,9 @@ state = State()
 # ...existing code...
 
 async def check_and_free_vram(needed_mb: int, target_model: str):
-    try:
-        async with httpx.AsyncClient() as client:
-            r = await client.get(f"{OLLAMA_URL}/api/ps")
-            if r.status_code != 200: return
-
-            data = r.json()
-        models = data.get("models", [])
-        
-        # Get currently active models from scheduler to protect them
-        active_models = list(state.scheduler.active_counts.keys())
-        
-        # Get REAL GPU metrics
-        gpu = get_gpu_metrics()
-        real_free = gpu['free']
-        
-        # Smart Combo Caching:
-        # If we have enough space (with 500MB buffer), DON'T unload anything.
-        # This keeps "combos" (sets of models) loaded in VRAM.
-        if real_free >= (needed_mb + 500):
-            current_combo = [m.get("name") or m.get("model") for m in models]
-            if target_model not in current_combo:
-                current_combo.append(target_model)
-            logger.info(f"🎰 COMBO HIT! Keeping {len(current_combo)} models loaded: {current_combo} (Free: {real_free}MB)")
-            return
-
-        logger.info(f"VRAM Check: Need {needed_mb}MB, Have {real_free}MB. Deficit: {needed_mb - real_free}MB")
-
-        # Identify idle models
-        idle_models = []
-        for m in models:
-            name = m.get("name") or m.get("model")
-            # Skip target and active
-            if name == target_model or name in active_models: 
-                continue
-            
-            size_vram = m.get("size_vram", 0)
-            size_mb = int(size_vram / 1024 / 1024)
-            
-            # Use our own last_used tracker for LRU policy
-            last_used_ts = state.last_used.get(name, 0)
-            
-            idle_models.append({
-                "name": name,
-                "size_mb": size_mb,
-                "last_used": last_used_ts
-            })
-
-        # Sort by last_used (Oldest first) -> Least Recently Used
-        idle_models.sort(key=lambda x: x["last_used"])
-
-        freed_mb = 0
-        deficit = (needed_mb + 500) - real_free
-        
-        # Partial Unload: Only unload enough to fit the new model
-        for m in idle_models:
-            if deficit <= 0:
-                break
-                
-            logger.info(f"Smart Unload: Dropping {m['name']} (Last used: {m['last_used']}) to free {m['size_mb']}MB")
-            await unload_model(m['name'])
-            freed_mb += m['size_mb']
-            deficit -= m['size_mb']
-            
-        if freed_mb > 0:
-            await asyncio.sleep(0.5)
-            
-    except Exception as e:
-        logger.error(f"Error checking VRAM state: {e}")
+    # Llama-server manages its own memory via single-model loading.
+    # Manager.py handles switching. This logic is legacy Ollama-specific and is disabled.
+    return
 
 @app.post("/api/generate")
 async def proxy_generate(request: Request, client_id: str = Depends(verify_credentials)):
@@ -355,7 +290,7 @@ async def proxy_generate(request: Request, client_id: str = Depends(verify_crede
         client = httpx.AsyncClient(timeout=model_timeout)
         req = client.build_request(
             request.method,
-            f"{OLLAMA_URL}/api/generate",
+            f"{LLAMA_SERVER_URL}/api/generate",
             json=body,
             timeout=model_timeout
         )
@@ -429,7 +364,7 @@ async def proxy_chat(request: Request, client_id: str = Depends(verify_credentia
         client = httpx.AsyncClient(timeout=chat_timeout)
         req = client.build_request(
             request.method,
-            f"{OLLAMA_URL}/api/chat",
+            f"{LLAMA_SERVER_URL}/api/chat",
             json=body,
             timeout=chat_timeout
         )
@@ -466,14 +401,14 @@ async def proxy_chat(request: Request, client_id: str = Depends(verify_credentia
 @app.get("/api/{path:path}")
 async def proxy_get(path: str, request: Request):
     async with httpx.AsyncClient() as client:
-        resp = await client.get(f"{OLLAMA_URL}/api/{path}", params=request.query_params)
+        resp = await client.get(f"{LLAMA_SERVER_URL}/api/{path}", params=request.query_params)
         return Response(content=resp.content, status_code=resp.status_code, headers=resp.headers)
 
 @app.post("/api/{path:path}")
 async def proxy_post(path: str, request: Request, client_id: str = Depends(verify_credentials)):
     body = await request.body()
     async with httpx.AsyncClient() as client:
-        resp = await client.post(f"{OLLAMA_URL}/api/{path}", content=body)
+        resp = await client.post(f"{LLAMA_SERVER_URL}/api/{path}", content=body)
         return Response(content=resp.content, status_code=resp.status_code, headers=resp.headers)
 
 # Model listing endpoint (Before catch-all)
@@ -500,7 +435,7 @@ async def list_models():
 @app.get("/v1/{path:path}")
 async def proxy_v1_get(path: str, request: Request):
     async with httpx.AsyncClient() as client:
-        resp = await client.get(f"{OLLAMA_URL}/v1/{path}", params=request.query_params)
+        resp = await client.get(f"{LLAMA_SERVER_URL}/v1/{path}", params=request.query_params)
         return Response(content=resp.content, status_code=resp.status_code, headers=resp.headers)
 
 @app.post("/v1/{path:path}")
@@ -533,7 +468,7 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
     logger.info(f"OpenAI-compat request from client '{client_id}': POST /v1/{path}")
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.post(
-            f"{OLLAMA_URL}/v1/{path}",
+            f"{LLAMA_SERVER_URL}/v1/{path}",
             content=body,
             headers={"Content-Type": request.headers.get("Content-Type", "application/json")}
         )
@@ -556,7 +491,7 @@ async def save_session(request: Request):
         
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"{OLLAMA_URL}/slots/0?action=save",
+                f"{LLAMA_SERVER_URL}/slots/0?action=save",
                 json={"filename": filename},
                 timeout=60.0
             )  
@@ -579,7 +514,7 @@ async def load_session(request: Request):
             
         async with httpx.AsyncClient() as client:
             resp = await client.post(
-                f"{OLLAMA_URL}/slots/0?action=restore",
+                f"{LLAMA_SERVER_URL}/slots/0?action=restore",
                 json={"filename": filename},
                 timeout=60.0 # Loading takes time
             )

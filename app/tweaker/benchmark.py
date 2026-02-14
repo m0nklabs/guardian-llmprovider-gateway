@@ -13,12 +13,12 @@ class BenchmarkSuite:
         self.data_dir = data_dir
         self.results_file = os.path.join(data_dir, "benchmark_results.json")
         self.state_file = os.path.join(data_dir, "benchmark_state.json")
-        self.ollama_url = "http://localhost:11436/api/generate" 
-        # We benchmark directly against the internal Ollama instance (11436)
+        self.server_url = "http://localhost:11440/api/generate" 
+        # We benchmark directly against the internal Llama Server (11440)
         # to avoid proxy overhead and auth requirements during automated testing.
-        self.target_url = "http://localhost:11436/api/generate" 
+        self.target_url = "http://localhost:11440/api/generate" 
         
-        self.models_to_test = ["deepseek-r1:32b", "gemma2:27b", "gpt-oss:20b"] # TODO: Load from Ollama API
+        self.models_to_test = ["deepseek-r1:32b", "gemma2:27b", "gpt-oss:20b"] # TODO: Load from Llama Server API
         self.ctx_options = [2048, 4096, 8192, 16384, 24576, 28672, 32768]
         self.batch_options = [128, 256, 512, 1024]
         

@@ -40,7 +40,7 @@
 
 ### Directory Structure
 ```text
-/home/flip/ollama_guardian/
+/home/flip/llama_cpp_guardian/
 ├── app/
 │   ├── main.py            # Application Entry Point (FastAPI + Scheduler)
 │   ├── proxy/             # Proxy Server Logic
