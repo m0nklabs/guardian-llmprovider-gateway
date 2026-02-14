@@ -1,4 +1,9 @@
 models:
+  glm-4.7-30b:
+    path: /home/flip/models/GLM-4.7-Flash-Q4_K_M-latest.gguf
+    context: 262144
+    ngl: 99
+
   glm-4:
     path: /home/flip/models/GLM-4.7-Flash-Q4_K_M-latest.gguf
     context: 262144

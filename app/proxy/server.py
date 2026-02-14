@@ -23,9 +23,11 @@ from starlette.status import HTTP_401_UNAUTHORIZED
 from collections import defaultdict
 from app.proxy.optimizer import RequestOptimizer
 from app.engine.manager import ModelManager
+from app.proxy.auth import verify_api_key
 
 # Load configuration from settings.yaml
 def load_config() -> dict:
+
     """Load configuration from settings.yaml with sensible defaults."""
     config_path = Path(__file__).parent.parent.parent / "config" / "settings.yaml"
     default_config = {
@@ -75,7 +77,7 @@ CLIENTS_FILE = "config/clients.json"
 # Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Proxy")
-security = HTTPBasic()
+# security = HTTPBasic() # Removed in favor of API Key Auth
 app = FastAPI()
 model_manager = ModelManager()
 
@@ -102,6 +104,7 @@ def get_gpu_metrics():
         return {'used': 0, 'free': SAFE_VRAM_LIMIT_MB, 'total': SAFE_VRAM_LIMIT_MB}
 
 def get_model_size(model_name: str) -> int:
+    if not model_name: return 0
     model_lower = model_name.lower()
     # Specific overrides for new models
     if "glm-4" in model_lower: return 26000  # ~24GB
@@ -118,6 +121,10 @@ def get_model_size(model_name: str) -> int:
     if "8b" in model_lower: return 6000
     if "7b" in model_lower: return 5000
     if "1.5b" in model_lower: return 1500
+    
+    # Default fallback
+    return 8000
+
     if "0.5b" in model_lower: return 600
     if "embed" in model_lower: return 500
     return 4000
@@ -163,31 +170,7 @@ async def unload_model(model_name: str):
 async def update_model_stats(model_name: str):
     pass
 
-async def verify_credentials(request: Request):
-    # Permissive Mode: We use auth for identification (Client ID), not security.
-    # Accepts both Basic Auth (username as client_id) and Bearer tokens (token as client_id).
-    auth_header = request.headers.get("Authorization", "")
-    
-    if auth_header.startswith("Bearer "):
-        token = auth_header[7:].strip()
-        if token:
-            logger.debug(f"🔑 Bearer auth from client: {token}")
-            return token
-    elif auth_header.startswith("Basic "):
-        try:
-            decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
-            username = decoded.split(":", 1)[0]
-            if username:
-                logger.debug(f"🔑 Basic auth from client: {username}")
-                return username
-        except Exception:
-            pass
-    
-    raise HTTPException(
-        status_code=HTTP_401_UNAUTHORIZED,
-        detail="Username (Basic) or token (Bearer) required for identification",
-        headers={"WWW-Authenticate": 'Basic realm="llama-guardian", Bearer'},
-    )
+# Auth replaced by verify_api_key imported from app.proxy.auth
 
 # VramScheduler
 class VramScheduler:
@@ -248,83 +231,9 @@ async def check_and_free_vram(needed_mb: int, target_model: str):
     # Manager.py handles switching. This logic is legacy Ollama-specific and is disabled.
     return
 
-@app.post("/api/generate")
-async def proxy_generate(request: Request, client_id: str = Depends(verify_credentials)):
-    try:
-        body = await request.json()
-    except:
-        body = {}
-        
-    model = body.get("model")
-    if not model:
-        raise HTTPException(status_code=400, detail="Model not specified")
-
-    # Update Last Used (for LRU caching)
-    state.last_used[model] = time.time()
-
-    logger.info(f"Request from client '{client_id}' for model '{model}'")
-
-    # Enforce default context size if not specified
-    if "options" not in body:
-        body["options"] = {}
-    
-    # Optimize Options (Inject Benchmark Results)
-    body["options"] = state.optimizer.optimize_options(model, body["options"])
-
-    if "num_ctx" not in body["options"]:
-        body["options"]["num_ctx"] = DEFAULT_CONTEXT_SIZE
-        logger.info(f"Enforced default context size {DEFAULT_CONTEXT_SIZE} for {model}")
-
-    vram_needed = get_model_size(model)
-    
-    # Acquire VRAM slot
-    await state.scheduler.acquire(model, vram_needed)
-    
-    try:
-        # Active Unload Logic (now aware of active models)
-        await check_and_free_vram(vram_needed, model)
-
-        # Use configured timeout to prevent stuck requests
-        model_timeout = get_model_timeout(model)
-        logger.info(f"Using timeout {model_timeout}s for model {model}")
-        client = httpx.AsyncClient(timeout=model_timeout)
-        req = client.build_request(
-            request.method,
-            f"{LLAMA_SERVER_URL}/api/generate",
-            json=body,
-            timeout=model_timeout
-        )
-        r = await client.send(req, stream=True)
-    except httpx.ReadTimeout:
-        logger.error(f"Request timeout for {model} after {model_timeout}s")
-        await state.scheduler.release(model)
-        if 'client' in locals(): await client.aclose()
-        raise HTTPException(status_code=504, detail="Request timed out (Guardian Protection)")
-    except Exception as e:
-        await state.scheduler.release(model)
-        if 'client' in locals(): await client.aclose()
-        raise e
-
-    async def stream_generator():
-        try:
-            async for chunk in r.aiter_raw():
-                yield chunk
-        finally:
-            await r.aclose()
-            await client.aclose()
-            await state.scheduler.release(model)
-
-    background = BackgroundTask(update_model_stats, model_name=model)
-    
-    return StreamingResponse(
-        stream_generator(),
-        status_code=r.status_code,
-        headers=r.headers,
-        background=background
-    )
-
 @app.post("/api/chat")
-async def proxy_chat(request: Request, client_id: str = Depends(verify_credentials)):
+async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_api_key)):
+    """Bridge Ollama-style chat requests to OpenAI-style Llama Server"""
     try:
         body = await request.json()
     except:
@@ -334,86 +243,269 @@ async def proxy_chat(request: Request, client_id: str = Depends(verify_credentia
     if not model:
         raise HTTPException(status_code=400, detail="Model not specified")
 
-    # Update Last Used (for LRU caching)
-    state.last_used[model] = time.time()
-
-    logger.info(f"Chat request from client '{client_id}' for model '{model}'")
-
-    # Enforce default context size if not specified
-    if "options" not in body:
-        body["options"] = {}
+    logger.info(f"bridge: Ollama chat request for '{model}' -> Translating to OpenAI format")
     
-    # Optimize Options (Inject Benchmark Results)
-    body["options"] = state.optimizer.optimize_options(model, body["options"])
+    # Check if model switch needed
+    current_model = await model_manager.get_current_model()
+    if model != current_model and model in model_manager.models:
+         await model_manager.switch_model(model)
 
-    if "num_ctx" not in body["options"]:
-        body["options"]["num_ctx"] = DEFAULT_CONTEXT_SIZE
-
-    vram_needed = get_model_size(model)
+    # Translate Ollama request to OpenAI format
+    messages = body.get("messages", [])
+    stream = body.get("stream", True)
     
-    # Acquire VRAM slot
-    await state.scheduler.acquire(model, vram_needed)
+    # Basic options mapping
+    options = body.get("options", {})
+    temperature = options.get("temperature", 0.7)
+    
+    openai_body = {
+        "model": model,
+        "messages": messages,
+        "stream": stream,
+        "temperature": temperature
+    }
 
+    # Forward to Llama Server (OpenAI Endpoint)
+    timeout_sec = get_model_timeout(model)
+    client = httpx.AsyncClient(timeout=timeout_sec)
+    
+    req = client.build_request(
+        "POST",
+        f"{LLAMA_SERVER_URL}/v1/chat/completions",
+        json=openai_body,
+        timeout=timeout_sec
+    )
+    
     try:
-        # Active Unload Logic
-        await check_and_free_vram(vram_needed, model)
-
-        # Forward request with proper streaming lifecycle and timeout
-        chat_timeout = get_model_timeout(model)
-        logger.info(f"Using timeout {chat_timeout}s for chat with {model}")
-        client = httpx.AsyncClient(timeout=chat_timeout)
-        req = client.build_request(
-            request.method,
-            f"{LLAMA_SERVER_URL}/api/chat",
-            json=body,
-            timeout=chat_timeout
-        )
-        r = await client.send(req, stream=True)
-    except httpx.ReadTimeout:
-        logger.error(f"Chat request timeout for {model} after {chat_timeout}s")
-        await state.scheduler.release(model)
-        if 'client' in locals(): await client.aclose()
-        raise HTTPException(status_code=504, detail="Request timed out (Guardian Protection)")
+        r = await client.send(req, stream=stream)
     except Exception as e:
-        await state.scheduler.release(model)
-        if 'client' in locals(): await client.aclose()
+        await client.aclose()
         raise e
 
-    async def stream_generator():
+    if stream:
+        async def stream_adapter():
+            try:
+                async for chunk in r.aiter_lines():
+                    if not chunk or chunk.strip() == "data: [DONE]": 
+                        continue
+                    if chunk.startswith("data: "):
+                        try:
+                            data = json.loads(chunk[6:])
+                            # Translate OpenAI chunk back to Ollama chunk
+                            if "choices" in data and len(data["choices"]) > 0:
+                                delta = data["choices"][0].get("delta", {})
+                                content = delta.get("content", "")
+                                if content:
+                                    ollama_chunk = {
+                                        "model": model,
+                                        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+                                        "message": {"role": "assistant", "content": content},
+                                        "done": False
+                                    }
+                                    yield json.dumps(ollama_chunk) + "\n"
+                        except:
+                            pass
+                # Final done message
+                yield json.dumps({
+                    "model": model, 
+                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()), 
+                    "done": True,
+                    "total_duration": 0,
+                    "load_duration": 0,
+                    "prompt_eval_count": 0,
+                    "eval_count": 0
+                }) + "\n"
+            finally:
+                await r.aclose()
+                await client.aclose()
+
+        return StreamingResponse(stream_adapter(), media_type="application/x-ndjson")
+    else:
+        # Handle non-streaming response
         try:
-            async for chunk in r.aiter_raw():
-                yield chunk
-        finally:
+            data = r.json()
+            content = data["choices"][0]["message"]["content"]
+            ollama_resp = {
+                "model": model,
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+                "message": {"role": "assistant", "content": content},
+                "done": True,
+                "total_duration": 0,
+                "load_duration": 0,
+                "prompt_eval_count": data.get("usage", {}).get("prompt_tokens", 0),
+                "eval_count": data.get("usage", {}).get("completion_tokens", 0)
+            }
             await r.aclose()
             await client.aclose()
-            await state.scheduler.release(model)
+            return ollama_resp
+        except Exception as e:
+            await r.aclose()
+            await client.aclose()
+            raise e
 
-    # Background task to learn stats
-    background = BackgroundTask(update_model_stats, model_name=model)
+# Legacy endpoint for Ollama generate
+@app.post("/api/generate")
+async def proxy_generate_ollama(request: Request, client_id: str = Depends(verify_api_key)):
+    """Bridge Ollama /api/generate (prompt-based) to /api/chat logic"""
+    try:
+        body = await request.json()
+    except:
+        body = {}
+        
+    prompt = body.get("prompt", "")
+    if prompt and "messages" not in body:
+        # Convert prompt to messages format for the chat bridge
+        body["messages"] = [{"role": "user", "content": prompt}]
     
-    return StreamingResponse(
-        stream_generator(),
-        status_code=r.status_code,
-        headers=r.headers,
-        background=background
+    # Create a new request with the modified body
+    # We can't easily replace the request body in the request object, so we'll call the logic directly
+    # But proxy_chat_ollama expects a Request. Let's refactor slightly or just patch the body retrieval if possible.
+    # actually, verifying dependency injection might be tricky if we call the function directly.
+    # Instead, let's implement the specific Generate bridge here to be safe and clean.
+    
+    model = body.get("model")
+    if not model:
+        raise HTTPException(status_code=400, detail="Model not specified")
+        
+    # Translate to OpenAI
+    messages = body.get("messages", [{"role": "user", "content": prompt}])
+    stream = body.get("stream", True)
+    options = body.get("options", {})
+    temperature = options.get("temperature", 0.7)
+    
+    openai_body = {
+        "model": model,
+        "messages": messages,
+        "stream": stream,
+        "temperature": temperature
+    }
+
+    # reuse the same client/streaming logic
+    timeout_sec = get_model_timeout(model)
+    client = httpx.AsyncClient(timeout=timeout_sec)
+    
+    req = client.build_request(
+        "POST",
+        f"{LLAMA_SERVER_URL}/v1/chat/completions",
+        json=openai_body,
+        timeout=timeout_sec
     )
 
-@app.get("/api/{path:path}")
-async def proxy_get(path: str, request: Request):
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(f"{LLAMA_SERVER_URL}/api/{path}", params=request.query_params)
-        return Response(content=resp.content, status_code=resp.status_code, headers=resp.headers)
+    try:
+        r = await client.send(req, stream=stream)
+    except Exception as e:
+        await client.aclose()
+        raise e
 
-@app.post("/api/{path:path}")
-async def proxy_post(path: str, request: Request, client_id: str = Depends(verify_credentials)):
-    body = await request.body()
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(f"{LLAMA_SERVER_URL}/api/{path}", content=body)
-        return Response(content=resp.content, status_code=resp.status_code, headers=resp.headers)
+    if stream:
+        async def stream_adapter_generate():
+            try:
+                async for chunk in r.aiter_lines():
+                    if not chunk or chunk.strip() == "data: [DONE]": 
+                        continue
+                    if chunk.startswith("data: "):
+                        try:
+                            data = json.loads(chunk[6:])
+                            if "choices" in data and len(data["choices"]) > 0:
+                                delta = data["choices"][0].get("delta", {})
+                                content = delta.get("content", "")
+                                if content:
+                                    # /api/generate response format: { "response": "..." }
+                                    ollama_chunk = {
+                                        "model": model,
+                                        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+                                        "response": content,
+                                        "done": False
+                                    }
+                                    yield json.dumps(ollama_chunk) + "\n"
+                        except:
+                            pass
+                yield json.dumps({
+                    "model": model, 
+                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()), 
+                    "done": True,
+                    "response": "",
+                    "total_duration": 0,
+                    "load_duration": 0,
+                    "prompt_eval_count": 0,
+                    "eval_count": 0
+                }) + "\n"
+            finally:
+                await r.aclose()
+                await client.aclose()
+
+        return StreamingResponse(stream_adapter_generate(), media_type="application/x-ndjson")
+    else:
+        try:
+            data = r.json()
+            content = data["choices"][0]["message"]["content"]
+            ollama_resp = {
+                "model": model,
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+                "response": content,
+                "done": True,
+                "context": [], # context usually returned by generate, handled by client
+                "total_duration": 0,
+                "load_duration": 0,
+                "prompt_eval_count": data.get("usage", {}).get("prompt_tokens", 0),
+                "eval_count": data.get("usage", {}).get("completion_tokens", 0)
+            }
+            await r.aclose()
+            await client.aclose()
+            return ollama_resp
+        except Exception as e:
+            await r.aclose()
+            await client.aclose()
+            raise e
+
+
+@app.get("/api/version")
+async def get_version():
+    """Mimic Ollama version endpoint"""
+    return {"version": "0.1.27"}
+
+@app.get("/api/tags")
+async def proxy_tags_ollama(client_id: str = Depends(verify_api_key)):
+    """Simulate Ollama /api/tags endpoint"""
+    import traceback
+    models = []
+    try:
+        # Get models from our manager config
+        if not hasattr(model_manager, 'models') or model_manager.models is None:
+            logger.error("model_manager.models is missing or None")
+            return {"models": []}
+            
+        for name in model_manager.models.keys():
+            models.append({
+                "name": name,
+                "model": name,
+                "modified_at": "2024-01-01T00:00:00.0000000+00:00",
+                "size": get_model_size(name) * 1024 * 1024,
+                "digest": "000000000000",
+                "details": {
+                    "parent_model": "",
+                    "format": "gguf",
+                    "family": "llama",
+                    "families": ["llama"],
+                    "parameter_size": "7B",
+                    "quantization_level": "Q4_0"
+                }
+            })
+    except Exception as e:
+        logger.error(f"Error in proxy_tags_ollama: {e}")
+        traceback.print_exc()
+        # Return empty list instead of crashing
+        pass
+    return {"models": models}
+
+
+
+# ...existing code...
+
 
 # Model listing endpoint (Before catch-all)
 @app.get("/v1/models")
-async def list_models():
+async def list_models(client_id: str = Depends(verify_api_key)):
     """List available models from config."""
     models_list = []
     try:
@@ -433,13 +525,13 @@ async def list_models():
 
 # OpenAI-compatible /v1/ routes (used by OpenClaw and other OpenAI-compatible clients)
 @app.get("/v1/{path:path}")
-async def proxy_v1_get(path: str, request: Request):
+async def proxy_v1_get(path: str, request: Request, client_id: str = Depends(verify_api_key)):
     async with httpx.AsyncClient() as client:
         resp = await client.get(f"{LLAMA_SERVER_URL}/v1/{path}", params=request.query_params)
         return Response(content=resp.content, status_code=resp.status_code, headers=resp.headers)
 
 @app.post("/v1/{path:path}")
-async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(verify_credentials)):
+async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(verify_api_key)):
     body = await request.body()
     
     # Auto-switch logic for chat completions
@@ -482,7 +574,8 @@ async def start_proxy():
 
 
 @app.post("/api/session/save")
-async def save_session(request: Request):
+async def save_session(request: Request, client_id: str = Depends(verify_api_key)):
+    logger.info(f"💾 Session SAVE request from {client_id}")
     try:
         data = await request.json()
         filename = data.get("filename")
@@ -505,7 +598,8 @@ async def save_session(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/session/load")
-async def load_session(request: Request):
+async def load_session(request: Request, client_id: str = Depends(verify_api_key)):
+    logger.info(f"📂 Session LOAD request from {client_id}")
     try:
         data = await request.json()
         filename = data.get("filename")
@@ -528,7 +622,8 @@ async def load_session(request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/session/list")
-async def list_sessions():
+async def list_sessions(client_id: str = Depends(verify_api_key)):
+    logger.debug(f"📜 Session LIST request from {client_id}")
     try:
         save_path = Path("/home/flip/llama_slots") 
         if not save_path.exists():
@@ -539,3 +634,7 @@ async def list_sessions():
     except Exception as e:
         logger.error(f"List sessions failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    import asyncio
+    asyncio.run(start_proxy())

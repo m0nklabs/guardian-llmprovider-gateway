@@ -14,7 +14,7 @@ benchmark:
     days: ["mon", "tue", "wed", "thu", "fri"]
 
 proxy:
-  port: 11435
+  port: 11434
   target: http://localhost:11440
   vram_limit_mb: 27000
 
