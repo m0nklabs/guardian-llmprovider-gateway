@@ -41,7 +41,7 @@ timeouts:
     # Small models (<5GB VRAM)
     tier_small:
       min_size_mb: 0
-      timeout_seconds: 240   # 4 minutes
+      timeout_seconds: 600   # 10 minutes (was 4 min)
   
   # Global fallback timeout if no tier matches
   default_timeout: 600

@@ -1,0 +1,55 @@
+models:
+  glm-4:
+    path: /home/flip/models/GLM-4.7-Flash-Q4_K_M-latest.gguf
+    context: 262144
+    ngl: 99
+    
+  deepseek-r1:
+    path: /home/flip/models/deepseek-r1-32b-16k-latest.gguf
+    context: 16384
+    ngl: 99
+
+  command-r:
+    path: /home/flip/models/command-r-latest.gguf
+    context: 32768
+    ngl: 99
+
+  gemma2-27b:
+    path: /home/flip/models/gemma2-27b.gguf
+    context: 8192
+    ngl: 99
+
+  mistral:
+    path: /home/flip/models/mistral-7b.gguf
+    context: 32768
+    ngl: 99
+
+  llama3:
+    path: /home/flip/models/llama3.1-8b.gguf
+    context: 8192
+    ngl: 99
+    
+  qwen2.5-coder:
+    path: /home/flip/models/qwen3-coder-30b-q4km-32k-latest.gguf
+    context: 32768
+    ngl: 99
+
+  moondream:
+    path: /home/flip/models/moondream-latest.gguf
+    context: 2048
+    ngl: 33
+
+  nomic-embed:
+    path: /home/flip/models/nomic-embed-text-latest.gguf
+    context: 8192
+    ngl: 99
+
+  phi4:
+    path: /home/flip/models/phi4-14b.gguf
+    context: 16384
+    ngl: 99
+
+  gemma2-9b:
+    path: /home/flip/models/gemma2-9b.gguf
+    context: 8192
+    ngl: 99

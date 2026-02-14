@@ -93,15 +93,16 @@ class BenchmarkSuite:
         logger.info("Starting Benchmark Suite...")
         
         state = self.load_state()
-        
-        # If queue is empty, generate it (fresh start)
-        if not state["queue"] and not state["completed"]:
-            state["queue"] = self.generate_test_queue()
-            self.save_state(state)
-        
-        # Filter out already completed tests from queue if any overlap (sanity check)
-        completed_ids = {x["id"] for x in state["completed"]}
-        queue = [t for t in state["queue"] if t["id"] not in completed_ids]
+
+        # Always generate a fresh queue from current config and filter out already
+        # completed tests. This prevents the suite from becoming a no-op when
+        # state.queue is empty/stale but state.completed exists.
+        generated_queue = self.generate_test_queue()
+        state["queue"] = generated_queue
+        self.save_state(state)
+
+        completed_ids = {x.get("id") for x in state.get("completed", []) if isinstance(x, dict)}
+        queue = [t for t in generated_queue if t.get("id") not in completed_ids]
         
         logger.info(f"Found {len(queue)} tests remaining in queue.")
 

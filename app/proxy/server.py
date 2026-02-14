@@ -11,6 +11,8 @@ from typing import Dict, List, Optional
 
 import yaml
 
+import base64
+
 import httpx
 from fastapi import FastAPI, Request, HTTPException, Response, Depends
 from fastapi.responses import StreamingResponse
@@ -20,6 +22,7 @@ from starlette.status import HTTP_401_UNAUTHORIZED
 
 from collections import defaultdict
 from app.proxy.optimizer import RequestOptimizer
+from app.engine.manager import ModelManager
 
 # Load configuration from settings.yaml
 def load_config() -> dict:
@@ -55,7 +58,8 @@ def load_config() -> dict:
 CONFIG = load_config()
 
 # Configuration
-OLLAMA_URL = "http://127.0.0.1:11436"
+OLLAMA_URL = "http://127.0.0.1:11440"
+
 # Total VRAM available (approx 28GB: 12GB + 16GB)
 # We set a safe limit to avoid OOM (Adjusted to 26GB to provide safety buffer for CPU offloading prevention)
 SAFE_VRAM_LIMIT_MB = 26000
@@ -73,6 +77,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Proxy")
 security = HTTPBasic()
 app = FastAPI()
+model_manager = ModelManager()
 
 # ...existing code...
 
@@ -97,14 +102,24 @@ def get_gpu_metrics():
         return {'used': 0, 'free': SAFE_VRAM_LIMIT_MB, 'total': SAFE_VRAM_LIMIT_MB}
 
 def get_model_size(model_name: str) -> int:
-    if "70b" in model_name: return 40000
-    if "32b" in model_name: return 20000
-    if "13b" in model_name: return 10000
-    if "8b" in model_name: return 6000
-    if "7b" in model_name: return 5000
-    if "1.5b" in model_name: return 1500
-    if "0.5b" in model_name: return 600
-    if "embed" in model_name: return 500
+    model_lower = model_name.lower()
+    # Specific overrides for new models
+    if "glm-4" in model_lower: return 26000  # ~24GB
+    if "qwen3" in model_lower and "30b" in model_lower: return 20000 # ~18GB
+    if "deepseek-r1" in model_lower and "32b" in model_lower: return 22000 # ~19GB
+    
+    # Generic heuristics
+    if "70b" in model_lower: return 40000
+    if "32b" in model_lower: return 20000
+    if "30b" in model_lower: return 20000
+    if "27b" in model_lower: return 18000
+    if "13b" in model_lower: return 10000
+    if "14b" in model_lower: return 11000
+    if "8b" in model_lower: return 6000
+    if "7b" in model_lower: return 5000
+    if "1.5b" in model_lower: return 1500
+    if "0.5b" in model_lower: return 600
+    if "embed" in model_lower: return 500
     return 4000
 
 def get_model_timeout(model_name: str) -> int:
@@ -148,16 +163,30 @@ async def unload_model(model_name: str):
 async def update_model_stats(model_name: str):
     pass
 
-async def verify_credentials(credentials: HTTPBasicCredentials = Depends(security)):
-    # Permissive Mode: We use Basic Auth for identification (Client ID), not security.
-    # We accept any password (or none), as long as a username is provided.
-    if credentials.username:
-        return credentials.username
-        
+async def verify_credentials(request: Request):
+    # Permissive Mode: We use auth for identification (Client ID), not security.
+    # Accepts both Basic Auth (username as client_id) and Bearer tokens (token as client_id).
+    auth_header = request.headers.get("Authorization", "")
+    
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:].strip()
+        if token:
+            logger.debug(f"🔑 Bearer auth from client: {token}")
+            return token
+    elif auth_header.startswith("Basic "):
+        try:
+            decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
+            username = decoded.split(":", 1)[0]
+            if username:
+                logger.debug(f"🔑 Basic auth from client: {username}")
+                return username
+        except Exception:
+            pass
+    
     raise HTTPException(
         status_code=HTTP_401_UNAUTHORIZED,
-        detail="Username required for identification",
-        headers={"WWW-Authenticate": "Basic"},
+        detail="Username (Basic) or token (Bearer) required for identification",
+        headers={"WWW-Authenticate": 'Basic realm="ollama-guardian", Bearer'},
     )
 
 # VramScheduler
@@ -447,9 +476,131 @@ async def proxy_post(path: str, request: Request, client_id: str = Depends(verif
         resp = await client.post(f"{OLLAMA_URL}/api/{path}", content=body)
         return Response(content=resp.content, status_code=resp.status_code, headers=resp.headers)
 
+# Model listing endpoint (Before catch-all)
+@app.get("/v1/models")
+async def list_models():
+    """List available models from config."""
+    models_list = []
+    try:
+        current = await model_manager.get_current_model()
+        for name, cfg in model_manager.models.items():
+            models_list.append({
+                "id": name,
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "organization-owner",
+                "permission": []
+            })
+    except Exception as e:
+        logger.error(f"Failed to list models: {e}")
+        
+    return {"object": "list", "data": models_list}
+
+# OpenAI-compatible /v1/ routes (used by OpenClaw and other OpenAI-compatible clients)
+@app.get("/v1/{path:path}")
+async def proxy_v1_get(path: str, request: Request):
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"{OLLAMA_URL}/v1/{path}", params=request.query_params)
+        return Response(content=resp.content, status_code=resp.status_code, headers=resp.headers)
+
+@app.post("/v1/{path:path}")
+async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(verify_credentials)):
+    body = await request.body()
+    
+    # Auto-switch logic for chat completions
+    if path == "chat/completions":
+        try:
+            json_body = json.loads(body)
+            requested_model = json_body.get("model")
+            current_model = await model_manager.get_current_model()
+            
+            if requested_model and requested_model != current_model:
+                if requested_model in model_manager.models:
+                    logger.info(f"🔄 Auto-switching backend from {current_model} to {requested_model}")
+                    try:
+                        await model_manager.switch_model(requested_model)
+                    except Exception as e:
+                        logger.error(f"❌ Switch failed: {e}")
+                        raise HTTPException(status_code=500, detail="Model switch failed")
+                else:
+                    logger.warning(f"⚠️ Requested model {requested_model} not managed by Guardian. Forwarding anyway.")
+        except json.JSONDecodeError:
+            pass
+        except Exception as e:
+            logger.error(f"Error checking model switch: {e}")
+
+    timeout = httpx.Timeout(600.0, connect=10.0)
+    logger.info(f"OpenAI-compat request from client '{client_id}': POST /v1/{path}")
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(
+            f"{OLLAMA_URL}/v1/{path}",
+            content=body,
+            headers={"Content-Type": request.headers.get("Content-Type", "application/json")}
+        )
+        return Response(content=resp.content, status_code=resp.status_code, headers=resp.headers)
+
 async def start_proxy():
     import uvicorn
     config = uvicorn.Config(app, host="0.0.0.0", port=11434, log_level="info")
     server = uvicorn.Server(config)
     await server.serve()
 
+
+@app.post("/api/session/save")
+async def save_session(request: Request):
+    try:
+        data = await request.json()
+        filename = data.get("filename")
+        if not filename:
+            raise HTTPException(status_code=400, detail="Filename required")
+        
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{OLLAMA_URL}/slots/0?action=save",
+                json={"filename": filename},
+                timeout=60.0
+            )  
+            if resp.status_code != 200:
+                logger.error(f"Llama save failed: {resp.text}")
+                raise HTTPException(status_code=resp.status_code, detail=f"Llama save failed: {resp.text}")
+                
+            return resp.json()
+    except Exception as e:
+        logger.error(f"Save session failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/session/load")
+async def load_session(request: Request):
+    try:
+        data = await request.json()
+        filename = data.get("filename")
+        if not filename:
+            raise HTTPException(status_code=400, detail="Filename required")
+            
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{OLLAMA_URL}/slots/0?action=restore",
+                json={"filename": filename},
+                timeout=60.0 # Loading takes time
+            )
+            if resp.status_code != 200:
+                logger.error(f"Llama load failed: {resp.text}")
+                raise HTTPException(status_code=resp.status_code, detail=f"Llama load failed: {resp.text}")
+                
+            return resp.json()
+    except Exception as e:
+        logger.error(f"Load session failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/session/list")
+async def list_sessions():
+    try:
+        save_path = Path("/home/flip/llama_slots") 
+        if not save_path.exists():
+            return {"sessions": []}
+            
+        files = [f.stem for f in save_path.glob("*.bin")]
+        return {"sessions": sorted(files)}
+    except Exception as e:
+        logger.error(f"List sessions failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

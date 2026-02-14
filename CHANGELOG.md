@@ -4,9 +4,12 @@
 
 ### Added
 - **Configurable Timeout Tiers**: Timeout values per model tier are now configurable in `config/settings.yaml` under `timeouts.tiers`. Each tier has `min_size_mb` and `timeout_seconds` settings.
+- **Benchmark Visualization in UI**: Dashboard now visualizes benchmark results (best TPS per model + last-run metadata) via a new `/api/benchmark` endpoint.
+- **Manual Benchmark Control**: Added `/api/benchmark/start` and `/api/benchmark/stop` to run benchmarks on-demand.
 
 ### Changed
 - **Dynamic Timeouts**: Refactored `get_model_timeout()` to read from config file instead of hardcoded values. Supports hot-reload via config file changes.
+- **Benchmark Resuming Behavior**: Benchmark queue is regenerated from current settings and filtered by completed tests to avoid no-op runs when the persisted queue is empty/stale.
 
 ---
 

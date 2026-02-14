@@ -26,3 +26,22 @@ logs/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Logs
+guardian.log
+startup.log
+debug.log
+
+# Dynamic Config
+config/current_model.args
+config/clients.json
+
+# Data
+data/
+llama_slots/
+
+# VS Code
+.vscode/
+
+# MacOS
+.DS_Store

@@ -31,7 +31,1805 @@
         "ctx": 8192,
         "batch": 1024
       }
+    },
+    {
+      "id": "deepseek-r1:32b|2048|128",
+      "timestamp": "2025-12-21T14:05:07.274406",
+      "success": true,
+      "metrics": {
+        "tps": 17.728533947665895,
+        "total_duration": 46.77974214,
+        "vram_delta": 19556,
+        "peak_vram": 19559
+      },
+      "config": {
+        "id": "deepseek-r1:32b|2048|128",
+        "model": "deepseek-r1:32b",
+        "ctx": 2048,
+        "batch": 128
+      }
+    },
+    {
+      "id": "deepseek-r1:32b|2048|256",
+      "timestamp": "2025-12-21T14:05:57.625131",
+      "success": true,
+      "metrics": {
+        "tps": 17.723732374352355,
+        "total_duration": 48.237141931,
+        "vram_delta": 216,
+        "peak_vram": 19775
+      },
+      "config": {
+        "id": "deepseek-r1:32b|2048|256",
+        "model": "deepseek-r1:32b",
+        "ctx": 2048,
+        "batch": 256
+      }
+    },
+    {
+      "id": "deepseek-r1:32b|2048|512",
+      "timestamp": "2025-12-21T14:06:45.494766",
+      "success": true,
+      "metrics": {
+        "tps": 17.71678843748866,
+        "total_duration": 45.748336514,
+        "vram_delta": 430,
+        "peak_vram": 20205
+      },
+      "config": {
+        "id": "deepseek-r1:32b|2048|512",
+        "model": "deepseek-r1:32b",
+        "ctx": 2048,
+        "batch": 512
+      }
+    },
+    {
+      "id": "deepseek-r1:32b|2048|1024",
+      "timestamp": "2025-12-21T14:07:25.810637",
+      "success": true,
+      "metrics": {
+        "tps": 17.69205631126646,
+        "total_duration": 38.232986322,
+        "vram_delta": 0,
+        "peak_vram": 20205
+      },
+      "config": {
+        "id": "deepseek-r1:32b|2048|1024",
+        "model": "deepseek-r1:32b",
+        "ctx": 2048,
+        "batch": 1024
+      }
+    },
+    {
+      "id": "deepseek-r1:32b|4096|128",
+      "timestamp": "2025-12-21T14:08:24.060703",
+      "success": true,
+      "metrics": {
+        "tps": 17.7016615199357,
+        "total_duration": 56.131905385,
+        "vram_delta": -32,
+        "peak_vram": 20173
+      },
+      "config": {
+        "id": "deepseek-r1:32b|4096|128",
+        "model": "deepseek-r1:32b",
+        "ctx": 4096,
+        "batch": 128
+      }
+    },
+    {
+      "id": "deepseek-r1:32b|4096|256",
+      "timestamp": "2025-12-21T14:09:17.013466",
+      "success": true,
+      "metrics": {
+        "tps": 17.7134900292893,
+        "total_duration": 50.840396577,
+        "vram_delta": 318,
+        "peak_vram": 20491
+      },
+      "config": {
+        "id": "deepseek-r1:32b|4096|256",
+        "model": "deepseek-r1:32b",
+        "ctx": 4096,
+        "batch": 256
+      }
+    },
+    {
+      "id": "deepseek-r1:32b|4096|512",
+      "timestamp": "2025-12-21T14:10:13.362152",
+      "success": true,
+      "metrics": {
+        "tps": 17.69730522514956,
+        "total_duration": 54.23331796,
+        "vram_delta": 632,
+        "peak_vram": 21123
+      },
+      "config": {
+        "id": "deepseek-r1:32b|4096|512",
+        "model": "deepseek-r1:32b",
+        "ctx": 4096,
+        "batch": 512
+      }
+    },
+    {
+      "id": "deepseek-r1:32b|4096|1024",
+      "timestamp": "2025-12-21T14:11:24.338046",
+      "success": true,
+      "metrics": {
+        "tps": 17.649847746791565,
+        "total_duration": 68.854145981,
+        "vram_delta": 0,
+        "peak_vram": 21123
+      },
+      "config": {
+        "id": "deepseek-r1:32b|4096|1024",
+        "model": "deepseek-r1:32b",
+        "ctx": 4096,
+        "batch": 1024
+      }
+    },
+    {
+      "id": "deepseek-r1:32b|8192|128",
+      "timestamp": "2025-12-21T14:12:20.032307",
+      "success": true,
+      "metrics": {
+        "tps": 17.705483854439557,
+        "total_duration": 53.571030152,
+        "vram_delta": 330,
+        "peak_vram": 21453
+      },
+      "config": {
+        "id": "deepseek-r1:32b|8192|128",
+        "model": "deepseek-r1:32b",
+        "ctx": 8192,
+        "batch": 128
+      }
+    },
+    {
+      "id": "deepseek-r1:32b|8192|256",
+      "timestamp": "2025-12-21T14:13:18.383256",
+      "success": true,
+      "metrics": {
+        "tps": 17.702353269673303,
+        "total_duration": 56.232854521,
+        "vram_delta": 574,
+        "peak_vram": 22027
+      },
+      "config": {
+        "id": "deepseek-r1:32b|8192|256",
+        "model": "deepseek-r1:32b",
+        "ctx": 8192,
+        "batch": 256
+      }
+    },
+    {
+      "id": "deepseek-r1:32b|8192|512",
+      "timestamp": "2025-12-21T14:14:12.844419",
+      "success": true,
+      "metrics": {
+        "tps": 17.705636573991708,
+        "total_duration": 52.334719188,
+        "vram_delta": 1144,
+        "peak_vram": 23171
+      },
+      "config": {
+        "id": "deepseek-r1:32b|8192|512",
+        "model": "deepseek-r1:32b",
+        "ctx": 8192,
+        "batch": 512
+      }
+    },
+    {
+      "id": "deepseek-r1:32b|8192|1024",
+      "timestamp": "2025-12-21T14:15:07.023382",
+      "success": true,
+      "metrics": {
+        "tps": 17.713297592708496,
+        "total_duration": 52.054865191,
+        "vram_delta": 0,
+        "peak_vram": 23171
+      },
+      "config": {
+        "id": "deepseek-r1:32b|8192|1024",
+        "model": "deepseek-r1:32b",
+        "ctx": 8192,
+        "batch": 1024
+      }
+    },
+    {
+      "id": "deepseek-r1:32b|16384|128",
+      "timestamp": "2025-12-21T14:15:56.868694",
+      "success": true,
+      "metrics": {
+        "tps": 17.65347072808671,
+        "total_duration": 47.727130921,
+        "vram_delta": 842,
+        "peak_vram": 24013
+      },
+      "config": {
+        "id": "deepseek-r1:32b|16384|128",
+        "model": "deepseek-r1:32b",
+        "ctx": 16384,
+        "batch": 128
+      }
+    },
+    {
+      "id": "deepseek-r1:32b|16384|256",
+      "timestamp": "2025-12-21T14:16:44.099853",
+      "success": true,
+      "metrics": {
+        "tps": 17.718202949259563,
+        "total_duration": 45.105250757,
+        "vram_delta": 1086,
+        "peak_vram": 25099
+      },
+      "config": {
+        "id": "deepseek-r1:32b|16384|256",
+        "model": "deepseek-r1:32b",
+        "ctx": 16384,
+        "batch": 256
+      }
+    },
+    {
+      "id": "deepseek-r1:32b|16384|512",
+      "timestamp": "2025-12-21T14:17:46.248728",
+      "success": true,
+      "metrics": {
+        "tps": 17.7001516294322,
+        "total_duration": 60.0202987,
+        "vram_delta": 2168,
+        "peak_vram": 27267
+      },
+      "config": {
+        "id": "deepseek-r1:32b|16384|512",
+        "model": "deepseek-r1:32b",
+        "ctx": 16384,
+        "batch": 512
+      }
+    },
+    {
+      "id": "deepseek-r1:32b|16384|1024",
+      "timestamp": "2025-12-21T14:17:56.955032",
+      "success": false,
+      "error": "500 Server Error: Internal Server Error for url: http://localhost:11436/api/generate",
+      "config": {
+        "id": "deepseek-r1:32b|16384|1024",
+        "model": "deepseek-r1:32b",
+        "ctx": 16384,
+        "batch": 1024
+      }
+    },
+    {
+      "id": "deepseek-r1:32b|24576|128",
+      "timestamp": "2025-12-21T14:18:45.754866",
+      "success": true,
+      "metrics": {
+        "tps": 17.73035171542464,
+        "total_duration": 46.681549311,
+        "vram_delta": 26570,
+        "peak_vram": 26573
+      },
+      "config": {
+        "id": "deepseek-r1:32b|24576|128",
+        "model": "deepseek-r1:32b",
+        "ctx": 24576,
+        "batch": 128
+      }
+    },
+    {
+      "id": "deepseek-r1:32b|24576|256",
+      "timestamp": "2025-12-21T14:18:56.276229",
+      "success": false,
+      "error": "500 Server Error: Internal Server Error for url: http://localhost:11436/api/generate",
+      "config": {
+        "id": "deepseek-r1:32b|24576|256",
+        "model": "deepseek-r1:32b",
+        "ctx": 24576,
+        "batch": 256
+      }
+    },
+    {
+      "id": "deepseek-r1:32b|24576|512",
+      "timestamp": "2025-12-21T14:19:05.744842",
+      "success": false,
+      "error": "500 Server Error: Internal Server Error for url: http://localhost:11436/api/generate",
+      "config": {
+        "id": "deepseek-r1:32b|24576|512",
+        "model": "deepseek-r1:32b",
+        "ctx": 24576,
+        "batch": 512
+      }
+    },
+    {
+      "id": "deepseek-r1:32b|24576|1024",
+      "timestamp": "2025-12-21T14:19:15.148582",
+      "success": false,
+      "error": "500 Server Error: Internal Server Error for url: http://localhost:11436/api/generate",
+      "config": {
+        "id": "deepseek-r1:32b|24576|1024",
+        "model": "deepseek-r1:32b",
+        "ctx": 24576,
+        "batch": 1024
+      }
+    },
+    {
+      "id": "deepseek-r1:32b|28672|128",
+      "timestamp": "2025-12-21T14:19:24.378487",
+      "success": false,
+      "error": "500 Server Error: Internal Server Error for url: http://localhost:11436/api/generate",
+      "config": {
+        "id": "deepseek-r1:32b|28672|128",
+        "model": "deepseek-r1:32b",
+        "ctx": 28672,
+        "batch": 128
+      }
+    },
+    {
+      "id": "deepseek-r1:32b|28672|256",
+      "timestamp": "2025-12-21T14:19:33.886383",
+      "success": false,
+      "error": "500 Server Error: Internal Server Error for url: http://localhost:11436/api/generate",
+      "config": {
+        "id": "deepseek-r1:32b|28672|256",
+        "model": "deepseek-r1:32b",
+        "ctx": 28672,
+        "batch": 256
+      }
+    },
+    {
+      "id": "deepseek-r1:32b|28672|512",
+      "timestamp": "2025-12-21T14:19:43.592359",
+      "success": false,
+      "error": "500 Server Error: Internal Server Error for url: http://localhost:11436/api/generate",
+      "config": {
+        "id": "deepseek-r1:32b|28672|512",
+        "model": "deepseek-r1:32b",
+        "ctx": 28672,
+        "batch": 512
+      }
+    },
+    {
+      "id": "deepseek-r1:32b|28672|1024",
+      "timestamp": "2025-12-21T14:19:52.763062",
+      "success": false,
+      "error": "500 Server Error: Internal Server Error for url: http://localhost:11436/api/generate",
+      "config": {
+        "id": "deepseek-r1:32b|28672|1024",
+        "model": "deepseek-r1:32b",
+        "ctx": 28672,
+        "batch": 1024
+      }
+    },
+    {
+      "id": "deepseek-r1:32b|32768|128",
+      "timestamp": "2025-12-21T14:20:01.943477",
+      "success": false,
+      "error": "500 Server Error: Internal Server Error for url: http://localhost:11436/api/generate",
+      "config": {
+        "id": "deepseek-r1:32b|32768|128",
+        "model": "deepseek-r1:32b",
+        "ctx": 32768,
+        "batch": 128
+      }
+    },
+    {
+      "id": "deepseek-r1:32b|32768|256",
+      "timestamp": "2025-12-21T14:20:11.362872",
+      "success": false,
+      "error": "500 Server Error: Internal Server Error for url: http://localhost:11436/api/generate",
+      "config": {
+        "id": "deepseek-r1:32b|32768|256",
+        "model": "deepseek-r1:32b",
+        "ctx": 32768,
+        "batch": 256
+      }
+    },
+    {
+      "id": "deepseek-r1:32b|32768|512",
+      "timestamp": "2025-12-21T14:20:20.547080",
+      "success": false,
+      "error": "500 Server Error: Internal Server Error for url: http://localhost:11436/api/generate",
+      "config": {
+        "id": "deepseek-r1:32b|32768|512",
+        "model": "deepseek-r1:32b",
+        "ctx": 32768,
+        "batch": 512
+      }
+    },
+    {
+      "id": "deepseek-r1:32b|32768|1024",
+      "timestamp": "2025-12-21T14:20:29.904809",
+      "success": false,
+      "error": "500 Server Error: Internal Server Error for url: http://localhost:11436/api/generate",
+      "config": {
+        "id": "deepseek-r1:32b|32768|1024",
+        "model": "deepseek-r1:32b",
+        "ctx": 32768,
+        "batch": 1024
+      }
+    },
+    {
+      "id": "gemma2:27b|2048|128",
+      "timestamp": "2025-12-21T14:20:47.841645",
+      "success": true,
+      "metrics": {
+        "tps": 22.787982887391294,
+        "total_duration": 15.822701308,
+        "vram_delta": 16246,
+        "peak_vram": 16249
+      },
+      "config": {
+        "id": "gemma2:27b|2048|128",
+        "model": "gemma2:27b",
+        "ctx": 2048,
+        "batch": 128
+      }
+    },
+    {
+      "id": "gemma2:27b|2048|256",
+      "timestamp": "2025-12-21T14:21:09.202300",
+      "success": true,
+      "metrics": {
+        "tps": 22.691707532569488,
+        "total_duration": 19.251745778,
+        "vram_delta": 302,
+        "peak_vram": 16551
+      },
+      "config": {
+        "id": "gemma2:27b|2048|256",
+        "model": "gemma2:27b",
+        "ctx": 2048,
+        "batch": 256
+      }
+    },
+    {
+      "id": "gemma2:27b|2048|512",
+      "timestamp": "2025-12-21T14:21:29.637272",
+      "success": true,
+      "metrics": {
+        "tps": 22.732738825046198,
+        "total_duration": 18.316482429,
+        "vram_delta": 598,
+        "peak_vram": 17149
+      },
+      "config": {
+        "id": "gemma2:27b|2048|512",
+        "model": "gemma2:27b",
+        "ctx": 2048,
+        "batch": 512
+      }
+    },
+    {
+      "id": "gemma2:27b|2048|1024",
+      "timestamp": "2025-12-21T14:21:49.232511",
+      "success": true,
+      "metrics": {
+        "tps": 22.77248586121058,
+        "total_duration": 17.481867517,
+        "vram_delta": -2,
+        "peak_vram": 17147
+      },
+      "config": {
+        "id": "gemma2:27b|2048|1024",
+        "model": "gemma2:27b",
+        "ctx": 2048,
+        "batch": 1024
+      }
+    },
+    {
+      "id": "gemma2:27b|4096|128",
+      "timestamp": "2025-12-21T14:22:09.320850",
+      "success": true,
+      "metrics": {
+        "tps": 22.74242277888343,
+        "total_duration": 17.976376244,
+        "vram_delta": -106,
+        "peak_vram": 17041
+      },
+      "config": {
+        "id": "gemma2:27b|4096|128",
+        "model": "gemma2:27b",
+        "ctx": 4096,
+        "batch": 128
+      }
+    },
+    {
+      "id": "gemma2:27b|4096|256",
+      "timestamp": "2025-12-21T14:22:29.123467",
+      "success": true,
+      "metrics": {
+        "tps": 22.747917456591747,
+        "total_duration": 17.692514769,
+        "vram_delta": 360,
+        "peak_vram": 17401
+      },
+      "config": {
+        "id": "gemma2:27b|4096|256",
+        "model": "gemma2:27b",
+        "ctx": 4096,
+        "batch": 256
+      }
+    },
+    {
+      "id": "gemma2:27b|4096|512",
+      "timestamp": "2025-12-21T14:22:50.785387",
+      "success": true,
+      "metrics": {
+        "tps": 22.684724645634706,
+        "total_duration": 19.549305777,
+        "vram_delta": 716,
+        "peak_vram": 18117
+      },
+      "config": {
+        "id": "gemma2:27b|4096|512",
+        "model": "gemma2:27b",
+        "ctx": 4096,
+        "batch": 512
+      }
+    },
+    {
+      "id": "gemma2:27b|4096|1024",
+      "timestamp": "2025-12-21T14:23:13.866473",
+      "success": true,
+      "metrics": {
+        "tps": 22.649599153091167,
+        "total_duration": 20.971200953,
+        "vram_delta": 0,
+        "peak_vram": 18117
+      },
+      "config": {
+        "id": "gemma2:27b|4096|1024",
+        "model": "gemma2:27b",
+        "ctx": 4096,
+        "batch": 1024
+      }
+    },
+    {
+      "id": "gemma2:27b|8192|128",
+      "timestamp": "2025-12-21T14:23:36.077048",
+      "success": true,
+      "metrics": {
+        "tps": 22.571270989314026,
+        "total_duration": 20.098441204,
+        "vram_delta": 568,
+        "peak_vram": 18685
+      },
+      "config": {
+        "id": "gemma2:27b|8192|128",
+        "model": "gemma2:27b",
+        "ctx": 8192,
+        "batch": 128
+      }
+    },
+    {
+      "id": "gemma2:27b|8192|256",
+      "timestamp": "2025-12-21T14:23:56.202330",
+      "success": true,
+      "metrics": {
+        "tps": 22.59984163942408,
+        "total_duration": 18.012155166,
+        "vram_delta": 528,
+        "peak_vram": 19213
+      },
+      "config": {
+        "id": "gemma2:27b|8192|256",
+        "model": "gemma2:27b",
+        "ctx": 8192,
+        "batch": 256
+      }
+    },
+    {
+      "id": "gemma2:27b|8192|512",
+      "timestamp": "2025-12-21T14:24:17.809484",
+      "success": true,
+      "metrics": {
+        "tps": 22.697959825955543,
+        "total_duration": 19.497948263,
+        "vram_delta": 1054,
+        "peak_vram": 20267
+      },
+      "config": {
+        "id": "gemma2:27b|8192|512",
+        "model": "gemma2:27b",
+        "ctx": 8192,
+        "batch": 512
+      }
+    },
+    {
+      "id": "gemma2:27b|8192|1024",
+      "timestamp": "2025-12-21T14:24:39.299086",
+      "success": true,
+      "metrics": {
+        "tps": 22.697290653578744,
+        "total_duration": 19.380869381,
+        "vram_delta": 0,
+        "peak_vram": 20267
+      },
+      "config": {
+        "id": "gemma2:27b|8192|1024",
+        "model": "gemma2:27b",
+        "ctx": 8192,
+        "batch": 1024
+      }
+    },
+    {
+      "id": "gemma2:27b|16384|128",
+      "timestamp": "2025-12-21T14:25:01.269257",
+      "success": true,
+      "metrics": {
+        "tps": 22.577940184738424,
+        "total_duration": 19.861788044,
+        "vram_delta": -1582,
+        "peak_vram": 18685
+      },
+      "config": {
+        "id": "gemma2:27b|16384|128",
+        "model": "gemma2:27b",
+        "ctx": 16384,
+        "batch": 128
+      }
+    },
+    {
+      "id": "gemma2:27b|16384|256",
+      "timestamp": "2025-12-21T14:25:21.575141",
+      "success": true,
+      "metrics": {
+        "tps": 22.65695513005906,
+        "total_duration": 18.191408144,
+        "vram_delta": 526,
+        "peak_vram": 19211
+      },
+      "config": {
+        "id": "gemma2:27b|16384|256",
+        "model": "gemma2:27b",
+        "ctx": 16384,
+        "batch": 256
+      }
+    },
+    {
+      "id": "gemma2:27b|16384|512",
+      "timestamp": "2025-12-21T14:25:44.242611",
+      "success": true,
+      "metrics": {
+        "tps": 22.678229001511408,
+        "total_duration": 20.562415629,
+        "vram_delta": 1054,
+        "peak_vram": 20265
+      },
+      "config": {
+        "id": "gemma2:27b|16384|512",
+        "model": "gemma2:27b",
+        "ctx": 16384,
+        "batch": 512
+      }
+    },
+    {
+      "id": "gemma2:27b|16384|1024",
+      "timestamp": "2025-12-21T14:26:04.817696",
+      "success": true,
+      "metrics": {
+        "tps": 22.734998679104542,
+        "total_duration": 18.459271214,
+        "vram_delta": 2,
+        "peak_vram": 20267
+      },
+      "config": {
+        "id": "gemma2:27b|16384|1024",
+        "model": "gemma2:27b",
+        "ctx": 16384,
+        "batch": 1024
+      }
+    },
+    {
+      "id": "gemma2:27b|24576|128",
+      "timestamp": "2025-12-21T14:26:27.028067",
+      "success": true,
+      "metrics": {
+        "tps": 22.56283118844853,
+        "total_duration": 20.100407546,
+        "vram_delta": -1582,
+        "peak_vram": 18685
+      },
+      "config": {
+        "id": "gemma2:27b|24576|128",
+        "model": "gemma2:27b",
+        "ctx": 24576,
+        "batch": 128
+      }
+    },
+    {
+      "id": "gemma2:27b|24576|256",
+      "timestamp": "2025-12-21T14:26:48.469314",
+      "success": true,
+      "metrics": {
+        "tps": 22.611058699489547,
+        "total_duration": 19.326492092,
+        "vram_delta": 526,
+        "peak_vram": 19211
+      },
+      "config": {
+        "id": "gemma2:27b|24576|256",
+        "model": "gemma2:27b",
+        "ctx": 24576,
+        "batch": 256
+      }
+    },
+    {
+      "id": "gemma2:27b|24576|512",
+      "timestamp": "2025-12-21T14:27:08.941131",
+      "success": true,
+      "metrics": {
+        "tps": 22.731225435085367,
+        "total_duration": 18.360289305,
+        "vram_delta": 1056,
+        "peak_vram": 20267
+      },
+      "config": {
+        "id": "gemma2:27b|24576|512",
+        "model": "gemma2:27b",
+        "ctx": 24576,
+        "batch": 512
+      }
+    },
+    {
+      "id": "gemma2:27b|24576|1024",
+      "timestamp": "2025-12-21T14:27:28.430847",
+      "success": true,
+      "metrics": {
+        "tps": 22.746499709725374,
+        "total_duration": 17.364177639,
+        "vram_delta": 0,
+        "peak_vram": 20267
+      },
+      "config": {
+        "id": "gemma2:27b|24576|1024",
+        "model": "gemma2:27b",
+        "ctx": 24576,
+        "batch": 1024
+      }
+    },
+    {
+      "id": "gemma2:27b|28672|128",
+      "timestamp": "2025-12-21T14:27:48.802538",
+      "success": true,
+      "metrics": {
+        "tps": 22.616320697789597,
+        "total_duration": 18.259335546,
+        "vram_delta": -1582,
+        "peak_vram": 18685
+      },
+      "config": {
+        "id": "gemma2:27b|28672|128",
+        "model": "gemma2:27b",
+        "ctx": 28672,
+        "batch": 128
+      }
+    },
+    {
+      "id": "gemma2:27b|28672|256",
+      "timestamp": "2025-12-21T14:28:08.905464",
+      "success": true,
+      "metrics": {
+        "tps": 22.6125846581842,
+        "total_duration": 17.989858427,
+        "vram_delta": 528,
+        "peak_vram": 19213
+      },
+      "config": {
+        "id": "gemma2:27b|28672|256",
+        "model": "gemma2:27b",
+        "ctx": 28672,
+        "batch": 256
+      }
+    },
+    {
+      "id": "gemma2:27b|28672|512",
+      "timestamp": "2025-12-21T14:28:29.000264",
+      "success": true,
+      "metrics": {
+        "tps": 22.742870355827765,
+        "total_duration": 17.982965256,
+        "vram_delta": 1054,
+        "peak_vram": 20267
+      },
+      "config": {
+        "id": "gemma2:27b|28672|512",
+        "model": "gemma2:27b",
+        "ctx": 28672,
+        "batch": 512
+      }
+    },
+    {
+      "id": "gemma2:27b|28672|1024",
+      "timestamp": "2025-12-21T14:28:48.691707",
+      "success": true,
+      "metrics": {
+        "tps": 22.756623589241503,
+        "total_duration": 17.583161907,
+        "vram_delta": -2,
+        "peak_vram": 20265
+      },
+      "config": {
+        "id": "gemma2:27b|28672|1024",
+        "model": "gemma2:27b",
+        "ctx": 28672,
+        "batch": 1024
+      }
+    },
+    {
+      "id": "gemma2:27b|32768|128",
+      "timestamp": "2025-12-21T14:29:10.960696",
+      "success": true,
+      "metrics": {
+        "tps": 22.574532193084053,
+        "total_duration": 20.158059385,
+        "vram_delta": -1580,
+        "peak_vram": 18685
+      },
+      "config": {
+        "id": "gemma2:27b|32768|128",
+        "model": "gemma2:27b",
+        "ctx": 32768,
+        "batch": 128
+      }
+    },
+    {
+      "id": "gemma2:27b|32768|256",
+      "timestamp": "2025-12-21T14:29:30.885560",
+      "success": true,
+      "metrics": {
+        "tps": 22.638924897452423,
+        "total_duration": 17.812912897,
+        "vram_delta": 528,
+        "peak_vram": 19213
+      },
+      "config": {
+        "id": "gemma2:27b|32768|256",
+        "model": "gemma2:27b",
+        "ctx": 32768,
+        "batch": 256
+      }
+    },
+    {
+      "id": "gemma2:27b|32768|512",
+      "timestamp": "2025-12-21T14:29:52.150742",
+      "success": true,
+      "metrics": {
+        "tps": 22.682968202982796,
+        "total_duration": 19.156495248,
+        "vram_delta": 1054,
+        "peak_vram": 20267
+      },
+      "config": {
+        "id": "gemma2:27b|32768|512",
+        "model": "gemma2:27b",
+        "ctx": 32768,
+        "batch": 512
+      }
+    },
+    {
+      "id": "gemma2:27b|32768|1024",
+      "timestamp": "2025-12-21T14:30:14.079626",
+      "success": true,
+      "metrics": {
+        "tps": 22.69633297861972,
+        "total_duration": 19.815992405,
+        "vram_delta": -2,
+        "peak_vram": 20265
+      },
+      "config": {
+        "id": "gemma2:27b|32768|1024",
+        "model": "gemma2:27b",
+        "ctx": 32768,
+        "batch": 1024
+      }
+    },
+    {
+      "id": "gpt-oss:20b|2048|128",
+      "timestamp": "2025-12-21T14:40:16.241138",
+      "success": false,
+      "error": "HTTPConnectionPool(host='localhost', port=11436): Read timed out. (read timeout=600)",
+      "config": {
+        "id": "gpt-oss:20b|2048|128",
+        "model": "gpt-oss:20b",
+        "ctx": 2048,
+        "batch": 128
+      }
+    },
+    {
+      "id": "gpt-oss:20b|2048|256",
+      "timestamp": "2025-12-21T14:50:18.400711",
+      "success": false,
+      "error": "HTTPConnectionPool(host='localhost', port=11436): Read timed out. (read timeout=600)",
+      "config": {
+        "id": "gpt-oss:20b|2048|256",
+        "model": "gpt-oss:20b",
+        "ctx": 2048,
+        "batch": 256
+      }
+    },
+    {
+      "id": "gpt-oss:20b|2048|512",
+      "timestamp": "2025-12-21T14:50:42.134503",
+      "success": true,
+      "metrics": {
+        "tps": 82.57944872419064,
+        "total_duration": 21.481198692,
+        "vram_delta": 54,
+        "peak_vram": 12504
+      },
+      "config": {
+        "id": "gpt-oss:20b|2048|512",
+        "model": "gpt-oss:20b",
+        "ctx": 2048,
+        "batch": 512
+      }
+    },
+    {
+      "id": "gpt-oss:20b|2048|1024",
+      "timestamp": "2025-12-21T14:52:09.555666",
+      "success": true,
+      "metrics": {
+        "tps": 78.85750045836174,
+        "total_duration": 85.127585905,
+        "vram_delta": 116,
+        "peak_vram": 12620
+      },
+      "config": {
+        "id": "gpt-oss:20b|2048|1024",
+        "model": "gpt-oss:20b",
+        "ctx": 2048,
+        "batch": 1024
+      }
+    },
+    {
+      "id": "gpt-oss:20b|4096|128",
+      "timestamp": "2025-12-21T15:02:11.715979",
+      "success": false,
+      "error": "HTTPConnectionPool(host='localhost', port=11436): Read timed out. (read timeout=600)",
+      "config": {
+        "id": "gpt-oss:20b|4096|128",
+        "model": "gpt-oss:20b",
+        "ctx": 4096,
+        "batch": 128
+      }
+    },
+    {
+      "id": "gpt-oss:20b|4096|256",
+      "timestamp": "2025-12-21T15:12:13.876522",
+      "success": false,
+      "error": "HTTPConnectionPool(host='localhost', port=11436): Read timed out. (read timeout=600)",
+      "config": {
+        "id": "gpt-oss:20b|4096|256",
+        "model": "gpt-oss:20b",
+        "ctx": 4096,
+        "batch": 256
+      }
+    },
+    {
+      "id": "gpt-oss:20b|4096|512",
+      "timestamp": "2025-12-21T15:14:39.925451",
+      "success": true,
+      "metrics": {
+        "tps": 0,
+        "total_duration": 0.0,
+        "vram_delta": -53,
+        "peak_vram": 12506
+      },
+      "config": {
+        "id": "gpt-oss:20b|4096|512",
+        "model": "gpt-oss:20b",
+        "ctx": 4096,
+        "batch": 512
+      }
+    },
+    {
+      "id": "gpt-oss:20b|4096|1024",
+      "timestamp": "2025-12-21T15:18:05.950052",
+      "success": true,
+      "metrics": {
+        "tps": 0,
+        "total_duration": 0.0,
+        "vram_delta": 114,
+        "peak_vram": 12620
+      },
+      "config": {
+        "id": "gpt-oss:20b|4096|1024",
+        "model": "gpt-oss:20b",
+        "ctx": 4096,
+        "batch": 1024
+      }
+    },
+    {
+      "id": "gpt-oss:20b|8192|128",
+      "timestamp": "2025-12-21T15:18:28.241514",
+      "success": true,
+      "metrics": {
+        "tps": 82.55795271071662,
+        "total_duration": 20.021603539,
+        "vram_delta": -198,
+        "peak_vram": 12422
+      },
+      "config": {
+        "id": "gpt-oss:20b|8192|128",
+        "model": "gpt-oss:20b",
+        "ctx": 8192,
+        "batch": 128
+      }
+    },
+    {
+      "id": "gpt-oss:20b|8192|256",
+      "timestamp": "2025-12-21T15:21:38.554005",
+      "success": true,
+      "metrics": {
+        "tps": 0,
+        "total_duration": 0.0,
+        "vram_delta": 137,
+        "peak_vram": 12559
+      },
+      "config": {
+        "id": "gpt-oss:20b|8192|256",
+        "model": "gpt-oss:20b",
+        "ctx": 8192,
+        "batch": 256
+      }
+    },
+    {
+      "id": "gpt-oss:20b|8192|512",
+      "timestamp": "2025-12-21T15:23:00.197142",
+      "success": true,
+      "metrics": {
+        "tps": 79.08396753032662,
+        "total_duration": 79.256817925,
+        "vram_delta": -53,
+        "peak_vram": 12506
+      },
+      "config": {
+        "id": "gpt-oss:20b|8192|512",
+        "model": "gpt-oss:20b",
+        "ctx": 8192,
+        "batch": 512
+      }
+    },
+    {
+      "id": "gpt-oss:20b|8192|1024",
+      "timestamp": "2025-12-21T15:32:57.560886",
+      "success": true,
+      "metrics": {
+        "tps": 69.58680835076422,
+        "total_duration": 594.990985304,
+        "vram_delta": 223,
+        "peak_vram": 12729
+      },
+      "config": {
+        "id": "gpt-oss:20b|8192|1024",
+        "model": "gpt-oss:20b",
+        "ctx": 8192,
+        "batch": 1024
+      }
+    },
+    {
+      "id": "gpt-oss:20b|16384|128",
+      "timestamp": "2025-12-21T15:34:34.256477",
+      "success": true,
+      "metrics": {
+        "tps": 0,
+        "total_duration": 0.0,
+        "vram_delta": -239,
+        "peak_vram": 12490
+      },
+      "config": {
+        "id": "gpt-oss:20b|16384|128",
+        "model": "gpt-oss:20b",
+        "ctx": 16384,
+        "batch": 128
+      }
+    },
+    {
+      "id": "gpt-oss:20b|16384|256",
+      "timestamp": "2025-12-21T15:44:36.317762",
+      "success": false,
+      "error": "HTTPConnectionPool(host='localhost', port=11436): Read timed out. (read timeout=600)",
+      "config": {
+        "id": "gpt-oss:20b|16384|256",
+        "model": "gpt-oss:20b",
+        "ctx": 16384,
+        "batch": 256
+      }
+    },
+    {
+      "id": "gpt-oss:20b|16384|512",
+      "timestamp": "2025-12-21T15:45:41.715810",
+      "success": true,
+      "metrics": {
+        "tps": 79.27946617608369,
+        "total_duration": 63.141962946,
+        "vram_delta": 173,
+        "peak_vram": 12695
+      },
+      "config": {
+        "id": "gpt-oss:20b|16384|512",
+        "model": "gpt-oss:20b",
+        "ctx": 16384,
+        "batch": 512
+      }
+    },
+    {
+      "id": "gpt-oss:20b|16384|1024",
+      "timestamp": "2025-12-21T15:46:04.941373",
+      "success": true,
+      "metrics": {
+        "tps": 84.0762276060632,
+        "total_duration": 20.977874917,
+        "vram_delta": 17,
+        "peak_vram": 12712
+      },
+      "config": {
+        "id": "gpt-oss:20b|16384|1024",
+        "model": "gpt-oss:20b",
+        "ctx": 16384,
+        "batch": 1024
+      }
+    },
+    {
+      "id": "gpt-oss:20b|24576|128",
+      "timestamp": "2025-12-21T15:56:07.002728",
+      "success": false,
+      "error": "HTTPConnectionPool(host='localhost', port=11436): Read timed out. (read timeout=600)",
+      "config": {
+        "id": "gpt-oss:20b|24576|128",
+        "model": "gpt-oss:20b",
+        "ctx": 24576,
+        "batch": 128
+      }
+    },
+    {
+      "id": "gpt-oss:20b|24576|256",
+      "timestamp": "2025-12-21T16:06:09.179984",
+      "success": false,
+      "error": "HTTPConnectionPool(host='localhost', port=11436): Read timed out. (read timeout=600)",
+      "config": {
+        "id": "gpt-oss:20b|24576|256",
+        "model": "gpt-oss:20b",
+        "ctx": 24576,
+        "batch": 256
+      }
+    },
+    {
+      "id": "gpt-oss:20b|24576|512",
+      "timestamp": "2025-12-21T16:16:11.340702",
+      "success": false,
+      "error": "HTTPConnectionPool(host='localhost', port=11436): Read timed out. (read timeout=600)",
+      "config": {
+        "id": "gpt-oss:20b|24576|512",
+        "model": "gpt-oss:20b",
+        "ctx": 24576,
+        "batch": 512
+      }
+    },
+    {
+      "id": "gpt-oss:20b|24576|1024",
+      "timestamp": "2025-12-21T16:26:13.504376",
+      "success": false,
+      "error": "HTTPConnectionPool(host='localhost', port=11436): Read timed out. (read timeout=600)",
+      "config": {
+        "id": "gpt-oss:20b|24576|1024",
+        "model": "gpt-oss:20b",
+        "ctx": 24576,
+        "batch": 1024
+      }
+    },
+    {
+      "id": "gpt-oss:20b|28672|128",
+      "timestamp": "2025-12-21T16:36:15.665286",
+      "success": false,
+      "error": "HTTPConnectionPool(host='localhost', port=11436): Read timed out. (read timeout=600)",
+      "config": {
+        "id": "gpt-oss:20b|28672|128",
+        "model": "gpt-oss:20b",
+        "ctx": 28672,
+        "batch": 128
+      }
+    },
+    {
+      "id": "gpt-oss:20b|28672|256",
+      "timestamp": "2025-12-21T16:46:17.806169",
+      "success": false,
+      "error": "HTTPConnectionPool(host='localhost', port=11436): Read timed out. (read timeout=600)",
+      "config": {
+        "id": "gpt-oss:20b|28672|256",
+        "model": "gpt-oss:20b",
+        "ctx": 28672,
+        "batch": 256
+      }
+    },
+    {
+      "id": "gpt-oss:20b|28672|512",
+      "timestamp": "2025-12-21T16:50:44.051741",
+      "success": true,
+      "metrics": {
+        "tps": 71.76656865654643,
+        "total_duration": 263.943550153,
+        "vram_delta": 72,
+        "peak_vram": 12783
+      },
+      "config": {
+        "id": "gpt-oss:20b|28672|512",
+        "model": "gpt-oss:20b",
+        "ctx": 28672,
+        "batch": 512
+      }
+    },
+    {
+      "id": "gpt-oss:20b|28672|1024",
+      "timestamp": "2025-12-21T17:00:46.126101",
+      "success": false,
+      "error": "HTTPConnectionPool(host='localhost', port=11436): Read timed out. (read timeout=600)",
+      "config": {
+        "id": "gpt-oss:20b|28672|1024",
+        "model": "gpt-oss:20b",
+        "ctx": 28672,
+        "batch": 1024
+      }
+    },
+    {
+      "id": "gpt-oss:20b|32768|128",
+      "timestamp": "2025-12-21T17:01:08.759167",
+      "success": true,
+      "metrics": {
+        "tps": 82.61207779399864,
+        "total_duration": 20.348278005,
+        "vram_delta": -297,
+        "peak_vram": 12626
+      },
+      "config": {
+        "id": "gpt-oss:20b|32768|128",
+        "model": "gpt-oss:20b",
+        "ctx": 32768,
+        "batch": 128
+      }
+    },
+    {
+      "id": "gpt-oss:20b|32768|256",
+      "timestamp": "2025-12-21T17:11:10.926858",
+      "success": false,
+      "error": "HTTPConnectionPool(host='localhost', port=11436): Read timed out. (read timeout=600)",
+      "config": {
+        "id": "gpt-oss:20b|32768|256",
+        "model": "gpt-oss:20b",
+        "ctx": 32768,
+        "batch": 256
+      }
+    },
+    {
+      "id": "gpt-oss:20b|32768|512",
+      "timestamp": "2025-12-21T17:21:13.010528",
+      "success": false,
+      "error": "HTTPConnectionPool(host='localhost', port=11436): Read timed out. (read timeout=600)",
+      "config": {
+        "id": "gpt-oss:20b|32768|512",
+        "model": "gpt-oss:20b",
+        "ctx": 32768,
+        "batch": 512
+      }
+    },
+    {
+      "id": "gpt-oss:20b|32768|1024",
+      "timestamp": "2025-12-21T17:31:15.169984",
+      "success": false,
+      "error": "HTTPConnectionPool(host='localhost', port=11436): Read timed out. (read timeout=600)",
+      "config": {
+        "id": "gpt-oss:20b|32768|1024",
+        "model": "gpt-oss:20b",
+        "ctx": 32768,
+        "batch": 1024
+      }
     }
   ],
-  "queue": []
+  "queue": [
+    {
+      "id": "deepseek-r1:32b|2048|128",
+      "model": "deepseek-r1:32b",
+      "ctx": 2048,
+      "batch": 128
+    },
+    {
+      "id": "deepseek-r1:32b|2048|256",
+      "model": "deepseek-r1:32b",
+      "ctx": 2048,
+      "batch": 256
+    },
+    {
+      "id": "deepseek-r1:32b|2048|512",
+      "model": "deepseek-r1:32b",
+      "ctx": 2048,
+      "batch": 512
+    },
+    {
+      "id": "deepseek-r1:32b|2048|1024",
+      "model": "deepseek-r1:32b",
+      "ctx": 2048,
+      "batch": 1024
+    },
+    {
+      "id": "deepseek-r1:32b|4096|128",
+      "model": "deepseek-r1:32b",
+      "ctx": 4096,
+      "batch": 128
+    },
+    {
+      "id": "deepseek-r1:32b|4096|256",
+      "model": "deepseek-r1:32b",
+      "ctx": 4096,
+      "batch": 256
+    },
+    {
+      "id": "deepseek-r1:32b|4096|512",
+      "model": "deepseek-r1:32b",
+      "ctx": 4096,
+      "batch": 512
+    },
+    {
+      "id": "deepseek-r1:32b|4096|1024",
+      "model": "deepseek-r1:32b",
+      "ctx": 4096,
+      "batch": 1024
+    },
+    {
+      "id": "deepseek-r1:32b|8192|128",
+      "model": "deepseek-r1:32b",
+      "ctx": 8192,
+      "batch": 128
+    },
+    {
+      "id": "deepseek-r1:32b|8192|256",
+      "model": "deepseek-r1:32b",
+      "ctx": 8192,
+      "batch": 256
+    },
+    {
+      "id": "deepseek-r1:32b|8192|512",
+      "model": "deepseek-r1:32b",
+      "ctx": 8192,
+      "batch": 512
+    },
+    {
+      "id": "deepseek-r1:32b|8192|1024",
+      "model": "deepseek-r1:32b",
+      "ctx": 8192,
+      "batch": 1024
+    },
+    {
+      "id": "deepseek-r1:32b|16384|128",
+      "model": "deepseek-r1:32b",
+      "ctx": 16384,
+      "batch": 128
+    },
+    {
+      "id": "deepseek-r1:32b|16384|256",
+      "model": "deepseek-r1:32b",
+      "ctx": 16384,
+      "batch": 256
+    },
+    {
+      "id": "deepseek-r1:32b|16384|512",
+      "model": "deepseek-r1:32b",
+      "ctx": 16384,
+      "batch": 512
+    },
+    {
+      "id": "deepseek-r1:32b|16384|1024",
+      "model": "deepseek-r1:32b",
+      "ctx": 16384,
+      "batch": 1024
+    },
+    {
+      "id": "deepseek-r1:32b|24576|128",
+      "model": "deepseek-r1:32b",
+      "ctx": 24576,
+      "batch": 128
+    },
+    {
+      "id": "deepseek-r1:32b|24576|256",
+      "model": "deepseek-r1:32b",
+      "ctx": 24576,
+      "batch": 256
+    },
+    {
+      "id": "deepseek-r1:32b|24576|512",
+      "model": "deepseek-r1:32b",
+      "ctx": 24576,
+      "batch": 512
+    },
+    {
+      "id": "deepseek-r1:32b|24576|1024",
+      "model": "deepseek-r1:32b",
+      "ctx": 24576,
+      "batch": 1024
+    },
+    {
+      "id": "deepseek-r1:32b|28672|128",
+      "model": "deepseek-r1:32b",
+      "ctx": 28672,
+      "batch": 128
+    },
+    {
+      "id": "deepseek-r1:32b|28672|256",
+      "model": "deepseek-r1:32b",
+      "ctx": 28672,
+      "batch": 256
+    },
+    {
+      "id": "deepseek-r1:32b|28672|512",
+      "model": "deepseek-r1:32b",
+      "ctx": 28672,
+      "batch": 512
+    },
+    {
+      "id": "deepseek-r1:32b|28672|1024",
+      "model": "deepseek-r1:32b",
+      "ctx": 28672,
+      "batch": 1024
+    },
+    {
+      "id": "deepseek-r1:32b|32768|128",
+      "model": "deepseek-r1:32b",
+      "ctx": 32768,
+      "batch": 128
+    },
+    {
+      "id": "deepseek-r1:32b|32768|256",
+      "model": "deepseek-r1:32b",
+      "ctx": 32768,
+      "batch": 256
+    },
+    {
+      "id": "deepseek-r1:32b|32768|512",
+      "model": "deepseek-r1:32b",
+      "ctx": 32768,
+      "batch": 512
+    },
+    {
+      "id": "deepseek-r1:32b|32768|1024",
+      "model": "deepseek-r1:32b",
+      "ctx": 32768,
+      "batch": 1024
+    },
+    {
+      "id": "gemma2:27b|2048|128",
+      "model": "gemma2:27b",
+      "ctx": 2048,
+      "batch": 128
+    },
+    {
+      "id": "gemma2:27b|2048|256",
+      "model": "gemma2:27b",
+      "ctx": 2048,
+      "batch": 256
+    },
+    {
+      "id": "gemma2:27b|2048|512",
+      "model": "gemma2:27b",
+      "ctx": 2048,
+      "batch": 512
+    },
+    {
+      "id": "gemma2:27b|2048|1024",
+      "model": "gemma2:27b",
+      "ctx": 2048,
+      "batch": 1024
+    },
+    {
+      "id": "gemma2:27b|4096|128",
+      "model": "gemma2:27b",
+      "ctx": 4096,
+      "batch": 128
+    },
+    {
+      "id": "gemma2:27b|4096|256",
+      "model": "gemma2:27b",
+      "ctx": 4096,
+      "batch": 256
+    },
+    {
+      "id": "gemma2:27b|4096|512",
+      "model": "gemma2:27b",
+      "ctx": 4096,
+      "batch": 512
+    },
+    {
+      "id": "gemma2:27b|4096|1024",
+      "model": "gemma2:27b",
+      "ctx": 4096,
+      "batch": 1024
+    },
+    {
+      "id": "gemma2:27b|8192|128",
+      "model": "gemma2:27b",
+      "ctx": 8192,
+      "batch": 128
+    },
+    {
+      "id": "gemma2:27b|8192|256",
+      "model": "gemma2:27b",
+      "ctx": 8192,
+      "batch": 256
+    },
+    {
+      "id": "gemma2:27b|8192|512",
+      "model": "gemma2:27b",
+      "ctx": 8192,
+      "batch": 512
+    },
+    {
+      "id": "gemma2:27b|8192|1024",
+      "model": "gemma2:27b",
+      "ctx": 8192,
+      "batch": 1024
+    },
+    {
+      "id": "gemma2:27b|16384|128",
+      "model": "gemma2:27b",
+      "ctx": 16384,
+      "batch": 128
+    },
+    {
+      "id": "gemma2:27b|16384|256",
+      "model": "gemma2:27b",
+      "ctx": 16384,
+      "batch": 256
+    },
+    {
+      "id": "gemma2:27b|16384|512",
+      "model": "gemma2:27b",
+      "ctx": 16384,
+      "batch": 512
+    },
+    {
+      "id": "gemma2:27b|16384|1024",
+      "model": "gemma2:27b",
+      "ctx": 16384,
+      "batch": 1024
+    },
+    {
+      "id": "gemma2:27b|24576|128",
+      "model": "gemma2:27b",
+      "ctx": 24576,
+      "batch": 128
+    },
+    {
+      "id": "gemma2:27b|24576|256",
+      "model": "gemma2:27b",
+      "ctx": 24576,
+      "batch": 256
+    },
+    {
+      "id": "gemma2:27b|24576|512",
+      "model": "gemma2:27b",
+      "ctx": 24576,
+      "batch": 512
+    },
+    {
+      "id": "gemma2:27b|24576|1024",
+      "model": "gemma2:27b",
+      "ctx": 24576,
+      "batch": 1024
+    },
+    {
+      "id": "gemma2:27b|28672|128",
+      "model": "gemma2:27b",
+      "ctx": 28672,
+      "batch": 128
+    },
+    {
+      "id": "gemma2:27b|28672|256",
+      "model": "gemma2:27b",
+      "ctx": 28672,
+      "batch": 256
+    },
+    {
+      "id": "gemma2:27b|28672|512",
+      "model": "gemma2:27b",
+      "ctx": 28672,
+      "batch": 512
+    },
+    {
+      "id": "gemma2:27b|28672|1024",
+      "model": "gemma2:27b",
+      "ctx": 28672,
+      "batch": 1024
+    },
+    {
+      "id": "gemma2:27b|32768|128",
+      "model": "gemma2:27b",
+      "ctx": 32768,
+      "batch": 128
+    },
+    {
+      "id": "gemma2:27b|32768|256",
+      "model": "gemma2:27b",
+      "ctx": 32768,
+      "batch": 256
+    },
+    {
+      "id": "gemma2:27b|32768|512",
+      "model": "gemma2:27b",
+      "ctx": 32768,
+      "batch": 512
+    },
+    {
+      "id": "gemma2:27b|32768|1024",
+      "model": "gemma2:27b",
+      "ctx": 32768,
+      "batch": 1024
+    },
+    {
+      "id": "gpt-oss:20b|2048|128",
+      "model": "gpt-oss:20b",
+      "ctx": 2048,
+      "batch": 128
+    },
+    {
+      "id": "gpt-oss:20b|2048|256",
+      "model": "gpt-oss:20b",
+      "ctx": 2048,
+      "batch": 256
+    },
+    {
+      "id": "gpt-oss:20b|2048|512",
+      "model": "gpt-oss:20b",
+      "ctx": 2048,
+      "batch": 512
+    },
+    {
+      "id": "gpt-oss:20b|2048|1024",
+      "model": "gpt-oss:20b",
+      "ctx": 2048,
+      "batch": 1024
+    },
+    {
+      "id": "gpt-oss:20b|4096|128",
+      "model": "gpt-oss:20b",
+      "ctx": 4096,
+      "batch": 128
+    },
+    {
+      "id": "gpt-oss:20b|4096|256",
+      "model": "gpt-oss:20b",
+      "ctx": 4096,
+      "batch": 256
+    },
+    {
+      "id": "gpt-oss:20b|4096|512",
+      "model": "gpt-oss:20b",
+      "ctx": 4096,
+      "batch": 512
+    },
+    {
+      "id": "gpt-oss:20b|4096|1024",
+      "model": "gpt-oss:20b",
+      "ctx": 4096,
+      "batch": 1024
+    },
+    {
+      "id": "gpt-oss:20b|8192|128",
+      "model": "gpt-oss:20b",
+      "ctx": 8192,
+      "batch": 128
+    },
+    {
+      "id": "gpt-oss:20b|8192|256",
+      "model": "gpt-oss:20b",
+      "ctx": 8192,
+      "batch": 256
+    },
+    {
+      "id": "gpt-oss:20b|8192|512",
+      "model": "gpt-oss:20b",
+      "ctx": 8192,
+      "batch": 512
+    },
+    {
+      "id": "gpt-oss:20b|8192|1024",
+      "model": "gpt-oss:20b",
+      "ctx": 8192,
+      "batch": 1024
+    },
+    {
+      "id": "gpt-oss:20b|16384|128",
+      "model": "gpt-oss:20b",
+      "ctx": 16384,
+      "batch": 128
+    },
+    {
+      "id": "gpt-oss:20b|16384|256",
+      "model": "gpt-oss:20b",
+      "ctx": 16384,
+      "batch": 256
+    },
+    {
+      "id": "gpt-oss:20b|16384|512",
+      "model": "gpt-oss:20b",
+      "ctx": 16384,
+      "batch": 512
+    },
+    {
+      "id": "gpt-oss:20b|16384|1024",
+      "model": "gpt-oss:20b",
+      "ctx": 16384,
+      "batch": 1024
+    },
+    {
+      "id": "gpt-oss:20b|24576|128",
+      "model": "gpt-oss:20b",
+      "ctx": 24576,
+      "batch": 128
+    },
+    {
+      "id": "gpt-oss:20b|24576|256",
+      "model": "gpt-oss:20b",
+      "ctx": 24576,
+      "batch": 256
+    },
+    {
+      "id": "gpt-oss:20b|24576|512",
+      "model": "gpt-oss:20b",
+      "ctx": 24576,
+      "batch": 512
+    },
+    {
+      "id": "gpt-oss:20b|24576|1024",
+      "model": "gpt-oss:20b",
+      "ctx": 24576,
+      "batch": 1024
+    },
+    {
+      "id": "gpt-oss:20b|28672|128",
+      "model": "gpt-oss:20b",
+      "ctx": 28672,
+      "batch": 128
+    },
+    {
+      "id": "gpt-oss:20b|28672|256",
+      "model": "gpt-oss:20b",
+      "ctx": 28672,
+      "batch": 256
+    },
+    {
+      "id": "gpt-oss:20b|28672|512",
+      "model": "gpt-oss:20b",
+      "ctx": 28672,
+      "batch": 512
+    },
+    {
+      "id": "gpt-oss:20b|28672|1024",
+      "model": "gpt-oss:20b",
+      "ctx": 28672,
+      "batch": 1024
+    },
+    {
+      "id": "gpt-oss:20b|32768|128",
+      "model": "gpt-oss:20b",
+      "ctx": 32768,
+      "batch": 128
+    },
+    {
+      "id": "gpt-oss:20b|32768|256",
+      "model": "gpt-oss:20b",
+      "ctx": 32768,
+      "batch": 256
+    },
+    {
+      "id": "gpt-oss:20b|32768|512",
+      "model": "gpt-oss:20b",
+      "ctx": 32768,
+      "batch": 512
+    },
+    {
+      "id": "gpt-oss:20b|32768|1024",
+      "model": "gpt-oss:20b",
+      "ctx": 32768,
+      "batch": 1024
+    }
+  ]
 }
