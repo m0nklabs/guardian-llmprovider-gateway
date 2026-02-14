@@ -201,7 +201,7 @@ class GuardianService:
         self.proxy_task = None
 
     async def start(self):
-        logger.info("Starting Ollama Guardian...")
+        logger.info("Starting Llama Server Guardian...")
         
         # Expose internals to UI app
         app.state.scheduler = self.scheduler

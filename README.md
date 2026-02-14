@@ -5,7 +5,7 @@ A comprehensive tool to manage, monitor, and optimize Llama Server LLM usage.
 ## Features
 
 1.  **Guardian Proxy (Port 11435)**:
-    *   Intercepts requests to Llama Server (Port 11434).
+    *   Intercepts requests to Llama Server (Port 11440).
     *   **Active Unload**: Automatically unloads idle models to free VRAM for new requests, preventing OOM crashes on multi-GPU setups.
     *   **Stats Learning**: Learns actual VRAM usage of models over time and saves it to `data/model_stats.json`.
     *   **Safety Limits**: Enforces a configurable VRAM limit (default 27GB).

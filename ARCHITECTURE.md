@@ -1,12 +1,12 @@
-# Ollama Guardian - Architecture & Documentation
+# Llama Server Guardian - Architecture & Documentation
 
 ## Project Overview
-**Ollama Guardian** is a middleware solution designed to sit between client applications and the Ollama LLM server. It acts as a traffic controller, security guard, and performance optimizer.
+**Llama Server Guardian** is a middleware solution designed to sit between client applications and the Llama Server backend. It acts as a traffic controller, security guard, and performance optimizer.
 
 ## Core Objectives
 
 1.  **Queue Proxy & Traffic Control**:
-    *   **Flood Protection**: Prevents the Ollama server from being overwhelmed by too many simultaneous requests.
+    *   **Flood Protection**: Prevents the Llama Server from being overwhelmed by too many simultaneous requests.
     *   **Queue Management**: Queues incoming requests when the system is at capacity.
     *   **Active Unload**: Proactively unloads idle models from VRAM to make space for new high-priority requests, preventing Out-Of-Memory (OOM) crashes.
 
@@ -27,8 +27,8 @@
 ## Technical Architecture
 
 ### Architecture Diagram
-*   **Port 11434 (Public)**: **Ollama Guardian**. The entry point for all clients. Handles Basic Auth, VRAM scheduling, Combo Caching, and Request Optimization.
-*   **Port 11436 (Internal)**: **Real Ollama Server**. The execution engine. Only accessible by the Guardian.
+*   **Port 11435 (Public)**: **Guardian Proxy**. The entry point for all clients. Handles Basic Auth, VRAM scheduling, Combo Caching, and Request Optimization.
+*   **Port 11440 (Internal)**: **Real Llama Server**. The execution engine. Only accessible by the Guardian.
 *   **Port 11437 (UI)**: **Guardian Dashboard**.
 
 ### Authentication & Load Balancing

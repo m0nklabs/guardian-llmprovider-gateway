@@ -1,5 +1,14 @@
 # Changelog
 
+## [2026-02-14] - Refactor to Llama Server
+
+### Changed
+- **Ollama to Llama Server**: Renamed all component references from "Ollama" to "Llama Server" to reflect the backend change.
+- **Port standardization**: Default internal Llama Server port updated to 11440.
+- **Environment Variables**: Renamed `OLLAMA_URL` and similar vars to `LLAMA_SERVER_URL`.
+- **Legacy Cleanup**: Removed deprecated `configure_ollama.sh` and `modelfile_template.txt`.
+- **VRAM Logic**: Disabled legacy `check_and_free_vram` in favor of new manager.
+
 ## [Unreleased] - 2025-12-21
 
 ### Added
