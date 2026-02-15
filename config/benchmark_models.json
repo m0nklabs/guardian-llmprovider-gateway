@@ -1,0 +1,27 @@
+[
+  {
+    "repo": "unsloth/DeepSeek-R1-Distill-Qwen-32B-GGUF",
+    "filename": "DeepSeek-R1-Distill-Qwen-32B-Uncensored.Q4_K_M.gguf",
+    "local_name": "DeepSeek-R1-Distill-Qwen-32B-Uncensored.Q4_K_M.gguf"
+  },
+  {
+    "repo": "bartowski/gemma-3-27b-it-GGUF",
+    "filename": "gemma-3-27b-it-Q4_K_M.gguf",
+    "local_name": "gemma-3-27b-it.Q4_K_M.gguf"
+  },
+   {
+    "repo": "unsloth/phi-4-GGUF",
+    "filename": "phi-4-Q8_0.gguf",
+    "local_name": "phi-4-Q8_0.gguf"
+  },
+  {
+    "repo": "Qwen/Qwen3-Coder-32B-Instruct-GGUF",
+    "filename": "qwen3-coder-32b-instruct-q4_k_m.gguf",
+    "local_name": "qwen3-coder-30b-q4km-32k-latest.gguf"
+  },
+  {
+    "repo": "zai-org/GLM-4.7-Flash-GGUF",
+    "filename": "glm-4.7-flash-q4_k_m.gguf",
+    "local_name": "GLM-4.7-Flash-Q4_K_M-latest.gguf"
+  }
+]

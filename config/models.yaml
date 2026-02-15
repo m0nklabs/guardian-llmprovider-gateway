@@ -1,60 +1,118 @@
 models:
-  glm-4.7-30b:
+  # --- GLM Models ---
+  glm-4.7-30b: &glm4
     path: /home/flip/models/GLM-4.7-Flash-Q4_K_M-latest.gguf
-    context: 262144
-    ngl: 99
-
-  glm-4:
-    path: /home/flip/models/GLM-4.7-Flash-Q4_K_M-latest.gguf
-    context: 262144
-    ngl: 99
-    
-  deepseek-r1:
-    path: /home/flip/models/deepseek-r1-32b-16k-latest.gguf
-    context: 16384
-    ngl: 99
-
-  command-r:
-    path: /home/flip/models/command-r-latest.gguf
     context: 32768
     ngl: 99
 
-  gemma2-27b:
-    path: /home/flip/models/gemma2-27b.gguf
-    context: 8192
+  glm-4: *glm4
+  GLM-4.7-Flash-Q6_K:latest: *glm4
+
+  # --- DeepSeek Models ---
+  deepseek-r1: &deepseek32
+    path: /home/flip/models/deepseek-r1-32b-16k-latest.gguf
+    context: 24576 # Optimized for 28GB VRAM
     ngl: 99
 
-  mistral:
+  deepseek-r1:32b: *deepseek32
+  deepseek-r1-32b-16k:latest: *deepseek32
+  deepseek-r1-32b-max:latest: *deepseek32
+
+  # --- Command R Models ---
+  command-r: &commandr
+    path: /home/flip/models/command-r-latest.gguf
+    context: 16384 # Heaviest model, limited VRAM headroom
+    ngl: 99
+
+  command-r:latest: *commandr
+
+  # --- Gemma Models ---
+  gemma2-27b: &gemma27
+    path: /home/flip/models/gemma2-27b.gguf
+    context: 32768
+    ngl: 99
+
+  gemma2:27b: *gemma27
+  gemma3:27b: &gemma3
+    path: /home/flip/models/gemma3-27b.gguf
+    context: 32768
+    ngl: 99
+
+  gemma2-9b: &gemma9
+    path: /home/flip/models/gemma2-9b.gguf
+    context: 32768
+    ngl: 99
+  
+  gemma2:9b: *gemma9
+
+  # --- Mistral Models ---
+  mistral: &mistral7
     path: /home/flip/models/mistral-7b.gguf
     context: 32768
     ngl: 99
+  
+  mistral:7b: *mistral7
 
-  llama3:
+  # --- Llama Models ---
+  llama3: &llama8
     path: /home/flip/models/llama3.1-8b.gguf
-    context: 8192
-    ngl: 99
-    
-  qwen2.5-coder:
-    path: /home/flip/models/qwen3-coder-30b-q4km-32k-latest.gguf
     context: 32768
     ngl: 99
 
-  moondream:
+  llama3.1:8b: *llama8
+
+  llama3.2:3b:
+    path: /home/flip/models/llama3.2-3b.gguf
+    context: 32768
+    ngl: 99
+
+  # --- Qwen / Coder Models ---
+  qwen3-coder: &qwen30
+    path: /home/flip/models/qwen3-coder-30b-q4km-32k-latest.gguf
+    context: 24576 # Optimized for 28GB VRAM
+    ngl: 99
+
+  qwen3-coder-30b-q4km-32k:latest: *qwen30
+  hf.co/unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF:latest: *qwen30
+
+  qwen3:14b:
+    path: /home/flip/models/qwen3-14b.gguf
+    context: 32768
+    ngl: 99
+
+  Qwen3-30B-A3B-Thinking-2507-Q4_K_M:latest:
+    path: /home/flip/models/Qwen3-30B-A3B-Thinking-2507-Q4_K_M-latest.gguf
+    context: 32768
+    ngl: 99
+
+  # --- Other Models ---
+  moondream: &moondream
     path: /home/flip/models/moondream-latest.gguf
     context: 2048
     ngl: 33
+  
+  moondream:latest: *moondream
 
-  nomic-embed:
+  gpt-oss:20b:
+    path: /home/flip/models/gpt-oss-20b.gguf
+    context: 65536
+    ngl: 99
+
+  nomic-embed: &nomic
     path: /home/flip/models/nomic-embed-text-latest.gguf
     context: 8192
     ngl: 99
 
-  phi4:
+  nomic-embed-text:latest: *nomic
+
+  nomic-embed-text-cpu:latest:
+    path: /home/flip/models/nomic-embed-text-cpu-latest.gguf
+    context: 8192
+    ngl: 0
+
+  phi4: &phi14
     path: /home/flip/models/phi4-14b.gguf
-    context: 16384
+    context: 32768
     ngl: 99
 
-  gemma2-9b:
-    path: /home/flip/models/gemma2-9b.gguf
-    context: 8192
-    ngl: 99
+  phi4:14b: *phi14

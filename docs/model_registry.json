@@ -1,0 +1,178 @@
+[
+  {
+    "local_name": "Ministral-3-14B-Reasoning-2512-Q8_0.gguf",
+    "repo": "mistralai/Ministral-3-14B-Reasoning-2512-GGUF",
+    "filename": "Ministral-3-14B-Reasoning-2512-Q8_0.gguf",
+    "description": "Ministral 3 14B Reasoning (Q8_0).",
+    "hf_url": "https://huggingface.co/mistralai/Ministral-3-14B-Reasoning-2512-GGUF",
+    "quant_level": "Q8_0"
+  },
+  {
+    "local_name": "Step3-VL-10B-F16.gguf",
+    "repo": "seanbailey518/Step3-VL-10B-GGUF",
+    "filename": "Step3-VL-10B-F16.gguf",
+    "description": "Step3 VL 10B (F16).",
+    "hf_url": "https://huggingface.co/seanbailey518/Step3-VL-10B-GGUF",
+    "quant_level": "F16"
+  },
+  {
+    "local_name": "Phi-4-reasoning-plus-Q8_0.gguf",
+    "repo": "lmstudio-community/Phi-4-reasoning-plus-GGUF",
+    "filename": "Phi-4-reasoning-plus-Q8_0.gguf",
+    "description": "Phi-4 Reasoning Plus (Q8_0).",
+    "hf_url": "https://huggingface.co/lmstudio-community/Phi-4-reasoning-plus-GGUF",
+    "quant_level": "Q8_0"
+  },
+  {
+    "local_name": "Qwen3-VL-30B-A3B-Thinking-Q8_0.gguf",
+    "repo": "unsloth/Qwen3-VL-30B-A3B-Thinking-GGUF",
+    "filename": "Qwen3-VL-30B-A3B-Thinking-Q8_0.gguf",
+    "description": "Qwen3-VL 30B Thinking (Q8_0).",
+    "hf_url": "https://huggingface.co/unsloth/Qwen3-VL-30B-A3B-Thinking-GGUF",
+    "quant_level": "Q8_0"
+  },
+  {
+    "local_name": "GLM-4.7-Flash-Q4_K_M-latest.gguf",
+    "repo": "zai-org/GLM-4.7-Flash-GGUF",
+    "filename": "glm-4.7-flash-q4_k_m.gguf",
+    "description": "User confirmed GLM-4.7 Flash model.",
+    "hf_url": "https://huggingface.co/zai-org/GLM-4.7-Flash-GGUF",
+    "quant_level": "Q4_K_M"
+  },
+  {
+    "local_name": "gemma-3-27b-it.Q4_K_M.gguf",
+    "repo": "google/gemma-3-27b-it-GGUF",
+    "filename": "gemma-3-27b-it-q4_k_m.gguf",
+    "description": "Gemma 3 27B Instruct model.",
+    "hf_url": "https://huggingface.co/google/gemma-3-27b-it-GGUF",
+    "quant_level": "Q4_K_M"
+  },
+  {
+    "local_name": "DeepSeek-R1-Distill-Qwen-32B-Uncensored.Q4_K_M.gguf",
+    "repo": "deepseek-ai/DeepSeek-R1-Distill-Qwen-32B-GGUF",
+    "filename": "deepseek-r1-distill-qwen-32b-q4_k_m.gguf",
+    "description": "DeepSeek R1 Distill Qwen 32B (Uncensored).",
+    "hf_url": "https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B-GGUF",
+    "quant_level": "Q4_K_M"
+  },
+  {
+    "local_name": "phi4-14b.gguf",
+    "repo": "microsoft/phi-4-GGUF",
+    "filename": "phi-4-q4_k_m.gguf",
+    "description": "Phi-4 14B model.",
+    "hf_url": "https://huggingface.co/microsoft/phi-4-GGUF",
+    "quant_level": "Q4_K_M"
+  },
+  {
+    "local_name": "mistral-7b.gguf",
+    "repo": "mistralai/Mistral-7B-Instruct-v0.3-GGUF",
+    "filename": "mistral-7b-instruct-v0.3-q4_k_m.gguf",
+    "description": "Mistral 7B Instruct v0.3.",
+    "hf_url": "https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3-GGUF",
+    "quant_level": "Q4_K_M"
+  },
+  {
+    "local_name": "llama3.1-8b.gguf",
+    "repo": "meta-llama/Meta-Llama-3.1-8B-Instruct-GGUF",
+    "filename": "meta-llama-3.1-8b-instruct-q4_k_m.gguf",
+    "description": "Llama 3.1 8B Instruct.",
+    "hf_url": "https://huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct-GGUF",
+    "quant_level": "Q4_K_M"
+  },
+  {
+    "local_name": "llama3.2-3b.gguf",
+    "repo": "meta-llama/Llama-3.2-3B-Instruct-GGUF",
+    "filename": "llama-3.2-3b-instruct-q4_k_m.gguf",
+    "description": "Llama 3.2 3B Instruct.",
+    "hf_url": "https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct-GGUF",
+    "quant_level": "Q4_K_M"
+  },
+  {
+    "local_name": "gemma2-9b.gguf",
+    "repo": "google/gemma-2-9b-it-GGUF",
+    "filename": "gemma-2-9b-it-q4_k_m.gguf",
+    "description": "Gemma 2 9B Instruct.",
+    "hf_url": "https://huggingface.co/google/gemma-2-9b-it-GGUF",
+    "quant_level": "Q4_K_M"
+  },
+  {
+    "local_name": "gemma2-27b.gguf",
+    "repo": "google/gemma-2-27b-it-GGUF",
+    "filename": "gemma-2-27b-it-q4_k_m.gguf",
+    "description": "Gemma 2 27B Instruct.",
+    "hf_url": "https://huggingface.co/google/gemma-2-27b-it-GGUF",
+    "quant_level": "Q4_K_M"
+  },
+  {
+    "local_name": "gpt-oss-20b-F16.gguf",
+    "repo": "unsloth/gpt-oss-20b-GGUF",
+    "filename": "gpt-oss-20b-F16.gguf",
+    "description": "GPT-OSS 20B (F16) - Requested by User.",
+    "hf_url": "https://huggingface.co/unsloth/gpt-oss-20b-GGUF",
+    "quant_level": "F16"
+  },
+  {
+    "local_name": "Qwen3-30B-A3B-Thinking-2507-Q4_K_M-latest.gguf",
+    "repo": "unsloth/Qwen3-30B-A3B-Thinking-2507-GGUF",
+    "filename": "Qwen3-30B-A3B-Thinking-2507-Q4_K_M.gguf",
+    "description": "Qwen3 30B A3B Thinking 2507 - Preview model.",
+    "hf_url": "https://huggingface.co/unsloth/Qwen3-30B-A3B-Thinking-2507-GGUF",
+    "quant_level": "Q4_K_M"
+  },
+  {
+    "local_name": "phi-4-Q8_0.gguf",
+    "repo": "unsloth/phi-4-GGUF",
+    "filename": "phi-4-Q8_0.gguf",
+    "description": "Phi-4 Q8_0 - Unsloth quantization.",
+    "hf_url": "https://huggingface.co/unsloth/phi-4-GGUF",
+    "quant_level": "Q8_0"
+  },
+  {
+    "local_name": "gpt-oss-20b-uncensored.Q4_K_M.gguf",
+    "repo": "mradermacher/gpt-oss-20b-uncensored-GGUF",
+    "filename": "gpt-oss-20b-uncensored.Q4_K_M.gguf",
+    "description": "GPT-OSS 20B Uncensored - Q4_K_M.",
+    "hf_url": "https://huggingface.co/mradermacher/gpt-oss-20b-uncensored-GGUF",
+    "quant_level": "Q4_K_M"
+  },
+  {
+    "local_name": "gpt-oss-20b-uncensored.Q8_0.gguf",
+    "repo": "mradermacher/gpt-oss-20b-uncensored-GGUF",
+    "filename": "gpt-oss-20b-uncensored.Q8_0.gguf",
+    "description": "GPT-OSS 20B Uncensored - Q8_0.",
+    "hf_url": "https://huggingface.co/mradermacher/gpt-oss-20b-uncensored-GGUF",
+    "quant_level": "Q8_0"
+  },
+  {
+    "local_name": "Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf",
+    "repo": "unsloth/Nemotron-3-Nano-30B-A3B-GGUF",
+    "filename": "Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf",
+    "description": "Nemotron-3 Nano 30B A3B - Unsloth optimized.",
+    "hf_url": "https://huggingface.co/unsloth/Nemotron-3-Nano-30B-A3B-GGUF",
+    "quant_level": "Q4_K_M"
+  },
+  {
+    "local_name": "Qwen3-VL-30B-A3B-Thinking-Q4_K_M.gguf",
+    "repo": "unsloth/Qwen3-VL-30B-A3B-Thinking-GGUF",
+    "filename": "Qwen3-VL-30B-A3B-Thinking-Q4_K_M.gguf",
+    "description": "Qwen3-VL 30B A3B Thinking - Q4_K_M.",
+    "hf_url": "https://huggingface.co/unsloth/Qwen3-VL-30B-A3B-Thinking-GGUF",
+    "quant_level": "Q4_K_M"
+  },
+  {
+    "local_name": "GLM-4.7-Flash-Q8_0.gguf",
+    "repo": "unsloth/GLM-4.7-Flash-GGUF",
+    "filename": "GLM-4.7-Flash-Q8_0.gguf",
+    "description": "GLM-4.7 Flash - Q8_0 (High Quality).",
+    "hf_url": "https://huggingface.co/unsloth/GLM-4.7-Flash-GGUF",
+    "quant_level": "Q8_0"
+  },
+  {
+    "local_name": "nomic-embed-text-v2-moe.f16.gguf",
+    "repo": "nomic-ai/nomic-embed-text-v2-moe-GGUF",
+    "filename": "nomic-embed-text-v2-moe.f16.gguf",
+    "description": "Nomic Embed Text v2 MoE (F16) - Embedding Model.",
+    "hf_url": "https://huggingface.co/nomic-ai/nomic-embed-text-v2-moe-GGUF",
+    "quant_level": "F16"
+  }
+]

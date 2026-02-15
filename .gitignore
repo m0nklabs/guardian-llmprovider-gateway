@@ -45,3 +45,5 @@ llama_slots/
 
 # MacOS
 .DS_Store
+config/api_keys.json
+benchmark_results.json
