@@ -2,22 +2,18 @@ import os
 import json
 import asyncio
 import logging
-import secrets
 import subprocess
 import time
+import sys
+import errno
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import yaml
-
-import base64
-
 import httpx
 from fastapi import FastAPI, Request, HTTPException, Response, Depends
 from fastapi.responses import StreamingResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from starlette.background import BackgroundTask
 from starlette.status import HTTP_401_UNAUTHORIZED
 
 from collections import defaultdict
@@ -63,25 +59,75 @@ CONFIG = load_config()
 LLAMA_SERVER_URL = "http://127.0.0.1:11440"
 
 # Total VRAM available (approx 28GB: 12GB + 16GB)
-# We set a safe limit to avoid OOM (Adjusted to 26GB to provide safety buffer for CPU offloading prevention)
-SAFE_VRAM_LIMIT_MB = 26000
-# Global default context size (28k)
-DEFAULT_CONTEXT_SIZE = 28672
-# Concurrency Limit (Increased to allow parallel small models)
-MAX_CONCURRENT_REQUESTS = 8
-# Max Request Duration (5 minutes) - Kills stuck requests
-MAX_REQUEST_TIMEOUT = 300
-STATS_FILE = "data/model_stats.json"
-CLIENTS_FILE = "config/clients.json"
+# Read from settings.yaml proxy.vram_limit_mb, fallback to hardcoded value
+def _load_vram_limit() -> int:
+    try:
+        config_path = Path(__file__).parent.parent.parent / "config" / "settings.yaml"
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                cfg = yaml.safe_load(f) or {}
+            return cfg.get("proxy", {}).get("vram_limit_mb", 27000)
+    except Exception:
+        pass
+    return 27000
+
+SAFE_VRAM_LIMIT_MB = _load_vram_limit()
 
 # Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Proxy")
-# security = HTTPBasic() # Removed in favor of API Key Auth
-app = FastAPI()
+
+PID_FILE = "guardian.pid"
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Check and write PID file
+    pid_path = Path(__file__).parent.parent.parent / PID_FILE
+    if pid_path.exists():
+        try:
+            with open(pid_path, 'r') as f:
+                content = f.read().strip()
+                if content:
+                    old_pid = int(content)
+                    # Check if process exists
+                    if old_pid != os.getpid():
+                        try:
+                            os.kill(old_pid, 0)
+                            logger.error(f"FATAL: Guardian is already running (PID {old_pid}). Exiting immediately to prevent conflict.")
+                            sys.exit(1)
+                        except OSError as e:
+                            if e.errno == errno.ESRCH:
+                                logger.warning(f"Found stale PID file for PID {old_pid}. Overwriting.")
+                            else:
+                                raise e
+        except ValueError:
+             logger.warning("Invalid PID file found. Overwriting.")
+        except FileNotFoundError:
+            pass
+
+    try:
+        with open(pid_path, 'w') as f:
+            f.write(str(os.getpid()))
+        logger.info(f"Guardian started with PID {os.getpid()}")
+    except Exception as e:
+        logger.error(f"Failed to write PID file: {e}")
+
+    yield
+    
+    # Shutdown: Remove PID file
+    if pid_path.exists():
+        try:
+            with open(pid_path, 'r') as f:
+                content = f.read().strip()
+                if content and int(content) == os.getpid():
+                     pid_path.unlink()
+                     logger.info("PID file removed.")
+        except Exception as e:
+            logger.warning(f"Failed to clean up PID file: {e}")
+
+app = FastAPI(lifespan=lifespan)
 model_manager = ModelManager()
 
-# ...existing code...
 
 def get_gpu_metrics():
     try:
@@ -122,11 +168,11 @@ def get_model_size(model_name: str) -> int:
     if "7b" in model_lower: return 5000
     if "1.5b" in model_lower: return 1500
     
-    # Default fallback
-    return 8000
-
+    # Small models
     if "0.5b" in model_lower: return 600
     if "embed" in model_lower: return 500
+    
+    # Default fallback
     return 4000
 
 def get_model_timeout(model_name: str) -> int:
@@ -160,15 +206,9 @@ def get_model_timeout(model_name: str) -> int:
     return default_timeout
 
 
-async def unload_model(model_name: str):
-    async with httpx.AsyncClient() as client:
-        try:
-            await client.post(f"{LLAMA_SERVER_URL}/api/generate", json={"model": model_name, "keep_alive": 0})
-        except Exception as e:
-            logger.error(f"Failed to unload {model_name}: {e}")
-
-async def update_model_stats(model_name: str):
-    pass
+# Model switch concurrency lock - prevents race conditions when
+# multiple requests try to switch models simultaneously
+_model_switch_lock = asyncio.Lock()
 
 # Auth replaced by verify_api_key imported from app.proxy.auth
 
@@ -224,12 +264,6 @@ class State:
 
 state = State()
 
-# ...existing code...
-
-async def check_and_free_vram(needed_mb: int, target_model: str):
-    # Llama-server manages its own memory via single-model loading.
-    # Manager.py handles switching. This logic is legacy Ollama-specific and is disabled.
-    return
 
 @app.post("/api/chat")
 async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_api_key)):
@@ -245,10 +279,14 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
 
     logger.info(f"bridge: Ollama chat request for '{model}' -> Translating to OpenAI format")
     
-    # Check if model switch needed
+    # Check if model switch needed (with concurrency lock)
     current_model = await model_manager.get_current_model()
     if model != current_model and model in model_manager.models:
-         await model_manager.switch_model(model)
+        async with _model_switch_lock:
+            # Re-check after acquiring lock (another request may have switched already)
+            current_model = await model_manager.get_current_model()
+            if model != current_model:
+                await model_manager.switch_model(model)
 
     # Translate Ollama request to OpenAI format
     messages = body.get("messages", [])
@@ -460,7 +498,7 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
 
 
 @app.get("/api/version")
-async def get_version():
+async def get_version(client_id: str = Depends(verify_api_key)):
     """Mimic Ollama version endpoint"""
     return {"version": "0.1.27"}
 
@@ -499,10 +537,6 @@ async def proxy_tags_ollama(client_id: str = Depends(verify_api_key)):
     return {"models": models}
 
 
-
-# ...existing code...
-
-
 # Model listing endpoint (Before catch-all)
 @app.get("/v1/models")
 async def list_models(client_id: str = Depends(verify_api_key)):
@@ -534,7 +568,7 @@ async def proxy_v1_get(path: str, request: Request, client_id: str = Depends(ver
 async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(verify_api_key)):
     body = await request.body()
     
-    # Auto-switch logic for chat completions
+    # Auto-switch logic for chat completions (with concurrency lock)
     if path == "chat/completions":
         try:
             json_body = json.loads(body)
@@ -543,12 +577,16 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
             
             if requested_model and requested_model != current_model:
                 if requested_model in model_manager.models:
-                    logger.info(f"🔄 Auto-switching backend from {current_model} to {requested_model}")
-                    try:
-                        await model_manager.switch_model(requested_model)
-                    except Exception as e:
-                        logger.error(f"❌ Switch failed: {e}")
-                        raise HTTPException(status_code=500, detail="Model switch failed")
+                    async with _model_switch_lock:
+                        # Re-check after acquiring lock
+                        current_model = await model_manager.get_current_model()
+                        if requested_model != current_model:
+                            logger.info(f"🔄 Auto-switching backend from {current_model} to {requested_model}")
+                            try:
+                                await model_manager.switch_model(requested_model)
+                            except Exception as e:
+                                logger.error(f"❌ Switch failed: {e}")
+                                raise HTTPException(status_code=500, detail="Model switch failed")
                 else:
                     logger.warning(f"⚠️ Requested model {requested_model} not managed by Guardian. Forwarding anyway.")
         except json.JSONDecodeError:

@@ -1,21 +1,23 @@
+# Services to stop during benchmark maintenance window
 services_to_stop:
   - caramba-backend
   - agent-forge
 
+# Benchmark configuration
 benchmark:
-  models:
-    - deepseek-r1:32b
-    - gemma2:27b
-    - gpt-oss:20b
+  # Models loaded dynamically from models.yaml
   
   schedule:
     start_hour: 4
     end_hour: 11
     days: ["mon", "tue", "wed", "thu", "fri"]
 
+# Proxy configuration
 proxy:
   port: 11434
   target: http://localhost:11440
+  # Total usable VRAM across all GPUs (RTX 3060 12GB + RTX 5060 Ti 16GB = 28GB)
+  # Safety buffer accounts for Frigate (~1.5GB) and system overhead
   vram_limit_mb: 27000
 
 # Dynamic timeout configuration per model tier (in seconds)

@@ -1,30 +1,50 @@
 import json
 import os
 import time
-import requests
+import asyncio
 import logging
 import subprocess
 from datetime import datetime
 
+import httpx
+
 logger = logging.getLogger("Tweaker")
+
 
 class BenchmarkSuite:
     def __init__(self, data_dir="data", config_path="config/settings.yaml"):
         self.data_dir = data_dir
         self.results_file = os.path.join(data_dir, "benchmark_results.json")
         self.state_file = os.path.join(data_dir, "benchmark_state.json")
-        self.server_url = "http://localhost:11440/api/generate" 
-        # We benchmark directly against the internal Llama Server (11440)
-        # to avoid proxy overhead and auth requirements during automated testing.
-        self.target_url = "http://localhost:11440/api/generate" 
+        # Benchmark directly against llama-server (OpenAI-compatible endpoint)
+        self.server_url = "http://localhost:11440/v1/chat/completions"
+        self.target_url = "http://localhost:11440/v1/chat/completions"
         
-        self.models_to_test = ["deepseek-r1:32b", "gemma2:27b", "gpt-oss:20b"] # TODO: Load from Llama Server API
+        # Load models from config instead of hardcoding
+        self.models_to_test = self._load_models_from_config(config_path)
         self.ctx_options = [2048, 4096, 8192, 16384, 24576, 28672, 32768]
         self.batch_options = [128, 256, 512, 1024]
         
         self.current_test = None
         self.is_running = False
-        self.best_tps_cache = {} # model -> max_tps
+        self.best_tps_cache = {}  # model -> max_tps
+
+    def _load_models_from_config(self, config_path: str) -> list:
+        """Load model names from models.yaml instead of hardcoding."""
+        try:
+            import yaml
+            config_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "config", "models.yaml")
+            if os.path.exists(config_file):
+                with open(config_file, 'r') as f:
+                    cfg = yaml.safe_load(f) or {}
+                models = list(cfg.get("models", {}).keys())
+                if models:
+                    logger.info(f"Loaded {len(models)} models from config for benchmarking")
+                    return models
+        except Exception as e:
+            logger.warning(f"Failed to load models from config: {e}")
+        # Fallback
+        return ["GLM-4.7-Flash", "gemma-3-27b-it", "deepseek-r1-32b"]
 
     def check_for_record(self, model, tps, config):
         """Checks if this result is a new record for the model."""
@@ -113,7 +133,7 @@ class BenchmarkSuite:
             # User-friendly output
             print(f"Testing {test_case['model']} | ctx={test_case['ctx']} | batch={test_case['batch']} ... ", end="", flush=True)
             
-            result = self.run_single_test(test_case)
+            result = await asyncio.to_thread(self.run_single_test, test_case)
             
             # Print result
             status = "SUCCESS" if result["success"] else "FAILED"
@@ -139,36 +159,37 @@ class BenchmarkSuite:
         logger.info("Benchmark Suite Finished or Stopped.")
 
     def run_single_test(self, test_case):
+        """Run a single benchmark test using OpenAI-compatible /v1/chat/completions."""
         model = test_case["model"]
         ctx = test_case["ctx"]
         batch = test_case["batch"]
         
         payload = {
             "model": model,
-            "prompt": "Write a short story about a llama who learns to code in Python. The story should be about 200 words long.",
+            "messages": [
+                {"role": "user", "content": "Write a short story about a llama who learns to code in Python. The story should be about 200 words long."}
+            ],
             "stream": False,
-            "options": {
-                "num_ctx": ctx,
-                "num_batch": batch,
-                "num_gpu": 99,
-                "temperature": 0.7
-            }
+            "temperature": 0.7,
+            "max_tokens": 300
         }
         
         start_vram = self.get_vram_usage()
         start_time = time.time()
         
         try:
-            response = requests.post(self.target_url, json=payload, timeout=600)
-            response.raise_for_status()
-            data = response.json()
+            with httpx.Client(timeout=600.0) as client:
+                response = client.post(self.target_url, json=payload)
+                response.raise_for_status()
+                data = response.json()
             
             end_vram = self.get_vram_usage()
+            elapsed = time.time() - start_time
             
-            total_duration = data.get("total_duration", 0) / 1e9
-            eval_count = data.get("eval_count", 0)
-            eval_duration = data.get("eval_duration", 0) / 1e9
-            tps = eval_count / eval_duration if eval_duration > 0 else 0
+            # Parse OpenAI-format response
+            usage = data.get("usage", {})
+            eval_count = usage.get("completion_tokens", 0)
+            tps = eval_count / elapsed if elapsed > 0 else 0
             
             return {
                 "id": test_case["id"],
@@ -176,7 +197,9 @@ class BenchmarkSuite:
                 "success": True,
                 "metrics": {
                     "tps": tps,
-                    "total_duration": total_duration,
+                    "total_duration": elapsed,
+                    "eval_count": eval_count,
+                    "prompt_tokens": usage.get("prompt_tokens", 0),
                     "vram_delta": end_vram - start_vram,
                     "peak_vram": end_vram
                 },

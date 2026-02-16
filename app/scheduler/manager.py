@@ -3,24 +3,41 @@ import logging
 import datetime
 import subprocess
 
+import yaml
+from pathlib import Path
+
 logger = logging.getLogger("Scheduler")
+
 
 class SchedulerManager:
     def __init__(self):
-        # Configuration for idle window (04:00 - 11:00)
-        self.start_hour = 4
-        self.end_hour = 11
-        self.services_to_manage = [
-            # "caramba-backend", # Example services to stop
-            # "agent-forge"
-        ]
+        config = self._load_config()
+        schedule = config.get("benchmark", {}).get("schedule", {})
+        self.start_hour = schedule.get("start_hour", 4)
+        self.end_hour = schedule.get("end_hour", 11)
+        self.allowed_days = schedule.get("days", ["mon", "tue", "wed", "thu", "fri"])
+        self.services_to_manage = config.get("services_to_stop", [])
         self.active_mode = False
+        logger.info(f"Scheduler config: hours={self.start_hour}-{self.end_hour}, days={self.allowed_days}, services={self.services_to_manage}")
+
+    def _load_config(self) -> dict:
+        """Load scheduler configuration from settings.yaml."""
+        config_path = Path(__file__).parent.parent.parent / "config" / "settings.yaml"
+        try:
+            if config_path.exists():
+                with open(config_path, 'r') as f:
+                    return yaml.safe_load(f) or {}
+        except Exception as e:
+            logger.warning(f"Failed to load scheduler config: {e}")
+        return {}
 
     def is_idle_window(self):
         now = datetime.datetime.now()
-        # Check if weekday (0=Monday, 4=Friday)
-        if now.weekday() > 4: # Saturday(5) or Sunday(6)
-            return False # Or maybe run all day on weekends? User said "doordeweeks" (weekdays)
+        # Check if today's day name is in allowed days
+        day_names = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+        today = day_names[now.weekday()]
+        if today not in self.allowed_days:
+            return False
         
         return self.start_hour <= now.hour < self.end_hour
 
@@ -57,10 +74,17 @@ class SchedulerManager:
             self.manage_service(service, "start")
 
     def manage_service(self, service_name, action):
+        """Start or stop a systemd service during maintenance mode."""
         try:
             logger.info(f"{action.capitalize()}ing service: {service_name}")
-            # subprocess.run(["sudo", "systemctl", action, service_name], check=True)
-            # For now, just log it to avoid accidental shutdowns during dev
-            pass 
+            subprocess.run(
+                ["sudo", "systemctl", action, service_name],
+                check=True,
+                capture_output=True,
+                timeout=30
+            )
+            logger.info(f"Successfully {action}ed {service_name}")
+        except subprocess.TimeoutExpired:
+            logger.error(f"Timeout {action}ing {service_name}")
         except Exception as e:
             logger.error(f"Failed to {action} {service_name}: {e}")
