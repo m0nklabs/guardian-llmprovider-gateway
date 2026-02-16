@@ -1,5 +1,37 @@
 # Changelog
 
+## [2026-02-16] - Comprehensive Code Review & Multi-GPU Fixes
+
+### Fixed (CRITICAL)
+- **Unreachable code in `get_model_size()`**: `return 8000` was placed before embed/0.5b checks, causing embed models (e.g., nomic-embed) to report 8000MB instead of 500MB.
+- **Default model `"glm-4"` didn't exist**: Changed to `"GLM-4.7-Flash"` to match actual `models.yaml` key.
+- **Benchmark suite non-functional**: Was using Ollama `/api/generate` endpoint (404 on llama-server). Migrated to `/v1/chat/completions` with OpenAI-format response parsing.
+- **Benchmark model names**: Were Ollama-style (`deepseek-r1:32b`). Now loaded dynamically from `models.yaml`.
+- **Model switch race condition**: Added `asyncio.Lock()` to prevent concurrent model switches from colliding.
+
+### Fixed (IMPORTANT)
+- **Dead config `vram_limit_mb`**: `settings.yaml` value (27000) was never read — `server.py` hardcoded 26000. Now properly loaded from config.
+- **Dead config `proxy.port` and `proxy.target`**: Documented as config-driven but were hardcoded. `vram_limit_mb` now wired; port/target remain hardcoded (intentional).
+- **Scheduler ignored `settings.yaml`**: Hours, days, and services were hardcoded. Now reads `benchmark.schedule` and `services_to_stop` from config.
+- **`manage_service()` was a no-op**: `subprocess.run()` was commented out. Re-enabled with timeout protection.
+- **Unauthenticated endpoints**: `/api/tags` and `/api/version` bypassed API key auth. Fixed.
+- **Benchmark blocked event loop**: Sync `requests.post()` inside async `run_suite()`. Fixed via `asyncio.to_thread()` + migrated from `requests` to `httpx`.
+
+### Added
+- **`tensor_split` for all >12GB models**: 16 models configured with multi-GPU weight distribution (`0.55,0.45` for ≤19GB, `0.45,0.55` for >20GB). Enables coexistence with Frigate NVR on GPU 1.
+- **`_model_switch_lock`**: Global asyncio lock prevents concurrent model switches across `/api/chat` and `/v1/chat/completions`.
+
+### Removed
+- Unused imports: `secrets`, `base64`, `BackgroundTask`, `HTTPBasic`, `HTTPBasicCredentials`
+- Dead constants: `DEFAULT_CONTEXT_SIZE`, `MAX_CONCURRENT_REQUESTS`, `MAX_REQUEST_TIMEOUT`, `STATS_FILE`, `CLIENTS_FILE`
+- Dead functions: `unload_model()` (used Ollama API), `update_model_stats()` (no-op), `check_and_free_vram()` (no-op)
+- Stale `# ...existing code...` placeholder comments
+
+### Changed
+- **`start_llama.sh`**: Fixed default model filename from `GLM-4.7-Flash-Q4_K_M-latest.gguf` to `GLM-4.7-Flash-Q4_K_M.gguf`.
+- **`settings.yaml`**: Cleaned dead `benchmark.models` list (now loaded from `models.yaml`), added VRAM documentation comments.
+- **README.md**: Complete rewrite reflecting current architecture, dual-backend system, multi-GPU setup, and all features.
+
 ## [2026-02-14] - Refactor to Llama Server
 
 ### Changed
