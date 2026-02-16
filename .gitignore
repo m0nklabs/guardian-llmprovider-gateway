@@ -34,7 +34,13 @@ debug.log
 
 # Dynamic Config
 config/current_model.args
+config/current_model.binary
 config/clients.json
+
+# Runtime
+guardian.pid
+*.bak
+*.bak_*
 
 # Data
 data/
@@ -47,3 +53,4 @@ llama_slots/
 .DS_Store
 config/api_keys.json
 benchmark_results.json
+node_modules/
