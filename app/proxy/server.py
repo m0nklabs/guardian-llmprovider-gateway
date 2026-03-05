@@ -18,7 +18,7 @@ from starlette.status import HTTP_401_UNAUTHORIZED
 
 from collections import defaultdict
 from app.proxy.optimizer import RequestOptimizer
-from app.engine.manager import ModelManager
+from app.engine.manager import ModelManager, ModelLoadError
 from app.proxy.auth import verify_api_key
 
 # Load configuration from settings.yaml
@@ -112,7 +112,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to write PID file: {e}")
 
+    # SECURITY: Run startup model verification (checks actual backend matches config)
+    try:
+        await model_manager.startup_check()
+    except Exception as e:
+        logger.error(f"⚠️ Startup check error (non-fatal): {e}")
+
+    # Start idle-unload background watcher
+    idle_task = asyncio.create_task(_idle_unload_watcher())
+
     yield
+
+    idle_task.cancel()
     
     # Shutdown: Remove PID file
     if pid_path.exists():
@@ -127,6 +138,24 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 model_manager = ModelManager()
+
+
+async def _idle_unload_watcher():
+    """Background task: auto-unload llama-server after N minutes of inactivity."""
+    while True:
+        await asyncio.sleep(60)  # Check every minute
+        idle_minutes = model_manager.idle_unload_minutes
+        if idle_minutes is None:
+            continue  # Feature disabled
+        if model_manager.is_unloaded:
+            continue  # Already free
+        idle_secs = time.time() - model_manager.last_request_time
+        if idle_secs >= idle_minutes * 60:
+            logger.info(f"💤 Idle for {idle_secs/60:.1f}m (limit {idle_minutes}m) — auto-unloading to free VRAM")
+            try:
+                await model_manager.unload()
+            except Exception as e:
+                logger.error(f"❌ Auto-unload failed: {e}")
 
 
 def get_gpu_metrics():
@@ -282,11 +311,30 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
     # Check if model switch needed (with concurrency lock)
     current_model = await model_manager.get_current_model()
     if model != current_model and model in model_manager.models:
-        async with _model_switch_lock:
-            # Re-check after acquiring lock (another request may have switched already)
-            current_model = await model_manager.get_current_model()
-            if model != current_model:
-                await model_manager.switch_model(model)
+        # SECURITY: Check client permission and pin
+        if not model_manager.is_switch_allowed(client_id):
+            logger.warning(f"🔒 Client '{client_id}' not in switch_allowlist, blocked Ollama switch to '{model}'")
+        else:
+            async with _model_switch_lock:
+                # Re-check after acquiring lock (another request may have switched already)
+                current_model = await model_manager.get_current_model()
+                if model != current_model:
+                    try:
+                        await model_manager.switch_model(model, client_id=client_id)
+                    except ModelLoadError as e:
+                        crash = e.crash_record
+                        detail = {
+                            "error": f"Model '{model}' failed to load",
+                            "message": str(e),
+                            "crash_details": crash.to_dict() if crash else None,
+                        }
+                        logger.error(f"💥 Model load crash: {detail}")
+                        raise HTTPException(status_code=503, detail=detail)
+                    except ValueError as e:
+                        logger.warning(f"🔒 Switch denied: {e}")
+                    except Exception as e:
+                        logger.error(f"❌ Switch failed: {e}")
+                        raise HTTPException(status_code=500, detail=f"Model switch failed: {e}")
 
     # Translate Ollama request to OpenAI format
     messages = body.get("messages", [])
@@ -557,6 +605,77 @@ async def list_models(client_id: str = Depends(verify_api_key)):
         
     return {"object": "list", "data": models_list}
 
+
+# --- Crash history & status endpoints ---
+
+@app.post("/admin/unload")
+async def admin_unload(client_id: str = Depends(verify_api_key)):
+    """Stop llama-server immediately to free all VRAM (e.g. before running ComfyUI)."""
+    if model_manager.is_unloaded:
+        return {"status": "already_unloaded", "message": "llama-server is already stopped"}
+    await model_manager.unload()
+    return {"status": "unloaded", "message": f"Model '{model_manager.current_model}' unloaded — VRAM is free"}
+
+
+@app.post("/admin/load")
+async def admin_load(request: Request, client_id: str = Depends(verify_api_key)):
+    """Reload llama-server. Optionally pass {\"model\": \"name\"} to load a specific model."""
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    target = body.get("model", None)
+    try:
+        await model_manager.load(target)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    return {"status": "loaded", "model": model_manager.current_model}
+
+
+@app.get("/api/crashes")
+async def get_crash_history(client_id: str = Depends(verify_api_key)):
+    """Return the crash history of llama-server load failures."""
+    return {
+        "total_crashes": len(model_manager.crash_history),
+        "last_crash": model_manager.last_crash.to_dict() if model_manager.last_crash else None,
+        "history": model_manager.get_crash_history(),
+    }
+
+
+@app.get("/api/status")
+async def get_server_status(client_id: str = Depends(verify_api_key)):
+    """Return current model status and backend health."""
+    healthy = False
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{LLAMA_SERVER_URL}/health")
+            healthy = resp.status_code == 200
+    except Exception:
+        pass
+
+    vram = get_gpu_metrics()
+    idle_minutes = model_manager.idle_unload_minutes
+    idle_secs = time.time() - model_manager.last_request_time
+    return {
+        "current_model": await model_manager.get_current_model(),
+        "backend_healthy": healthy,
+        "is_unloaded": model_manager.is_unloaded,
+        "idle_seconds": round(idle_secs),
+        "idle_unload_minutes": idle_minutes,
+        "backend_url": LLAMA_SERVER_URL,
+        "total_crashes": len(model_manager.crash_history),
+        "last_crash": model_manager.last_crash.to_dict() if model_manager.last_crash else None,
+        "vram": vram,
+        "vram_model_mb": get_model_size(await model_manager.get_current_model()),
+        "security": {
+            "pinned_model": model_manager.pinned_model,
+            "switch_allowlist": list(model_manager._switch_allowlist) if model_manager._switch_allowlist else None,
+            "backend_verified": model_manager._model_verified,
+        },
+    }
+
+
 # OpenAI-compatible /v1/ routes (used by OpenClaw and other OpenAI-compatible clients)
 @app.get("/v1/{path:path}")
 async def proxy_v1_get(path: str, request: Request, client_id: str = Depends(verify_api_key)):
@@ -567,7 +686,20 @@ async def proxy_v1_get(path: str, request: Request, client_id: str = Depends(ver
 @app.post("/v1/{path:path}")
 async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(verify_api_key)):
     body = await request.body()
-    
+
+    # If llama-server was unloaded (e.g. to free VRAM), auto-reload before forwarding
+    if model_manager.is_unloaded:
+        logger.info(f"🔄 Incoming request while unloaded — auto-reloading '{model_manager.current_model}'...")
+        try:
+            async with _model_switch_lock:
+                if model_manager.is_unloaded:  # double-check under lock
+                    await model_manager.load()
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"Auto-reload failed: {e}")
+
+    # Track last request time for idle-unload
+    model_manager.last_request_time = time.time()
+
     # Auto-switch logic for chat completions (with concurrency lock)
     if path == "chat/completions":
         try:
@@ -577,20 +709,42 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
             
             if requested_model and requested_model != current_model:
                 if requested_model in model_manager.models:
-                    async with _model_switch_lock:
-                        # Re-check after acquiring lock
-                        current_model = await model_manager.get_current_model()
-                        if requested_model != current_model:
-                            logger.info(f"🔄 Auto-switching backend from {current_model} to {requested_model}")
-                            try:
-                                await model_manager.switch_model(requested_model)
-                            except Exception as e:
-                                logger.error(f"❌ Switch failed: {e}")
-                                raise HTTPException(status_code=500, detail="Model switch failed")
+                    # SECURITY: Check if client is allowed to switch models
+                    if not model_manager.is_switch_allowed(client_id):
+                        logger.warning(
+                            f"🔒 Client '{client_id}' not in switch_allowlist, "
+                            f"blocked switch to '{requested_model}'. Forwarding to current model."
+                        )
+                    else:
+                        async with _model_switch_lock:
+                            # Re-check after acquiring lock
+                            current_model = await model_manager.get_current_model()
+                            if requested_model != current_model:
+                                logger.info(f"🔄 Auto-switching backend from {current_model} to {requested_model} (client: {client_id})")
+                                try:
+                                    await model_manager.switch_model(requested_model, client_id=client_id)
+                                except ModelLoadError as e:
+                                    crash = e.crash_record
+                                    detail = {
+                                        "error": f"Model '{requested_model}' failed to load",
+                                        "message": str(e),
+                                        "crash_details": crash.to_dict() if crash else None,
+                                    }
+                                    logger.error(f"💥 Model load crash: {detail}")
+                                    raise HTTPException(status_code=503, detail=detail)
+                                except ValueError as e:
+                                    # Pinned model or permission error
+                                    logger.warning(f"🔒 Switch denied: {e}")
+                                    # Don't raise — just forward to current model
+                                except Exception as e:
+                                    logger.error(f"❌ Switch failed: {e}")
+                                    raise HTTPException(status_code=500, detail="Model switch failed")
                 else:
-                    logger.warning(f"⚠️ Requested model {requested_model} not managed by Guardian. Forwarding anyway.")
+                    logger.warning(f"⚠️ Requested model {requested_model} not managed by Guardian. Forwarding to current.")
         except json.JSONDecodeError:
             pass
+        except HTTPException:
+            raise  # Let model-load errors propagate to the client
         except Exception as e:
             logger.error(f"Error checking model switch: {e}")
 
