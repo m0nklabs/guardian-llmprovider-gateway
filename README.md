@@ -1,137 +1,135 @@
 # Llama CPP Guardian
 
-An intelligent proxy and management layer for llama-server (llama.cpp), providing model switching, VRAM scheduling, benchmarking, and Ollama API compatibility.
+Guardian is a proxy, lifecycle manager, and benchmark layer for `llama-server`, built to make local LLM serving predictable on shared GPU hardware.
 
-## Architecture
+## Core Model
 
 ```
-Client (Copilot, OpenWebUI, etc.)
-  │
-  ▼
-Guardian Proxy (Port 11434) ── Ollama-compat + OpenAI /v1/ API
-  │
-  ▼
-llama-server (Port 11440) ── Raw llama.cpp backend (locked)
+Client / App / Tooling
+        │
+        ▼
+Guardian Proxy :11434
+  ├─ Ollama-compatible endpoints
+  ├─ OpenAI-style /v1 endpoints
+  ├─ auth + routing
+  ├─ model selection / switching
+  └─ request optimization
+        │
+        ▼
+llama-server :11440
 ```
 
-### Dual-Backend System
-- **Primary**: `ik_llama.cpp` fork (ikawrakow) — optimized, used for all models by default
-- **Fallback**: Official `llama.cpp` (ggml-org) — only for unsupported architectures (e.g., Nemotron)
-- Backend selection per model via `backend: official` in `models.yaml`
+Dashboard/UI runs separately on port `11437`.
 
-## Features
+## Dual Backend Strategy
 
-1. **Guardian Proxy (Port 11434)**
-   - Intercepts and routes requests to llama-server (Port 11440)
-   - **Auto Model Switching**: Detects requested model, stops/starts llama-server with correct args
-   - **Concurrency Protection**: Lock prevents race conditions during model switches
-   - **Multi-GPU tensor-split**: Distributes model weights across GPUs (RTX 3060 + RTX 5060 Ti)
-   - **Ollama API Bridge**: Translates `/api/chat`, `/api/generate`, `/api/tags` to OpenAI format
-   - **OpenAI Compatibility**: Native `/v1/chat/completions`, `/v1/models` passthrough
-   - **API Key Auth**: Bearer token authentication (`flip_` prefix keys)
-   - **Session Management**: Save/load KV cache slots for context preservation
-   - **Dynamic Timeouts**: Configurable per-model-tier timeout from `settings.yaml`
+Guardian intentionally supports two llama.cpp backends:
 
-2. **Benchmark Suite**
-   - Automated testing across all configured models with variable context/batch sizes
-   - **Resumable**: State persisted to `data/benchmark_state.json`
-   - **Non-blocking**: Runs via `asyncio.to_thread()` to avoid blocking the proxy event loop
-   - **Record Tracking**: Logs 🏆 records when TPS improves for a model
-   - Models loaded dynamically from `models.yaml` config
+- **Primary**: `ik_llama.cpp` fork for almost all models
+- **Fallback**: official `llama.cpp` for architectures the ik fork does not support well
 
-3. **Scheduler**
-   - Runs benchmarks during configurable idle window (default: 04:00-11:00 weekdays)
-   - Stops/starts configured services during maintenance mode
-   - All settings loaded from `settings.yaml`
+Backend selection is controlled per model in `config/models.yaml`.
 
-4. **Request Optimizer**
-   - Learns optimal `num_ctx` from benchmark results
-   - Auto-injects optimized settings when not explicitly set by client
+## What Guardian Handles
 
-## Installation
+### Request Proxying
+- OpenAI-style `/v1/chat/completions`
+- model listing
+- Ollama-compatible `/api/chat`, `/api/generate`, `/api/tags`, `/api/version`
+
+### Model Lifecycle
+- detects requested model
+- switches llama-server arguments/binary when needed
+- uses a concurrency lock to prevent overlapping model switches
+- supports model pinning
+- unloads idle models to free VRAM
+- detects crashes and recovers state more cleanly than a raw server wrapper
+
+### Performance / Capacity
+- multi-GPU tensor-split support for large models
+- per-tier timeout logic
+- benchmark-driven optimization hints
+- resumable benchmark state
+
+### Compatibility
+- OpenWebUI compatibility improvements
+- API key auth rather than permissive basic auth
+- vision-model support in the current stack
+
+## Recent Direction
+
+Important recent changes reflected in the current codebase:
+
+- model pinning
+- crash detection improvements
+- idle unload behavior
+- vision model support
+- scheduler settings wired from config instead of hardcoded values
+- benchmark fixes for current API behavior
+- auth coverage for metadata/model-info endpoints
+
+## Running Guardian
 
 ```bash
 pip install -r requirements.txt
-```
-
-## Usage
-
-```bash
-# Start Guardian (proxy on 11434, UI on 11437)
 python3 app/main.py
-
-# Generate an API key
-python3 -m app.proxy.auth <client-name>
 ```
 
-## Configuration
+## Key Configuration Files
 
-### models.yaml
-Each model entry supports:
-```yaml
-models:
-  model-name:
-    path: /path/to/model.gguf
-    context: 131072          # Context window size
-    ngl: 99                  # GPU layers (99 = all)
-    kv_type: q4_0            # KV cache quantization (q4_0, q8_0, f16)
-    backend: ik_fork         # Backend binary (ik_fork or official)
-    tensor_split: "0.55,0.45"  # Multi-GPU weight distribution
-    extra_args: ""           # Additional llama-server CLI flags
-```
+### `config/models.yaml`
 
-### settings.yaml
-```yaml
-proxy:
-  port: 11434
-  target: http://localhost:11440
-  vram_limit_mb: 27000       # Total usable VRAM budget
+Defines:
+- model paths
+- backend selection
+- context sizes
+- GPU/tensor split settings
+- extra llama-server arguments
 
-benchmark:
-  schedule:
-    start_hour: 4
-    end_hour: 11
-    days: ["mon", "tue", "wed", "thu", "fri"]
+### `config/settings.yaml`
 
-services_to_stop:            # Services paused during benchmarks
-  - caramba-backend
-  - agent-forge
+Defines:
+- proxy port and target
+- VRAM budget
+- scheduler timing and managed services
+- timeout tiers
+- benchmark behavior
 
-timeouts:                    # Per-tier request timeouts
-  tiers:
-    tier_70b: { min_size_mb: 40000, timeout_seconds: 1800 }
-    tier_32b: { min_size_mb: 20000, timeout_seconds: 1200 }
-    # ...
-```
+## Main Directories
 
-## Directory Structure
-
-```
+```text
 app/
-├── engine/manager.py     # Model switching, server args, dual-backend
-├── proxy/
-│   ├── server.py         # FastAPI proxy, Ollama bridge, OpenAI passthrough
-│   ├── auth.py           # API key management
-│   └── optimizer.py      # Benchmark-driven request optimization
-├── scheduler/manager.py  # Idle-window scheduling
-├── tweaker/benchmark.py  # Benchmark suite
-├── ui/                   # Dashboard (port 11437)
-└── main.py               # Entry point
+├── engine/        # model switching and process lifecycle
+├── proxy/         # HTTP API layer, auth, optimizer
+├── scheduler/     # maintenance windows and service orchestration
+├── tweaker/       # benchmarking logic
+├── ui/            # dashboard assets and UI code
+└── main.py        # application entrypoint
+
 config/
-├── models.yaml           # Model definitions + tensor_split
-├── settings.yaml         # Proxy, scheduler, timeout config
-├── api_keys.json         # API keys store
-├── current_model.args    # Active model CLI args (dynamic)
-└── current_model.binary  # Active backend binary path (dynamic)
+├── models.yaml
+├── settings.yaml
+├── api_keys.json
+├── current_model.args
+└── current_model.binary
+
 scripts/
-└── start_llama.sh        # Systemd wrapper, reads args/binary from config
+└── start_llama.sh
 ```
 
-## GPU Setup
+## GPU Notes
 
-| GPU | Model | VRAM | Role |
-|-----|-------|------|------|
-| GPU 0 | RTX 3060 | 12 GB | LLM weights (55%) |
-| GPU 1 | RTX 5060 Ti | 16 GB | LLM weights (45%) + Frigate NVR (~1.5 GB) |
+Guardian runs on a mixed-GPU host and needs to coexist with other GPU consumers.
 
-Models >12 GB use `tensor_split` to distribute across both GPUs, leaving room for Frigate on GPU 1.
+Typical setup:
+- RTX 3060 12GB
+- RTX 5060 Ti 16GB
+- Frigate using part of the GPU budget independently
+
+Large models use configured tensor splits so the system can stay responsive without blind OOM roulette.
+
+## Related Docs
+
+- [ARCHITECTURE.md](ARCHITECTURE.md)
+- [docs/BENCHMARK_SUMMARY.md](docs/BENCHMARK_SUMMARY.md)
+- [docs/REAL_BENCHMARK_RESULTS.md](docs/REAL_BENCHMARK_RESULTS.md)
