@@ -1,10 +1,12 @@
 # Guardian Architecture
 
+> Last Updated: 2026-03-06
+
 ## Overview
 
 Guardian sits in front of `llama-server` and turns a raw local inference process into a manageable service.
 
-It is responsible for request translation, auth, model switching, lifecycle recovery, benchmarking, and GPU-aware orchestration.
+It is responsible for request translation, auth, model switching, lifecycle recovery, benchmarking, session management, and GPU-aware orchestration.
 
 ## Current Topology
 
@@ -55,6 +57,7 @@ Important current safeguards:
 - crash detection
 - active model pinning
 - dynamic reading of current model args/binary files
+- explicit admin load/unload control
 
 ### 3. Auth and Access Control
 
@@ -73,7 +76,15 @@ Guardian benchmarks configured models and records performance data such as:
 
 Benchmark runs are resumable and no longer block the main proxy event loop.
 
-### 5. Scheduler / Maintenance Windows
+### 5. Session and Runtime State
+
+Guardian also exposes runtime helpers that go beyond plain request forwarding:
+
+- session save/load/list endpoints
+- crash history/status inspection
+- stats and benchmark status APIs for the dashboard
+
+### 6. Scheduler / Maintenance Windows
 
 The scheduler can:
 
@@ -89,6 +100,30 @@ Per-model backend selection is part of the design:
 - **official llama.cpp** when a model architecture demands it
 
 This matters because not every GGUF model behaves equally well across both backends.
+
+## API Surface Summary
+
+### Proxy / Compatibility
+
+- Ollama-style `/api/chat`, `/api/generate`, `/api/tags`, `/api/version`
+- OpenAI-style `/v1/models` plus forwarded `/v1/*` requests
+
+### Operational Endpoints
+
+- `/api/status`
+- `/api/crashes`
+- `/admin/load`
+- `/admin/unload`
+- `/api/session/save`
+- `/api/session/load`
+- `/api/session/list`
+
+### Dashboard / Benchmark Endpoints
+
+- `/api/stats`
+- `/api/benchmark`
+- `/api/benchmark/start`
+- `/api/benchmark/stop`
 
 ## Configuration Surfaces
 
@@ -155,6 +190,7 @@ It is effectively the control plane for local llama.cpp serving on this machine:
 - it constrains how requests reach the backend
 - it captures performance knowledge over time
 - it shields clients from backend churn
+- it exposes operator-facing state and recovery controls
 
 ## Documentation Notes
 
