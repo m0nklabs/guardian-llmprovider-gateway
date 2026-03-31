@@ -1,5 +1,21 @@
 # Changelog
 
+## [2026-03-31] - Cooperative VRAM Management & Documentation Overhaul
+
+### Added
+- **Cooperative VRAM management**: Guardian now calls ComfyUI's `POST /free` API to request graceful VRAM release before loading models. ComfyUI stays alive and auto-reloads models on next workflow.
+- **`_request_comfyui_free()`**: New method in `ModelManager` that sends `{"unload_models": true, "free_memory": true}` to `http://127.0.0.1:8188/free` with 10s timeout and graceful error handling.
+- **`_free_gpu_memory()`**: Orchestrator method that coordinates VRAM cleanup from coexisting services before model loads.
+- **Hydroponics API key**: Added `hydro_` prefixed key for Mycodo/Pi4 nutrient automation integration.
+
+### Changed
+- **README.md**: Complete rewrite with full API reference table, directory structure, cooperative VRAM management docs, GPU configuration details, and all current features.
+- **ARCHITECTURE.md**: Complete rewrite reflecting cooperative VRAM management (ComfyUI /free integration), VramScheduler, timeout tiers, backend verification flow, model switch sequence diagram, and implementation notes.
+- **Model load flow**: `load()` and `switch_model()` now call `_free_gpu_memory()` before `_start_server()` to ensure VRAM availability.
+
+### Design Decision
+- **Cooperative over destructive**: Instead of killing GPU processes (ComfyUI, etc.), Guardian politely requests VRAM release via API calls. This preserves service uptime and lets ComfyUI auto-recover its models on the next workflow execution.
+
 ## [2026-02-16] - Comprehensive Code Review & Multi-GPU Fixes
 
 ### Fixed (CRITICAL)
