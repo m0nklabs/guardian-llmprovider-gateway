@@ -267,10 +267,13 @@ class ModelManager:
         target_config = self.models[model_name]
         self._write_server_args(target_config)
         
-        # 4. Start llama-server
+        # 4. Free GPU memory (kill non-Frigate processes)
+        await self._free_gpu_memory()
+
+        # 5. Start llama-server
         await self._start_server()
         
-        # 5. Wait for health with crash detection
+        # 6. Wait for health with crash detection
         healthy = await self._wait_for_health(model_name)
         
         if not healthy:
@@ -288,7 +291,7 @@ class ModelManager:
         if not await self.verify_backend_model():
             logger.error(f"🚨 POST-SWITCH VERIFICATION FAILED for '{model_name}'!")
         
-        # 6. Restore context if exists
+        # 7. Restore context if exists
         try:
              await self._load_context(f"auto_save_{model_name}")
         except Exception:
@@ -314,6 +317,53 @@ class ModelManager:
         self.is_unloaded = True
         logger.info("✅ llama-server stopped — VRAM is free")
 
+    async def _free_gpu_memory(self) -> None:
+        """Ask coexisting GPU services to release VRAM before loading a model.
+
+        Instead of killing processes, this asks services politely via their APIs:
+        - ComfyUI: POST /free {"unload_models": true, "free_memory": true}
+        - Frigate: NEVER touched (cameras are sacred)
+
+        Any unknown GPU processes are logged but left alone.
+        """
+        logger.info("🧹 Requesting GPU memory release from coexisting services...")
+
+        # Ask ComfyUI to unload models and free VRAM
+        await self._request_comfyui_free()
+
+        # Log remaining GPU consumers for visibility
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-compute-apps=pid,process_name,used_gpu_memory",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                for line in result.stdout.strip().splitlines():
+                    logger.info(f"📊 GPU process: {line.strip()}")
+        except Exception:
+            pass
+
+    async def _request_comfyui_free(self) -> None:
+        """Ask ComfyUI to unload all models and free GPU memory via its API."""
+        comfyui_url = "http://127.0.0.1:8188"
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(
+                    f"{comfyui_url}/free",
+                    json={"unload_models": True, "free_memory": True},
+                )
+                if resp.status_code == 200:
+                    logger.info("✅ ComfyUI released GPU memory (models unloaded)")
+                    # Give CUDA a moment to actually release the memory
+                    await asyncio.sleep(1)
+                else:
+                    logger.warning(f"⚠️ ComfyUI /free returned HTTP {resp.status_code}")
+        except httpx.ConnectError:
+            logger.info("ℹ️ ComfyUI not running — no memory to free")
+        except Exception as e:
+            logger.warning(f"⚠️ Failed to request ComfyUI memory free: {e}")
+
     async def load(self, model_name: Optional[str] = None) -> None:
         """Reload llama-server with current (or specified) model."""
         target = model_name or self.current_model
@@ -321,6 +371,7 @@ class ModelManager:
             raise ValueError(f"Model '{target}' not found in configuration")
         logger.info(f"🔄 Loading model '{target}'...")
         self._write_server_args(self.models[target])
+        await self._free_gpu_memory()
         await self._start_server()
         healthy = await self._wait_for_health(target)
         if not healthy:
