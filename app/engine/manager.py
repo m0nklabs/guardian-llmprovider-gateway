@@ -70,6 +70,7 @@ class ModelManager:
         # === VRAM management: unload state and idle tracking ===
         self.is_unloaded: bool = False  # True when llama-server stopped to free VRAM
         self.last_request_time: float = time.time()  # Used for idle-unload timeout
+        self.active_requests: int = 0  # Counter for in-flight requests (prevents idle-unload during streaming)
 
     # --- Pinned model config (persisted in models.yaml under 'guardian:') ---
     def _load_pinned_model(self) -> Optional[str]:
@@ -230,6 +231,8 @@ class ModelManager:
         return self.current_model
 
     async def switch_model(self, model_name: str, client_id: str = "_system", force: bool = False):
+        # Re-read models.yaml so config edits take effect without Guardian restart
+        self.models = self._load_config()
         if model_name not in self.models:
             raise ValueError(f"Model {model_name} not found in configuration")
 
@@ -366,6 +369,8 @@ class ModelManager:
 
     async def load(self, model_name: Optional[str] = None) -> None:
         """Reload llama-server with current (or specified) model."""
+        # Re-read models.yaml so config edits take effect without Guardian restart
+        self.models = self._load_config()
         target = model_name or self.current_model
         if target not in self.models:
             raise ValueError(f"Model '{target}' not found in configuration")

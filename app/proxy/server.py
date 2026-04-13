@@ -149,6 +149,8 @@ async def _idle_unload_watcher():
             continue  # Feature disabled
         if model_manager.is_unloaded:
             continue  # Already free
+        if model_manager.active_requests > 0:
+            continue  # Don't unload while requests are in-flight
         idle_secs = time.time() - model_manager.last_request_time
         if idle_secs >= idle_minutes * 60:
             logger.info(f"💤 Idle for {idle_secs/60:.1f}m (limit {idle_minutes}m) — auto-unloading to free VRAM")
@@ -699,6 +701,7 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
 
     # Track last request time for idle-unload
     model_manager.last_request_time = time.time()
+    model_manager.active_requests += 1
 
     # Auto-switch logic for chat completions (with concurrency lock)
     if path == "chat/completions":
@@ -750,13 +753,57 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
 
     timeout = httpx.Timeout(600.0, connect=10.0)
     logger.info(f"OpenAI-compat request from client '{client_id}': POST /v1/{path}")
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(
+
+    # Detect streaming requests for chat/completions — must proxy SSE in real-time
+    is_stream = False
+    if path == "chat/completions":
+        try:
+            json_body = json.loads(body)
+            is_stream = json_body.get("stream", False)
+        except (json.JSONDecodeError, Exception):
+            pass
+
+    if is_stream:
+        # Stream SSE chunks in real-time instead of buffering entire response
+        client = httpx.AsyncClient(timeout=timeout)
+        req = client.build_request(
+            "POST",
             f"{LLAMA_SERVER_URL}/v1/{path}",
             content=body,
-            headers={"Content-Type": request.headers.get("Content-Type", "application/json")}
+            headers={"Content-Type": request.headers.get("Content-Type", "application/json")},
         )
-        return Response(content=resp.content, status_code=resp.status_code, headers=resp.headers)
+        try:
+            resp = await client.send(req, stream=True)
+        except Exception as e:
+            await client.aclose()
+            raise HTTPException(status_code=502, detail=f"Backend request failed: {e}")
+
+        async def stream_passthrough():
+            try:
+                async for chunk in resp.aiter_bytes():
+                    yield chunk
+            finally:
+                await resp.aclose()
+                await client.aclose()
+                model_manager.active_requests = max(0, model_manager.active_requests - 1)
+                model_manager.last_request_time = time.time()
+
+        return StreamingResponse(
+            stream_passthrough(),
+            status_code=resp.status_code,
+            media_type="text/event-stream",
+            headers={k: v for k, v in resp.headers.items() if k.lower() not in ("transfer-encoding", "content-length")},
+        )
+    else:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(
+                f"{LLAMA_SERVER_URL}/v1/{path}",
+                content=body,
+                headers={"Content-Type": request.headers.get("Content-Type", "application/json")}
+            )
+            model_manager.active_requests = max(0, model_manager.active_requests - 1)
+            model_manager.last_request_time = time.time()
+            return Response(content=resp.content, status_code=resp.status_code, headers=resp.headers)
 
 async def start_proxy():
     import uvicorn
