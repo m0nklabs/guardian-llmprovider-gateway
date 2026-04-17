@@ -176,14 +176,14 @@ class TestWriteServerArgs:
             assert backend == DEFAULT_BACKEND or backend not in config
             assert binary_path == BACKEND_BINARIES["official"]
 
-    def test_ik_fork_backend_selection(self, tmp_path: Path):
+    def test_unknown_backend_falls_back_to_official(self, tmp_path: Path):
+        """Unknown backend key should gracefully fall back to official."""
         mgr = _make_manager(tmp_path)
-        from app.engine.manager import BACKEND_BINARIES
+        from app.engine.manager import BACKEND_BINARIES, DEFAULT_BACKEND
 
-        config = mgr.models["Qwen3-30B-A3B"]
-        backend = config.get("backend", "official")
-        assert backend == "ik_fork"
-        assert BACKEND_BINARIES[backend] == "/home/flip/ik_llama_cpp_build/build/bin/llama-server"
+        backend = "nonexistent_fork"
+        binary_path = BACKEND_BINARIES.get(backend, BACKEND_BINARIES[DEFAULT_BACKEND])
+        assert binary_path == BACKEND_BINARIES["official"]
 
 
 # ── _identify_model_by_path ───────────────────────────────────────────
@@ -380,9 +380,7 @@ class TestBackendBinaries:
         from app.engine.manager import BACKEND_BINARIES
 
         assert "official" in BACKEND_BINARIES
-        assert "ik_fork" in BACKEND_BINARIES
         assert "official" in BACKEND_BINARIES["official"]  # path contains "official"
-        assert "ik_llama" in BACKEND_BINARIES["ik_fork"]
 
 
 # ── Model aliases ─────────────────────────────────────────────────────

@@ -35,7 +35,6 @@ models:
     ngl: 99
     ctx: 4096
     max_context: 32768
-    backend: ik_fork
     ts: "20,8"
 """
 

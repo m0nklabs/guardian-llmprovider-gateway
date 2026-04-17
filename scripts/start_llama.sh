@@ -13,8 +13,8 @@ if [ -f "$ENV_FILE" ]; then
     set +a
 fi
 
-# Default binary: ik_llama.cpp fork (primary)
-DEFAULT_BINARY="/home/flip/ik_llama_cpp_build/build/bin/llama-server"
+# Default binary: official llama.cpp
+DEFAULT_BINARY="/home/flip/llama_cpp_official/build/bin/llama-server"
 
 # Default fallback if config missing — MUST match manager.py default_model
 # SECURITY: This fallback should match the pinned/default model in Guardian config
@@ -29,13 +29,13 @@ else
     echo "Config file not found, using default: $ARGS"
 fi
 
-# Select binary: read from binary file, or use default (ik_fork)
+# Select binary: read from binary file, or use default (official)
 if [ -f "$BINARY_FILE" ]; then
     BINARY=$(cat "$BINARY_FILE")
     echo "Using backend binary: $BINARY"
 else
     BINARY="$DEFAULT_BINARY"
-    echo "No binary config, using default (ik_fork): $BINARY"
+    echo "No binary config, using default (official): $BINARY"
 fi
 
 # Verify binary exists

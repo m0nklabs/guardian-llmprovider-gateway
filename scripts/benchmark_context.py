@@ -22,7 +22,7 @@ CTX_SIZES = [8192, 16384, 32768, 65536, 98304, 131072, 262144, 524288, 1048576]
 KV_CACHE_TYPES = ["f16", "q8_0", "q4_0"]
 
 # Server binary path
-LLAMA_SERVER_BIN = os.getenv("LLAMA_SERVER_BIN", "/home/flip/ik_llama_cpp_build/build/bin/llama-server")
+LLAMA_SERVER_BIN = os.getenv("LLAMA_SERVER_BIN", "/home/flip/llama_cpp_official/build/bin/llama-server")
 HOST = "127.0.0.1"
 PORT = int(os.getenv("LLAMA_PORT", "11442"))
 URL = f"http://{HOST}:{PORT}/health"

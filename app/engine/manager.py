@@ -12,11 +12,11 @@ from datetime import datetime
 
 logger = logging.getLogger("model-manager")
 
-# Binary paths for dual-backend support
-# official = primary (ggml-org/llama.cpp), ik_fork = fallback if needed for specific optimizations
+# Binary paths for backend support
+# Additional backends (forks, custom builds) can be registered here.
+# Models select their backend via the 'backend' key in models.yaml (default: official).
 BACKEND_BINARIES = {
     "official": "/home/flip/llama_cpp_official/build/bin/llama-server",
-    "ik_fork": "/home/flip/ik_llama_cpp_build/build/bin/llama-server",
 }
 DEFAULT_BACKEND = "official"
 

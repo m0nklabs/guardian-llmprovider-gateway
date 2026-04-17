@@ -27,8 +27,8 @@ Clients / Apps / Tools
         │
         ▼
   Configured backend binary
-    ├─ official llama.cpp (primary)
-    └─ ik_llama.cpp fork (fallback)
+    └─ official llama.cpp (default)
+        (extensible — register additional backends in BACKEND_BINARIES)
 
   Dashboard UI :11437
 ```
@@ -47,16 +47,16 @@ Guardian runs a single-slot backend. Only one inference request is processed at 
 
 See [docs/CLIENT_INTEGRATION.md](docs/CLIENT_INTEGRATION.md) for client implementation patterns and code examples.
 
-### Dual Backend Strategy
+### Extensible Backend
 
-Guardian supports two llama.cpp backends, selectable per model:
+Guardian supports per-model backend selection. The official llama.cpp binary is the default. Additional backends (forks, custom builds) can be registered in the `BACKEND_BINARIES` dict — models opt in via the `backend:` field in `config/models.yaml`.
 
 | Backend | Binary | Use Case |
 |---------|--------|----------|
-| **official** (primary) | `/home/flip/llama_cpp_official/build/bin/llama-server` | Default for all models |
-| **ik_fork** (fallback) | `/home/flip/ik_llama_cpp_build/build/bin/llama-server` | Specific optimizations if needed |
+| **official** (default) | `/home/flip/llama_cpp_official/build/bin/llama-server` | All models |
+| *(custom)* | Register in `app/engine/manager.py` | Specific optimizations |
 
-Backend selection is per-model via the `backend:` field in `config/models.yaml`. Models without an explicit backend use the official binary.
+Models without an explicit `backend:` key use the official binary.
 
 ### Protocol Bridging
 

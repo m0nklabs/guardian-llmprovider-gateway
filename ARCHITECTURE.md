@@ -33,8 +33,8 @@ Clients / Apps / Tools
         │
         ▼
   Backend binary (per-model selection)
-    ├─ official llama.cpp (primary)
-    └─ ik_llama.cpp fork (fallback)
+    └─ official llama.cpp (default)
+        (extensible — register additional backends in BACKEND_BINARIES)
 
   Dashboard UI (:11437)
     └─ Chart.js + Tailwind dark mode
@@ -171,14 +171,14 @@ Per-model backend selection via the `backend:` field in `models.yaml`:
 ```python
 BACKEND_BINARIES = {
     "official": "/home/flip/llama_cpp_official/build/bin/llama-server",
-    "ik_fork": "/home/flip/ik_llama_cpp_build/build/bin/llama-server",
+    # Add custom backends here, e.g.:
+    # "my_fork": "/path/to/custom/llama-server",
 }
 DEFAULT_BACKEND = "official"
 ```
 
 - **official** (ggml-org/llama.cpp): Default for all models. Actively maintained upstream.
-- **ik_fork** (ikawrakow/ik_llama.cpp): Fallback for specific optimizations if needed.
-- Set via `backend:` key in `config/models.yaml` per model.
+- Additional backends can be registered in `BACKEND_BINARIES` — models opt in via `backend: <key>` in their config.
 - Written to `config/current_model.binary` at switch time for `start_llama.sh`.
 
 ## GPU Strategy
