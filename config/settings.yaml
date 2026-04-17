@@ -1,58 +1,74 @@
-# Services to stop during benchmark maintenance window
 services_to_stop:
-  - caramba-backend
-  - agent-forge
-
-# Benchmark configuration
+- caramba-backend
+- agent-forge
 benchmark:
-  # Models loaded dynamically from models.yaml
-  
   schedule:
     start_hour: 4
     end_hour: 11
-    days: ["mon", "tue", "wed", "thu", "fri"]
-
-# Proxy configuration
+    days:
+    - mon
+    - tue
+    - wed
+    - thu
+    - fri
 proxy:
   port: 11434
   target: http://localhost:11440
-  # Total usable VRAM across all GPUs (RTX 3060 12GB + RTX 5060 Ti 16GB = 28GB)
-  # Safety buffer accounts for 3rd-party GPU processes (Frigate NVR, etc.) and system overhead
   vram_limit_mb: 27000
-
-# Request queue — serializes inference access to single-slot backend
 queue:
-  max_concurrent: 1           # Match llama-server --parallel (1 = single slot)
-  queue_timeout_seconds: 300  # Max wait in queue before HTTP 429
-
-# 3rd-party GPU services — cooperative VRAM management
+  max_concurrent: 1
+  queue_timeout_seconds: 300
 services:
-  comfyui_url: http://127.0.0.1:8188  # ComfyUI /free endpoint for VRAM release
-
-# Dynamic timeout configuration per model tier (in seconds)
-# Tiers are based on estimated VRAM usage in MB
+  comfyui_url: http://127.0.0.1:8188
 timeouts:
   tiers:
-    # 70B+ models (40GB+ VRAM)
     tier_70b:
       min_size_mb: 40000
-      timeout_seconds: 1800  # 30 minutes
-    # 32B models (20-40GB VRAM)  
+      timeout_seconds: 1800
     tier_32b:
       min_size_mb: 20000
-      timeout_seconds: 1200  # 20 minutes
-    # 13B models (10-20GB VRAM)
+      timeout_seconds: 1200
     tier_13b:
       min_size_mb: 10000
-      timeout_seconds: 600   # 10 minutes
-    # 7-8B models (5-10GB VRAM)
+      timeout_seconds: 600
     tier_8b:
       min_size_mb: 5000
-      timeout_seconds: 360   # 6 minutes
-    # Small models (<5GB VRAM)
+      timeout_seconds: 360
     tier_small:
       min_size_mb: 0
-      timeout_seconds: 600   # 10 minutes (was 4 min)
-  
-  # Global fallback timeout if no tier matches
+      timeout_seconds: 600
   default_timeout: 600
+scaler:
+  enabled: true
+  log_decisions: true
+  profiles:
+    trivial:
+      max_chars: 200
+      max_messages: 2
+      thinking_budget: 256
+      max_tokens: 1024
+    simple:
+      max_chars: 800
+      max_messages: 4
+      thinking_budget: 1024
+      max_tokens: 4096
+    moderate:
+      max_chars: 4000
+      max_messages: 12
+      thinking_budget: 4096
+      max_tokens: 8192
+    complex:
+      max_chars: 15000
+      max_messages: 30
+      thinking_budget: 8192
+      max_tokens: 16384
+    deep:
+      thinking_budget: -1
+      max_tokens: 32768
+  queue_pressure:
+    moderate_threshold: 2
+    heavy_threshold: 4
+    moderate_thinking_factor: 0.5
+    heavy_thinking_factor: 0.25
+    moderate_max_tokens_factor: 0.75
+    heavy_max_tokens_factor: 0.5

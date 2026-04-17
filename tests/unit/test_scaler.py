@@ -1,5 +1,6 @@
 """Unit tests for DynamicScaler — adaptive reasoning budget & max_tokens."""
 
+import copy
 import pytest
 from unittest.mock import patch
 from app.proxy.scaler import DynamicScaler, _DEFAULT_CONFIG
@@ -8,7 +9,7 @@ from app.proxy.scaler import DynamicScaler, _DEFAULT_CONFIG
 @pytest.fixture
 def scaler():
     """Create a fresh DynamicScaler with default config."""
-    with patch("app.proxy.scaler._load_scaler_config", return_value=dict(_DEFAULT_CONFIG)):
+    with patch("app.proxy.scaler._load_scaler_config", return_value=copy.deepcopy(_DEFAULT_CONFIG)):
         s = DynamicScaler()
     return s
 
@@ -229,3 +230,50 @@ class TestPressureLabel:
     def test_heavy(self, scaler):
         assert scaler._pressure_label(4) == "heavy"
         assert scaler._pressure_label(100) == "heavy"
+
+
+class TestUpdateConfig:
+    """Test update_config and reset_config API methods."""
+
+    def test_update_enabled(self, scaler):
+        assert scaler.config["enabled"] is True
+        scaler.update_config({"enabled": False}, persist=False)
+        assert scaler.config["enabled"] is False
+
+    def test_update_profile_partial(self, scaler):
+        scaler.update_config(
+            {"profiles": {"trivial": {"thinking_budget": 512}}},
+            persist=False,
+        )
+        assert scaler.config["profiles"]["trivial"]["thinking_budget"] == 512
+        # Other trivial fields unchanged
+        assert scaler.config["profiles"]["trivial"]["max_chars"] == 200
+
+    def test_update_queue_pressure(self, scaler):
+        scaler.update_config(
+            {"queue_pressure": {"heavy_threshold": 8}},
+            persist=False,
+        )
+        assert scaler.config["queue_pressure"]["heavy_threshold"] == 8
+        # Other fields unchanged
+        assert scaler.config["queue_pressure"]["moderate_threshold"] == 2
+
+    def test_reset_config(self, scaler):
+        scaler.update_config({"enabled": False}, persist=False)
+        assert scaler.config["enabled"] is False
+        scaler.reset_config(persist=False)
+        assert scaler.config["enabled"] is True
+
+    def test_get_config_is_deep_copy(self, scaler):
+        cfg = scaler.get_config()
+        cfg["enabled"] = False
+        cfg["profiles"]["trivial"]["thinking_budget"] = 9999
+        # Original unchanged
+        assert scaler.config["enabled"] is True
+        assert scaler.config["profiles"]["trivial"]["thinking_budget"] == 256
+
+    def test_update_returns_full_config(self, scaler):
+        result = scaler.update_config({"enabled": False}, persist=False)
+        assert result["enabled"] is False
+        assert "profiles" in result
+        assert "queue_pressure" in result

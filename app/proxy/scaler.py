@@ -8,6 +8,7 @@ explicit client params.
 Configurable via ``config/settings.yaml`` under the ``scaler`` key.
 """
 
+import copy
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -67,7 +68,7 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
 
 def _load_scaler_config() -> Dict[str, Any]:
     """Load scaler config from settings.yaml, merged with defaults."""
-    config = dict(_DEFAULT_CONFIG)
+    config = copy.deepcopy(_DEFAULT_CONFIG)
     try:
         path = Path(__file__).parent.parent.parent / "config" / "settings.yaml"
         if path.exists():
@@ -111,6 +112,68 @@ class DynamicScaler:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return a deep copy of the current scaler config."""
+        return copy.deepcopy(self.config)
+
+    def update_config(self, patch: Dict[str, Any], *, persist: bool = True) -> Dict[str, Any]:
+        """Merge *patch* into the current config and optionally persist.
+
+        Supports partial updates at any depth::
+
+            {"enabled": false}
+            {"profiles": {"trivial": {"thinking_budget": 512}}}
+            {"queue_pressure": {"heavy_threshold": 6}}
+
+        Returns the full updated config.
+        """
+        for key in ("enabled", "log_decisions"):
+            if key in patch:
+                self.config[key] = patch[key]
+
+        if "profiles" in patch:
+            for pname, pvals in patch["profiles"].items():
+                if pname in self.config["profiles"]:
+                    self.config["profiles"][pname].update(pvals)
+                else:
+                    self.config["profiles"][pname] = pvals
+
+        if "queue_pressure" in patch:
+            self.config["queue_pressure"].update(patch["queue_pressure"])
+
+        if persist:
+            self._persist_config()
+
+        logger.info(f"🔧 Scaler config updated via API (persist={persist})")
+        return copy.deepcopy(self.config)
+
+    def reset_config(self, *, persist: bool = True) -> Dict[str, Any]:
+        """Reset scaler config to built-in defaults."""
+        self.config = copy.deepcopy(_DEFAULT_CONFIG)
+        if persist:
+            self._persist_config()
+        logger.info("🔄 Scaler config reset to defaults")
+        return copy.deepcopy(self.config)
+
+    def _persist_config(self) -> None:
+        """Write current scaler config into settings.yaml."""
+        path = Path(__file__).parent.parent.parent / "config" / "settings.yaml"
+        try:
+            if path.exists():
+                with open(path, "r") as f:
+                    full_cfg = yaml.safe_load(f) or {}
+            else:
+                full_cfg = {}
+
+            full_cfg["scaler"] = copy.deepcopy(self.config)
+            with open(path, "w") as f:
+                yaml.dump(full_cfg, f, default_flow_style=False, sort_keys=False)
+
+            self._config_mtime = path.stat().st_mtime
+            logger.info("💾 Scaler config persisted to settings.yaml")
+        except Exception as e:
+            logger.error(f"Failed to persist scaler config: {e}")
 
     def reload_config(self) -> None:
         """Re-read settings.yaml (called on each request for hot-reload)."""

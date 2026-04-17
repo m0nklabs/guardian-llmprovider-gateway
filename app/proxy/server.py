@@ -857,6 +857,37 @@ async def prometheus_metrics():
     return Response(content=body, media_type=content_type)
 
 
+# --- Scaler configuration endpoints ---
+
+@app.get("/api/scaler")
+async def get_scaler_config(client_id: str = Depends(verify_api_key)):
+    """Return current scaler configuration."""
+    return state.scaler.get_config()
+
+
+@app.put("/api/scaler")
+async def update_scaler_config(request: Request, client_id: str = Depends(verify_api_key)):
+    """Update scaler configuration (partial merge).
+
+    Body examples::
+
+        {"enabled": false}
+        {"profiles": {"trivial": {"thinking_budget": 512}}}
+        {"queue_pressure": {"heavy_threshold": 6}}
+    """
+    patch = await request.json()
+    persist = patch.pop("_persist", True)
+    updated = state.scaler.update_config(patch, persist=persist)
+    return {"status": "updated", "config": updated}
+
+
+@app.post("/api/scaler/reset")
+async def reset_scaler_config(client_id: str = Depends(verify_api_key)):
+    """Reset scaler configuration to built-in defaults."""
+    config = state.scaler.reset_config()
+    return {"status": "reset", "config": config}
+
+
 # --- Queue status endpoint (non-queued, always immediately available) ---
 
 @app.get("/v1/queue/status")
