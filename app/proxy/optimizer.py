@@ -87,8 +87,14 @@ class RequestOptimizer:
             
         logger.info(f"Loaded optimizations for {len(self.best_configs)} models")
 
-    def optimize_options(self, model_name: str, current_options: Dict) -> Dict:
-        """Injects optimized settings if they are not explicitly set by the user."""
+    def optimize_options(self, model_name: str, current_options: Dict, max_context: Optional[int] = None) -> Dict:
+        """Injects optimized settings if they are not explicitly set by the user.
+        
+        Args:
+            model_name: Name of the model to optimize for.
+            current_options: Current request options dict.
+            max_context: Optional max_context from models.yaml — caps injected num_ctx.
+        """
         self.load_benchmarks() # Check for updates
         
         # Clean up model name (remove .gguf etc if needed)
@@ -112,8 +118,13 @@ class RequestOptimizer:
         
         # Only inject if NOT present in request (respect user overrides)
         if "num_ctx" not in optimized:
-            optimized["num_ctx"] = best["num_ctx"]
-            logger.info(f"⚡ Optimized {model_name}: Injected num_ctx={best['num_ctx']} (Verified Context)")
+            injected_ctx = best["num_ctx"]
+            # Clamp to max_context if defined in models.yaml
+            if max_context and injected_ctx > max_context:
+                logger.info(f"⚡ Clamping num_ctx {injected_ctx} → {max_context} (max_context limit)")
+                injected_ctx = max_context
+            optimized["num_ctx"] = injected_ctx
+            logger.info(f"⚡ Optimized {model_name}: Injected num_ctx={injected_ctx} (Verified Context)")
             
         # We don't optimize batch size in new benchmark yet
         

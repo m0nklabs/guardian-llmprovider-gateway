@@ -25,6 +25,10 @@ queue:
   max_concurrent: 1           # Match llama-server --parallel (1 = single slot)
   queue_timeout_seconds: 300  # Max wait in queue before HTTP 429
 
+# 3rd-party GPU services — cooperative VRAM management
+services:
+  comfyui_url: http://127.0.0.1:8188  # ComfyUI /free endpoint for VRAM release
+
 # Dynamic timeout configuration per model tier (in seconds)
 # Tiers are based on estimated VRAM usage in MB
 timeouts:

@@ -708,13 +708,16 @@ async def list_models(client_id: str = Depends(verify_api_key)):
     try:
         current = await model_manager.get_current_model()
         for name, cfg in model_manager.models.items():
-            models_list.append({
+            model_entry = {
                 "id": name,
                 "object": "model",
                 "created": int(time.time()),
                 "owned_by": "organization-owner",
-                "permission": []
-            })
+                "permission": [],
+            }
+            if "max_context" in cfg:
+                model_entry["max_context"] = cfg["max_context"]
+            models_list.append(model_entry)
     except Exception as e:
         logger.error(f"Failed to list models: {e}")
         

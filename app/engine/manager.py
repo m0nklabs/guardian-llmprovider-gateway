@@ -347,9 +347,19 @@ class ModelManager:
         except Exception:
             pass
 
+    def _get_comfyui_url(self) -> str:
+        """Read ComfyUI URL from settings.yaml, fallback to default."""
+        try:
+            settings_path = self.config_path.parent / "settings.yaml"
+            with open(settings_path, "r") as f:
+                cfg = yaml.safe_load(f) or {}
+            return cfg.get("services", {}).get("comfyui_url", "http://127.0.0.1:8188")
+        except Exception:
+            return "http://127.0.0.1:8188"
+
     async def _request_comfyui_free(self) -> None:
         """Ask ComfyUI to unload all models and free GPU memory via its API."""
-        comfyui_url = "http://127.0.0.1:8188"
+        comfyui_url = self._get_comfyui_url()
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.post(
