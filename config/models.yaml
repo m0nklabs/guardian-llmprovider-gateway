@@ -154,7 +154,7 @@ guardian:
   # Pin a specific model — blocks ALL client-triggered switches to other models.
   # Only system startup and force=True can override this.
   # Set to null or remove to allow free switching.
-  pinned_model: "GLM-4.7-Flash-Claude-4.5-Opus"
+  pinned_model: "Huihui-gemma-4-26B-A4B-it-abliterated"
   
   # Allowlist of client names that may trigger model switches.
   # Empty list = unrestricted (all clients can switch — backward compat).

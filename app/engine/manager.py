@@ -253,8 +253,7 @@ class ModelManager:
             f"🔄 Startup mismatch: forcing switch from actual '{actual_name}' to target '{target}'"
         )
 
-        if target != self.current_model:
-            self.current_model = "__MISMATCH__"  # Force switch_model to not skip
+        self.current_model = "__MISMATCH__"  # Force switch_model to not skip
 
         try:
             await self.switch_model(target)
@@ -429,6 +428,7 @@ class ModelManager:
             raise ValueError(f"Model '{target}' not found in configuration")
         logger.info(f"🔄 Loading model '{target}'...")
         self._write_server_args(self.models[target])
+        await self._stop_server()
         await self._free_gpu_memory()
         await self._start_server()
         healthy = await self._wait_for_health(target)

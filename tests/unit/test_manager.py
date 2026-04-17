@@ -253,6 +253,39 @@ class TestVerifyBackendModel:
         assert result is False
 
 
+# ── startup_check ─────────────────────────────────────────────────────
+
+
+class TestStartupCheck:
+    @pytest.mark.asyncio
+    async def test_forces_switch_on_mismatch_even_if_current_equals_target(self, tmp_path: Path):
+        yaml_with_pin = SAMPLE_MODELS_YAML + "\nguardian:\n  pinned_model: GLM-4.7-Flash\n"
+        mgr = _make_manager(tmp_path, models_yaml=yaml_with_pin)
+
+        # Reproduce edge case: current already equals target but backend verification fails
+        mgr.current_model = "GLM-4.7-Flash"
+
+        with (
+            patch.object(mgr, "verify_backend_model", new_callable=AsyncMock, return_value=False),
+            patch.object(mgr, "_get_backend_model_path", return_value="/models/Qwen3-30B.gguf"),
+            patch.object(mgr, "switch_model", new_callable=AsyncMock) as mock_switch,
+        ):
+            await mgr.startup_check()
+
+        mock_switch.assert_awaited_once_with("GLM-4.7-Flash")
+
+    @pytest.mark.asyncio
+    async def test_no_switch_when_backend_already_verified(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        with (
+            patch.object(mgr, "verify_backend_model", new_callable=AsyncMock, return_value=True),
+            patch.object(mgr, "switch_model", new_callable=AsyncMock) as mock_switch,
+        ):
+            await mgr.startup_check()
+
+        mock_switch.assert_not_called()
+
+
 # ── switch_model security ─────────────────────────────────────────────
 
 
