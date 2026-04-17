@@ -18,6 +18,7 @@ from starlette.status import HTTP_401_UNAUTHORIZED
 
 from collections import defaultdict
 from app.proxy.optimizer import RequestOptimizer
+from app.proxy.scaler import DynamicScaler
 from app.engine.manager import ModelManager, ModelLoadError
 from app.proxy.auth import verify_api_key
 from app.proxy.queue import InferenceQueue
@@ -308,6 +309,8 @@ class State:
         self.scheduler = VramScheduler(SAFE_VRAM_LIMIT_MB)
         # Optimizer
         self.optimizer = RequestOptimizer()
+        # Dynamic scaler — adaptive reasoning budget & max_tokens
+        self.scaler = DynamicScaler()
 
 state = State()
 
@@ -414,6 +417,14 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
             "stream": stream,
             "temperature": temperature
         }
+
+        # Dynamic scaler: inject thinking_budget_tokens / max_tokens
+        openai_body = state.scaler.scale_request(
+            openai_body,
+            waiting_count=inference_queue.waiting_count,
+            active_count=inference_queue.active_count,
+            client_id=client_id,
+        )
 
         # Forward to Llama Server (OpenAI Endpoint)
         timeout_sec = get_model_timeout(model)
@@ -589,6 +600,14 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
             "stream": stream,
             "temperature": temperature
         }
+
+        # Dynamic scaler: inject thinking_budget_tokens / max_tokens
+        openai_body = state.scaler.scale_request(
+            openai_body,
+            waiting_count=inference_queue.waiting_count,
+            active_count=inference_queue.active_count,
+            client_id=client_id,
+        )
 
         timeout_sec = get_model_timeout(model)
         client = httpx.AsyncClient(timeout=timeout_sec)
@@ -816,6 +835,10 @@ async def get_server_status(client_id: str = Depends(verify_api_key)):
             "switch_allowlist": list(model_manager._switch_allowlist) if model_manager._switch_allowlist else None,
             "backend_verified": model_manager._model_verified,
         },
+        "scaler": {
+            "enabled": state.scaler.config.get("enabled", False),
+            "profiles": list(state.scaler.config.get("profiles", {}).keys()),
+        },
     }
 
 
@@ -957,6 +980,20 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
 
         timeout = httpx.Timeout(600.0, connect=10.0)
         logger.info(f"OpenAI-compat request from client '{client_id}': POST /v1/{path}")
+
+        # --- Dynamic scaler: inject thinking_budget_tokens / max_tokens ---
+        if path == "chat/completions":
+            try:
+                json_body = json.loads(body)
+                json_body = state.scaler.scale_request(
+                    json_body,
+                    waiting_count=inference_queue.waiting_count,
+                    active_count=inference_queue.active_count,
+                    client_id=client_id,
+                )
+                body = json.dumps(json_body).encode("utf-8")
+            except (json.JSONDecodeError, Exception):
+                pass
 
         # Detect streaming requests for chat/completions — must proxy SSE in real-time
         is_stream = False
