@@ -228,8 +228,10 @@ class TestInferenceBlocking:
         assert "choices" in data
         assert len(data["choices"]) > 0
         assert "message" in data["choices"][0]
-        content = data["choices"][0]["message"]["content"]
-        assert len(content) > 0, "Model returned empty content"
+        msg = data["choices"][0]["message"]
+        content = msg.get("content") or ""
+        reasoning = msg.get("reasoning_content") or ""
+        assert len(content) + len(reasoning) > 0, "Model returned empty content and no reasoning"
 
     def test_chat_completions_has_usage(self, client: httpx.Client):
         """Response includes token usage stats."""
@@ -339,14 +341,14 @@ class TestInferenceStreaming:
 
         assert len(chunks) > 1, f"Expected multiple chunks, got {len(chunks)}"
 
-        # At least some chunks should have content deltas
-        deltas = [
-            c["choices"][0]["delta"].get("content", "")
-            for c in chunks
-            if c.get("choices") and c["choices"][0].get("delta")
-        ]
+        # At least some chunks should have content or reasoning deltas
+        deltas = []
+        for c in chunks:
+            if c.get("choices") and c["choices"][0].get("delta"):
+                delta = c["choices"][0]["delta"]
+                deltas.append(delta.get("content") or delta.get("reasoning_content") or "")
         combined = "".join(deltas)
-        assert len(combined) > 0, "Stream produced no content"
+        assert len(combined) > 0, "Stream produced no content or reasoning"
 
     def test_streaming_has_queue_headers(self, auth_headers: dict):
         """Streaming responses include queue wait header on initial response."""
