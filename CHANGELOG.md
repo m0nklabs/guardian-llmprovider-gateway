@@ -1,5 +1,19 @@
 # Changelog
 
+## [2026-04-17] - Backend Strategy Flip, Middleware Rebrand & Documentation Overhaul
+
+### Changed
+- **Backend strategy flipped**: Official llama.cpp is now the PRIMARY backend; ik_llama.cpp fork is FALLBACK. `DEFAULT_BACKEND` changed from `"ik_fork"` to `"official"` in `manager.py`.
+- **Middleware rebrand**: Guardian is now positioned as middleware (not proxy). Logger renamed from `"Proxy"` to `"Guardian"` in `server.py`.
+- **3rd-party GPU process awareness**: Replaced Frigate-specific language with generalized "3rd-party GPU process" awareness throughout configuration and documentation.
+- **models.yaml cleanup**: Removed explicit `backend: official` from all 10 models that had it — they now use the default (official).
+- **README.md**: Complete rewrite — middleware positioning, queue system documentation, dual backend strategy, 3rd-party GPU awareness, full API reference, directory structure.
+- **ARCHITECTURE.md**: Complete rewrite — detailed queue architecture, cooperative VRAM management, backend selection, GPU strategy, timeout tiers, model lifecycle flows.
+- **CLIENT_INTEGRATION.md**: Updated heading to reflect middleware terminology.
+
+### Added
+- GitHub issue #1: 5-phase roadmap for Guardian improvements (backend flip, middleware rebrand, 3rd-party awareness, docs, future roadmap).
+
 ## [2026-03-31] - Cooperative VRAM Management & Documentation Overhaul
 
 ### Added

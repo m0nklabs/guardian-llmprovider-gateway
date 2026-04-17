@@ -13,12 +13,12 @@ from datetime import datetime
 logger = logging.getLogger("model-manager")
 
 # Binary paths for dual-backend support
-# ik_fork = primary (ikawrakow/ik_llama.cpp), official = fallback for unsupported architectures
+# official = primary (ggml-org/llama.cpp), ik_fork = fallback if needed for specific optimizations
 BACKEND_BINARIES = {
-    "ik_fork": "/home/flip/ik_llama_cpp_build/build/bin/llama-server",
     "official": "/home/flip/llama_cpp_official/build/bin/llama-server",
+    "ik_fork": "/home/flip/ik_llama_cpp_build/build/bin/llama-server",
 }
-DEFAULT_BACKEND = "ik_fork"
+DEFAULT_BACKEND = "official"
 
 MAX_CRASH_HISTORY = 50  # Keep last N crash records
 

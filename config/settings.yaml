@@ -17,8 +17,13 @@ proxy:
   port: 11434
   target: http://localhost:11440
   # Total usable VRAM across all GPUs (RTX 3060 12GB + RTX 5060 Ti 16GB = 28GB)
-  # Safety buffer accounts for Frigate (~1.5GB) and system overhead
+  # Safety buffer accounts for 3rd-party GPU processes (Frigate NVR, etc.) and system overhead
   vram_limit_mb: 27000
+
+# Request queue — serializes inference access to single-slot backend
+queue:
+  max_concurrent: 1           # Match llama-server --parallel (1 = single slot)
+  queue_timeout_seconds: 300  # Max wait in queue before HTTP 429
 
 # Dynamic timeout configuration per model tier (in seconds)
 # Tiers are based on estimated VRAM usage in MB

@@ -1,6 +1,6 @@
 # Guardian Client Integration Guide
 
-This document describes how to integrate with Guardian's API, including authentication, inference requests, the request queue, and status polling.
+This document describes how to integrate with Guardian middleware, including authentication, inference requests, the request queue, and status polling.
 
 ## Base URL
 

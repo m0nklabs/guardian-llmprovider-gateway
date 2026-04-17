@@ -20,6 +20,7 @@ from collections import defaultdict
 from app.proxy.optimizer import RequestOptimizer
 from app.engine.manager import ModelManager, ModelLoadError
 from app.proxy.auth import verify_api_key
+from app.proxy.queue import InferenceQueue
 
 # Load configuration from settings.yaml
 def load_config() -> dict:
@@ -75,7 +76,7 @@ SAFE_VRAM_LIMIT_MB = _load_vram_limit()
 
 # Logging
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("Proxy")
+logger = logging.getLogger("Guardian")
 
 PID_FILE = "guardian.pid"
 
@@ -151,6 +152,8 @@ async def _idle_unload_watcher():
             continue  # Already free
         if model_manager.active_requests > 0:
             continue  # Don't unload while requests are in-flight
+        if inference_queue.active_count > 0 or inference_queue.waiting_count > 0:
+            continue  # Don't unload while queue has pending work
         idle_secs = time.time() - model_manager.last_request_time
         if idle_secs >= idle_minutes * 60:
             logger.info(f"💤 Idle for {idle_secs/60:.1f}m (limit {idle_minutes}m) — auto-unloading to free VRAM")
@@ -296,6 +299,25 @@ class State:
 state = State()
 
 
+# --- Inference queue: serializes access to single-slot backend ---
+def _load_queue_config() -> dict:
+    try:
+        config_path = Path(__file__).parent.parent.parent / "config" / "settings.yaml"
+        if config_path.exists():
+            with open(config_path, 'r') as f:
+                cfg = yaml.safe_load(f) or {}
+            return cfg.get("queue", {})
+    except Exception:
+        pass
+    return {}
+
+_queue_cfg = _load_queue_config()
+inference_queue = InferenceQueue(
+    max_concurrent=_queue_cfg.get("max_concurrent", 1),
+    queue_timeout=_queue_cfg.get("queue_timeout_seconds", 300),
+)
+
+
 @app.post("/api/chat")
 async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_api_key)):
     """Bridge Ollama-style chat requests to OpenAI-style Llama Server"""
@@ -309,127 +331,165 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
         raise HTTPException(status_code=400, detail="Model not specified")
 
     logger.info(f"bridge: Ollama chat request for '{model}' -> Translating to OpenAI format")
-    
-    # Check if model switch needed (with concurrency lock)
-    current_model = await model_manager.get_current_model()
-    if model != current_model and model in model_manager.models:
-        # SECURITY: Check client permission and pin
-        if not model_manager.is_switch_allowed(client_id):
-            logger.warning(f"🔒 Client '{client_id}' not in switch_allowlist, blocked Ollama switch to '{model}'")
-        else:
-            async with _model_switch_lock:
-                # Re-check after acquiring lock (another request may have switched already)
-                current_model = await model_manager.get_current_model()
-                if model != current_model:
-                    try:
-                        await model_manager.switch_model(model, client_id=client_id)
-                    except ModelLoadError as e:
-                        crash = e.crash_record
-                        detail = {
-                            "error": f"Model '{model}' failed to load",
-                            "message": str(e),
-                            "crash_details": crash.to_dict() if crash else None,
-                        }
-                        logger.error(f"💥 Model load crash: {detail}")
-                        raise HTTPException(status_code=503, detail=detail)
-                    except ValueError as e:
-                        logger.warning(f"🔒 Switch denied: {e}")
-                    except Exception as e:
-                        logger.error(f"❌ Switch failed: {e}")
-                        raise HTTPException(status_code=500, detail=f"Model switch failed: {e}")
 
-    # Translate Ollama request to OpenAI format
-    messages = body.get("messages", [])
-    stream = body.get("stream", True)
-    
-    # Basic options mapping
-    options = body.get("options", {})
-    temperature = options.get("temperature", 0.7)
-    
-    openai_body = {
-        "model": model,
-        "messages": messages,
-        "stream": stream,
-        "temperature": temperature
-    }
-
-    # Forward to Llama Server (OpenAI Endpoint)
-    timeout_sec = get_model_timeout(model)
-    client = httpx.AsyncClient(timeout=timeout_sec)
-    
-    req = client.build_request(
-        "POST",
-        f"{LLAMA_SERVER_URL}/v1/chat/completions",
-        json=openai_body,
-        timeout=timeout_sec
-    )
-    
+    # Acquire inference slot (blocks if another request is active)
     try:
-        r = await client.send(req, stream=stream)
-    except Exception as e:
-        await client.aclose()
-        raise e
+        request_id = await inference_queue.acquire(client_id, model)
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=429,
+            detail={"error": "queue_timeout", "message": f"Waited {inference_queue.queue_timeout}s in queue"},
+        )
 
-    if stream:
-        async def stream_adapter():
-            try:
-                async for chunk in r.aiter_lines():
-                    if not chunk or chunk.strip() == "data: [DONE]": 
-                        continue
-                    if chunk.startswith("data: "):
+    _release_in_finally = True
+    try:
+        # Auto-reload if unloaded
+        if model_manager.is_unloaded:
+            logger.info(f"🔄 Auto-reloading '{model_manager.current_model}'...")
+            async with _model_switch_lock:
+                if model_manager.is_unloaded:
+                    await model_manager.load()
+
+        # Check if model switch needed (safe — we hold the queue slot)
+        current_model = await model_manager.get_current_model()
+        if model != current_model and model in model_manager.models:
+            # SECURITY: Check client permission and pin
+            if not model_manager.is_switch_allowed(client_id):
+                logger.warning(f"🔒 Client '{client_id}' not in switch_allowlist, blocked Ollama switch to '{model}'")
+            else:
+                async with _model_switch_lock:
+                    # Re-check after acquiring lock (another request may have switched already)
+                    current_model = await model_manager.get_current_model()
+                    if model != current_model:
                         try:
-                            data = json.loads(chunk[6:])
-                            # Translate OpenAI chunk back to Ollama chunk
-                            if "choices" in data and len(data["choices"]) > 0:
-                                delta = data["choices"][0].get("delta", {})
-                                content = delta.get("content", "")
-                                if content:
-                                    ollama_chunk = {
-                                        "model": model,
-                                        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
-                                        "message": {"role": "assistant", "content": content},
-                                        "done": False
-                                    }
-                                    yield json.dumps(ollama_chunk) + "\n"
-                        except:
-                            pass
-                # Final done message
-                yield json.dumps({
-                    "model": model, 
-                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()), 
+                            await model_manager.switch_model(model, client_id=client_id)
+                        except ModelLoadError as e:
+                            crash = e.crash_record
+                            detail = {
+                                "error": f"Model '{model}' failed to load",
+                                "message": str(e),
+                                "crash_details": crash.to_dict() if crash else None,
+                            }
+                            logger.error(f"💥 Model load crash: {detail}")
+                            raise HTTPException(status_code=503, detail=detail)
+                        except ValueError as e:
+                            logger.warning(f"🔒 Switch denied: {e}")
+                        except Exception as e:
+                            logger.error(f"❌ Switch failed: {e}")
+                            raise HTTPException(status_code=500, detail=f"Model switch failed: {e}")
+
+        model_manager.last_request_time = time.time()
+        model_manager.active_requests += 1
+
+        # Translate Ollama request to OpenAI format
+        messages = body.get("messages", [])
+        stream = body.get("stream", True)
+        
+        # Basic options mapping
+        options = body.get("options", {})
+        temperature = options.get("temperature", 0.7)
+        
+        openai_body = {
+            "model": model,
+            "messages": messages,
+            "stream": stream,
+            "temperature": temperature
+        }
+
+        # Forward to Llama Server (OpenAI Endpoint)
+        timeout_sec = get_model_timeout(model)
+        client = httpx.AsyncClient(timeout=timeout_sec)
+        
+        req = client.build_request(
+            "POST",
+            f"{LLAMA_SERVER_URL}/v1/chat/completions",
+            json=openai_body,
+            timeout=timeout_sec
+        )
+        
+        try:
+            r = await client.send(req, stream=stream)
+        except Exception as e:
+            await client.aclose()
+            raise e
+
+        if stream:
+            async def stream_adapter():
+                try:
+                    async for chunk in r.aiter_lines():
+                        if not chunk or chunk.strip() == "data: [DONE]": 
+                            continue
+                        if chunk.startswith("data: "):
+                            try:
+                                data = json.loads(chunk[6:])
+                                # Translate OpenAI chunk back to Ollama chunk
+                                if "choices" in data and len(data["choices"]) > 0:
+                                    delta = data["choices"][0].get("delta", {})
+                                    content = delta.get("content", "")
+                                    if content:
+                                        ollama_chunk = {
+                                            "model": model,
+                                            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+                                            "message": {"role": "assistant", "content": content},
+                                            "done": False
+                                        }
+                                        yield json.dumps(ollama_chunk) + "\n"
+                            except:
+                                pass
+                    # Final done message
+                    yield json.dumps({
+                        "model": model, 
+                        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()), 
+                        "done": True,
+                        "total_duration": 0,
+                        "load_duration": 0,
+                        "prompt_eval_count": 0,
+                        "eval_count": 0
+                    }) + "\n"
+                finally:
+                    await r.aclose()
+                    await client.aclose()
+                    model_manager.active_requests = max(0, model_manager.active_requests - 1)
+                    model_manager.last_request_time = time.time()
+                    inference_queue.release(request_id)
+
+            queue_wait_ms = inference_queue.get_queue_wait_ms(request_id)
+            response = StreamingResponse(
+                stream_adapter(),
+                media_type="application/x-ndjson",
+                headers={"X-Request-Id": request_id, "X-Queue-Wait-Ms": str(int(queue_wait_ms))},
+            )
+            _release_in_finally = False
+            return response
+        else:
+            # Handle non-streaming response
+            try:
+                data = r.json()
+                content = data["choices"][0]["message"]["content"]
+                ollama_resp = {
+                    "model": model,
+                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+                    "message": {"role": "assistant", "content": content},
                     "done": True,
                     "total_duration": 0,
                     "load_duration": 0,
-                    "prompt_eval_count": 0,
-                    "eval_count": 0
-                }) + "\n"
-            finally:
+                    "prompt_eval_count": data.get("usage", {}).get("prompt_tokens", 0),
+                    "eval_count": data.get("usage", {}).get("completion_tokens", 0)
+                }
                 await r.aclose()
                 await client.aclose()
-
-        return StreamingResponse(stream_adapter(), media_type="application/x-ndjson")
-    else:
-        # Handle non-streaming response
-        try:
-            data = r.json()
-            content = data["choices"][0]["message"]["content"]
-            ollama_resp = {
-                "model": model,
-                "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
-                "message": {"role": "assistant", "content": content},
-                "done": True,
-                "total_duration": 0,
-                "load_duration": 0,
-                "prompt_eval_count": data.get("usage", {}).get("prompt_tokens", 0),
-                "eval_count": data.get("usage", {}).get("completion_tokens", 0)
-            }
-            await r.aclose()
-            await client.aclose()
-            return ollama_resp
-        except Exception as e:
-            await r.aclose()
-            await client.aclose()
-            raise e
+                model_manager.active_requests = max(0, model_manager.active_requests - 1)
+                model_manager.last_request_time = time.time()
+                return ollama_resp
+            except Exception as e:
+                await r.aclose()
+                await client.aclose()
+                model_manager.active_requests = max(0, model_manager.active_requests - 1)
+                raise e
+    finally:
+        if _release_in_finally:
+            model_manager.active_requests = max(0, model_manager.active_requests - 1)
+            inference_queue.release(request_id)
 
 # Legacy endpoint for Ollama generate
 @app.post("/api/generate")
@@ -442,109 +502,162 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
         
     prompt = body.get("prompt", "")
     if prompt and "messages" not in body:
-        # Convert prompt to messages format for the chat bridge
         body["messages"] = [{"role": "user", "content": prompt}]
-    
-    # Create a new request with the modified body
-    # We can't easily replace the request body in the request object, so we'll call the logic directly
-    # But proxy_chat_ollama expects a Request. Let's refactor slightly or just patch the body retrieval if possible.
-    # actually, verifying dependency injection might be tricky if we call the function directly.
-    # Instead, let's implement the specific Generate bridge here to be safe and clean.
     
     model = body.get("model")
     if not model:
         raise HTTPException(status_code=400, detail="Model not specified")
-        
-    # Translate to OpenAI
-    messages = body.get("messages", [{"role": "user", "content": prompt}])
-    stream = body.get("stream", True)
-    options = body.get("options", {})
-    temperature = options.get("temperature", 0.7)
-    
-    openai_body = {
-        "model": model,
-        "messages": messages,
-        "stream": stream,
-        "temperature": temperature
-    }
 
-    # reuse the same client/streaming logic
-    timeout_sec = get_model_timeout(model)
-    client = httpx.AsyncClient(timeout=timeout_sec)
-    
-    req = client.build_request(
-        "POST",
-        f"{LLAMA_SERVER_URL}/v1/chat/completions",
-        json=openai_body,
-        timeout=timeout_sec
-    )
-
+    # Acquire inference slot
     try:
-        r = await client.send(req, stream=stream)
-    except Exception as e:
-        await client.aclose()
-        raise e
+        request_id = await inference_queue.acquire(client_id, model)
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=429,
+            detail={"error": "queue_timeout", "message": f"Waited {inference_queue.queue_timeout}s in queue"},
+        )
 
-    if stream:
-        async def stream_adapter_generate():
-            try:
-                async for chunk in r.aiter_lines():
-                    if not chunk or chunk.strip() == "data: [DONE]": 
-                        continue
-                    if chunk.startswith("data: "):
+    _release_in_finally = True
+    try:
+        # Auto-reload if unloaded
+        if model_manager.is_unloaded:
+            logger.info(f"🔄 Auto-reloading '{model_manager.current_model}'...")
+            async with _model_switch_lock:
+                if model_manager.is_unloaded:
+                    await model_manager.load()
+
+        # Model switch (safe — we hold the queue slot)
+        current_model = await model_manager.get_current_model()
+        if model != current_model and model in model_manager.models:
+            if not model_manager.is_switch_allowed(client_id):
+                logger.warning(f"🔒 Client '{client_id}' not in switch_allowlist, blocked switch to '{model}'")
+            else:
+                async with _model_switch_lock:
+                    current_model = await model_manager.get_current_model()
+                    if model != current_model:
                         try:
-                            data = json.loads(chunk[6:])
-                            if "choices" in data and len(data["choices"]) > 0:
-                                delta = data["choices"][0].get("delta", {})
-                                content = delta.get("content", "")
-                                if content:
-                                    # /api/generate response format: { "response": "..." }
-                                    ollama_chunk = {
-                                        "model": model,
-                                        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
-                                        "response": content,
-                                        "done": False
-                                    }
-                                    yield json.dumps(ollama_chunk) + "\n"
-                        except:
-                            pass
-                yield json.dumps({
-                    "model": model, 
-                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()), 
-                    "done": True,
-                    "response": "",
-                    "total_duration": 0,
-                    "load_duration": 0,
-                    "prompt_eval_count": 0,
-                    "eval_count": 0
-                }) + "\n"
-            finally:
-                await r.aclose()
-                await client.aclose()
+                            await model_manager.switch_model(model, client_id=client_id)
+                        except ModelLoadError as e:
+                            crash = e.crash_record
+                            raise HTTPException(status_code=503, detail={
+                                "error": f"Model '{model}' failed to load",
+                                "message": str(e),
+                                "crash_details": crash.to_dict() if crash else None,
+                            })
+                        except ValueError as e:
+                            logger.warning(f"🔒 Switch denied: {e}")
+                        except Exception as e:
+                            raise HTTPException(status_code=500, detail=f"Model switch failed: {e}")
 
-        return StreamingResponse(stream_adapter_generate(), media_type="application/x-ndjson")
-    else:
+        model_manager.last_request_time = time.time()
+        model_manager.active_requests += 1
+
+        # Translate to OpenAI
+        messages = body.get("messages", [{"role": "user", "content": prompt}])
+        stream = body.get("stream", True)
+        options = body.get("options", {})
+        temperature = options.get("temperature", 0.7)
+        
+        openai_body = {
+            "model": model,
+            "messages": messages,
+            "stream": stream,
+            "temperature": temperature
+        }
+
+        timeout_sec = get_model_timeout(model)
+        client = httpx.AsyncClient(timeout=timeout_sec)
+        
+        req = client.build_request(
+            "POST",
+            f"{LLAMA_SERVER_URL}/v1/chat/completions",
+            json=openai_body,
+            timeout=timeout_sec
+        )
+
         try:
-            data = r.json()
-            content = data["choices"][0]["message"]["content"]
-            ollama_resp = {
-                "model": model,
-                "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
-                "response": content,
-                "done": True,
-                "context": [], # context usually returned by generate, handled by client
-                "total_duration": 0,
-                "load_duration": 0,
-                "prompt_eval_count": data.get("usage", {}).get("prompt_tokens", 0),
-                "eval_count": data.get("usage", {}).get("completion_tokens", 0)
-            }
-            await r.aclose()
-            await client.aclose()
-            return ollama_resp
+            r = await client.send(req, stream=stream)
         except Exception as e:
-            await r.aclose()
             await client.aclose()
             raise e
+
+        if stream:
+            async def stream_adapter_generate():
+                try:
+                    async for chunk in r.aiter_lines():
+                        if not chunk or chunk.strip() == "data: [DONE]": 
+                            continue
+                        if chunk.startswith("data: "):
+                            try:
+                                data = json.loads(chunk[6:])
+                                if "choices" in data and len(data["choices"]) > 0:
+                                    delta = data["choices"][0].get("delta", {})
+                                    content = delta.get("content", "")
+                                    if content:
+                                        # /api/generate response format: { "response": "..." }
+                                        ollama_chunk = {
+                                            "model": model,
+                                            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+                                            "response": content,
+                                            "done": False
+                                        }
+                                        yield json.dumps(ollama_chunk) + "\n"
+                            except:
+                                pass
+                    yield json.dumps({
+                        "model": model, 
+                        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()), 
+                        "done": True,
+                        "response": "",
+                        "total_duration": 0,
+                        "load_duration": 0,
+                        "prompt_eval_count": 0,
+                        "eval_count": 0
+                    }) + "\n"
+                finally:
+                    await r.aclose()
+                    await client.aclose()
+                    model_manager.active_requests = max(0, model_manager.active_requests - 1)
+                    model_manager.last_request_time = time.time()
+                    inference_queue.release(request_id)
+
+            queue_wait_ms = inference_queue.get_queue_wait_ms(request_id)
+            response = StreamingResponse(
+                stream_adapter_generate(),
+                media_type="application/x-ndjson",
+                headers={"X-Request-Id": request_id, "X-Queue-Wait-Ms": str(int(queue_wait_ms))},
+            )
+            _release_in_finally = False
+            return response
+        else:
+            try:
+                data = r.json()
+                content = data["choices"][0]["message"]["content"]
+                ollama_resp = {
+                    "model": model,
+                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+                    "response": content,
+                    "done": True,
+                    "context": [],
+                    "total_duration": 0,
+                    "load_duration": 0,
+                    "prompt_eval_count": data.get("usage", {}).get("prompt_tokens", 0),
+                    "eval_count": data.get("usage", {}).get("completion_tokens", 0)
+                }
+                await r.aclose()
+                await client.aclose()
+                model_manager.active_requests = max(0, model_manager.active_requests - 1)
+                model_manager.last_request_time = time.time()
+                return ollama_resp
+            except Exception as e:
+                await r.aclose()
+                await client.aclose()
+                model_manager.active_requests = max(0, model_manager.active_requests - 1)
+                raise e
+    finally:
+        if _release_in_finally:
+            model_manager.active_requests = max(0, model_manager.active_requests - 1)
+            inference_queue.release(request_id)
 
 
 @app.get("/api/version")
@@ -678,6 +791,14 @@ async def get_server_status(client_id: str = Depends(verify_api_key)):
     }
 
 
+# --- Queue status endpoint (non-queued, always immediately available) ---
+
+@app.get("/v1/queue/status")
+async def queue_status(client_id: str = Depends(verify_api_key)):
+    """Return current queue status.  Clients should poll this while waiting."""
+    return inference_queue.get_status(client_id=client_id)
+
+
 # OpenAI-compatible /v1/ routes (used by OpenClaw and other OpenAI-compatible clients)
 @app.get("/v1/{path:path}")
 async def proxy_v1_get(path: str, request: Request, client_id: str = Depends(verify_api_key)):
@@ -689,121 +810,169 @@ async def proxy_v1_get(path: str, request: Request, client_id: str = Depends(ver
 async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(verify_api_key)):
     body = await request.body()
 
-    # If llama-server was unloaded (e.g. to free VRAM), auto-reload before forwarding
-    if model_manager.is_unloaded:
-        logger.info(f"🔄 Incoming request while unloaded — auto-reloading '{model_manager.current_model}'...")
-        try:
-            async with _model_switch_lock:
-                if model_manager.is_unloaded:  # double-check under lock
-                    await model_manager.load()
-        except Exception as e:
-            raise HTTPException(status_code=503, detail=f"Auto-reload failed: {e}")
+    # Only queue inference endpoints; everything else passes through directly
+    is_inference = path in ("chat/completions", "completions", "embeddings")
 
-    # Track last request time for idle-unload
-    model_manager.last_request_time = time.time()
-    model_manager.active_requests += 1
-
-    # Auto-switch logic for chat completions (with concurrency lock)
-    if path == "chat/completions":
-        try:
-            json_body = json.loads(body)
-            requested_model = json_body.get("model")
-            current_model = await model_manager.get_current_model()
-            
-            if requested_model and requested_model != current_model:
-                if requested_model in model_manager.models:
-                    # SECURITY: Check if client is allowed to switch models
-                    if not model_manager.is_switch_allowed(client_id):
-                        logger.warning(
-                            f"🔒 Client '{client_id}' not in switch_allowlist, "
-                            f"blocked switch to '{requested_model}'. Forwarding to current model."
-                        )
-                    else:
-                        async with _model_switch_lock:
-                            # Re-check after acquiring lock
-                            current_model = await model_manager.get_current_model()
-                            if requested_model != current_model:
-                                logger.info(f"🔄 Auto-switching backend from {current_model} to {requested_model} (client: {client_id})")
-                                try:
-                                    await model_manager.switch_model(requested_model, client_id=client_id)
-                                except ModelLoadError as e:
-                                    crash = e.crash_record
-                                    detail = {
-                                        "error": f"Model '{requested_model}' failed to load",
-                                        "message": str(e),
-                                        "crash_details": crash.to_dict() if crash else None,
-                                    }
-                                    logger.error(f"💥 Model load crash: {detail}")
-                                    raise HTTPException(status_code=503, detail=detail)
-                                except ValueError as e:
-                                    # Pinned model or permission error
-                                    logger.warning(f"🔒 Switch denied: {e}")
-                                    # Don't raise — just forward to current model
-                                except Exception as e:
-                                    logger.error(f"❌ Switch failed: {e}")
-                                    raise HTTPException(status_code=500, detail="Model switch failed")
-                else:
-                    logger.warning(f"⚠️ Requested model {requested_model} not managed by Guardian. Forwarding to current.")
-        except json.JSONDecodeError:
-            pass
-        except HTTPException:
-            raise  # Let model-load errors propagate to the client
-        except Exception as e:
-            logger.error(f"Error checking model switch: {e}")
-
-    timeout = httpx.Timeout(600.0, connect=10.0)
-    logger.info(f"OpenAI-compat request from client '{client_id}': POST /v1/{path}")
-
-    # Detect streaming requests for chat/completions — must proxy SSE in real-time
-    is_stream = False
-    if path == "chat/completions":
-        try:
-            json_body = json.loads(body)
-            is_stream = json_body.get("stream", False)
-        except (json.JSONDecodeError, Exception):
-            pass
-
-    if is_stream:
-        # Stream SSE chunks in real-time instead of buffering entire response
-        client = httpx.AsyncClient(timeout=timeout)
-        req = client.build_request(
-            "POST",
-            f"{LLAMA_SERVER_URL}/v1/{path}",
-            content=body,
-            headers={"Content-Type": request.headers.get("Content-Type", "application/json")},
-        )
-        try:
-            resp = await client.send(req, stream=True)
-        except Exception as e:
-            await client.aclose()
-            raise HTTPException(status_code=502, detail=f"Backend request failed: {e}")
-
-        async def stream_passthrough():
-            try:
-                async for chunk in resp.aiter_bytes():
-                    yield chunk
-            finally:
-                await resp.aclose()
-                await client.aclose()
-                model_manager.active_requests = max(0, model_manager.active_requests - 1)
-                model_manager.last_request_time = time.time()
-
-        return StreamingResponse(
-            stream_passthrough(),
-            status_code=resp.status_code,
-            media_type="text/event-stream",
-            headers={k: v for k, v in resp.headers.items() if k.lower() not in ("transfer-encoding", "content-length")},
-        )
-    else:
+    if not is_inference:
+        timeout = httpx.Timeout(600.0, connect=10.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(
                 f"{LLAMA_SERVER_URL}/v1/{path}",
                 content=body,
                 headers={"Content-Type": request.headers.get("Content-Type", "application/json")}
             )
-            model_manager.active_requests = max(0, model_manager.active_requests - 1)
-            model_manager.last_request_time = time.time()
             return Response(content=resp.content, status_code=resp.status_code, headers=resp.headers)
+
+    # --- Inference path: acquire queue slot ---
+    # Determine requested model for queue tracking
+    requested_model = "_unknown"
+    try:
+        json_body = json.loads(body)
+        requested_model = json_body.get("model", requested_model)
+    except (json.JSONDecodeError, Exception):
+        pass
+
+    try:
+        request_id = await inference_queue.acquire(client_id, requested_model)
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=429,
+            detail={"error": "queue_timeout", "message": f"Waited {inference_queue.queue_timeout}s in queue"},
+        )
+
+    _release_in_finally = True
+    try:
+        # If llama-server was unloaded, auto-reload before forwarding
+        if model_manager.is_unloaded:
+            logger.info(f"🔄 Incoming request while unloaded — auto-reloading '{model_manager.current_model}'...")
+            try:
+                async with _model_switch_lock:
+                    if model_manager.is_unloaded:  # double-check under lock
+                        await model_manager.load()
+            except Exception as e:
+                raise HTTPException(status_code=503, detail=f"Auto-reload failed: {e}")
+
+        # Track last request time for idle-unload
+        model_manager.last_request_time = time.time()
+        model_manager.active_requests += 1
+
+        # Auto-switch logic for chat completions (with concurrency lock)
+        if path == "chat/completions":
+            try:
+                json_body = json.loads(body)
+                requested_model = json_body.get("model")
+                current_model = await model_manager.get_current_model()
+                
+                if requested_model and requested_model != current_model:
+                    if requested_model in model_manager.models:
+                        # SECURITY: Check if client is allowed to switch models
+                        if not model_manager.is_switch_allowed(client_id):
+                            logger.warning(
+                                f"🔒 Client '{client_id}' not in switch_allowlist, "
+                                f"blocked switch to '{requested_model}'. Forwarding to current model."
+                            )
+                        else:
+                            async with _model_switch_lock:
+                                # Re-check after acquiring lock
+                                current_model = await model_manager.get_current_model()
+                                if requested_model != current_model:
+                                    logger.info(f"🔄 Auto-switching backend from {current_model} to {requested_model} (client: {client_id})")
+                                    try:
+                                        await model_manager.switch_model(requested_model, client_id=client_id)
+                                    except ModelLoadError as e:
+                                        crash = e.crash_record
+                                        detail = {
+                                            "error": f"Model '{requested_model}' failed to load",
+                                            "message": str(e),
+                                            "crash_details": crash.to_dict() if crash else None,
+                                        }
+                                        logger.error(f"💥 Model load crash: {detail}")
+                                        raise HTTPException(status_code=503, detail=detail)
+                                    except ValueError as e:
+                                        # Pinned model or permission error
+                                        logger.warning(f"🔒 Switch denied: {e}")
+                                        # Don't raise — just forward to current model
+                                    except Exception as e:
+                                        logger.error(f"❌ Switch failed: {e}")
+                                        raise HTTPException(status_code=500, detail="Model switch failed")
+                    else:
+                        logger.warning(f"⚠️ Requested model {requested_model} not managed by Guardian. Forwarding to current.")
+            except json.JSONDecodeError:
+                pass
+            except HTTPException:
+                raise  # Let model-load errors propagate to the client
+            except Exception as e:
+                logger.error(f"Error checking model switch: {e}")
+
+        timeout = httpx.Timeout(600.0, connect=10.0)
+        logger.info(f"OpenAI-compat request from client '{client_id}': POST /v1/{path}")
+
+        # Detect streaming requests for chat/completions — must proxy SSE in real-time
+        is_stream = False
+        if path == "chat/completions":
+            try:
+                json_body = json.loads(body)
+                is_stream = json_body.get("stream", False)
+            except (json.JSONDecodeError, Exception):
+                pass
+
+        if is_stream:
+            # Stream SSE chunks in real-time instead of buffering entire response
+            client = httpx.AsyncClient(timeout=timeout)
+            req = client.build_request(
+                "POST",
+                f"{LLAMA_SERVER_URL}/v1/{path}",
+                content=body,
+                headers={"Content-Type": request.headers.get("Content-Type", "application/json")},
+            )
+            try:
+                resp = await client.send(req, stream=True)
+            except Exception as e:
+                await client.aclose()
+                raise HTTPException(status_code=502, detail=f"Backend request failed: {e}")
+
+            async def stream_passthrough():
+                try:
+                    async for chunk in resp.aiter_bytes():
+                        yield chunk
+                finally:
+                    await resp.aclose()
+                    await client.aclose()
+                    model_manager.active_requests = max(0, model_manager.active_requests - 1)
+                    model_manager.last_request_time = time.time()
+                    inference_queue.release(request_id)
+
+            queue_wait_ms = inference_queue.get_queue_wait_ms(request_id)
+            response = StreamingResponse(
+                stream_passthrough(),
+                status_code=resp.status_code,
+                media_type="text/event-stream",
+                headers={
+                    k: v for k, v in resp.headers.items()
+                    if k.lower() not in ("transfer-encoding", "content-length")
+                } | {"X-Request-Id": request_id, "X-Queue-Wait-Ms": str(int(queue_wait_ms))},
+            )
+            _release_in_finally = False
+            return response
+        else:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(
+                    f"{LLAMA_SERVER_URL}/v1/{path}",
+                    content=body,
+                    headers={"Content-Type": request.headers.get("Content-Type", "application/json")}
+                )
+                model_manager.active_requests = max(0, model_manager.active_requests - 1)
+                model_manager.last_request_time = time.time()
+                queue_wait_ms = inference_queue.get_queue_wait_ms(request_id)
+                return Response(
+                    content=resp.content,
+                    status_code=resp.status_code,
+                    headers=dict(resp.headers) | {"X-Request-Id": request_id, "X-Queue-Wait-Ms": str(int(queue_wait_ms))},
+                )
+    finally:
+        if _release_in_finally:
+            model_manager.active_requests = max(0, model_manager.active_requests - 1)
+            inference_queue.release(request_id)
 
 async def start_proxy():
     import uvicorn

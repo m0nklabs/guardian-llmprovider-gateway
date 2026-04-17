@@ -1,8 +1,8 @@
 # Llama CPP Guardian
 
-Guardian is a proxy, lifecycle manager, and benchmark layer for `llama-server`, built to make local LLM serving predictable on shared GPU hardware.
+Guardian is middleware for `llama-server` that turns a raw inference process into a managed service with request queuing, model lifecycle control, cooperative GPU memory management, API key auth, and benchmark-driven optimization.
 
-It sits between clients and the raw llama.cpp server, providing model switching with crash detection, VRAM scheduling with cooperative GPU memory management, OpenAI & Ollama-compatible API bridging, benchmarking, and API key auth.
+It sits between clients and the llama.cpp backend, providing protocol bridging (OpenAI + Ollama APIs), automatic model switching, FIFO request queuing, idle unload/auto-reload, crash detection, and shared GPU coordination with 3rd-party processes.
 
 ## Architecture
 
@@ -10,66 +10,80 @@ It sits between clients and the raw llama.cpp server, providing model switching 
 Clients / Apps / Tools
         │
         ▼
-┌──────────────────────────────────┐
-│  Guardian Proxy :11434           │
-│  ├─ Bearer token auth            │
-│  ├─ Ollama-compatible endpoints  │
-│  ├─ OpenAI-style /v1 endpoints   │
-│  ├─ Model selection / switching  │
-│  ├─ Request optimization         │
-│  ├─ Idle unload & auto-reload    │
-│  └─ Cooperative VRAM management  │
-└──────────────────────────────────┘
+┌──────────────────────────────────────┐
+│  Guardian Middleware :11434           │
+│  ├─ Bearer token auth                │
+│  ├─ FIFO request queue (serialized)  │
+│  ├─ OpenAI /v1 + Ollama /api bridges │
+│  ├─ Model selection / switching      │
+│  ├─ Request optimization             │
+│  ├─ Idle unload & auto-reload        │
+│  ├─ VRAM budget enforcement          │
+│  └─ 3rd-party GPU process awareness  │
+└──────────────────────────────────────┘
         │
         ▼
   llama-server :11440
         │
         ▼
   Configured backend binary
-    ├─ ik_llama.cpp fork (primary)
-    └─ official llama.cpp (fallback)
-```
+    ├─ official llama.cpp (primary)
+    └─ ik_llama.cpp fork (fallback)
 
-Dashboard/UI runs on port `11437`.
+  Dashboard UI :11437
+```
 
 ## Key Features
 
+### Request Queue
+
+Guardian runs a single-slot backend. Only one inference request is processed at a time — concurrent requests wait in a FIFO queue.
+
+- Transparent to simple clients (just blocks until a slot is free)
+- `X-Request-Id` and `X-Queue-Wait-Ms` response headers on every inference response
+- `GET /v1/queue/status` — separate polling endpoint for queue position (not queued itself, always responds immediately)
+- Configurable timeout → HTTP 429 when exceeded
+- Client disconnect detection (cancels queued request)
+
+See [docs/CLIENT_INTEGRATION.md](docs/CLIENT_INTEGRATION.md) for client implementation patterns and code examples.
+
 ### Dual Backend Strategy
 
-Guardian supports two llama.cpp backends per model:
+Guardian supports two llama.cpp backends, selectable per model:
 
 | Backend | Binary | Use Case |
 |---------|--------|----------|
-| **ik_fork** (primary) | `/home/flip/ik_llama_cpp_build/build/bin/llama-server` | Default for all models |
-| **official** (fallback) | `/home/flip/llama_cpp_official/build/bin/llama-server` | Architectures the ik fork doesn't support (e.g., Nemotron) |
+| **official** (primary) | `/home/flip/llama_cpp_official/build/bin/llama-server` | Default for all models |
+| **ik_fork** (fallback) | `/home/flip/ik_llama_cpp_build/build/bin/llama-server` | Specific optimizations if needed |
 
-Backend selection is per-model in `config/models.yaml`.
+Backend selection is per-model via the `backend:` field in `config/models.yaml`. Models without an explicit backend use the official binary.
 
 ### Protocol Bridging
 
 Guardian exposes both API styles simultaneously:
 
-- **OpenAI**: `/v1/chat/completions`, `/v1/models`, `/v1/*` proxy
+- **OpenAI**: `/v1/chat/completions`, `/v1/models`, `/v1/*`
 - **Ollama**: `/api/chat`, `/api/generate`, `/api/tags`, `/api/version`
 
 Automatic model switching: if a request specifies a different model than what's loaded, Guardian switches transparently (subject to pinning and allowlist rules).
 
 ### Model Lifecycle Management
 
-- **Model switching** with concurrency lock (`asyncio.Lock`) to prevent races
+- **Model switching** — concurrency-safe via `asyncio.Lock()`, happens inside queue slot
 - **Model pinning** — lock the system to a single model via `guardian.pinned_model`
 - **Client allowlist** — restrict which API keys can trigger model switches
-- **Idle unload** — automatically stops llama-server after configurable idle time, reloads on next request
-- **Crash detection** — records up to 50 crash events with config snapshots for debugging
-- **Backend verification** — post-switch check confirms the correct model is actually running
+- **Idle unload** — stops llama-server after configurable idle time, auto-reloads on next request
+- **Crash detection** — records up to 50 crash events with config snapshots
+- **Backend verification** — post-switch check confirms the correct model is running
+- **Config hot-reload** — re-reads `models.yaml` on every load/switch (no Guardian restart needed)
 
-### Cooperative VRAM Management
+### 3rd-Party GPU Process Awareness
 
-Guardian coexists with other GPU services (ComfyUI, Frigate NVR) on shared hardware:
+Guardian operates on shared GPU hardware alongside other processes. Instead of killing competing processes, it cooperates:
 
-- **ComfyUI integration**: Before loading a model, Guardian calls ComfyUI's `POST /free` API to request graceful VRAM release. ComfyUI stays alive and auto-reloads models on its next workflow.
-- **Frigate awareness**: Frigate's ~440MB ffmpeg VRAM usage is expected and accounted for in the VRAM budget — never touched.
-- **VRAM scheduling**: Configurable hard limit (`proxy.vram_limit_mb`, default 27000) prevents OOM crashes.
+- **ComfyUI integration**: Before loading a model, calls `POST /free` to request graceful VRAM release. ComfyUI stays alive and auto-reloads its models on next workflow.
+- **3rd-party budgeting**: The VRAM budget (`proxy.vram_limit_mb`) accounts for memory reserved by other GPU processes (Frigate NVR, etc.). These processes are never touched.
+- **VRAM scheduling**: Enforces a hard VRAM limit to prevent OOM crashes on multi-GPU setups.
 
 ### Security
 
@@ -77,15 +91,14 @@ Guardian coexists with other GPU services (ComfyUI, Frigate NVR) on shared hardw
 - Token format: `{prefix}_{32-char-hex}` (e.g., `flip_abc123...`, `hydro_def456...`)
 - **Model pinning** prevents unauthorized model switches
 - **Switch allowlist** restricts which clients can trigger model changes
-- **Backend verification** prevents desync between Guardian and llama-server
 
 ### Benchmarking & Optimization
 
-- Automated benchmark suite across models × context sizes × batch sizes
-- Resumable benchmark state persisted to `data/benchmark_state.json`
+- Automated benchmark suite: models × context sizes × batch sizes
+- Resumable state persisted to `data/benchmark_state.json`
 - `RequestOptimizer` injects best-known context/batch settings into requests
 - Scheduled maintenance windows for unattended benchmark runs
-- Real-time dashboard visualization of results
+- Dashboard visualization of results
 
 ## Running Guardian
 
@@ -103,21 +116,22 @@ python3 app/main.py
 Defines per-model runtime behavior:
 
 ```yaml
-GLM-4.7-Flash-Claude-Opus-Reasoning:
-  path: /home/flip/models/GLM-4.7-Flash-Claude-Opus-Reasoning-Q4_K_M.gguf
-  context: 262144
-  ngl: 99
-  kv_type: q4_0
-  backend: ik_fork
-  tensor_split: "0.57,0.43"
+models:
+  GLM-4.7-Flash-Claude-4.5-Opus:
+    path: /home/flip/models/glm-4.7-flash-claude-4.5-opus.q4_k_m.gguf
+    context: 262144
+    ngl: 99
+    kv_type: q4_0
+    tensor_split: "0.57,0.43"
+    extra_args: "-nkvo --parallel 4"
 
 guardian:
-  pinned_model: "GLM-4.7-Flash-Claude-Opus-Reasoning"
+  pinned_model: "GLM-4.7-Flash-Claude-4.5-Opus"
   switch_allowlist: ["m0nk111", "oelala"]
   idle_unload_minutes: 5
 ```
 
-40+ models configured, including vision models (mmproj support), MoE models, and reasoning models.
+Supported per-model fields: `path`, `context`, `max_context`, `ngl`, `kv_type`, `backend`, `tensor_split`, `mmproj`, `extra_args`.
 
 ### `config/settings.yaml` — System Configuration
 
@@ -126,6 +140,10 @@ proxy:
   port: 11434
   target: http://localhost:11440
   vram_limit_mb: 27000
+
+queue:
+  max_concurrent: 1
+  queue_timeout_seconds: 300
 
 timeouts:
   tiers:
@@ -146,30 +164,50 @@ services_to_stop: ["caramba-backend", "agent-forge"]
 
 ### `config/api_keys.json` — API Key Registry
 
-Stores Bearer tokens with client names, creation timestamps, and optional metadata.
+Stores Bearer tokens with client names, creation timestamps, and optional metadata. Generate new keys with `python3 scripts/generate_key.py --name "my-app"`.
 
 ## API Reference
 
 For detailed client integration examples (Python, TypeScript), queue-aware patterns, and error handling, see **[docs/CLIENT_INTEGRATION.md](docs/CLIENT_INTEGRATION.md)**.
 
+### Inference (queued)
+
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
-| `/api/chat` | POST | Ollama-style chat (auto-switches model) |
+| `/v1/chat/completions` | POST | OpenAI chat (streaming + non-streaming) |
+| `/v1/completions` | POST | OpenAI text completion |
+| `/v1/embeddings` | POST | OpenAI embeddings |
+| `/api/chat` | POST | Ollama-style chat |
 | `/api/generate` | POST | Ollama-style prompt generation |
-| `/api/tags` | GET | List available models (Ollama format) |
-| `/api/version` | GET | Ollama version compat |
-| `/v1/models` | GET | OpenAI model list |
-| `/v1/chat/completions` | POST | OpenAI chat (auto-switches model) |
+
+All inference responses include `X-Request-Id` and `X-Queue-Wait-Ms` headers.
+
+### Queue & Status
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
 | `/v1/queue/status` | GET | Queue position, wait time, active requests |
-| `/v1/{path}` | GET/POST | OpenAI-compatible proxy passthrough |
 | `/api/status` | GET | Current model, health, VRAM, crash info |
 | `/api/crashes` | GET | Crash history (up to 50 records) |
-| `/admin/load` | POST | Reload llama-server (optionally specify model) |
-| `/admin/unload` | POST | Stop llama-server to free VRAM |
+
+### Model Management
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/v1/models` | GET | OpenAI model list |
+| `/api/tags` | GET | Ollama model list |
+| `/api/version` | GET | Ollama version compat |
+| `/admin/load` | POST | Force-load a specific model |
+| `/admin/unload` | POST | Stop llama-server (free VRAM) |
+
+### Session & Benchmark
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
 | `/api/session/save` | POST | Save conversation context |
 | `/api/session/load` | POST | Load conversation context |
 | `/api/session/list` | GET | List saved sessions |
-| `/api/stats` | GET | Dashboard stats (VRAM, models, records) |
+| `/api/stats` | GET | Dashboard metrics (VRAM, models, records) |
 | `/api/benchmark` | GET | Benchmark results & summary |
 | `/api/benchmark/start` | POST | Trigger benchmark suite |
 | `/api/benchmark/stop` | POST | Stop running benchmark |
@@ -180,29 +218,31 @@ All endpoints require `Authorization: Bearer <token>`.
 
 ```text
 app/
-├── engine/        # Model switching, process lifecycle, VRAM management
-│   └── manager.py # ModelManager — core lifecycle control
-├── proxy/         # HTTP API layer, auth, optimizer
-│   ├── server.py  # FastAPI app, all endpoints, VramScheduler
-│   ├── auth.py    # Bearer token auth (api_keys.json)
-│   └── optimizer.py # Benchmark-driven request optimization
-├── scheduler/     # Maintenance windows, service orchestration
-│   └── manager.py # SchedulerManager — idle-window benchmarks
-├── tweaker/       # Benchmarking logic, TPS measurement
-│   └── benchmark.py # BenchmarkSuite — model × ctx × batch tests
-├── ui/            # Dashboard (Tailwind dark mode, Chart.js)
-└── main.py        # Application entrypoint (GuardianService)
+├── engine/
+│   └── manager.py       # ModelManager: lifecycle, switching, VRAM, crash detection
+├── proxy/
+│   ├── server.py        # FastAPI app: all endpoints, idle watcher
+│   ├── queue.py         # InferenceQueue: FIFO semaphore, status reporting
+│   ├── auth.py          # Bearer token auth (api_keys.json)
+│   └── optimizer.py     # RequestOptimizer: benchmark-driven tuning
+├── scheduler/
+│   └── manager.py       # SchedulerManager: maintenance windows, service control
+├── tweaker/
+│   └── benchmark.py     # BenchmarkSuite: model × ctx × batch testing
+├── ui/
+│   └── index.html       # Dashboard (Tailwind dark mode, Chart.js)
+└── main.py              # GuardianService: startup orchestration
 
 config/
-├── models.yaml          # Model registry (40+ models)
-├── settings.yaml        # System config (ports, timeouts, scheduler)
+├── models.yaml          # Model registry + guardian security config
+├── settings.yaml        # System config (ports, VRAM, timeouts, queue, scheduler)
 ├── api_keys.json        # API key store
-├── current_model.args   # Runtime: active llama-server args
+├── current_model.args   # Runtime: active llama-server CLI args
 ├── current_model.binary # Runtime: active backend binary path
 └── current_model.env    # Runtime: per-model env vars (optional)
 
 scripts/
-├── start_llama.sh       # Backend startup wrapper
+├── start_llama.sh       # Backend startup wrapper (reads current_model.binary)
 ├── generate_key.py      # CLI key generation
 ├── test_system.py       # End-to-end system test
 ├── benchmark_context.py # Context size benchmarking
@@ -213,6 +253,7 @@ data/
 └── benchmark_state.json # Persisted benchmark queue + results
 
 docs/
+├── CLIENT_INTEGRATION.md     # Client API guide with code examples
 ├── BENCHMARK_SUMMARY.md      # Global rankings and model comparisons
 ├── CONTEXT_BENCHMARKS.md     # Optimal context sizes per model
 ├── REAL_BENCHMARK_RESULTS.md # Empirical test results
@@ -221,22 +262,23 @@ docs/
 
 ## GPU Environment
 
-Guardian runs on a dual-GPU host and cooperates with other GPU services:
+Guardian runs on a dual-GPU host and coordinates VRAM with 3rd-party processes:
 
 | GPU | VRAM | Role |
 |-----|------|------|
 | RTX 3060 (cuda:0) | 12GB | Model weight storage (tensor split) |
 | RTX 5060 Ti (cuda:1) | 16GB | Primary compute + model weights |
 
-**Coexisting services**:
-- **Frigate NVR**: ~440MB on GPU (ffmpeg hardware decoding) — never touched
+**3rd-party GPU processes** (accounted for in VRAM budget, never killed):
+- **Frigate NVR**: ~440MB (ffmpeg hardware decoding) — always running
 - **ComfyUI**: Releases VRAM on request via `/free` API — cooperative sharing
 
-Models use configured tensor splits (e.g., `"0.57,0.43"`) to distribute weights across both GPUs. The VRAM budget (default 27000MB) accounts for Frigate's reservation.
+Models use configured tensor splits (e.g., `"0.57,0.43"`) to distribute weights across both GPUs.
 
 ## Related Docs
 
-- [ARCHITECTURE.md](ARCHITECTURE.md) — Detailed architecture and design decisions
+- [ARCHITECTURE.md](ARCHITECTURE.md) — Architecture and design decisions
+- [docs/CLIENT_INTEGRATION.md](docs/CLIENT_INTEGRATION.md) — Client API guide with queue-aware patterns
 - [docs/BENCHMARK_SUMMARY.md](docs/BENCHMARK_SUMMARY.md) — Model performance rankings
 - [docs/REAL_BENCHMARK_RESULTS.md](docs/REAL_BENCHMARK_RESULTS.md) — Empirical benchmark results
 - [docs/CONTEXT_BENCHMARKS.md](docs/CONTEXT_BENCHMARKS.md) — Context size recommendations
