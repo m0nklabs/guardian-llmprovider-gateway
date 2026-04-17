@@ -199,13 +199,32 @@ Content-Type: application/json
 
 Clients should handle HTTP 429 with a retry or user notification.
 
+> **Client timeout warning:** Your HTTP client timeout must be **greater than** `queue_timeout_seconds` + expected inference time. Otherwise your client may time out *before* Guardian sends the 429, and you'll see a generic timeout error instead of a meaningful queue timeout response. Recommended minimum: `queue_timeout_seconds + 300` (e.g., `600s` for the default 300s queue timeout).
+
 ---
 
 ## Client Implementation Patterns
 
+### ⚠️ Timeout vs Queue — The Key Problem
+
+Guardian's queue is **server-side blocking**: your HTTP request blocks until a slot opens and inference completes. This means your **client-side timeout covers both queue wait time AND inference time**.
+
+Example: You set `timeout=120s`. Your request waits 90s in the queue. That leaves only 30s for inference — which may not be enough for a large prompt. Your client times out, even though Guardian was about to respond.
+
+**This is why queue-aware patterns exist.** Without them, you can't distinguish between "still waiting for a queue slot" (safe to keep waiting) and "inference is stuck" (should abort/retry).
+
+**Solutions:**
+- **Pattern A** (simple): Set a generous timeout (e.g., `600s`) that covers worst-case queue + inference. Accept that you can't tell *why* it's slow.
+- **Pattern B** (recommended for production): Poll `/v1/queue/status` in a background task. This tells you exactly whether you're queued or processing, so you can set **separate** timeout policies:
+  - Queue wait: up to `queue_timeout_seconds` (Guardian handles this with HTTP 429)
+  - Inference: your own deadline based on expected generation time
+- **Pattern C** (streaming): Same as A/B but for SSE streams — queue headers arrive on the initial response before chunks start.
+
 ### Pattern A: Fire-and-Forget (Simplest)
 
-Just send the request and wait. The queue is transparent. This is sufficient for most use cases.
+Just send the request and wait. The queue is transparent. Sufficient for **background tasks** where latency doesn't matter.
+
+**Important:** Set your client timeout high enough to cover maximum queue wait (`queue_timeout_seconds`, default 300s) PLUS maximum inference time. A safe default is `600s`.
 
 ```python
 import httpx
@@ -223,7 +242,13 @@ No queue logic needed. The request blocks server-side until a slot is available.
 
 ### Pattern B: Queue-Aware (Background Status Polling)
 
-Send the inference request in one task, poll the status endpoint in another. This lets you show "waiting in queue" UI to the user.
+Send the inference request in one task, poll `/v1/queue/status` in another. This is the **recommended pattern for production services** because it lets you:
+
+1. **Show progress** to the user ("position 3 in queue", "processing...")
+2. **Set smart timeouts** — e.g., abort only if *inference* exceeds your deadline, not because the queue was slow
+3. **Log queue metrics** for monitoring (how often are your requests queued? for how long?)
+
+The status endpoint is **never queued** — it always responds instantly, even during inference.
 
 #### Python (asyncio + httpx)
 
