@@ -150,6 +150,8 @@ Stores Bearer tokens with client names, creation timestamps, and optional metada
 
 ## API Reference
 
+For detailed client integration examples (Python, TypeScript), queue-aware patterns, and error handling, see **[docs/CLIENT_INTEGRATION.md](docs/CLIENT_INTEGRATION.md)**.
+
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
 | `/api/chat` | POST | Ollama-style chat (auto-switches model) |
@@ -158,6 +160,7 @@ Stores Bearer tokens with client names, creation timestamps, and optional metada
 | `/api/version` | GET | Ollama version compat |
 | `/v1/models` | GET | OpenAI model list |
 | `/v1/chat/completions` | POST | OpenAI chat (auto-switches model) |
+| `/v1/queue/status` | GET | Queue position, wait time, active requests |
 | `/v1/{path}` | GET/POST | OpenAI-compatible proxy passthrough |
 | `/api/status` | GET | Current model, health, VRAM, crash info |
 | `/api/crashes` | GET | Crash history (up to 50 records) |
