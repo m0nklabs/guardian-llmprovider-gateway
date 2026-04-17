@@ -224,20 +224,34 @@ If your timeout is too short, it may expire during queue wait — before inferen
 
 Without queue awareness, you can't tell **why** a request is slow: still queued (safe to wait) or inference stuck (should abort).
 
-**Choose a pattern based on your needs:**
+### Three Independent Axes
 
-| Pattern | Complexity | Best for | Queue visibility |
-|---------|-----------|----------|------------------|
-| **A** — Fire-and-forget | Minimal | Background/batch jobs | None — just set a big timeout |
-| **B** — Queue polling | Moderate | Production services, UIs | Full — position, state, wait time |
-| **C** — Streaming | Moderate | Chat UIs, real-time | Via response headers |
-| **D** — Dynamic timeout | Higher | Latency-sensitive services | Full — adaptive per-phase deadlines |
+The patterns below are **composable building blocks**, not mutually exclusive choices. Your client sits on three independent axes:
 
-### Pattern A: Fire-and-Forget (Simplest)
+| Axis | Options | Trade-off |
+|------|---------|----------|
+| **Response mode** | Blocking vs Streaming | Latency perception vs complexity |
+| **Queue awareness** | None vs Status polling | Simplicity vs observability |
+| **Timeout strategy** | Static vs Dynamic per-phase | Simplicity vs precision |
+
+Pick one option per axis. Any combination works:
+
+| Combination | Use case | Complexity |
+|-------------|----------|------------|
+| Blocking + no polling + static | Scripts, batch jobs, cron | Minimal |
+| Blocking + polling + static | Production backend services | Moderate |
+| Blocking + polling + dynamic | Latency-sensitive services, SLO enforcement | Higher |
+| Streaming + no polling + static | Simple chat UIs | Moderate |
+| Streaming + polling + static | Chat UIs with queue feedback | Moderate |
+| Streaming + polling + dynamic | **Full-featured production chat** | Highest |
+
+The sections below document each building block independently, then show how to combine them.
+
+### Baseline: Blocking Request (Simplest)
 
 Just send the request and wait. The queue is transparent — your request blocks server-side until a slot opens.
 
-Sufficient for **background tasks** and **batch jobs** where latency doesn't matter.
+Sufficient for **background tasks** and **batch jobs** where latency doesn't matter. This is the starting point — the other building blocks layer on top of this.
 
 **Timeout rule:** Set `timeout ≥ queue_timeout_seconds + max_inference_time`. Safe default: **600s**.
 
@@ -255,13 +269,13 @@ result = resp.json()
 
 No queue logic needed. The request blocks server-side until a slot is available.
 
-### Pattern B: Queue-Aware (Background Status Polling)
+### Building Block: Queue Polling
 
-Send the inference request in one task, poll `/v1/queue/status` in another. **Recommended for production** because it gives you:
+Run a background task that polls `/v1/queue/status` alongside your inference request. Adds **queue awareness** to any request (blocking or streaming). Benefits:
 
 1. **Progress feedback** — show "position 3 in queue" or "processing..." to users
-2. **Separate timeout policies** — abort only if *inference* exceeds your deadline, not because the queue was slow
-3. **Observability** — log queue wait times, detect bottlenecks, feed monitoring dashboards
+2. **Observability** — log queue wait times, detect bottlenecks, feed dashboards
+3. **Phase detection** — know whether you're waiting in queue or in inference (foundation for dynamic timeout)
 
 The `/v1/queue/status` endpoint is **never queued itself** — it always responds instantly, even while inference is running.
 
@@ -383,9 +397,9 @@ async function pollQueueStatus(
 }
 ```
 
-### Pattern C: Streaming with Queue Headers
+### Building Block: Streaming
 
-For streaming responses, the queue headers are on the initial HTTP response (before any SSE chunks). Read them before consuming the stream.
+Add `"stream": true` to any request. Queue headers (`X-Queue-Wait-Ms`, `X-Request-Id`) arrive on the initial HTTP response before any SSE chunks.
 
 #### Python (httpx streaming)
 
@@ -417,11 +431,10 @@ async def chat_streaming(messages: list, model: str):
                     print(chunk)
 ```
 
-### Pattern D: Dynamic Timeout (Adaptive Per-Phase)
+### Building Block: Dynamic Timeout
 
-Static timeouts are a blunt instrument: set them too low and you abort requests
-that were just waiting in the queue; set them too high and you waste time when
-inference is genuinely stuck.
+Layered on top of **queue polling** — uses the phase information from `/v1/queue/status`
+to apply separate deadlines per phase instead of one static timeout.
 
 Dynamic timeout separates the request lifecycle into **two independent deadlines**:
 
@@ -579,11 +592,165 @@ result = await chat_with_dynamic_timeout(messages, "GLM-4.7-Flash", inference_de
 result = await chat_with_dynamic_timeout(messages, "Qwen3-30B", inference_deadline=180.0)
 ```
 
-**When to use Pattern D over B:**
+**When to add dynamic timeout to your client:**
 - You need to **fail fast** on stuck inference without aborting queue waits
 - You serve multiple models with **different speed profiles**
 - You want **separate alerting** for queue congestion vs inference slowness
 - You're building a production service where timeout granularity matters for SLOs
+
+---
+
+### Combining Building Blocks: Streaming + Dynamic Timeout
+
+The most powerful combination for production chat UIs: real-time token output
+with per-phase deadline enforcement. This merges the **streaming** and **dynamic
+timeout** building blocks into a single client.
+
+```python
+import asyncio
+import time
+import httpx
+
+GUARDIAN_URL = "http://guardian:11434"
+API_KEY = "your_api_key_here"
+
+
+async def streaming_chat_with_dynamic_timeout(
+    messages: list,
+    model: str,
+    inference_deadline: float = 120.0,
+    on_token: callable = None,
+    on_status: callable = None,
+):
+    """
+    Streaming inference with per-phase timeout enforcement.
+
+    Combines:
+    - Streaming (real-time tokens via SSE)
+    - Queue polling (phase detection + progress feedback)
+    - Dynamic timeout (inference-phase deadline)
+
+    Args:
+        on_token: Called with each content delta string.
+        on_status: Called with (phase, detail) tuples for UI feedback.
+    """
+    headers = {"Authorization": f"Bearer {API_KEY}"}
+    on_token = on_token or (lambda t: print(t, end="", flush=True))
+    on_status = on_status or (lambda phase, detail: None)
+
+    # Read server's queue timeout for safety-net HTTP timeout
+    async with httpx.AsyncClient(timeout=10.0) as probe:
+        status = (await probe.get(
+            f"{GUARDIAN_URL}/v1/queue/status", headers=headers
+        )).json()
+        server_queue_timeout = status.get("queue_timeout_s", 300)
+
+    http_timeout = server_queue_timeout + inference_deadline + 60
+
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(http_timeout)
+    ) as client:
+        cancel_event = asyncio.Event()
+        monitor = asyncio.create_task(
+            _phase_monitor(
+                client, headers, inference_deadline, cancel_event, on_status
+            )
+        )
+
+        try:
+            async with client.stream(
+                "POST",
+                f"{GUARDIAN_URL}/v1/chat/completions",
+                json={"model": model, "messages": messages, "stream": True},
+                headers=headers,
+            ) as resp:
+                if resp.status_code == 429:
+                    raise TimeoutError(f"Queue timeout: {await resp.aread()}")
+
+                wait_ms = int(resp.headers.get("X-Queue-Wait-Ms", "0"))
+                on_status("connected", f"queue wait: {wait_ms}ms")
+
+                async for line in resp.aiter_lines():
+                    if line.startswith("data: "):
+                        chunk = line[6:]
+                        if chunk == "[DONE]":
+                            break
+                        import json as _json
+                        data = _json.loads(chunk)
+                        delta = data["choices"][0].get("delta", {}).get("content", "")
+                        if delta:
+                            on_token(delta)
+
+                return {"queue_wait_ms": wait_ms}
+        finally:
+            cancel_event.set()
+            monitor.cancel()
+
+
+async def _phase_monitor(
+    client: httpx.AsyncClient,
+    headers: dict,
+    inference_deadline: float,
+    cancel_event: asyncio.Event,
+    on_status: callable,
+    poll_interval: float = 2.0,
+):
+    """Shared phase monitor — works with both blocking and streaming."""
+    inference_started_at: float | None = None
+
+    while not cancel_event.is_set():
+        try:
+            resp = await client.get(
+                f"{GUARDIAN_URL}/v1/queue/status", headers=headers
+            )
+            info = resp.json()
+            phase = info.get("your_status", "idle")
+
+            if phase == "queued":
+                pos = info.get("your_position", "?")
+                wait = info.get("your_wait_s", 0)
+                on_status("queued", f"position {pos}, {wait:.0f}s")
+                inference_started_at = None
+
+            elif phase == "processing":
+                if inference_started_at is None:
+                    inference_started_at = time.monotonic()
+                    on_status("inference_start", "model is generating")
+
+                elapsed = time.monotonic() - inference_started_at
+                if elapsed > inference_deadline:
+                    from app.proxy.queue import DynamicTimeoutError  # or define locally
+                    raise DynamicTimeoutError("inference", elapsed, inference_deadline)
+
+        except (httpx.RequestError, httpx.HTTPStatusError):
+            pass
+
+        await asyncio.sleep(poll_interval)
+```
+
+**Usage with a chat UI:**
+
+```python
+async def handle_user_message(user_input: str):
+    def show_token(t: str):
+        ui.append_to_chat(t)  # Render token in real-time
+
+    def show_status(phase: str, detail: str):
+        if phase == "queued":
+            ui.show_spinner(f"In queue: {detail}")
+        elif phase == "inference_start":
+            ui.hide_spinner()
+        elif phase == "connected":
+            ui.log(f"Connected ({detail})")
+
+    await streaming_chat_with_dynamic_timeout(
+        messages=[{"role": "user", "content": user_input}],
+        model="GLM-4.7-Flash",
+        inference_deadline=60.0,
+        on_token=show_token,
+        on_status=show_status,
+    )
+```
 
 ---
 
