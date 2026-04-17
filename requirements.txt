@@ -6,3 +6,4 @@ psutil
 pydantic
 schedule
 huggingface_hub
+prometheus-client

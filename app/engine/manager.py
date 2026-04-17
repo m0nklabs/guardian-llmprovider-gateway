@@ -97,6 +97,49 @@ class ModelManager:
         except Exception:
             return set()
 
+    def _load_aliases(self) -> Dict[str, str]:
+        """Load model aliases from models.yaml aliases section."""
+        try:
+            with open(self.config_path, "r") as f:
+                cfg = yaml.safe_load(f)
+            aliases = cfg.get("aliases", {})
+            if aliases:
+                logger.info(f"🏷️  Loaded {len(aliases)} model aliases")
+            return aliases
+        except Exception:
+            return {}
+
+    def resolve_model(self, name: str) -> str:
+        """Resolve a model name or alias to the canonical model name.
+
+        Lookup order:
+        1. Exact match in models dict
+        2. Alias lookup from models.yaml aliases section
+        3. Case-insensitive match against model names
+        Raises ValueError if not found.
+        """
+        # 1. Exact match
+        if name in self.models:
+            return name
+
+        # 2. Alias lookup
+        aliases = self._load_aliases()
+        if name in aliases:
+            target = aliases[name]
+            if target in self.models:
+                logger.info(f"🏷️  Resolved alias '{name}' → '{target}'")
+                return target
+            logger.warning(f"⚠️ Alias '{name}' points to '{target}' which is not in models config")
+
+        # 3. Case-insensitive fallback
+        name_lower = name.lower()
+        for model_name in self.models:
+            if model_name.lower() == name_lower:
+                logger.info(f"🏷️  Resolved case-insensitive '{name}' → '{model_name}'")
+                return model_name
+
+        raise ValueError(f"Model '{name}' not found in configuration (no alias match)")
+
     @property
     def pinned_model(self) -> Optional[str]:
         return self._pinned_model

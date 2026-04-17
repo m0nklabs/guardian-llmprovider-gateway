@@ -383,3 +383,50 @@ class TestBackendBinaries:
         assert "ik_fork" in BACKEND_BINARIES
         assert "official" in BACKEND_BINARIES["official"]  # path contains "official"
         assert "ik_llama" in BACKEND_BINARIES["ik_fork"]
+
+
+# ── Model aliases ─────────────────────────────────────────────────────
+
+YAML_WITH_ALIASES = SAMPLE_MODELS_YAML + """\
+
+aliases:
+  glm4: "GLM-4.7-Flash"
+  qwen3: "Qwen3-30B-A3B"
+"""
+
+
+class TestModelAliases:
+    def test_resolve_exact_match(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path, models_yaml=YAML_WITH_ALIASES)
+        assert mgr.resolve_model("GLM-4.7-Flash") == "GLM-4.7-Flash"
+
+    def test_resolve_alias(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path, models_yaml=YAML_WITH_ALIASES)
+        assert mgr.resolve_model("glm4") == "GLM-4.7-Flash"
+        assert mgr.resolve_model("qwen3") == "Qwen3-30B-A3B"
+
+    def test_resolve_case_insensitive(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path, models_yaml=YAML_WITH_ALIASES)
+        assert mgr.resolve_model("glm-4.7-flash") == "GLM-4.7-Flash"
+        assert mgr.resolve_model("QWEN3-30B-A3B") == "Qwen3-30B-A3B"
+
+    def test_resolve_unknown_raises(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path, models_yaml=YAML_WITH_ALIASES)
+        with pytest.raises(ValueError, match="not found"):
+            mgr.resolve_model("nonexistent-model")
+
+    def test_no_aliases_section(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        # Should still work via exact match
+        assert mgr.resolve_model("GLM-4.7-Flash") == "GLM-4.7-Flash"
+
+    def test_alias_pointing_to_unknown_model(self, tmp_path: Path):
+        bad_alias_yaml = SAMPLE_MODELS_YAML + """\
+
+aliases:
+  broken: "NonexistentModel"
+"""
+        mgr = _make_manager(tmp_path, models_yaml=bad_alias_yaml)
+        # Falls through alias (target not in models), then case-insensitive, then raises
+        with pytest.raises(ValueError, match="not found"):
+            mgr.resolve_model("broken")

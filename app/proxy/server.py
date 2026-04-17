@@ -21,6 +21,19 @@ from app.proxy.optimizer import RequestOptimizer
 from app.engine.manager import ModelManager, ModelLoadError
 from app.proxy.auth import verify_api_key
 from app.proxy.queue import InferenceQueue
+from app.proxy.metrics import (
+    track_request,
+    update_queue_metrics,
+    update_gpu_metrics,
+    update_system_metrics,
+    get_metrics_output,
+    MODEL_SWITCHES,
+    MODEL_CRASHES,
+    QUEUE_TOTAL_QUEUED,
+    QUEUE_TOTAL_COMPLETED,
+    QUEUE_TOTAL_TIMEOUTS,
+    AUTH_FAILURES,
+)
 
 # Load configuration from settings.yaml
 def load_config() -> dict:
@@ -330,6 +343,12 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
     if not model:
         raise HTTPException(status_code=400, detail="Model not specified")
 
+    # Resolve aliases and case-insensitive names
+    try:
+        model = model_manager.resolve_model(model)
+    except ValueError:
+        pass  # Let it fall through — will be handled by switch logic
+
     logger.info(f"bridge: Ollama chat request for '{model}' -> Translating to OpenAI format")
 
     # Acquire inference slot (blocks if another request is active)
@@ -507,6 +526,12 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
     model = body.get("model")
     if not model:
         raise HTTPException(status_code=400, detail="Model not specified")
+
+    # Resolve aliases and case-insensitive names
+    try:
+        model = model_manager.resolve_model(model)
+    except ValueError:
+        pass  # Let it fall through — will be handled by switch logic
 
     # Acquire inference slot
     try:
@@ -794,6 +819,21 @@ async def get_server_status(client_id: str = Depends(verify_api_key)):
     }
 
 
+# --- Prometheus metrics endpoint (no auth — standard for scraping) ---
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    """Expose Prometheus-compatible metrics for Grafana/alerting.
+
+    No auth required — standard Prometheus convention for scrape targets.
+    """
+    update_queue_metrics(inference_queue)
+    update_gpu_metrics()
+    update_system_metrics(model_manager)
+    body, content_type = get_metrics_output()
+    return Response(content=body, media_type=content_type)
+
+
 # --- Queue status endpoint (non-queued, always immediately available) ---
 
 @app.get("/v1/queue/status")
@@ -864,6 +904,14 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
             try:
                 json_body = json.loads(body)
                 requested_model = json_body.get("model")
+
+                # Resolve aliases and case-insensitive names
+                if requested_model:
+                    try:
+                        requested_model = model_manager.resolve_model(requested_model)
+                    except ValueError:
+                        pass  # Unknown model — forward to current
+
                 current_model = await model_manager.get_current_model()
                 
                 if requested_model and requested_model != current_model:
