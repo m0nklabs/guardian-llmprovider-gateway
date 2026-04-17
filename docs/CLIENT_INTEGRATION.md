@@ -231,6 +231,7 @@ Without queue awareness, you can't tell **why** a request is slow: still queued 
 | **A** — Fire-and-forget | Minimal | Background/batch jobs | None — just set a big timeout |
 | **B** — Queue polling | Moderate | Production services, UIs | Full — position, state, wait time |
 | **C** — Streaming | Moderate | Chat UIs, real-time | Via response headers |
+| **D** — Dynamic timeout | Higher | Latency-sensitive services | Full — adaptive per-phase deadlines |
 
 ### Pattern A: Fire-and-Forget (Simplest)
 
@@ -415,6 +416,174 @@ async def chat_streaming(messages: list, model: str):
                     # Process chunk...
                     print(chunk)
 ```
+
+### Pattern D: Dynamic Timeout (Adaptive Per-Phase)
+
+Static timeouts are a blunt instrument: set them too low and you abort requests
+that were just waiting in the queue; set them too high and you waste time when
+inference is genuinely stuck.
+
+Dynamic timeout separates the request lifecycle into **two independent deadlines**:
+
+```
+|--- queue wait ---|--- inference ---|
+     ↑ deadline 1       ↑ deadline 2    ← each phase has its own budget
+```
+
+- **Queue deadline**: Match or derive from the server's `queue_timeout_s` (default 300s). No point setting it shorter — the server will 429 you anyway.
+- **Inference deadline**: Based on your expectations for the model and prompt size. A 50-token prompt on a 7B model finishes in seconds; a 4K-token prompt on a 30B model may need 2 minutes.
+
+**Why this beats static:**
+
+| Scenario | Static 600s | Dynamic (300s queue + 90s inference) |
+|----------|-------------|--------------------------------------|
+| Queue 5s → inference 10s | Waits up to 600s on failure | Detects stuck inference at 90s |
+| Queue 280s → inference 10s | Works, but can't tell phases apart | Queue phase OK, inference starts fresh |
+| Queue 5s → inference stuck | Waits full 600s before giving up | Aborts after 90s of inference |
+| Queue 310s → timeout | Generic timeout, no info | Server 429 with clear "queue_timeout" error |
+
+The trick: poll `/v1/queue/status` to know which phase you're in, and apply the
+matching deadline.
+
+#### Python (asyncio + httpx)
+
+```python
+import asyncio
+import time
+import httpx
+
+GUARDIAN_URL = "http://guardian:11434"
+API_KEY = "your_api_key_here"
+
+
+class DynamicTimeoutError(Exception):
+    """Raised when inference exceeds the dynamic deadline."""
+    def __init__(self, phase: str, elapsed: float, deadline: float):
+        self.phase = phase
+        self.elapsed = elapsed
+        self.deadline = deadline
+        super().__init__(
+            f"{phase} exceeded deadline: {elapsed:.1f}s > {deadline:.1f}s"
+        )
+
+
+async def chat_with_dynamic_timeout(
+    messages: list,
+    model: str,
+    inference_deadline: float = 120.0,
+):
+    """
+    Send an inference request with adaptive per-phase timeouts.
+
+    - Queue deadline is read from the server's queue_timeout_s.
+    - Inference deadline is caller-defined (default: 120s).
+    - The HTTP-level timeout is a safety net covering both phases.
+    """
+    headers = {"Authorization": f"Bearer {API_KEY}"}
+
+    # Step 1: Read the server's queue timeout to set our safety-net HTTP timeout
+    async with httpx.AsyncClient(timeout=10.0) as probe:
+        status = (await probe.get(
+            f"{GUARDIAN_URL}/v1/queue/status", headers=headers
+        )).json()
+        server_queue_timeout = status.get("queue_timeout_s", 300)
+
+    # Safety-net: covers both phases + buffer
+    http_timeout = server_queue_timeout + inference_deadline + 60
+
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(http_timeout)
+    ) as client:
+        # Start the dynamic monitor in the background
+        cancel_event = asyncio.Event()
+        monitor = asyncio.create_task(
+            _dynamic_monitor(
+                client, headers, inference_deadline, cancel_event
+            )
+        )
+
+        try:
+            resp = await client.post(
+                f"{GUARDIAN_URL}/v1/chat/completions",
+                json={"model": model, "messages": messages, "stream": False},
+                headers=headers,
+            )
+
+            if resp.status_code == 429:
+                raise TimeoutError(f"Queue timeout: {resp.json()}")
+
+            wait_ms = int(resp.headers.get("X-Queue-Wait-Ms", "0"))
+            return {
+                "response": resp.json(),
+                "queue_wait_s": wait_ms / 1000,
+            }
+        except asyncio.CancelledError:
+            # Monitor detected a deadline breach and cancelled us
+            raise monitor.result()  # re-raise the DynamicTimeoutError
+        finally:
+            cancel_event.set()
+            monitor.cancel()
+
+
+async def _dynamic_monitor(
+    client: httpx.AsyncClient,
+    headers: dict,
+    inference_deadline: float,
+    cancel_event: asyncio.Event,
+    poll_interval: float = 2.0,
+):
+    """Poll queue status and enforce the inference-phase deadline."""
+    inference_started_at: float | None = None
+
+    while not cancel_event.is_set():
+        try:
+            resp = await client.get(
+                f"{GUARDIAN_URL}/v1/queue/status", headers=headers
+            )
+            info = resp.json()
+            status = info.get("your_status", "idle")
+
+            if status == "queued":
+                # Queue phase — server handles its own timeout, just log
+                pos = info.get("your_position", "?")
+                wait = info.get("your_wait_s", 0)
+                print(f"⏳ Queue position {pos}, waiting {wait:.0f}s")
+                inference_started_at = None  # reset if re-queued
+
+            elif status == "processing":
+                if inference_started_at is None:
+                    inference_started_at = time.monotonic()
+                    print("🧠 Inference started")
+
+                elapsed = time.monotonic() - inference_started_at
+                print(f"🧠 Inference running: {elapsed:.0f}s / {inference_deadline:.0f}s")
+
+                if elapsed > inference_deadline:
+                    raise DynamicTimeoutError(
+                        "inference", elapsed, inference_deadline
+                    )
+
+        except (httpx.RequestError, httpx.HTTPStatusError):
+            pass  # Status endpoint unavailable — skip this tick
+
+        await asyncio.sleep(poll_interval)
+```
+
+**Usage:**
+
+```python
+# Short prompt → tight inference deadline
+result = await chat_with_dynamic_timeout(messages, "GLM-4.7-Flash", inference_deadline=30.0)
+
+# Long generation → generous inference deadline
+result = await chat_with_dynamic_timeout(messages, "Qwen3-30B", inference_deadline=180.0)
+```
+
+**When to use Pattern D over B:**
+- You need to **fail fast** on stuck inference without aborting queue waits
+- You serve multiple models with **different speed profiles**
+- You want **separate alerting** for queue congestion vs inference slowness
+- You're building a production service where timeout granularity matters for SLOs
 
 ---
 
