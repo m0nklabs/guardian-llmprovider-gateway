@@ -418,14 +418,6 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
             "temperature": temperature
         }
 
-        # Dynamic scaler: inject thinking_budget_tokens / max_tokens
-        openai_body = state.scaler.scale_request(
-            openai_body,
-            waiting_count=inference_queue.waiting_count,
-            active_count=inference_queue.active_count,
-            client_id=client_id,
-        )
-
         # Forward to Llama Server (OpenAI Endpoint)
         timeout_sec = get_model_timeout(model)
         client = httpx.AsyncClient(timeout=timeout_sec)
@@ -600,14 +592,6 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
             "stream": stream,
             "temperature": temperature
         }
-
-        # Dynamic scaler: inject thinking_budget_tokens / max_tokens
-        openai_body = state.scaler.scale_request(
-            openai_body,
-            waiting_count=inference_queue.waiting_count,
-            active_count=inference_queue.active_count,
-            client_id=client_id,
-        )
 
         timeout_sec = get_model_timeout(model)
         client = httpx.AsyncClient(timeout=timeout_sec)
@@ -888,6 +872,48 @@ async def reset_scaler_config(client_id: str = Depends(verify_api_key)):
     return {"status": "reset", "config": config}
 
 
+@app.post("/api/scaler/recommend")
+async def scaler_recommend(request: Request, client_id: str = Depends(verify_api_key)):
+    """Return recommended thinking_budget_tokens and max_tokens for a request.
+
+    Advisory only — the client decides whether to use these values.
+
+    Body: same shape as a chat/completions request (needs ``messages``).
+    Returns recommended values and the classification details.
+    """
+    body = await request.json()
+    messages = body.get("messages", [])
+
+    # Classify complexity
+    profile_name, complexity = state.scaler._classify_complexity(messages)
+    profile = state.scaler.config["profiles"].get(profile_name, {})
+
+    base_thinking = profile.get("thinking_budget", -1)
+    base_max_tokens = profile.get("max_tokens", 8192)
+
+    # Apply queue pressure
+    thinking_budget, max_tokens = state.scaler._apply_queue_pressure(
+        base_thinking, base_max_tokens, inference_queue.waiting_count
+    )
+    pressure = state.scaler._pressure_label(inference_queue.waiting_count)
+
+    if state.scaler.config.get("log_decisions"):
+        logger.info(
+            f"📋 [{client_id}] Scaler recommend: profile={profile_name} "
+            f"pressure={pressure} → thinking_budget={thinking_budget}, max_tokens={max_tokens}"
+        )
+
+    return {
+        "profile": profile_name,
+        "complexity": complexity,
+        "pressure": pressure,
+        "recommended": {
+            "thinking_budget_tokens": thinking_budget,
+            "max_tokens": max_tokens,
+        },
+    }
+
+
 # --- Queue status endpoint (non-queued, always immediately available) ---
 
 @app.get("/v1/queue/status")
@@ -1011,20 +1037,6 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
 
         timeout = httpx.Timeout(600.0, connect=10.0)
         logger.info(f"OpenAI-compat request from client '{client_id}': POST /v1/{path}")
-
-        # --- Dynamic scaler: inject thinking_budget_tokens / max_tokens ---
-        if path == "chat/completions":
-            try:
-                json_body = json.loads(body)
-                json_body = state.scaler.scale_request(
-                    json_body,
-                    waiting_count=inference_queue.waiting_count,
-                    active_count=inference_queue.active_count,
-                    client_id=client_id,
-                )
-                body = json.dumps(json_body).encode("utf-8")
-            except (json.JSONDecodeError, Exception):
-                pass
 
         # Detect streaming requests for chat/completions — must proxy SSE in real-time
         is_stream = False

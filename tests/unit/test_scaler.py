@@ -277,3 +277,41 @@ class TestUpdateConfig:
         assert result["enabled"] is False
         assert "profiles" in result
         assert "queue_pressure" in result
+
+
+class TestAdvisoryRecommend:
+    """Test the advisory pattern: classify + pressure → recommendation."""
+
+    def test_recommend_trivial(self, scaler):
+        messages = [{"role": "user", "content": "hi"}]
+        profile, complexity = scaler._classify_complexity(messages)
+        p = scaler.config["profiles"][profile]
+        thinking, max_tokens = scaler._apply_queue_pressure(
+            p["thinking_budget"], p["max_tokens"], waiting_count=0
+        )
+        assert profile == "trivial"
+        assert thinking == 256
+        assert max_tokens == 1024
+
+    def test_recommend_under_pressure(self, scaler):
+        messages = [{"role": "user", "content": "x" * 500}]
+        profile, _ = scaler._classify_complexity(messages)
+        p = scaler.config["profiles"][profile]
+        thinking_calm, tokens_calm = scaler._apply_queue_pressure(
+            p["thinking_budget"], p["max_tokens"], waiting_count=0
+        )
+        thinking_busy, tokens_busy = scaler._apply_queue_pressure(
+            p["thinking_budget"], p["max_tokens"], waiting_count=4
+        )
+        assert thinking_busy < thinking_calm
+        assert tokens_busy < tokens_calm
+
+    def test_recommend_deep_keeps_unlimited(self, scaler):
+        messages = [{"role": "user", "content": "x" * 20000}]
+        profile, _ = scaler._classify_complexity(messages)
+        p = scaler.config["profiles"][profile]
+        thinking, _ = scaler._apply_queue_pressure(
+            p["thinking_budget"], p["max_tokens"], waiting_count=10
+        )
+        assert profile == "deep"
+        assert thinking == -1  # unlimited stays unlimited
