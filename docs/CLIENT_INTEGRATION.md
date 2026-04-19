@@ -781,8 +781,192 @@ Only API keys whose `client_id` is in `guardian.switch_allowlist` can trigger mo
 | `/v1/models` | GET | List available models (OpenAI format) |
 | `/admin/load` | POST | Force-load a specific model |
 | `/admin/unload` | POST | Unload current model (free VRAM) |
+| `/api/scaler` | GET | Current scaler configuration |
+| `/api/scaler` | PUT | Update scaler config (partial merge, persists) |
+| `/api/scaler/reset` | POST | Reset scaler to defaults |
+| `/api/scaler/recommend` | POST | Advisory: get recommended budgets for a prompt |
 
 All require `Authorization: Bearer <token>`.
+
+---
+
+## Dynamic Scaler (Advisory)
+
+Guardian includes a **DynamicScaler** that analyzes prompt complexity and queue pressure to recommend optimal `thinking_budget_tokens` and `max_tokens` values. The scaler is **advisory-only** — it never modifies your requests automatically. Your client decides whether and how to use the recommendations.
+
+**Philosophy:** Full-power requests pass through Guardian completely unmodified. Only clients that explicitly opt in to scaling get adjusted values. This means a quick polling bot can request lean budgets while your interactive sessions keep full reasoning power.
+
+### Recommend Endpoint
+
+```
+POST /api/scaler/recommend
+Authorization: Bearer <api_key>
+Content-Type: application/json
+```
+
+Send the same `messages` array you'd send to `/v1/chat/completions`. Guardian classifies the prompt and returns recommended values without touching the actual inference.
+
+**Request:**
+
+```json
+{
+  "messages": [
+    {"role": "user", "content": "What is 2+2?"}
+  ]
+}
+```
+
+**Response:**
+
+```json
+{
+  "profile": "trivial",
+  "complexity": {
+    "total_chars": 14,
+    "num_messages": 1,
+    "has_system": false,
+    "has_images": false
+  },
+  "pressure": "none",
+  "recommended": {
+    "thinking_budget_tokens": 256,
+    "max_tokens": 1024
+  }
+}
+```
+
+**Profiles:**
+
+| Profile | Prompt size | Messages | Thinking budget | Max tokens | Use case |
+|---------|-------------|----------|-----------------|------------|----------|
+| `trivial` | ≤200 chars | ≤2 | 256 | 1024 | "hi", "what time is it" |
+| `simple` | ≤800 chars | ≤4 | 1024 | 4096 | Single questions, short tasks |
+| `moderate` | ≤4000 chars | ≤12 | 4096 | 8192 | Multi-turn conversations |
+| `complex` | ≤15000 chars | ≤30 | 8192 | 16384 | Long context, code review |
+| `deep` | >15000 chars | >30 | -1 (unlimited) | 32768 | Full documents, large codebases |
+
+**Queue pressure adjustment:** When the queue has waiting requests, recommended budgets are reduced to improve throughput:
+
+| Pressure | Condition | Thinking factor | Max tokens factor |
+|----------|-----------|-----------------|-------------------|
+| `none` | 0-1 waiting | 100% | 100% |
+| `moderate` | 2-3 waiting | 50% | 75% |
+| `heavy` | 4+ waiting | 25% | 50% |
+
+Floors: `thinking_budget ≥ 128`, `max_tokens ≥ 512`. Unlimited thinking (`-1`) stays unlimited under any pressure.
+
+### Client Usage Pattern
+
+**Two-step: recommend → inject → infer**
+
+```python
+import httpx
+
+GUARDIAN = "http://guardian:11434"
+HEADERS = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+
+async def smart_chat(messages: list, full_power: bool = False):
+    """Chat with optional scaler recommendations."""
+    body = {"model": "auto", "messages": messages, "stream": False}
+
+    if not full_power:
+        # Step 1: Ask Guardian what it recommends
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            rec = (await client.post(
+                f"{GUARDIAN}/api/scaler/recommend",
+                json={"messages": messages},
+                headers=HEADERS,
+            )).json()
+
+        # Step 2: Client decides — apply the recommendations
+        body["thinking_budget_tokens"] = rec["recommended"]["thinking_budget_tokens"]
+        body["max_tokens"] = rec["recommended"]["max_tokens"]
+
+    # Step 3: Send the (possibly enriched) request
+    async with httpx.AsyncClient(timeout=600.0) as client:
+        resp = await client.post(
+            f"{GUARDIAN}/v1/chat/completions",
+            json=body,
+            headers=HEADERS,
+        )
+        return resp.json()
+
+# Polling bot — lean budgets for throughput
+result = await smart_chat(messages, full_power=False)
+
+# Interactive session — full reasoning power, no scaler
+result = await smart_chat(messages, full_power=True)
+```
+
+**Selective application — use only what you want:**
+
+```python
+rec = (await client.post(f"{GUARDIAN}/api/scaler/recommend", json=body, headers=HEADERS)).json()
+
+# Only cap max_tokens, keep unlimited thinking
+body["max_tokens"] = rec["recommended"]["max_tokens"]
+# Don't set thinking_budget_tokens → model uses its default (unlimited)
+```
+
+### Scaler Configuration Endpoints
+
+View and tune scaler profiles at runtime — changes persist to `settings.yaml`.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/scaler` | GET | Current scaler configuration |
+| `/api/scaler` | PUT | Partial merge update (persists to disk) |
+| `/api/scaler/reset` | POST | Reset to built-in defaults |
+| `/api/scaler/recommend` | POST | Get recommendations for a request |
+
+**Read current config:**
+
+```bash
+curl -H "Authorization: Bearer $KEY" http://guardian:11434/api/scaler
+```
+
+**Update a profile:**
+
+```bash
+curl -X PUT -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  http://guardian:11434/api/scaler \
+  -d '{"profiles": {"trivial": {"thinking_budget": 512, "max_tokens": 2048}}}'
+```
+
+**Disable scaler entirely:**
+
+```bash
+curl -X PUT -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  http://guardian:11434/api/scaler \
+  -d '{"enabled": false}'
+```
+
+**Adjust queue pressure thresholds:**
+
+```bash
+curl -X PUT -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  http://guardian:11434/api/scaler \
+  -d '{"queue_pressure": {"heavy_threshold": 6, "moderate_thinking_factor": 0.6}}'
+```
+
+**Update without persisting (runtime-only, resets on restart):**
+
+```bash
+curl -X PUT -H "Authorization: Bearer $KEY" \
+  -H "Content-Type: application/json" \
+  http://guardian:11434/api/scaler \
+  -d '{"enabled": false, "_persist": false}'
+```
+
+**Reset to defaults:**
+
+```bash
+curl -X POST -H "Authorization: Bearer $KEY" \
+  http://guardian:11434/api/scaler/reset
+```
 
 ---
 
