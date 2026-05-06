@@ -728,6 +728,14 @@ async def proxy_tags_ollama(client_id: str = Depends(verify_api_key)):
     return {"models": models}
 
 
+# Public liveness probe — no auth, no info leak.
+# Used by external monitoring (monifuse, uptime checks). Returns 200 if Guardian
+# proxy process is up; does NOT reflect llama-server backend health.
+@app.get("/healthz")
+async def healthz():
+    return {"ok": True}
+
+
 # Model listing endpoint (Before catch-all)
 @app.get("/v1/models")
 async def list_models(client_id: str = Depends(verify_api_key)):

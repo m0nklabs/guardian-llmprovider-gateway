@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- Public liveness probe `GET /healthz` (no auth) returning `{"ok": true}` for external monitors (monifuse, uptime checks). Does not reflect llama-server backend health; for that use the auth-gated `/api/status`.
+
 ## [2026-05-06] - Model Registry Cleanup, Qwen 3.6, Gemma Deep, and Load Guard
 
 ### Added
