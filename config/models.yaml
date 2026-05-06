@@ -115,7 +115,10 @@ models:
     kv_type: q4_0
     tensor_split: "0.57,0.43"
     # 2026-05-06: max mode requested; keep KV cache on GPU and leave reasoning unrestricted.
-    extra_args: "--reasoning on --reasoning-format deepseek --reasoning-budget -1"
+    # Sampler params per Unsloth Qwen3.6 docs (thinking mode, precise coding tasks):
+    #   https://unsloth.ai/docs/models/qwen3.6 — temp=0.6, top-p=0.95, top-k=20,
+    #   min-p=0.0, presence-penalty=0.0, repeat-penalty=1.0.
+    extra_args: "--reasoning on --reasoning-format deepseek --reasoning-budget -1 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
 # === Model Aliases ===
 # Short names that resolve to full model names above.
 # Use in API requests: {"model": "qwen3-35b-uncensored"}
@@ -140,7 +143,7 @@ guardian:
   # Pin a specific model — blocks ALL client-triggered switches to other models.
   # Only system startup and force=True can override this.
   # Set to null or remove to allow free switching.
-  pinned_model: "Huihui-gemma-4-26B-A4B-it-abliterated"
+  pinned_model: null
   
   # Allowlist of client names that may trigger model switches.
   # Empty list = unrestricted (all clients can switch — backward compat).
@@ -149,6 +152,7 @@ guardian:
   switch_allowlist:
     - "m0nk111"
     - "oelala"
+    - "kyberm0nk"
 
   # Auto-unload llama-server after N minutes of inactivity to free VRAM for
   # ComfyUI or other GPU-heavy tasks. Set to null (or remove) to disable.
