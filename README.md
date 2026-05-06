@@ -73,6 +73,7 @@ Automatic model switching: if a request specifies a different model than what's 
 - **Model pinning** — lock the system to a single model via `guardian.pinned_model`
 - **Client allowlist** — restrict which API keys can trigger model switches
 - **Idle unload** — stops llama-server after configurable idle time, auto-reloads on next request
+- **Admin load protection** — `/admin/load` marks heavy model loads as active work so idle unload cannot interrupt them mid-load
 - **Crash detection** — records up to 50 crash events with config snapshots
 - **Backend verification** — post-switch check confirms the correct model is running
 - **Config hot-reload** — re-reads `models.yaml` on every load/switch (no Guardian restart needed)
@@ -117,16 +118,30 @@ Defines per-model runtime behavior:
 
 ```yaml
 models:
-  GLM-4.7-Flash-Claude-4.5-Opus:
-    path: /home/flip/models/glm-4.7-flash-claude-4.5-opus.q4_k_m.gguf
-    context: 262144
+  Qwen3.6-35B-A3B-HauhauCS-Aggressive:
+    path: /home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf
+    max_context: 131072
+    context: 131072
     ngl: 99
     kv_type: q4_0
     tensor_split: "0.57,0.43"
-    extra_args: "-nkvo --parallel 4"
+    extra_args: "--reasoning on --reasoning-format deepseek --reasoning-budget -1"
+
+  gemma-4-31B-it-uncensored-heretic-Deep:
+    path: /home/flip/models/gemma-4-31B-it-uncensored-heretic-Q4_K_M.gguf
+    max_context: 262144
+    context: 216064
+    ngl: 99
+    kv_type: q4_0
+    tensor_split: "0.62,0.38"
+    extra_args: "--reasoning on --reasoning-budget -1"
+
+aliases:
+  qwen3-35b-uncensored: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
+  gemma4-heretic-deep: "gemma-4-31B-it-uncensored-heretic-Deep"
 
 guardian:
-  pinned_model: "GLM-4.7-Flash-Claude-4.5-Opus"
+  pinned_model: "Huihui-gemma-4-26B-A4B-it-abliterated"
   switch_allowlist: ["m0nk111", "oelala"]
   idle_unload_minutes: 5
 ```
@@ -273,7 +288,7 @@ Guardian runs on a dual-GPU host and coordinates VRAM with 3rd-party processes:
 - **Frigate NVR**: ~440MB (ffmpeg hardware decoding) — always running
 - **ComfyUI**: Releases VRAM on request via `/free` API — cooperative sharing
 
-Models use configured tensor splits (e.g., `"0.57,0.43"`) to distribute weights across both GPUs.
+Models use configured tensor splits (e.g., `"0.57,0.43"`) to distribute weights across both GPUs. Text-focused deep-reasoning profiles may intentionally omit `mmproj` to preserve VRAM for larger context windows; keep multimodal projection on the normal vision-capable profile when image input is needed.
 
 ## Related Docs
 

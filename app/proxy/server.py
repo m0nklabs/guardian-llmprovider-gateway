@@ -772,10 +772,15 @@ async def admin_load(request: Request, client_id: str = Depends(verify_api_key))
     except Exception:
         pass
     target = body.get("model", None)
+    model_manager.last_request_time = time.time()
+    model_manager.active_requests += 1
     try:
         await model_manager.load(target)
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
+    finally:
+        model_manager.active_requests = max(0, model_manager.active_requests - 1)
+        model_manager.last_request_time = time.time()
     return {"status": "loaded", "model": model_manager.current_model}
 
 

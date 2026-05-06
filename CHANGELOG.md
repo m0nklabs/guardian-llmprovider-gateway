@@ -1,5 +1,26 @@
 # Changelog
 
+## [2026-05-06] - Model Registry Cleanup, Qwen 3.6, Gemma Deep, and Load Guard
+
+### Added
+- **Qwen3.6 uncensored profile**: Registered `Qwen3.6-35B-A3B-HauhauCS-Aggressive` with 131k context, GPU KV offload enabled, unrestricted reasoning, and `qwen3-35b-uncensored` alias.
+- **Gemma4 Heretic Deep profile**: Added `gemma-4-31B-it-uncensored-heretic-Deep` / `gemma4-heretic-deep` as a text-focused reasoning profile with 216k context, GPU KV offload enabled, unrestricted reasoning, and no multimodal projection overhead.
+- **Gemma4 E4B profile**: Added `gemma-4-E4B-it-uncensored` / `gemma4-e4b` for a smaller text-only Gemma profile.
+
+### Changed
+- **Gemma Deep VRAM tuning**: Tuned the Deep profile to `context: 216064` and `tensor_split: "0.62,0.38"`, leaving measured runtime headroom on both GPUs while using substantially more context than the initial 131k load.
+- **Model registry cleanup**: Removed obsolete GLM 4.7 entries and aliases after the GLM models were retired from the local Guardian registry.
+- **Alias cleanup**: Removed orphaned aliases that pointed at deleted model entries.
+- **README model examples**: Updated `config/models.yaml` documentation to reflect the current Qwen/Gemma registry instead of retired GLM examples.
+
+### Fixed
+- **Admin load idle-unload race**: `/admin/load` now increments `active_requests` and refreshes `last_request_time` during model loads so the idle-unload watcher does not terminate `llama-server` in the middle of heavy loads.
+
+### Verified
+- `models.yaml` parses successfully and all aliases resolve to existing model entries.
+- `gemma-4-31B-it-uncensored-heretic-Deep` loads through Guardian at 216k context with backend health reporting `true`.
+- Short `/v1/chat/completions` smoke test succeeds through Guardian on the Gemma Deep profile.
+
 ## [2026-04-17] - Backend Strategy Flip, Middleware Rebrand & Documentation Overhaul
 
 ### Changed
