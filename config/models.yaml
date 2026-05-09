@@ -175,7 +175,7 @@ aliases:
   phi4: "Phi-4-reasoning-plus"
   ministral: "Ministral-3-14B-Reasoning-2512"
   gemma4: "Huihui-gemma-4-26B-A4B-it-abliterated"
-  gemma4-agent: "gemma-4-31B-it-uncensored-heretic-Max-Agent"
+  gemma4-agent: "Huihui-gemma-4-26B-A4B-it-abliterated-Agent"
   gemma4-26b-agent: "Huihui-gemma-4-26B-A4B-it-abliterated-Agent"
   gemma4-heretic: "gemma-4-31B-it-uncensored-heretic"
   gemma4-heretic-deep: "gemma-4-31B-it-uncensored-heretic-Deep"

@@ -168,7 +168,7 @@ aliases:
   qwen3-35b-uncensored-agent: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Agent"
   qwen3-35b-reasoning-agent: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Reasoning-Agent"
   qwen3-32b-uncensored: "Qwen3-VL-32B-Gemini-Heretic-Uncensored-Thinking"
-  gemma4-agent: "gemma-4-31B-it-uncensored-heretic-Max-Agent"
+  gemma4-agent: "Huihui-gemma-4-26B-A4B-it-abliterated-Agent"
   gemma4-26b-agent: "Huihui-gemma-4-26B-A4B-it-abliterated-Agent"
   gemma4-heretic-deep: "gemma-4-31B-it-uncensored-heretic-Deep"
   gemma4-31b-uncensored-max-agent: "gemma-4-31B-it-uncensored-heretic-Max-Agent"

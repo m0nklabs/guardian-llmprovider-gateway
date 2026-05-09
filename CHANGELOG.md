@@ -7,11 +7,12 @@
 - Qwen3.6 Agent profile and `qwen3-35b-uncensored-agent` alias using Qwen's official non-thinking llama.cpp chat template for low-latency tool-facing agents.
 - Bounded Qwen3.6 reasoning agent profile and `qwen3-35b-reasoning-agent` alias with 65k context and a 2048-token reasoning budget for daily local-agent work.
 - Gemma4 31B uncensored max-reasoning Agent Zero profile based on `TrevorJS/gemma-4-31B-it-uncensored`, with unrestricted reasoning and anti-repeat sampler settings under `gemma4-31b-uncensored-max-agent`.
-- `gemma4-agent` now points at the Gemma4 31B uncensored max-agent profile; the earlier 26B agent profile remains available as `gemma4-26b-agent`.
+- Explicit `gemma4-26b-agent` alias for the stable 26B Agent Zero route; the 31B uncensored route remains opt-in as `gemma4-31b-uncensored-max-agent`.
 - Gemma4 Agent now uses the same multimodal projector as the proven OpenWebUI Gemma4 profile so Agent Zero can route image tasks through the bounded agent alias.
 
 ### Changed
 - Kept `qwen3-35b-uncensored` as the unrestricted deep-reasoning alias while adding a bounded 65k-context agent variant for Agent Zero/OpenAI-compatible tool clients.
+- Restored `gemma4-agent` to the stable 26B Agent Zero profile after the 31B uncensored route proved too slow for default AZ work.
 
 ### Fixed
 - OpenAI-compatible inference requests now detect a stale stopped `llama-server` backend, reload the active model once, and retry instead of leaking an ASGI 500 traceback to Agent Zero/LiteLLM clients.
