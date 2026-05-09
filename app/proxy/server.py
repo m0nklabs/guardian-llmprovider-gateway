@@ -334,6 +334,37 @@ inference_queue = InferenceQueue(
 )
 
 
+async def _reload_backend_after_connect_error(path: str, error: Exception) -> None:
+    """Reload llama-server once after Guardian detects stale backend state."""
+    current_model = await model_manager.get_current_model()
+    logger.warning(
+        f"⚠️ Backend unreachable while proxying /v1/{path}; "
+        f"reloading '{current_model}' once before retry: {error}"
+    )
+
+    async with _model_switch_lock:
+        if await model_manager.backend_health_ok():
+            model_manager.is_unloaded = False
+            logger.info("✅ Backend became healthy before retry")
+            return
+
+        model_manager.is_unloaded = True
+        try:
+            await model_manager.load(current_model)
+        except ModelLoadError as e:
+            crash = e.crash_record
+            detail = {
+                "error": f"Backend reload failed for '{current_model}'",
+                "message": str(e),
+                "crash_details": crash.to_dict() if crash else None,
+            }
+            logger.error(f"💥 Backend reload crash: {detail}")
+            raise HTTPException(status_code=503, detail=detail)
+        except Exception as e:
+            logger.error(f"❌ Backend reload failed after connect error: {e}")
+            raise HTTPException(status_code=503, detail=f"Backend reload failed: {e}")
+
+
 @app.post("/api/chat")
 async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_api_key)):
     """Bridge Ollama-style chat requests to OpenAI-style Llama Server"""
@@ -1071,6 +1102,22 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
             )
             try:
                 resp = await client.send(req, stream=True)
+            except httpx.ConnectError as e:
+                await client.aclose()
+                await _reload_backend_after_connect_error(path, e)
+
+                client = httpx.AsyncClient(timeout=timeout)
+                req = client.build_request(
+                    "POST",
+                    f"{LLAMA_SERVER_URL}/v1/{path}",
+                    content=body,
+                    headers={"Content-Type": request.headers.get("Content-Type", "application/json")},
+                )
+                try:
+                    resp = await client.send(req, stream=True)
+                except Exception as retry_error:
+                    await client.aclose()
+                    raise HTTPException(status_code=502, detail=f"Backend request failed after reload: {retry_error}")
             except Exception as e:
                 await client.aclose()
                 raise HTTPException(status_code=502, detail=f"Backend request failed: {e}")
@@ -1100,11 +1147,22 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
             return response
         else:
             async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.post(
-                    f"{LLAMA_SERVER_URL}/v1/{path}",
-                    content=body,
-                    headers={"Content-Type": request.headers.get("Content-Type", "application/json")}
-                )
+                try:
+                    resp = await client.post(
+                        f"{LLAMA_SERVER_URL}/v1/{path}",
+                        content=body,
+                        headers={"Content-Type": request.headers.get("Content-Type", "application/json")}
+                    )
+                except httpx.ConnectError as e:
+                    await _reload_backend_after_connect_error(path, e)
+                    try:
+                        resp = await client.post(
+                            f"{LLAMA_SERVER_URL}/v1/{path}",
+                            content=body,
+                            headers={"Content-Type": request.headers.get("Content-Type", "application/json")}
+                        )
+                    except Exception as retry_error:
+                        raise HTTPException(status_code=502, detail=f"Backend request failed after reload: {retry_error}")
                 model_manager.active_requests = max(0, model_manager.active_requests - 1)
                 model_manager.last_request_time = time.time()
                 queue_wait_ms = inference_queue.get_queue_wait_ms(request_id)

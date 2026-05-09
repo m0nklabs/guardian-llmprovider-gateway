@@ -4,6 +4,7 @@ import subprocess
 import yaml
 import time
 import re
+import shlex
 import httpx
 from pathlib import Path
 from typing import Dict, List, Optional, Set
@@ -149,14 +150,43 @@ class ModelManager:
         Falls back to first model in config if detection fails.
         """
         try:
-            args_file = Path("/home/flip/llama_cpp_guardian/config/current_model.args")
+            args_file = self.config_path.parent / "current_model.args"
             if args_file.exists():
                 args = args_file.read_text().strip()
-                # Extract -m /path/to/model.gguf from args
+                args_tokens = set(shlex.split(args))
+                candidates = []
                 for model_name, config in self.models.items():
-                    if config.get("path") and config["path"] in args:
-                        logger.info(f"🔍 Detected running model from args file: {model_name}")
-                        return model_name
+                    model_path = config.get("path")
+                    if not model_path or model_path not in args:
+                        continue
+
+                    score = 1
+                    context = str(config.get("context", config.get("ctx", 4096)))
+                    tensor_split = str(config.get("tensor_split", "")).strip()
+                    mmproj = str(config.get("mmproj", "")).strip()
+                    extra_args = str(config.get("extra_args", "")).strip()
+
+                    if f"-c {context}" in args:
+                        score += 2
+                    if tensor_split and f"--tensor-split {tensor_split}" in args:
+                        score += 2
+                    if mmproj and mmproj in args:
+                        score += 2
+                    if extra_args:
+                        extra_tokens = shlex.split(extra_args)
+                        if all(token in args_tokens for token in extra_tokens):
+                            score += 10 + len(extra_tokens)
+                        else:
+                            score -= 2
+                    else:
+                        score += 1
+
+                    candidates.append((score, len(extra_args), model_name))
+
+                if candidates:
+                    _, _, detected_model = max(candidates, key=lambda candidate: (candidate[0], candidate[1]))
+                    logger.info(f"🔍 Detected running model from args file: {detected_model}")
+                    return detected_model
         except Exception as e:
             logger.warning(f"Failed to detect initial model: {e}")
         # Fallback: first model in config
@@ -271,6 +301,18 @@ class ModelManager:
     async def get_current_model(self) -> str:
         # We can implement a health check or store internal state
         return self.current_model
+
+    async def backend_health_ok(self) -> bool:
+        """Return True when the managed llama-server backend accepts requests."""
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{self.server_url}/health")
+            return resp.status_code == 200
+        except httpx.ConnectError:
+            return False
+        except Exception as e:
+            logger.debug(f"Backend health probe failed: {e}")
+            return False
 
     async def switch_model(self, model_name: str, client_id: str = "_system", force: bool = False):
         # Re-read models.yaml so config edits take effect without Guardian restart

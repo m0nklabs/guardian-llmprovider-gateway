@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch, mock_open
 
 import pytest
 import yaml
+import httpx
 
 from tests.conftest import SAMPLE_MODELS_YAML, SAMPLE_SETTINGS_YAML
 
@@ -139,6 +140,37 @@ class TestDetectInitialModel:
         # Fallback should be first model in config
         assert mgr.current_model in mgr.models
 
+    def test_detects_same_path_profile_from_extra_args(self, tmp_path: Path):
+        config_dir = tmp_path / "config"
+        config_dir.mkdir()
+        models_file = config_dir / "models.yaml"
+        models_file.write_text(
+            """\
+models:
+  Qwen-Deep:
+    path: /models/qwen.gguf
+    context: 131072
+    extra_args: "--reasoning on --reasoning-budget -1 --temp 0.6"
+  Qwen-Agent:
+    path: /models/qwen.gguf
+    context: 65536
+    extra_args: "--chat-template-file /tmp/qwen_nonthinking.jinja --temp 0.7 --top-p 0.8"
+"""
+        )
+        (config_dir / "settings.yaml").write_text(SAMPLE_SETTINGS_YAML)
+        (config_dir / "current_model.args").write_text(
+            "-m /models/qwen.gguf -c 65536 -ngl 99 --host 127.0.0.1 --port 11440 "
+            "--chat-template-file /tmp/qwen_nonthinking.jinja --temp 0.7 --top-p 0.8"
+        )
+
+        with patch("app.engine.manager.subprocess.run") as mock_sub:
+            mock_sub.return_value = MagicMock(returncode=1, stdout="")
+            from app.engine.manager import ModelManager
+
+            mgr = ModelManager(config_path=str(models_file))
+
+        assert mgr.current_model == "Qwen-Agent"
+
 
 # ── _write_server_args ─────────────────────────────────────────────────
 
@@ -250,6 +282,50 @@ class TestVerifyBackendModel:
         mgr = _make_manager(tmp_path)
         with patch.object(mgr, "_get_backend_model_path", return_value=None):
             result = await mgr.verify_backend_model()
+        assert result is False
+
+
+# ── backend_health_ok ─────────────────────────────────────────────────
+
+
+class TestBackendHealthOk:
+    @pytest.mark.asyncio
+    async def test_returns_true_on_healthy_backend(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.__aexit__.return_value = None
+        mock_client.get.return_value = MagicMock(status_code=200)
+
+        with patch("app.engine.manager.httpx.AsyncClient", return_value=mock_client):
+            result = await mgr.backend_health_ok()
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_returns_false_on_unhealthy_status(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.__aexit__.return_value = None
+        mock_client.get.return_value = MagicMock(status_code=503)
+
+        with patch("app.engine.manager.httpx.AsyncClient", return_value=mock_client):
+            result = await mgr.backend_health_ok()
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_returns_false_on_connect_error(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mock_client = AsyncMock()
+        mock_client.__aenter__.return_value = mock_client
+        mock_client.__aexit__.return_value = None
+        mock_client.get.side_effect = httpx.ConnectError("backend down")
+
+        with patch("app.engine.manager.httpx.AsyncClient", return_value=mock_client):
+            result = await mgr.backend_health_ok()
+
         assert result is False
 
 

@@ -119,11 +119,23 @@ models:
     #   https://unsloth.ai/docs/models/qwen3.6 — temp=0.6, top-p=0.95, top-k=20,
     #   min-p=0.0, presence-penalty=0.0, repeat-penalty=1.0.
     extra_args: "--reasoning on --reasoning-format deepseek --reasoning-budget -1 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
+  Qwen3.6-35B-A3B-HauhauCS-Aggressive-Agent:
+    path: /home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf
+    max_context: 131072
+    context: 65536
+    ngl: 99
+    kv_type: q4_0
+    tensor_split: "0.57,0.43"
+    # Agent tools need fast, visible answers more than unbounded hidden reasoning.
+    # Qwen documents non-thinking mode for efficient dialogue; for llama.cpp the
+    # hard switch is implemented with the official non-thinking chat template.
+    extra_args: "--chat-template-file /home/flip/llama_cpp_guardian/config/qwen3_nonthinking.jinja --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
 # === Model Aliases ===
 # Short names that resolve to full model names above.
 # Use in API requests: {"model": "qwen3-35b-uncensored"}
 aliases:
   qwen3-35b-uncensored: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
+  qwen3-35b-uncensored-agent: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Agent"
   qwen3-30b: "Qwen3-30B-A3B-Thinking-2507"
   qwen3-vl: "Qwen3-VL-30B-A3B-Thinking"
   qwen3-vl-heretic: "Qwen3-VL-32B-Gemini-Heretic-Uncensored-Thinking"

@@ -4,6 +4,14 @@
 
 ### Added
 - Public liveness probe `GET /healthz` (no auth) returning `{"ok": true}` for external monitors (monifuse, uptime checks). Does not reflect llama-server backend health; for that use the auth-gated `/api/status`.
+- Qwen3.6 Agent profile and `qwen3-35b-uncensored-agent` alias using Qwen's official non-thinking llama.cpp chat template for low-latency tool-facing agents.
+
+### Changed
+- Kept `qwen3-35b-uncensored` as the unrestricted deep-reasoning alias while adding a bounded 65k-context agent variant for Agent Zero/OpenAI-compatible tool clients.
+
+### Fixed
+- OpenAI-compatible inference requests now detect a stale stopped `llama-server` backend, reload the active model once, and retry instead of leaking an ASGI 500 traceback to Agent Zero/LiteLLM clients.
+- Startup model detection now distinguishes profiles that share the same GGUF path by matching generated runtime args, preventing the non-thinking Qwen agent profile from being mistaken for the deep-reasoning profile after Guardian restarts.
 
 ## [2026-05-06] - Model Registry Cleanup, Qwen 3.6, Gemma Deep, and Load Guard
 
