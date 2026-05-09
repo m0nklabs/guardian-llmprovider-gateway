@@ -145,6 +145,15 @@ models:
     tensor_split: "0.57,0.43"
     extra_args: "--reasoning on --reasoning-format deepseek --reasoning-budget 2048 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0"
 
+  Huihui-gemma-4-26B-A4B-it-abliterated-Agent:
+    path: /home/flip/models/gemma-4-26B-A4B.unsloth-imatrix-UD-Q4_K_XL.gguf
+    max_context: 262144
+    context: 65536
+    ngl: 99
+    kv_type: q4_0
+    tensor_split: "0.55,0.45"
+    extra_args: "-nkvo --reasoning-budget 0 --temp 0.7 --top-k 40"
+
   gemma-4-31B-it-uncensored-heretic-Deep:
     path: /home/flip/models/gemma-4-31B-it-uncensored-heretic-Q4_K_M.gguf
     max_context: 262144
@@ -158,6 +167,7 @@ aliases:
   qwen3-35b-uncensored: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
   qwen3-35b-uncensored-agent: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Agent"
   qwen3-35b-reasoning-agent: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Reasoning-Agent"
+  gemma4-agent: "Huihui-gemma-4-26B-A4B-it-abliterated-Agent"
   gemma4-heretic-deep: "gemma-4-31B-it-uncensored-heretic-Deep"
 
 guardian:
