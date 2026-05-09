@@ -136,6 +136,15 @@ models:
     tensor_split: "0.57,0.43"
     extra_args: "--chat-template-file /home/flip/llama_cpp_guardian/config/qwen3_nonthinking.jinja --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0.0"
 
+  Qwen3.6-35B-A3B-HauhauCS-Aggressive-Reasoning-Agent:
+    path: /home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf
+    max_context: 131072
+    context: 65536
+    ngl: 99
+    kv_type: q4_0
+    tensor_split: "0.57,0.43"
+    extra_args: "--reasoning on --reasoning-format deepseek --reasoning-budget 2048 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0"
+
   gemma-4-31B-it-uncensored-heretic-Deep:
     path: /home/flip/models/gemma-4-31B-it-uncensored-heretic-Q4_K_M.gguf
     max_context: 262144
@@ -148,6 +157,7 @@ models:
 aliases:
   qwen3-35b-uncensored: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
   qwen3-35b-uncensored-agent: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Agent"
+  qwen3-35b-reasoning-agent: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Reasoning-Agent"
   gemma4-heretic-deep: "gemma-4-31B-it-uncensored-heretic-Deep"
 
 guardian:
