@@ -87,6 +87,7 @@ models:
     ngl: 99
     kv_type: q4_0
     tensor_split: "0.55,0.45"
+    mmproj: /home/flip/models/gemma4-26b-a4b-mmproj-BF16.gguf
     extra_args: "-nkvo --reasoning-budget 0 --temp 0.7 --top-k 40"
   gemma-4-31B-it-uncensored-heretic:
     path: /home/flip/models/gemma-4-31B-it-uncensored-heretic-Q4_K_M.gguf
