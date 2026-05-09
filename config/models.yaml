@@ -106,6 +106,17 @@ models:
     kv_type: q4_0
     tensor_split: "0.62,0.38"
     extra_args: "--reasoning on --reasoning-budget -1 --repeat-penalty 1.3 --repeat-last-n 128 --dry-multiplier 1.0 --dry-base 1.75 --dry-penalty-last-n 256 --temp 0.6 --top-k 40"
+  gemma-4-31B-it-uncensored-heretic-Max-Agent:
+    path: /home/flip/models/gemma-4-31B-it-uncensored-heretic-Q4_K_M.gguf
+    max_context: 262144
+    context: 65536
+    ngl: 99
+    kv_type: q4_0
+    tensor_split: "0.62,0.38"
+    mmproj: /home/flip/models/gemma-4-31B-it-mmproj-BF16.gguf
+    # Max-reasoning AZ profile for TrevorJS/gemma-4-31B-it-uncensored.
+    # Reasoning stays unrestricted; repeat/DRY penalties reduce visible loops.
+    extra_args: "-nkvo --reasoning on --reasoning-budget -1 --repeat-penalty 1.3 --repeat-last-n 128 --dry-multiplier 1.0 --dry-base 1.75 --dry-penalty-last-n 512 --temp 0.6 --top-k 40"
   gemma-4-E4B-it-uncensored:
     path: /home/flip/models/gemma-4-E4B-it-uncensored-Q4_K_M.gguf
     max_context: 131072
@@ -158,14 +169,18 @@ aliases:
   qwen3-35b-reasoning-agent: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Reasoning-Agent"
   qwen3-30b: "Qwen3-30B-A3B-Thinking-2507"
   qwen3-vl: "Qwen3-VL-30B-A3B-Thinking"
+  qwen3-32b-uncensored: "Qwen3-VL-32B-Gemini-Heretic-Uncensored-Thinking"
   qwen3-vl-heretic: "Qwen3-VL-32B-Gemini-Heretic-Uncensored-Thinking"
   nemotron: "Nemotron-3-Nano-30B-A3B"
   phi4: "Phi-4-reasoning-plus"
   ministral: "Ministral-3-14B-Reasoning-2512"
   gemma4: "Huihui-gemma-4-26B-A4B-it-abliterated"
-  gemma4-agent: "Huihui-gemma-4-26B-A4B-it-abliterated-Agent"
+  gemma4-agent: "gemma-4-31B-it-uncensored-heretic-Max-Agent"
+  gemma4-26b-agent: "Huihui-gemma-4-26B-A4B-it-abliterated-Agent"
   gemma4-heretic: "gemma-4-31B-it-uncensored-heretic"
   gemma4-heretic-deep: "gemma-4-31B-it-uncensored-heretic-Deep"
+  gemma4-31b-uncensored: "gemma-4-31B-it-uncensored-heretic"
+  gemma4-31b-uncensored-max-agent: "gemma-4-31B-it-uncensored-heretic-Max-Agent"
   gemma4-e4b: "gemma-4-E4B-it-uncensored"
   step3-vl: "Step3-VL-10B"
   llama3: "llama3.2-3b"
