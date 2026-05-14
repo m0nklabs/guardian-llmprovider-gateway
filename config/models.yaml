@@ -159,7 +159,7 @@ models:
   Qwen3.6-35B-A3B-HauhauCS-Aggressive-Agent:
     path: /home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf
     max_context: 131072
-    context: 65536
+    context: 131072
     ngl: 99
     kv_type: q4_0
     tensor_split: "0.57,0.43"
@@ -170,7 +170,7 @@ models:
   Qwen3.6-35B-A3B-HauhauCS-Aggressive-Reasoning-Agent:
     path: /home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf
     max_context: 131072
-    context: 65536
+    context: 131072
     ngl: 99
     kv_type: q4_0
     tensor_split: "0.57,0.43"

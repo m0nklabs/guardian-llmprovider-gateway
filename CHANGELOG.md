@@ -12,12 +12,14 @@
 
 ### Changed
 - Kept `qwen3-35b-uncensored` as the unrestricted deep-reasoning alias while adding a bounded 65k-context agent variant for Agent Zero/OpenAI-compatible tool clients.
+- Raised both Qwen3.6 CrewAI/agent-facing aliases (`qwen3-35b-uncensored-agent` and `qwen3-35b-reasoning-agent`) from 65k to their full 131072-token context so long CrewAI traces stop tripping Guardian with context-overflow 400s.
 - Restored `gemma4-agent` to the stable 26B Agent Zero profile after the 31B uncensored route proved too slow for default AZ work.
 
 ### Fixed
 - Anthropic-compatible clients such as Claude Code now authenticate successfully through Guardian because the proxy accepts `x-api-key` and `api-key` headers in addition to OpenAI-style `Authorization: Bearer` tokens.
 - OpenAI-compatible inference requests now detect a stale stopped `llama-server` backend, reload the active model once, and retry instead of leaking an ASGI 500 traceback to Agent Zero/LiteLLM clients.
 - Startup model detection now distinguishes profiles that share the same GGUF path by matching generated runtime args, preventing the non-thinking Qwen agent profile from being mistaken for the deep-reasoning profile after Guardian restarts.
+- Forced a live unload/reload of the Qwen3.6 reasoning agent after the context bump and verified Guardian rewrote `current_model.args` to `-c 131072`, confirming the hotfix was actually live instead of only sitting in YAML.
 
 ## [2026-05-06] - Model Registry Cleanup, Qwen 3.6, Gemma Deep, and Load Guard
 
