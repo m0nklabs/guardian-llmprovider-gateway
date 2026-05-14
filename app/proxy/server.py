@@ -978,7 +978,7 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
     body = await request.body()
 
     # Only queue inference endpoints; everything else passes through directly
-    is_inference = path in ("chat/completions", "completions", "embeddings")
+    is_inference = path in ("chat/completions", "completions", "embeddings", "messages")
 
     if not is_inference:
         timeout = httpx.Timeout(600.0, connect=10.0)
@@ -1023,8 +1023,8 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
         model_manager.last_request_time = time.time()
         model_manager.active_requests += 1
 
-        # Auto-switch logic for chat completions (with concurrency lock)
-        if path == "chat/completions":
+        # Auto-switch logic for chat completions & messages (with concurrency lock)
+        if path in ("chat/completions", "messages"):
             try:
                 json_body = json.loads(body)
                 requested_model = json_body.get("model")
@@ -1082,12 +1082,40 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
         timeout = httpx.Timeout(600.0, connect=10.0)
         logger.info(f"OpenAI-compat request from client '{client_id}': POST /v1/{path}")
 
-        # Detect streaming requests for chat/completions — must proxy SSE in real-time
+        # Detect streaming requests for chat/completions and messages — must proxy SSE in real-time
         is_stream = False
-        if path == "chat/completions":
+        if path in ("chat/completions", "messages"):
             try:
                 json_body = json.loads(body)
                 is_stream = json_body.get("stream", False)
+                # WORKAROUND: llama.cpp "Assistant response prefill is incompatible with enable_thinking"
+                msgs = json_body.get("messages", [])
+                
+                # Consolidate ALL trailing assistant messages
+                trailing_assistant_contents = []
+                while len(msgs) > 0 and msgs[-1].get("role") == "assistant":
+                    popped = msgs.pop()
+                    content = popped.get("content", "")
+                    if content:
+                        trailing_assistant_contents.insert(0, str(content))
+                        
+                if trailing_assistant_contents and len(msgs) >= 1:
+                    combined_prefill = "\\n".join(trailing_assistant_contents)
+                    
+                    # Find the last user message and append the prefill instruction
+                    last_user_idx = -1
+                    for i in range(len(msgs)-1, -1, -1):
+                        if msgs[i].get("role") == "user":
+                            last_user_idx = i
+                            break
+                            
+                    if last_user_idx != -1:
+                        msgs[last_user_idx]["content"] = str(msgs[last_user_idx].get("content", "")) + f"\n\n[System directive: Please start your response exactly with the following text: {combined_prefill}]"
+                        json_body["messages"] = msgs
+                        body = json.dumps(json_body).encode("utf-8")
+                    else:
+                        import logging
+                        logging.getLogger("uvicorn.error").warning("Found trailing assistant messages but no user message to attach to.")
             except (json.JSONDecodeError, Exception):
                 pass
 

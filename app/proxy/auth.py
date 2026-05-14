@@ -4,14 +4,27 @@ import time
 import logging
 from pathlib import Path
 from typing import Dict, Optional
-from fastapi import HTTPException, Security, Request, Depends
+from fastapi import HTTPException, Security, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.status import HTTP_401_UNAUTHORIZED
 
 logger = logging.getLogger("Auth")
 
 API_KEYS_FILE = Path(__file__).parent.parent.parent / "config" / "api_keys.json"
-security_scheme = HTTPBearer()
+security_scheme = HTTPBearer(auto_error=False)
+
+
+def _extract_api_key(request: Request, creds: Optional[HTTPAuthorizationCredentials]) -> Optional[str]:
+    """Accept both OpenAI-style Bearer tokens and Anthropic-style x-api-key headers."""
+    if creds and creds.credentials:
+        return creds.credentials
+
+    for header_name in ("x-api-key", "api-key"):
+        header_value = request.headers.get(header_name)
+        if header_value:
+            return header_value.strip()
+
+    return None
 
 def load_api_keys() -> Dict[str, dict]:
     if not API_KEYS_FILE.exists():
@@ -46,17 +59,17 @@ def generate_api_key(name: str, metadata: dict = None) -> str:
 
 async def verify_api_key(request: Request, creds: Optional[HTTPAuthorizationCredentials] = Security(security_scheme)):
     """
-    Verify API key from Bearer token.
+    Verify API key from Bearer token or Anthropic-style API key headers.
     Returns the metadata associated with the key (including name).
     """
-    if not creds:
+    token = _extract_api_key(request, creds)
+    if not token:
          raise HTTPException(
             status_code=HTTP_401_UNAUTHORIZED,
             detail="API Key required",
             headers={"WWW-Authenticate": "Bearer"},
         )
-        
-    token = creds.credentials
+
     if not token.startswith("flip_"):
         # Allow non-prefixed keys if they exist in file (backward compat or manual keys)
         pass

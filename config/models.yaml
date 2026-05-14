@@ -47,6 +47,23 @@ models:
     context: 32768
     ngl: 99
 
+  Qwen3.6-35B-A3B:
+    path: /home/flip/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
+    max_context: 262144
+    context: 131072
+    ngl: 99
+    kv_type: q4_0
+    tensor_split: "0.62,0.38"
+    extra_args: "--temp 0.6 --top-k 40"
+
+  gemma-4-31B-it:
+    path: /home/flip/models/gemma-4-31B-it-Q4_K_M.gguf
+    max_context: 262144
+    context: 216064
+    ngl: 99
+    kv_type: q4_0
+    tensor_split: "0.62,0.38"
+    extra_args: "--temp 0.6 --top-k 40"
   Qwen3-30B-A3B-Thinking-2507:
     path: /home/flip/models/Qwen3-30B-A3B-Thinking-2507-Q4_K_M.gguf
     max_context: 262144
@@ -164,6 +181,7 @@ models:
 # Short names that resolve to full model names above.
 # Use in API requests: {"model": "qwen3-35b-uncensored"}
 aliases:
+  qwen3.6-35b: "Qwen3.6-35B-A3B"
   qwen3-35b-uncensored: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
   qwen3-35b-uncensored-agent: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Agent"
   qwen3-35b-reasoning-agent: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Reasoning-Agent"
