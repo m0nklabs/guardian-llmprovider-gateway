@@ -16,6 +16,7 @@ Skip from normal unit test runs:
 
 import json
 import os
+import subprocess
 import time
 from typing import Generator
 
@@ -57,6 +58,67 @@ def _resolve_api_key() -> str:
 
 def _auth_headers() -> dict:
     return {"Authorization": f"Bearer {_resolve_api_key()}"}
+
+
+def _get_status_payload(timeout: float = FAST_TIMEOUT) -> dict:
+    resp = httpx.get(
+        f"{GUARDIAN_URL}/api/status",
+        headers=_auth_headers(),
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _resolve_restart_command() -> list[str]:
+    configured_unit = os.environ.get("GUARDIAN_RESTART_UNIT")
+    configured_scope = os.environ.get("GUARDIAN_RESTART_SCOPE")
+    if configured_unit:
+        if configured_scope == "user":
+            return ["systemctl", "--user", "restart", configured_unit]
+        return ["sudo", "-n", "systemctl", "restart", configured_unit]
+
+    status = _get_status_payload()
+    listener = status.get("proxy", {}).get("listener") or {}
+    unit = listener.get("systemd_unit")
+    cgroup = listener.get("cgroup") or ""
+    if not unit:
+        pytest.skip("Guardian listener is not attached to a systemd service")
+    if "/user.slice/" in cgroup:
+        return ["systemctl", "--user", "restart", unit]
+    return ["sudo", "-n", "systemctl", "restart", unit]
+
+
+def _wait_for_guardian_status(timeout: float = 30.0) -> dict:
+    deadline = time.monotonic() + timeout
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            return _get_status_payload(timeout=5.0)
+        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            last_error = exc
+            time.sleep(0.25)
+    pytest.fail(f"Guardian did not become reachable after restart: {last_error}")
+
+
+def _admin_load_with_retry(model: str, timeout: float = 45.0) -> httpx.Response:
+    deadline = time.monotonic() + timeout
+    last_error: Exception | None = None
+    while time.monotonic() < deadline:
+        try:
+            response = httpx.post(
+                f"{GUARDIAN_URL}/admin/load",
+                headers=_auth_headers(),
+                json={"model": model},
+                timeout=httpx.Timeout(REQUEST_TIMEOUT, connect=5.0),
+            )
+            if response.status_code == 200:
+                return response
+            last_error = RuntimeError(f"admin/load returned {response.status_code}: {response.text}")
+        except (httpx.RequestError, httpx.TimeoutException) as exc:
+            last_error = exc
+        time.sleep(0.25)
+    pytest.fail(f"admin/load did not succeed after restart: {last_error}")
 
 
 # ---------------------------------------------------------------------------
@@ -127,8 +189,48 @@ class TestStatus:
         assert resp.status_code == 200
         data = resp.json()
         assert "current_model" in data
+        assert "startup" in data
+        assert "switch" in data
+        assert "queue" in data
+        assert "routing" in data
+        assert "proxy" in data
         assert "vram" in data
         assert "backend_url" in data
+
+
+class TestRestartRace:
+    """Regression coverage for live restart plus immediate operator actions."""
+
+    def test_restart_then_admin_load_alias_then_chat(self):
+        restart_cmd = _resolve_restart_command()
+        result = subprocess.run(restart_cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode != 0:
+            pytest.skip(f"Could not restart Guardian for live restart test: {result.stderr.strip()}")
+
+        load_response = _admin_load_with_retry("qwen3-35b-uncensored")
+        assert load_response.status_code == 200
+
+        status = _wait_for_guardian_status()
+        assert status["startup"]["requested_model"] == "qwen3-35b-uncensored"
+        assert status["routing"]["tool_model"]
+        assert status["proxy"]["listener"]["systemd_unit"]
+
+        chat = httpx.post(
+            f"{GUARDIAN_URL}/v1/chat/completions",
+            headers=_auth_headers(),
+            json={
+                "model": "auto",
+                "messages": [{"role": "user", "content": "Reply with exactly: OK"}],
+                "max_tokens": 16,
+                "temperature": 0.0,
+            },
+            timeout=httpx.Timeout(REQUEST_TIMEOUT, connect=5.0),
+        )
+        assert chat.status_code == 200, chat.text
+        payload = chat.json()
+        message = payload["choices"][0]["message"]
+        content = message.get("content") or message.get("reasoning_content") or ""
+        assert "OK" in content
 
     def test_api_status_vram_fields(self, fast_client: httpx.Client):
         """VRAM data contains used/free/total."""
@@ -149,6 +251,9 @@ class TestStatus:
         # Each model entry should have an id
         for model in data["data"]:
             assert "id" in model
+            assert "context" in model
+            assert "benchmark_context_limit" in model
+            assert "max_context" in model
 
     def test_api_tags(self, fast_client: httpx.Client):
         """GET /api/tags returns Ollama-compatible model list."""

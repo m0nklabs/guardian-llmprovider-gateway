@@ -16,10 +16,25 @@
 - Restored `gemma4-agent` to the stable 26B Agent Zero profile after the 31B uncensored route proved too slow for default AZ work.
 
 ### Fixed
+- Guardian now starts answering on `11434` immediately after restart by running startup model verification in the background instead of holding FastAPI startup open until `llama-server` on `11440` finishes warming up.
+- Guardian no longer kills `systemctl --user restart llama-guardian-live.service` because of a momentarily live `guardian.pid`; the PID-file guard now overwrites old entries and relies on socket binding to reject real duplicate listeners.
+- `/admin/load` now accepts public model aliases such as `qwen3-35b-uncensored` and serializes manual loads behind the shared model-switch lock so operator-triggered loads cannot race the background startup check.
+- Guardian runtime status now uses generation-tracked operation snapshots, so an older background startup task cannot overwrite a newer manual load or auto-switch status in `/api/status`.
+- `/api/status` now exposes richer proxy/routing diagnostics, including the live listener owner, pid-file state, preferred tool/reasoning models, and backend verification metadata for faster live debugging.
+- `/api/status` now also exposes explicit switch-state diagnostics (`pending`/`checking`/`switching`/`ready`), queue state, current requested target, switch owner, and the last successful backend verification timestamp.
+- Auto-routed inference requests now prefer a tool-friendly sibling profile when the current family is an unbounded reasoning model, which keeps `model: auto` practical for tool clients without changing explicit model requests.
+- Ollama-compatible `/api/chat` and `/api/generate` responses now fall back to `reasoning_content` when a reasoning model emits no visible `content`, so tool clients no longer see a misleading empty answer.
+- The live integration suite now includes a restart-race regression that restarts the active Guardian systemd unit, immediately issues `/admin/load` with an alias, checks `/api/status`, and runs a mini chat request.
+- `/api/status` now exposes a `startup` object so authenticated clients can tell whether Guardian is still verifying the backend model, already ready, or ended startup with an error.
+- Claude Code can now switch Guardian models with its dedicated `claudecode_*` API key instead of inheriting whichever sibling app model was already loaded, which prevented restarts from getting stuck on NerveSplat's lighter `gemma4-e4b` runtime.
 - Anthropic-compatible clients such as Claude Code now authenticate successfully through Guardian because the proxy accepts `x-api-key` and `api-key` headers in addition to OpenAI-style `Authorization: Bearer` tokens.
 - OpenAI-compatible inference requests now detect a stale stopped `llama-server` backend, reload the active model once, and retry instead of leaking an ASGI 500 traceback to Agent Zero/LiteLLM clients.
 - Startup model detection now distinguishes profiles that share the same GGUF path by matching generated runtime args, preventing the non-thinking Qwen agent profile from being mistaken for the deep-reasoning profile after Guardian restarts.
 - Forced a live unload/reload of the Qwen3.6 reasoning agent after the context bump and verified Guardian rewrote `current_model.args` to `-c 131072`, confirming the hotfix was actually live instead of only sitting in YAML.
+- `/v1/models` now includes configured aliases alongside canonical model names, so clients that talk to Guardian through IDs such as `qwen3-35b-uncensored` can resolve metadata for the exact model string they send.
+- Guardian runtime sizing now treats `context` as the only active runtime window; `benchmark_context_limit` is treated as a separate benchmark or paper ceiling instead of feeding the advertised runtime headroom calculation.
+- `/v1/models` now exposes the benchmark ceiling under the clearer `benchmark_context_limit` field alongside the configured runtime `context` and the conservative `advertised_context` headroom field.
+- Claude Code specifically still receives the conservative `advertised_context` value through the OpenAI-compatible `max_context` response field because this Claude build compacts against that field only; the response keeps the explicit runtime and benchmark fields visible next to that compatibility override.
 
 ## [2026-05-06] - Model Registry Cleanup, Qwen 3.6, Gemma Deep, and Load Guard
 

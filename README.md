@@ -120,7 +120,7 @@ Defines per-model runtime behavior:
 models:
   Qwen3.6-35B-A3B-HauhauCS-Aggressive:
     path: /home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf
-    max_context: 131072
+    benchmark_context_limit: 131072
     context: 131072
     ngl: 99
     kv_type: q4_0
@@ -129,7 +129,7 @@ models:
 
   Qwen3.6-35B-A3B-HauhauCS-Aggressive-Agent:
     path: /home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf
-    max_context: 131072
+    benchmark_context_limit: 131072
     context: 65536
     ngl: 99
     kv_type: q4_0
@@ -138,7 +138,7 @@ models:
 
   Qwen3.6-35B-A3B-HauhauCS-Aggressive-Reasoning-Agent:
     path: /home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf
-    max_context: 131072
+    benchmark_context_limit: 131072
     context: 65536
     ngl: 99
     kv_type: q4_0
@@ -147,7 +147,7 @@ models:
 
   Huihui-gemma-4-26B-A4B-it-abliterated-Agent:
     path: /home/flip/models/gemma-4-26B-A4B.unsloth-imatrix-UD-Q4_K_XL.gguf
-    max_context: 262144
+    benchmark_context_limit: 262144
     context: 65536
     ngl: 99
     kv_type: q4_0
@@ -156,7 +156,7 @@ models:
 
   gemma-4-31B-it-uncensored-heretic-Deep:
     path: /home/flip/models/gemma-4-31B-it-uncensored-heretic-Q4_K_M.gguf
-    max_context: 262144
+    benchmark_context_limit: 262144
     context: 216064
     ngl: 99
     kv_type: q4_0
@@ -179,7 +179,10 @@ guardian:
   idle_unload_minutes: 5
 ```
 
-Supported per-model fields: `path`, `context`, `max_context`, `ngl`, `kv_type`, `backend`, `tensor_split`, `mmproj`, `extra_args`.
+Supported per-model fields: `path`, `context`, `benchmark_context_limit`, `ngl`, `kv_type`, `backend`, `tensor_split`, `mmproj`, `extra_args`.
+
+- `context`: the active runtime context Guardian actually loads for the model.
+- `benchmark_context_limit`: the benchmark or paper ceiling where testing higher stops being useful; Guardian does not use it as the active runtime window.
 
 ### `config/settings.yaml` — System Configuration
 

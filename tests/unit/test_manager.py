@@ -233,6 +233,82 @@ class TestIdentifyModelByPath:
         assert result is None
 
 
+class TestAdvertisedContextWindow:
+    def test_uses_runtime_context_not_theoretical_max(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.models["GLM-4.7-Flash"]["context"] = 8192
+        mgr.models["GLM-4.7-Flash"]["benchmark_context_limit"] = 16384
+
+        assert mgr.get_advertised_context_window("GLM-4.7-Flash") == 7168
+
+    def test_keeps_headroom_for_large_contexts(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.models["GLM-4.7-Flash"]["context"] = 131072
+        mgr.models["GLM-4.7-Flash"]["benchmark_context_limit"] = 131072
+
+        assert mgr.get_advertised_context_window("GLM-4.7-Flash") == 126976
+
+    def test_allows_explicit_advertised_override(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.models["GLM-4.7-Flash"]["context"] = 216064
+        mgr.models["GLM-4.7-Flash"]["benchmark_context_limit"] = 262144
+        mgr.models["GLM-4.7-Flash"]["advertised_context"] = 200000
+
+        assert mgr.get_advertised_context_window("GLM-4.7-Flash") == 200000
+
+    def test_returns_none_without_runtime_context(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.models["GLM-4.7-Flash"].pop("context", None)
+        mgr.models["GLM-4.7-Flash"].pop("ctx", None)
+        mgr.models["GLM-4.7-Flash"]["benchmark_context_limit"] = 16384
+
+        assert mgr.get_advertised_context_window("GLM-4.7-Flash") is None
+
+
+class TestContextWindowFields:
+    def test_runtime_context_uses_configured_context(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.models["GLM-4.7-Flash"]["context"] = 8192
+        mgr.models["GLM-4.7-Flash"]["benchmark_context_limit"] = 16384
+
+        assert mgr.get_runtime_context_window("GLM-4.7-Flash") == 8192
+
+    def test_benchmark_limit_reads_model_cap(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.models["GLM-4.7-Flash"]["context"] = 8192
+        mgr.models["GLM-4.7-Flash"]["benchmark_context_limit"] = 16384
+
+        assert mgr.get_benchmark_context_limit("GLM-4.7-Flash") == 16384
+
+    def test_benchmark_limit_does_not_fall_back_to_runtime(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.models["GLM-4.7-Flash"]["context"] = 8192
+        mgr.models["GLM-4.7-Flash"].pop("benchmark_context_limit", None)
+
+        assert mgr.get_benchmark_context_limit("GLM-4.7-Flash") is None
+
+
+class TestPublicModelMap:
+    def test_includes_valid_aliases(self, tmp_path: Path):
+        models_yaml = (
+            SAMPLE_MODELS_YAML
+            + """
+aliases:
+  glm-flash: GLM-4.7-Flash
+  qwen-fast: Qwen3-30B-A3B
+  missing: Missing-Model
+"""
+        )
+        mgr = _make_manager(tmp_path, models_yaml=models_yaml)
+
+        public_models = mgr.get_public_model_map()
+
+        assert public_models["GLM-4.7-Flash"] == "GLM-4.7-Flash"
+        assert public_models["glm-flash"] == "GLM-4.7-Flash"
+        assert public_models["qwen-fast"] == "Qwen3-30B-A3B"
+        assert "missing" not in public_models
+
+
 # ── _get_backend_model_path ───────────────────────────────────────────
 
 
@@ -537,3 +613,38 @@ aliases:
         # Falls through alias (target not in models), then case-insensitive, then raises
         with pytest.raises(ValueError, match="not found"):
             mgr.resolve_model("broken")
+
+
+TOOL_ROUTING_YAML = """\
+models:
+    Qwen-Deep:
+        path: /models/qwen.gguf
+        context: 131072
+        extra_args: "--reasoning on --reasoning-budget -1"
+    Qwen-Agent:
+        path: /models/qwen.gguf
+        context: 65536
+        extra_args: "--chat-template-file /tmp/qwen_nonthinking.jinja"
+    Qwen-Bounded:
+        path: /models/qwen.gguf
+        context: 65536
+        extra_args: "--reasoning on --reasoning-budget 2048"
+    Other-Model:
+        path: /models/other.gguf
+        context: 32768
+        extra_args: "--reasoning-budget 0"
+"""
+
+
+class TestPreferredModelRecommendations:
+        def test_prefers_tool_friendly_sibling_for_reasoning_model(self, tmp_path: Path):
+                mgr = _make_manager(tmp_path, models_yaml=TOOL_ROUTING_YAML)
+                assert mgr.get_preferred_tool_model("Qwen-Deep") == "Qwen-Agent"
+
+        def test_tool_friendly_model_returns_itself(self, tmp_path: Path):
+                mgr = _make_manager(tmp_path, models_yaml=TOOL_ROUTING_YAML)
+                assert mgr.get_preferred_tool_model("Qwen-Agent") == "Qwen-Agent"
+
+        def test_prefers_unbounded_reasoning_sibling(self, tmp_path: Path):
+                mgr = _make_manager(tmp_path, models_yaml=TOOL_ROUTING_YAML)
+                assert mgr.get_preferred_reasoning_model("Qwen-Agent") == "Qwen-Deep"

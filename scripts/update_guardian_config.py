@@ -5,7 +5,7 @@ import os
 BENCHMARK_FILE = '/home/flip/llama_cpp_guardian/docs/benchmark_results.json'
 CONFIG_FILE = '/home/flip/llama_cpp_guardian/config/models.yaml'
 
-def get_max_contexts():
+def get_recommended_contexts():
     if not os.path.exists(BENCHMARK_FILE):
         return {}
     
@@ -38,8 +38,8 @@ def get_max_contexts():
     return final_ctx
 
 def update_config():
-    max_contexts = get_max_contexts()
-    if not max_contexts:
+    recommended_contexts = get_recommended_contexts()
+    if not recommended_contexts:
         print("No benchmark data found.")
         return
 
@@ -59,8 +59,8 @@ def update_config():
                 path_val = parts[1].strip().split('#')[0].strip()
                 base_name = os.path.basename(path_val)
                 
-                if base_name in max_contexts:
-                    current_target_ctx = max_contexts[base_name]
+                if base_name in recommended_contexts:
+                    current_target_ctx = recommended_contexts[base_name]
                     # Print update plan for verify
                     # print(f"  Matched {base_name} -> {current_target_ctx}")
                 else:

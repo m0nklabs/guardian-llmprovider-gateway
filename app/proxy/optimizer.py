@@ -87,13 +87,13 @@ class RequestOptimizer:
             
         logger.info(f"Loaded optimizations for {len(self.best_configs)} models")
 
-    def optimize_options(self, model_name: str, current_options: Dict, max_context: Optional[int] = None) -> Dict:
+    def optimize_options(self, model_name: str, current_options: Dict, context_limit: Optional[int] = None) -> Dict:
         """Injects optimized settings if they are not explicitly set by the user.
         
         Args:
             model_name: Name of the model to optimize for.
             current_options: Current request options dict.
-            max_context: Optional max_context from models.yaml — caps injected num_ctx.
+            context_limit: Optional runtime context cap for injected num_ctx.
         """
         self.load_benchmarks() # Check for updates
         
@@ -119,10 +119,10 @@ class RequestOptimizer:
         # Only inject if NOT present in request (respect user overrides)
         if "num_ctx" not in optimized:
             injected_ctx = best["num_ctx"]
-            # Clamp to max_context if defined in models.yaml
-            if max_context and injected_ctx > max_context:
-                logger.info(f"⚡ Clamping num_ctx {injected_ctx} → {max_context} (max_context limit)")
-                injected_ctx = max_context
+            # Clamp to the active runtime context limit if one is provided.
+            if context_limit and injected_ctx > context_limit:
+                logger.info(f"⚡ Clamping num_ctx {injected_ctx} → {context_limit} (context limit)")
+                injected_ctx = context_limit
             optimized["num_ctx"] = injected_ctx
             logger.info(f"⚡ Optimized {model_name}: Injected num_ctx={injected_ctx} (Verified Context)")
             

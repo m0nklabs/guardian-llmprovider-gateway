@@ -9,7 +9,7 @@ import httpx
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 
 logger = logging.getLogger("model-manager")
 
@@ -63,6 +63,10 @@ class ModelManager:
         self._pinned_model: Optional[str] = self._load_pinned_model()
         self._switch_allowlist: Set[str] = self._load_switch_allowlist()
         self._model_verified = False  # True after startup verification passes
+        self._last_verification_at: Optional[str] = None
+        self._last_successful_verification_at: Optional[str] = None
+        self._last_verified_model: Optional[str] = None
+        self._last_backend_model: Optional[str] = None
 
         # Initial model: use pinned model if set, otherwise fallback
         self.current_model = self._pinned_model or self._detect_initial_model()
@@ -140,6 +144,163 @@ class ModelManager:
                 return model_name
 
         raise ValueError(f"Model '{name}' not found in configuration (no alias match)")
+
+    def _uses_reasoning(self, config: Dict) -> bool:
+        extra_args = str(config.get("extra_args", ""))
+        return "--reasoning on" in extra_args
+
+    def _is_tool_friendly_config(self, config: Dict) -> bool:
+        extra_args = str(config.get("extra_args", ""))
+        return (
+            "chat-template-file" in extra_args
+            or "--reasoning-budget 0" in extra_args
+            or not self._uses_reasoning(config)
+        )
+
+    def _matching_model_candidates(self, model_name: str) -> List[str]:
+        config = self.models.get(model_name, {})
+        if not config:
+            return []
+
+        path = config.get("path")
+        backend = config.get("backend", DEFAULT_BACKEND)
+        mmproj = config.get("mmproj")
+        candidates: List[str] = []
+        for candidate_name, candidate_cfg in self.models.items():
+            if candidate_name == model_name:
+                continue
+            if candidate_cfg.get("path") != path:
+                continue
+            if candidate_cfg.get("backend", DEFAULT_BACKEND) != backend:
+                continue
+            if candidate_cfg.get("mmproj") != mmproj:
+                continue
+            candidates.append(candidate_name)
+        return candidates
+
+    def _sort_preferred_candidates(self, model_names: List[str]) -> List[str]:
+        def sort_key(name: str):
+            cfg = self.models.get(name, {})
+            extra_args = str(cfg.get("extra_args", ""))
+            context = self.get_runtime_context_window(name) or 0
+            return (
+                0 if "Agent" in name else 1,
+                0 if self._is_tool_friendly_config(cfg) else 1,
+                0 if "chat-template-file" in extra_args else 1,
+                -context,
+                name,
+            )
+
+        return sorted(model_names, key=sort_key)
+
+    def get_preferred_tool_model(self, model_name: Optional[str] = None) -> Optional[str]:
+        """Return a tool-friendly sibling profile for a model family when available."""
+        target = model_name or self.current_model
+        config = self.models.get(target)
+        if not config:
+            return None
+        if self._is_tool_friendly_config(config):
+            return target
+
+        candidates = [
+            name for name in self._matching_model_candidates(target)
+            if self._is_tool_friendly_config(self.models.get(name, {}))
+        ]
+        if not candidates:
+            return target
+        return self._sort_preferred_candidates(candidates)[0]
+
+    def get_preferred_reasoning_model(self, model_name: Optional[str] = None) -> Optional[str]:
+        """Return the deepest reasoning-capable sibling profile for a model family."""
+        target = model_name or self.current_model
+        config = self.models.get(target)
+        if not config:
+            return None
+        if self._uses_reasoning(config):
+            return target
+
+        candidates = [
+            name for name in self._matching_model_candidates(target)
+            if self._uses_reasoning(self.models.get(name, {}))
+        ]
+        if not candidates:
+            return target
+
+        def sort_key(name: str):
+            cfg = self.models.get(name, {})
+            extra_args = str(cfg.get("extra_args", ""))
+            context = self.get_runtime_context_window(name) or 0
+            unbounded_reasoning = "--reasoning-budget -1" in extra_args
+            return (
+                0 if unbounded_reasoning else 1,
+                -context,
+                name,
+            )
+
+        return sorted(candidates, key=sort_key)[0]
+
+    def get_advertised_context_window(self, model_name: str) -> Optional[int]:
+        """Return a conservative context window to advertise to clients.
+
+        Use the active runtime profile size only, then reserve a small headroom
+        buffer so clients compact before hitting the llama.cpp hard limit.
+
+        The separate benchmark_context_limit value in models.yaml is treated as
+        a benchmark or paper ceiling, not as part of Guardian's runtime sizing
+        logic.
+        """
+        config = self.models.get(model_name, {})
+        runtime_context = self.get_runtime_context_window(model_name)
+
+        if runtime_context is None:
+            return None
+
+        advertised_override = config.get("advertised_context")
+        if isinstance(advertised_override, int) and advertised_override > 0:
+            return min(advertised_override, runtime_context)
+
+        headroom = max(1024, min(4096, runtime_context // 32))
+        return max(1024, runtime_context - headroom)
+
+    def get_runtime_context_window(self, model_name: str) -> Optional[int]:
+        """Return the configured runtime context for a model, if set."""
+        config = self.models.get(model_name, {})
+        configured_context = config.get("context", config.get("ctx"))
+        if isinstance(configured_context, int) and configured_context > 0:
+            return configured_context
+        return None
+
+    def get_benchmark_context_limit(self, model_name: str) -> Optional[int]:
+        """Return the non-runtime benchmark ceiling from models.yaml.
+
+        This mirrors the config's benchmark_context_limit semantics: the paper
+        or tested upper bound where further benchmark attempts stop being useful.
+        Guardian should not treat it as the active runtime context.
+        """
+        config = self.models.get(model_name, {})
+        benchmark_context_limit = config.get("benchmark_context_limit")
+        if isinstance(benchmark_context_limit, int) and benchmark_context_limit > 0:
+            return benchmark_context_limit
+        return None
+
+    def get_public_model_map(self) -> Dict[str, str]:
+        """Return public model IDs mapped to their canonical model names.
+
+        Include both canonical model names and valid aliases so OpenAI-compatible
+        clients can look up metadata using the exact ID they use
+        for inference requests.
+        """
+        public_models: Dict[str, str] = {name: name for name in self.models}
+
+        for alias, target in self._load_aliases().items():
+            if alias in public_models:
+                continue
+            if target not in self.models:
+                logger.warning(f"⚠️ Skipping alias '{alias}' in public model list; target '{target}' not found")
+                continue
+            public_models[alias] = target
+
+        return public_models
 
     @property
     def pinned_model(self) -> Optional[str]:
@@ -222,6 +383,10 @@ class ModelManager:
             if actual_gguf == expected_gguf:
                 logger.info(f"✅ Backend model verified: {self.current_model} ({Path(actual_gguf).name})")
                 self._model_verified = True
+                self._last_verification_at = datetime.now(UTC).isoformat()
+                self._last_successful_verification_at = self._last_verification_at
+                self._last_verified_model = self.current_model
+                self._last_backend_model = self.current_model
                 return True
             else:
                 # MISMATCH — find which model is actually loaded
@@ -231,9 +396,12 @@ class ModelManager:
                     f"but backend runs: {actual_model_name or 'UNKNOWN'} ({Path(actual_gguf).name})"
                 )
                 self._model_verified = False
+                self._last_verification_at = datetime.now(UTC).isoformat()
+                self._last_backend_model = actual_model_name
                 return False
         except Exception as e:
             logger.error(f"❌ Backend verification failed: {e}")
+            self._last_verification_at = datetime.now(UTC).isoformat()
             return False
 
     def _get_backend_model_path(self) -> Optional[str]:

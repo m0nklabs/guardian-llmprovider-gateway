@@ -95,14 +95,14 @@ class TestOptimizeOptions:
         # User-set value must not be overridden
         assert result["num_ctx"] == 4096
 
-    def test_clamps_to_max_context(self, tmp_path: Path):
+    def test_clamps_to_context_limit(self, tmp_path: Path):
         opt = _make_optimizer(tmp_path, state=SAMPLE_BENCHMARK_STATE)
-        result = opt.optimize_options("GLM-4.7-Flash", {}, max_context=4096)
+        result = opt.optimize_options("GLM-4.7-Flash", {}, context_limit=4096)
         assert result["num_ctx"] == 4096  # Clamped from 8192
 
     def test_no_clamp_when_within_limit(self, tmp_path: Path):
         opt = _make_optimizer(tmp_path, state=SAMPLE_BENCHMARK_STATE)
-        result = opt.optimize_options("GLM-4.7-Flash", {}, max_context=16384)
+        result = opt.optimize_options("GLM-4.7-Flash", {}, context_limit=16384)
         assert result["num_ctx"] == 8192  # No clamping needed
 
     def test_unknown_model_returns_unchanged(self, tmp_path: Path):

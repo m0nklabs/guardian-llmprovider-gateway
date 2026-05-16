@@ -1,14 +1,14 @@
 models:
   Step3-VL-10B:
     path: /home/flip/models/Step3-VL-10B-F16.gguf
-    max_context: 65536
+    benchmark_context_limit: 65536
     context: 32768
     ngl: 99
     tensor_split: "0.55,0.45"
     mmproj: /home/flip/models/mmproj-Step3-VL-10B-F16.gguf
   Ministral-3-14B-Reasoning-2512:
     path: /home/flip/models/Ministral-3-14B-Reasoning-2512-Q8_0.gguf
-    max_context: 262144
+    benchmark_context_limit: 262144
     context: 32768
     ngl: 99
     kv_type: f16
@@ -16,19 +16,19 @@ models:
 
   nomic-embed-text-v2-moe.f16:
     path: /home/flip/models/nomic-embed-text-v2-moe.f16.gguf
-    max_context: 512
+    benchmark_context_limit: 512
     context: 32768
     ngl: 99
   Phi-4-reasoning-plus:
     path: /home/flip/models/Phi-4-reasoning-plus-Q8_0.gguf
-    max_context: 32768
+    benchmark_context_limit: 32768
     context: 131072
     ngl: 99
     kv_type: f16
     tensor_split: "0.55,0.45"
   Qwen3-VL-30B-A3B-Thinking:
     path: /home/flip/models/Qwen3-VL-30B-A3B-Thinking-Q4_K_M.gguf
-    max_context: 262144
+    benchmark_context_limit: 262144
     context: 32768
     ngl: 99
     kv_type: f16
@@ -37,19 +37,19 @@ models:
     extra_args: "-nkvo"
   llama3.2-3b:
     path: /home/flip/models/llama3.2-3b.gguf
-    max_context: 131072
+    benchmark_context_limit: 131072
     context: 131072
     ngl: 99
     kv_type: f16
   nomic-embed-text-cpu:
     path: /home/flip/models/nomic-embed-text-cpu.gguf
-    max_context: 2048
+    benchmark_context_limit: 2048
     context: 32768
     ngl: 99
 
   Qwen3.6-35B-A3B:
     path: /home/flip/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
-    max_context: 262144
+    benchmark_context_limit: 262144
     context: 131072
     ngl: 99
     kv_type: q4_0
@@ -58,7 +58,7 @@ models:
 
   gemma-4-31B-it:
     path: /home/flip/models/gemma-4-31B-it-Q4_K_M.gguf
-    max_context: 262144
+    benchmark_context_limit: 262144
     context: 216064
     ngl: 99
     kv_type: q4_0
@@ -66,7 +66,7 @@ models:
     extra_args: "--temp 0.6 --top-k 40"
   Qwen3-30B-A3B-Thinking-2507:
     path: /home/flip/models/Qwen3-30B-A3B-Thinking-2507-Q4_K_M.gguf
-    max_context: 262144
+    benchmark_context_limit: 262144
     context: 131072
     ngl: 99
     kv_type: q8_0
@@ -74,14 +74,14 @@ models:
     extra_args: "-nkvo"
   Nemotron-3-Nano-30B-A3B:
     path: /home/flip/models/Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf
-    max_context: 1048576
+    benchmark_context_limit: 1048576
     context: 262144
     ngl: 99
     kv_type: q4_0
     tensor_split: "0.58,0.42"
   Qwen3-VL-32B-Gemini-Heretic-Uncensored-Thinking:
     path: /home/flip/models/Qwen3-VL-32B-Gemini-Heretic-Uncensored-Thinking.Q4_K_M.gguf
-    max_context: 262144
+    benchmark_context_limit: 262144
     context: 32768
     ngl: 99
     kv_type: q4_0
@@ -90,7 +90,7 @@ models:
     extra_args: "-nkvo"
   Huihui-gemma-4-26B-A4B-it-abliterated:
     path: /home/flip/models/gemma-4-26B-A4B.unsloth-imatrix-UD-Q4_K_XL.gguf
-    max_context: 262144
+    benchmark_context_limit: 262144
     context: 262144
     ngl: 99
     kv_type: q4_0
@@ -99,7 +99,7 @@ models:
     extra_args: "-nkvo"
   Huihui-gemma-4-26B-A4B-it-abliterated-Agent:
     path: /home/flip/models/gemma-4-26B-A4B.unsloth-imatrix-UD-Q4_K_XL.gguf
-    max_context: 262144
+    benchmark_context_limit: 262144
     context: 65536
     ngl: 99
     kv_type: q4_0
@@ -108,7 +108,7 @@ models:
     extra_args: "-nkvo --reasoning-budget 0 --temp 0.7 --top-k 40"
   gemma-4-31B-it-uncensored-heretic:
     path: /home/flip/models/gemma-4-31B-it-uncensored-heretic-Q4_K_M.gguf
-    max_context: 262144
+    benchmark_context_limit: 262144
     context: 262144
     ngl: 99
     kv_type: q4_0
@@ -117,7 +117,7 @@ models:
     extra_args: "-nkvo --reasoning-budget 1024 --repeat-penalty 1.3 --repeat-last-n 128 --dry-multiplier 1.0 --dry-base 1.75 --dry-penalty-last-n 256 --temp 0.6 --top-k 40"
   gemma-4-31B-it-uncensored-heretic-Deep:
     path: /home/flip/models/gemma-4-31B-it-uncensored-heretic-Q4_K_M.gguf
-    max_context: 262144
+    benchmark_context_limit: 262144
     context: 216064
     ngl: 99
     kv_type: q4_0
@@ -125,7 +125,7 @@ models:
     extra_args: "--reasoning on --reasoning-budget -1 --repeat-penalty 1.3 --repeat-last-n 128 --dry-multiplier 1.0 --dry-base 1.75 --dry-penalty-last-n 256 --temp 0.6 --top-k 40"
   gemma-4-31B-it-uncensored-heretic-Max-Agent:
     path: /home/flip/models/gemma-4-31B-it-uncensored-heretic-Q4_K_M.gguf
-    max_context: 262144
+    benchmark_context_limit: 262144
     context: 65536
     ngl: 99
     kv_type: q4_0
@@ -136,7 +136,7 @@ models:
     extra_args: "-nkvo --reasoning on --reasoning-budget -1 --repeat-penalty 1.3 --repeat-last-n 128 --dry-multiplier 1.0 --dry-base 1.75 --dry-penalty-last-n 512 --temp 0.6 --top-k 40"
   gemma-4-E4B-it-uncensored:
     path: /home/flip/models/gemma-4-E4B-it-uncensored-Q4_K_M.gguf
-    max_context: 131072
+    benchmark_context_limit: 131072
     context: 32768
     ngl: 99
     kv_type: f16
@@ -146,7 +146,7 @@ models:
 
   Qwen3.6-35B-A3B-HauhauCS-Aggressive:
     path: /home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf
-    max_context: 131072
+    benchmark_context_limit: 131072
     context: 131072
     ngl: 99
     kv_type: q4_0
@@ -158,7 +158,7 @@ models:
     extra_args: "--reasoning on --reasoning-format deepseek --reasoning-budget -1 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
   Qwen3.6-35B-A3B-HauhauCS-Aggressive-Agent:
     path: /home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf
-    max_context: 131072
+    benchmark_context_limit: 131072
     context: 131072
     ngl: 99
     kv_type: q4_0
@@ -169,7 +169,7 @@ models:
     extra_args: "--chat-template-file /home/flip/llama_cpp_guardian/config/qwen3_nonthinking.jinja --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
   Qwen3.6-35B-A3B-HauhauCS-Aggressive-Reasoning-Agent:
     path: /home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf
-    max_context: 131072
+    benchmark_context_limit: 131072
     context: 131072
     ngl: 99
     kv_type: q4_0
@@ -217,6 +217,7 @@ guardian:
   # Client names come from api_keys.json "name" field.
   switch_allowlist:
     - "m0nk111"
+    - "claudecode"
     - "oelala"
     - "kyberm0nk"
 

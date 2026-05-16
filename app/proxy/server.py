@@ -2,11 +2,12 @@ import os
 import json
 import asyncio
 import logging
+import re
+import signal
 import subprocess
 import time
-import sys
 import errno
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -93,11 +94,377 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Guardian")
 
 PID_FILE = "guardian.pid"
+PROXY_PORT = 11434
+_startup_check_task: Optional[asyncio.Task] = None
+_startup_check_status: Dict[str, Optional[object]] = {
+    "state": "idle",
+    "phase": "idle",
+    "source": None,
+    "owner": None,
+    "target_model": None,
+    "requested_model": None,
+    "effective_model": None,
+    "started_at": None,
+    "completed_at": None,
+    "error": None,
+    "generation": 0,
+}
+
+
+def _get_pid_file_path() -> Path:
+    return Path(__file__).parent.parent.parent / PID_FILE
+
+
+def _describe_process(pid: int) -> Optional[str]:
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "args="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip() or None
+    except Exception:
+        return None
+    return None
+
+
+def _get_process_cgroup(pid: int) -> Optional[str]:
+    try:
+        lines = Path(f"/proc/{pid}/cgroup").read_text().splitlines()
+    except Exception:
+        return None
+
+    for line in lines:
+        parts = line.split(":", 2)
+        if len(parts) == 3 and parts[2]:
+            return parts[2]
+    return None
+
+
+def _get_proxy_listener_info(port: int = PROXY_PORT) -> Optional[Dict[str, Optional[object]]]:
+    try:
+        result = subprocess.run(
+            ["ss", "-ltnp", f"( sport = :{port} )"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return None
+
+        for line in result.stdout.splitlines():
+            if f":{port}" not in line or "pid=" not in line:
+                continue
+            pid_match = re.search(r"pid=(\d+)", line)
+            name_match = re.search(r'"([^"]+)"', line)
+            if not pid_match:
+                continue
+            pid = int(pid_match.group(1))
+            cgroup = _get_process_cgroup(pid)
+            systemd_unit = None
+            if cgroup:
+                cgroup_name = Path(cgroup).name
+                if cgroup_name.endswith(".service"):
+                    systemd_unit = cgroup_name
+            return {
+                "pid": pid,
+                "process_name": name_match.group(1) if name_match else None,
+                "command": _describe_process(pid),
+                "cgroup": cgroup,
+                "systemd_unit": systemd_unit,
+                "port": port,
+                "is_current_process": pid == os.getpid(),
+            }
+    except Exception as e:
+        logger.debug(f"Failed to inspect proxy listener on {port}: {e}")
+    return None
+
+
+def _get_pid_file_status() -> Dict[str, Optional[object]]:
+    pid_path = _get_pid_file_path()
+    status: Dict[str, Optional[object]] = {
+        "path": str(pid_path),
+        "exists": pid_path.exists(),
+        "pid": None,
+        "alive": None,
+    }
+    if not pid_path.exists():
+        return status
+
+    try:
+        raw = pid_path.read_text().strip()
+        if not raw:
+            return status
+        pid = int(raw)
+        status["pid"] = pid
+        try:
+            os.kill(pid, 0)
+            status["alive"] = True
+        except OSError as exc:
+            status["alive"] = exc.errno != errno.ESRCH
+    except Exception:
+        status["alive"] = False
+    return status
+
+
+async def _wait_for_proxy_listener_release(old_pid: int, timeout: float = 3.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        listener = _get_proxy_listener_info()
+        if listener is None or listener.get("pid") != old_pid:
+            return True
+        await asyncio.sleep(0.1)
+    return False
+
+
+def _operation_state_for_phase(phase: str) -> str:
+    if phase == "startup_check":
+        return "checking"
+    if phase in {"manual_load", "auto_switch", "auto_reload", "backend_reload"}:
+        return "switching"
+    return "running"
+
+
+def _startup_state_is_in_progress(state: Optional[str]) -> bool:
+    return state in {"pending", "running", "checking", "switching"}
+
+
+def _extract_assistant_message_text(message: Dict[str, object]) -> str:
+    content = str(message.get("content") or "")
+    if content:
+        return content
+    return str(message.get("reasoning_content") or "")
+
+
+def _extract_assistant_delta_text(delta: Dict[str, object]) -> str:
+    content = str(delta.get("content") or "")
+    if content:
+        return content
+    return str(delta.get("reasoning_content") or "")
+
+
+def _is_guardian_uvicorn_listener(listener: Optional[Dict[str, Optional[object]]]) -> bool:
+    if not listener:
+        return False
+    command = str(listener.get("command") or "")
+    repo_root = str(Path(__file__).parent.parent.parent)
+    return (
+        listener.get("process_name") == "uvicorn"
+        and "app.proxy.server:app" in command
+        and repo_root in command
+        and f"--port {PROXY_PORT}" in command
+    )
+
+
+async def _stop_stale_guardian_listener(
+    listener: Optional[Dict[str, Optional[object]]], timeout: float = 3.0
+) -> bool:
+    if not _is_guardian_uvicorn_listener(listener):
+        return False
+
+    pid = listener.get("pid")
+    if not isinstance(pid, int) or pid == os.getpid():
+        return False
+
+    logger.warning(
+        f"Terminating stale Guardian listener PID {pid} before binding port {PROXY_PORT}: "
+        f"{listener.get('command')}"
+    )
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError as exc:
+        if exc.errno == errno.ESRCH:
+            return True
+        raise
+
+    if await _wait_for_proxy_listener_release(pid, timeout=timeout):
+        return True
+
+    logger.warning(f"Stale Guardian listener PID {pid} ignored SIGTERM; sending SIGKILL")
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError as exc:
+        if exc.errno != errno.ESRCH:
+            raise
+
+    return await _wait_for_proxy_listener_release(pid, timeout=1.0)
+
+
+def _reset_startup_check_status(
+    *,
+    source: str,
+    phase: str,
+    target_model: Optional[str],
+    requested_model: Optional[str] = None,
+    owner: Optional[str] = None,
+) -> int:
+    generation = int(_startup_check_status.get("generation", 0)) + 1
+    _startup_check_status.update(
+        {
+            "state": "pending",
+            "phase": phase,
+            "source": source,
+            "owner": owner,
+            "target_model": target_model,
+            "requested_model": requested_model,
+            "effective_model": None,
+            "started_at": None,
+            "completed_at": None,
+            "error": None,
+            "generation": generation,
+        }
+    )
+    return generation
+
+
+def _mark_startup_check_status(
+    state: str,
+    error: Optional[str] = None,
+    *,
+    generation: Optional[int] = None,
+    phase: Optional[str] = None,
+    source: Optional[str] = None,
+    owner: Optional[str] = None,
+    target_model: Optional[str] = None,
+    requested_model: Optional[str] = None,
+    effective_model: Optional[str] = None,
+) -> None:
+    if generation is not None and generation != _startup_check_status.get("generation"):
+        return
+
+    now = time.time()
+    _startup_check_status["state"] = state
+    if phase is not None:
+        _startup_check_status["phase"] = phase
+    if source is not None:
+        _startup_check_status["source"] = source
+    if owner is not None:
+        _startup_check_status["owner"] = owner
+    if target_model is not None:
+        _startup_check_status["target_model"] = target_model
+    if requested_model is not None:
+        _startup_check_status["requested_model"] = requested_model
+    if effective_model is not None:
+        _startup_check_status["effective_model"] = effective_model
+    if _startup_state_is_in_progress(state):
+        _startup_check_status["started_at"] = now
+        _startup_check_status["completed_at"] = None
+        _startup_check_status["error"] = None
+        return
+
+    if _startup_check_status["started_at"] is None:
+        _startup_check_status["started_at"] = now
+    _startup_check_status["completed_at"] = now
+    _startup_check_status["error"] = error
+
+
+def _get_startup_check_status() -> Dict[str, Optional[object]]:
+    snapshot = dict(_startup_check_status)
+    snapshot["task_active"] = _startup_check_task is not None and not _startup_check_task.done()
+    return snapshot
+
+
+async def _run_guardian_operation(
+    *,
+    source: str,
+    phase: str,
+    target_model: Optional[str],
+    requested_model: Optional[str],
+    owner: Optional[str],
+    operation,
+    generation: int,
+):
+    in_progress_state = _operation_state_for_phase(phase)
+    _mark_startup_check_status(
+        in_progress_state,
+        generation=generation,
+        source=source,
+        phase=phase,
+        owner=owner,
+        target_model=target_model,
+        requested_model=requested_model,
+    )
+
+    try:
+        result = await operation()
+    except asyncio.CancelledError:
+        _mark_startup_check_status("cancelled", generation=generation)
+        raise
+    except Exception as e:
+        _mark_startup_check_status("error", str(e), generation=generation)
+        raise
+
+    healthy = await model_manager.backend_health_ok()
+    verified = await model_manager.verify_backend_model() if healthy else False
+    effective_model = await model_manager.get_current_model()
+
+    if healthy and verified:
+        _mark_startup_check_status(
+            "ready",
+            generation=generation,
+            source=source,
+            phase=phase,
+            target_model=target_model,
+            requested_model=requested_model,
+            effective_model=effective_model,
+        )
+    else:
+        reasons = []
+        if not healthy:
+            reasons.append("backend_health_check_failed")
+        if not verified:
+            reasons.append("backend_model_unverified")
+        _mark_startup_check_status(
+            "degraded",
+            ", ".join(reasons) or None,
+            generation=generation,
+            source=source,
+            phase=phase,
+            target_model=target_model,
+            requested_model=requested_model,
+            effective_model=effective_model,
+        )
+    return result
+
+
+async def _run_startup_check_in_background(generation: int, target_model: Optional[str]) -> None:
+    try:
+        async with _model_switch_lock:
+            await _run_guardian_operation(
+                source="startup",
+                phase="startup_check",
+                target_model=target_model,
+                requested_model=target_model,
+                owner="startup",
+                operation=model_manager.startup_check,
+                generation=generation,
+            )
+    except Exception as e:
+        logger.error(f"⚠️ Startup check error (non-fatal): {e}")
+    else:
+        logger.info("✅ Startup check completed in background")
+
+
+def _resolve_inference_model(raw_model: Optional[str], current_model: str) -> Optional[str]:
+    if not raw_model:
+        return raw_model
+    if raw_model == "auto":
+        preferred = model_manager.get_preferred_tool_model(current_model)
+        return preferred or current_model
+    try:
+        return model_manager.resolve_model(raw_model)
+    except ValueError:
+        return raw_model
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _startup_check_task
+
     # Startup: Check and write PID file
-    pid_path = Path(__file__).parent.parent.parent / PID_FILE
+    pid_path = _get_pid_file_path()
+    pid_file_status = _get_pid_file_status()
     if pid_path.exists():
         try:
             with open(pid_path, 'r') as f:
@@ -108,8 +475,21 @@ async def lifespan(app: FastAPI):
                     if old_pid != os.getpid():
                         try:
                             os.kill(old_pid, 0)
-                            logger.error(f"FATAL: Guardian is already running (PID {old_pid}). Exiting immediately to prevent conflict.")
-                            sys.exit(1)
+                            listener = _get_proxy_listener_info()
+                            if listener and listener.get("pid") == old_pid:
+                                released = await _wait_for_proxy_listener_release(old_pid)
+                                if released:
+                                    logger.info(
+                                        f"Existing Guardian listener PID {old_pid} released port {PROXY_PORT} during restart handoff"
+                                    )
+                                else:
+                                    logger.warning(
+                                        f"Listener PID {old_pid} still holds port {PROXY_PORT}; continuing and relying on bind protection"
+                                    )
+                            logger.warning(
+                                f"Found active PID {old_pid} in {PID_FILE}; overwriting it and continuing startup. "
+                                "Socket binding will still prevent duplicate Guardian listeners."
+                            )
                         except OSError as e:
                             if e.errno == errno.ESRCH:
                                 logger.warning(f"Found stale PID file for PID {old_pid}. Overwriting.")
@@ -120,6 +500,31 @@ async def lifespan(app: FastAPI):
         except FileNotFoundError:
             pass
 
+    existing_listener = _get_proxy_listener_info()
+    if existing_listener and not existing_listener.get("is_current_process"):
+        listener_pid = existing_listener.get("pid")
+        pid_file_pid = pid_file_status.get("pid")
+        if isinstance(listener_pid, int) and listener_pid == pid_file_pid:
+            released = await _wait_for_proxy_listener_release(listener_pid)
+            if released:
+                logger.info(
+                    f"Existing Guardian listener PID {listener_pid} released port {PROXY_PORT} during startup handoff"
+                )
+            else:
+                logger.warning(
+                    f"Listener PID {listener_pid} still holds port {PROXY_PORT}; continuing and relying on bind protection"
+                )
+        elif _is_guardian_uvicorn_listener(existing_listener):
+            stopped = await _stop_stale_guardian_listener(existing_listener)
+            if not stopped:
+                logger.warning(
+                    f"Detected Guardian listener PID {listener_pid} on port {PROXY_PORT}, but it did not exit during orphan cleanup"
+                )
+        else:
+            logger.warning(
+                f"Port {PROXY_PORT} is already owned by an unexpected process; startup may fail: {existing_listener}"
+            )
+
     try:
         with open(pid_path, 'w') as f:
             f.write(str(os.getpid()))
@@ -127,11 +532,27 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Failed to write PID file: {e}")
 
-    # SECURITY: Run startup model verification (checks actual backend matches config)
-    try:
-        await model_manager.startup_check()
-    except Exception as e:
-        logger.error(f"⚠️ Startup check error (non-fatal): {e}")
+    # SECURITY: Run startup model verification in the background so Guardian
+    # binds on 11434 immediately while llama-server is still warming up.
+    startup_target = model_manager.pinned_model or model_manager.current_model
+    generation = _reset_startup_check_status(
+        source="startup",
+        phase="startup_check",
+        target_model=startup_target,
+        requested_model=startup_target,
+        owner="startup",
+    )
+    _mark_startup_check_status(
+        _operation_state_for_phase("startup_check"),
+        generation=generation,
+        source="startup",
+        phase="startup_check",
+        owner="startup",
+        target_model=startup_target,
+        requested_model=startup_target,
+    )
+    logger.info("🔄 Scheduling startup model verification in background")
+    _startup_check_task = asyncio.create_task(_run_startup_check_in_background(generation, startup_target))
 
     # Start idle-unload background watcher
     idle_task = asyncio.create_task(_idle_unload_watcher())
@@ -139,6 +560,16 @@ async def lifespan(app: FastAPI):
     yield
 
     idle_task.cancel()
+    if _startup_check_task is not None:
+        _startup_check_task.cancel()
+
+    with suppress(asyncio.CancelledError):
+        await idle_task
+
+    if _startup_check_task is not None:
+        with suppress(asyncio.CancelledError):
+            await _startup_check_task
+        _startup_check_task = None
     
     # Shutdown: Remove PID file
     if pid_path.exists():
@@ -350,7 +781,22 @@ async def _reload_backend_after_connect_error(path: str, error: Exception) -> No
 
         model_manager.is_unloaded = True
         try:
-            await model_manager.load(current_model)
+            generation = _reset_startup_check_status(
+                source="proxy",
+                phase="backend_reload",
+                target_model=current_model,
+                requested_model=current_model,
+                owner="backend_recovery",
+            )
+            await _run_guardian_operation(
+                source="proxy",
+                phase="backend_reload",
+                target_model=current_model,
+                requested_model=current_model,
+                owner="backend_recovery",
+                operation=lambda: model_manager.load(current_model),
+                generation=generation,
+            )
         except ModelLoadError as e:
             crash = e.crash_record
             detail = {
@@ -377,11 +823,8 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
     if not model:
         raise HTTPException(status_code=400, detail="Model not specified")
 
-    # Resolve aliases and case-insensitive names
-    try:
-        model = model_manager.resolve_model(model)
-    except ValueError:
-        pass  # Let it fall through — will be handled by switch logic
+    current_model = await model_manager.get_current_model()
+    model = _resolve_inference_model(model, current_model) or model
 
     logger.info(f"bridge: Ollama chat request for '{model}' -> Translating to OpenAI format")
 
@@ -399,9 +842,24 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
         # Auto-reload if unloaded
         if model_manager.is_unloaded:
             logger.info(f"🔄 Auto-reloading '{model_manager.current_model}'...")
+            generation = _reset_startup_check_status(
+                source="proxy",
+                phase="auto_reload",
+                target_model=model_manager.current_model,
+                requested_model=model_manager.current_model,
+                owner=client_id,
+            )
             async with _model_switch_lock:
                 if model_manager.is_unloaded:
-                    await model_manager.load()
+                    await _run_guardian_operation(
+                        source="proxy",
+                        phase="auto_reload",
+                        target_model=model_manager.current_model,
+                        requested_model=model_manager.current_model,
+                        owner=client_id,
+                        operation=model_manager.load,
+                        generation=generation,
+                    )
 
         # Check if model switch needed (safe — we hold the queue slot)
         current_model = await model_manager.get_current_model()
@@ -410,12 +868,27 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
             if not model_manager.is_switch_allowed(client_id):
                 logger.warning(f"🔒 Client '{client_id}' not in switch_allowlist, blocked Ollama switch to '{model}'")
             else:
+                generation = _reset_startup_check_status(
+                    source="proxy",
+                    phase="auto_switch",
+                    target_model=model,
+                    requested_model=body.get("model"),
+                    owner=client_id,
+                )
                 async with _model_switch_lock:
                     # Re-check after acquiring lock (another request may have switched already)
                     current_model = await model_manager.get_current_model()
                     if model != current_model:
                         try:
-                            await model_manager.switch_model(model, client_id=client_id)
+                            await _run_guardian_operation(
+                                source="proxy",
+                                phase="auto_switch",
+                                target_model=model,
+                                requested_model=body.get("model"),
+                                owner=client_id,
+                                operation=lambda: model_manager.switch_model(model, client_id=client_id),
+                                generation=generation,
+                            )
                         except ModelLoadError as e:
                             crash = e.crash_record
                             detail = {
@@ -478,7 +951,7 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
                                 # Translate OpenAI chunk back to Ollama chunk
                                 if "choices" in data and len(data["choices"]) > 0:
                                     delta = data["choices"][0].get("delta", {})
-                                    content = delta.get("content", "")
+                                    content = _extract_assistant_delta_text(delta)
                                     if content:
                                         ollama_chunk = {
                                             "model": model,
@@ -518,7 +991,7 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
             # Handle non-streaming response
             try:
                 data = r.json()
-                content = data["choices"][0]["message"]["content"]
+                content = _extract_assistant_message_text(data["choices"][0]["message"])
                 ollama_resp = {
                     "model": model,
                     "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
@@ -561,11 +1034,8 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
     if not model:
         raise HTTPException(status_code=400, detail="Model not specified")
 
-    # Resolve aliases and case-insensitive names
-    try:
-        model = model_manager.resolve_model(model)
-    except ValueError:
-        pass  # Let it fall through — will be handled by switch logic
+    current_model = await model_manager.get_current_model()
+    model = _resolve_inference_model(model, current_model) or model
 
     # Acquire inference slot
     try:
@@ -581,9 +1051,24 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
         # Auto-reload if unloaded
         if model_manager.is_unloaded:
             logger.info(f"🔄 Auto-reloading '{model_manager.current_model}'...")
+            generation = _reset_startup_check_status(
+                source="proxy",
+                phase="auto_reload",
+                target_model=model_manager.current_model,
+                requested_model=model_manager.current_model,
+                owner=client_id,
+            )
             async with _model_switch_lock:
                 if model_manager.is_unloaded:
-                    await model_manager.load()
+                    await _run_guardian_operation(
+                        source="proxy",
+                        phase="auto_reload",
+                        target_model=model_manager.current_model,
+                        requested_model=model_manager.current_model,
+                        owner=client_id,
+                        operation=model_manager.load,
+                        generation=generation,
+                    )
 
         # Model switch (safe — we hold the queue slot)
         current_model = await model_manager.get_current_model()
@@ -591,11 +1076,26 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
             if not model_manager.is_switch_allowed(client_id):
                 logger.warning(f"🔒 Client '{client_id}' not in switch_allowlist, blocked switch to '{model}'")
             else:
+                generation = _reset_startup_check_status(
+                    source="proxy",
+                    phase="auto_switch",
+                    target_model=model,
+                    requested_model=body.get("model"),
+                    owner=client_id,
+                )
                 async with _model_switch_lock:
                     current_model = await model_manager.get_current_model()
                     if model != current_model:
                         try:
-                            await model_manager.switch_model(model, client_id=client_id)
+                            await _run_guardian_operation(
+                                source="proxy",
+                                phase="auto_switch",
+                                target_model=model,
+                                requested_model=body.get("model"),
+                                owner=client_id,
+                                operation=lambda: model_manager.switch_model(model, client_id=client_id),
+                                generation=generation,
+                            )
                         except ModelLoadError as e:
                             crash = e.crash_record
                             raise HTTPException(status_code=503, detail={
@@ -651,7 +1151,7 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
                                 data = json.loads(chunk[6:])
                                 if "choices" in data and len(data["choices"]) > 0:
                                     delta = data["choices"][0].get("delta", {})
-                                    content = delta.get("content", "")
+                                    content = _extract_assistant_delta_text(delta)
                                     if content:
                                         # /api/generate response format: { "response": "..." }
                                         ollama_chunk = {
@@ -691,7 +1191,7 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
         else:
             try:
                 data = r.json()
-                content = data["choices"][0]["message"]["content"]
+                content = _extract_assistant_message_text(data["choices"][0]["message"])
                 ollama_resp = {
                     "model": model,
                     "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
@@ -774,16 +1274,33 @@ async def list_models(client_id: str = Depends(verify_api_key)):
     models_list = []
     try:
         current = await model_manager.get_current_model()
-        for name, cfg in model_manager.models.items():
+        for public_name, canonical_name in model_manager.get_public_model_map().items():
             model_entry = {
-                "id": name,
+                "id": public_name,
                 "object": "model",
                 "created": int(time.time()),
                 "owned_by": "organization-owner",
                 "permission": [],
             }
-            if "max_context" in cfg:
-                model_entry["max_context"] = cfg["max_context"]
+            benchmark_context_limit = model_manager.get_benchmark_context_limit(canonical_name)
+            runtime_context = model_manager.get_runtime_context_window(canonical_name)
+            advertised_context = model_manager.get_advertised_context_window(canonical_name)
+            if benchmark_context_limit is not None:
+                model_entry["max_context"] = benchmark_context_limit
+                model_entry["benchmark_context_limit"] = benchmark_context_limit
+            if runtime_context is not None:
+                model_entry["context"] = runtime_context
+            if advertised_context is not None:
+                model_entry["advertised_context"] = advertised_context
+
+            # Claude Code currently compacts against the OpenAI-compatible
+            # max_context field only. Preserve benchmark-cap semantics for
+            # normal clients, but return the safer advertised window for Claude
+            # so it compacts before hard overflow.
+            if client_id == "claudecode" and advertised_context is not None:
+                if benchmark_context_limit is not None:
+                    model_entry["benchmark_context_limit"] = benchmark_context_limit
+                model_entry["max_context"] = advertised_context
             models_list.append(model_entry)
     except Exception as e:
         logger.error(f"Failed to list models: {e}")
@@ -811,10 +1328,31 @@ async def admin_load(request: Request, client_id: str = Depends(verify_api_key))
     except Exception:
         pass
     target = body.get("model", None)
+    if target:
+        try:
+            target = model_manager.resolve_model(target)
+        except ValueError:
+            pass
+    generation = _reset_startup_check_status(
+        source="admin",
+        phase="manual_load",
+        target_model=target or model_manager.current_model,
+        requested_model=body.get("model"),
+        owner=client_id,
+    )
     model_manager.last_request_time = time.time()
     model_manager.active_requests += 1
     try:
-        await model_manager.load(target)
+        async with _model_switch_lock:
+            await _run_guardian_operation(
+                source="admin",
+                phase="manual_load",
+                target_model=target or model_manager.current_model,
+                requested_model=body.get("model"),
+                owner=client_id,
+                operation=lambda: model_manager.load(target),
+                generation=generation,
+            )
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
     finally:
@@ -836,6 +1374,12 @@ async def get_crash_history(client_id: str = Depends(verify_api_key)):
 @app.get("/api/status")
 async def get_server_status(client_id: str = Depends(verify_api_key)):
     """Return current model status and backend health."""
+    current_model = await model_manager.get_current_model()
+    startup_status = _get_startup_check_status()
+    queue_status = inference_queue.get_status()
+    switch_in_progress = _startup_state_is_in_progress(startup_status.get("state")) and startup_status.get("phase") != "idle"
+    current_requested_target = startup_status.get("target_model") if switch_in_progress else None
+    active_switch_owner = startup_status.get("owner") if switch_in_progress else None
     healthy = False
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -844,11 +1388,17 @@ async def get_server_status(client_id: str = Depends(verify_api_key)):
     except Exception:
         pass
 
+    preferred_tool_model = model_manager.get_preferred_tool_model(current_model)
+    preferred_reasoning_model = model_manager.get_preferred_reasoning_model(current_model)
+    backend_model_path = model_manager._get_backend_model_path()
+    backend_model_name = model_manager._last_backend_model
+    if backend_model_name is None and backend_model_path:
+        backend_model_name = model_manager._identify_model_by_path(backend_model_path)
     vram = get_gpu_metrics()
     idle_minutes = model_manager.idle_unload_minutes
     idle_secs = time.time() - model_manager.last_request_time
     return {
-        "current_model": await model_manager.get_current_model(),
+        "current_model": current_model,
         "backend_healthy": healthy,
         "is_unloaded": model_manager.is_unloaded,
         "idle_seconds": round(idle_secs),
@@ -857,11 +1407,39 @@ async def get_server_status(client_id: str = Depends(verify_api_key)):
         "total_crashes": len(model_manager.crash_history),
         "last_crash": model_manager.last_crash.to_dict() if model_manager.last_crash else None,
         "vram": vram,
-        "vram_model_mb": get_model_size(await model_manager.get_current_model()),
+        "vram_model_mb": get_model_size(current_model),
         "security": {
             "pinned_model": model_manager.pinned_model,
             "switch_allowlist": list(model_manager._switch_allowlist) if model_manager._switch_allowlist else None,
             "backend_verified": model_manager._model_verified,
+            "last_backend_verification_at": model_manager._last_verification_at,
+            "last_successful_backend_verification_at": model_manager._last_successful_verification_at,
+            "last_verified_model": model_manager._last_verified_model,
+            "backend_model": backend_model_name,
+            "backend_model_path": backend_model_path,
+        },
+        "startup": startup_status,
+        "current_requested_target": current_requested_target,
+        "switch": {
+            "active": switch_in_progress,
+            "state": startup_status.get("state"),
+            "phase": startup_status.get("phase"),
+            "owner": active_switch_owner,
+            "requested_target": current_requested_target,
+            "requested_model": startup_status.get("requested_model"),
+            "lock_held": _model_switch_lock.locked(),
+        },
+        "queue": queue_status,
+        "routing": {
+            "tool_model": preferred_tool_model,
+            "reasoning_model": preferred_reasoning_model,
+            "auto_behavior": "tool_friendly_same_weights_if_available",
+        },
+        "proxy": {
+            "pid": os.getpid(),
+            "port": PROXY_PORT,
+            "listener": _get_proxy_listener_info(),
+            "pid_file": _get_pid_file_status(),
         },
         "scaler": {
             "enabled": state.scaler.config.get("enabled", False),
@@ -1013,9 +1591,24 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
         if model_manager.is_unloaded:
             logger.info(f"🔄 Incoming request while unloaded — auto-reloading '{model_manager.current_model}'...")
             try:
+                generation = _reset_startup_check_status(
+                    source="proxy",
+                    phase="auto_reload",
+                    target_model=model_manager.current_model,
+                    requested_model=model_manager.current_model,
+                    owner=client_id,
+                )
                 async with _model_switch_lock:
                     if model_manager.is_unloaded:  # double-check under lock
-                        await model_manager.load()
+                        await _run_guardian_operation(
+                            source="proxy",
+                            phase="auto_reload",
+                            target_model=model_manager.current_model,
+                            requested_model=model_manager.current_model,
+                            owner=client_id,
+                            operation=model_manager.load,
+                            generation=generation,
+                        )
             except Exception as e:
                 raise HTTPException(status_code=503, detail=f"Auto-reload failed: {e}")
 
@@ -1030,13 +1623,9 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                 requested_model = json_body.get("model")
 
                 # Resolve aliases and case-insensitive names
-                if requested_model:
-                    try:
-                        requested_model = model_manager.resolve_model(requested_model)
-                    except ValueError:
-                        pass  # Unknown model — forward to current
-
                 current_model = await model_manager.get_current_model()
+                if requested_model:
+                    requested_model = _resolve_inference_model(requested_model, current_model)
                 
                 if requested_model and requested_model != current_model:
                     if requested_model in model_manager.models:
@@ -1047,13 +1636,28 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                                 f"blocked switch to '{requested_model}'. Forwarding to current model."
                             )
                         else:
+                            generation = _reset_startup_check_status(
+                                source="proxy",
+                                phase="auto_switch",
+                                target_model=requested_model,
+                                requested_model=json_body.get("model"),
+                                owner=client_id,
+                            )
                             async with _model_switch_lock:
                                 # Re-check after acquiring lock
                                 current_model = await model_manager.get_current_model()
                                 if requested_model != current_model:
                                     logger.info(f"🔄 Auto-switching backend from {current_model} to {requested_model} (client: {client_id})")
                                     try:
-                                        await model_manager.switch_model(requested_model, client_id=client_id)
+                                        await _run_guardian_operation(
+                                            source="proxy",
+                                            phase="auto_switch",
+                                            target_model=requested_model,
+                                            requested_model=json_body.get("model"),
+                                            owner=client_id,
+                                            operation=lambda: model_manager.switch_model(requested_model, client_id=client_id),
+                                            generation=generation,
+                                        )
                                     except ModelLoadError as e:
                                         crash = e.crash_record
                                         detail = {
@@ -1206,7 +1810,7 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
 
 async def start_proxy():
     import uvicorn
-    config = uvicorn.Config(app, host="0.0.0.0", port=11434, log_level="info")
+    config = uvicorn.Config(app, host="0.0.0.0", port=PROXY_PORT, log_level="info")
     server = uvicorn.Server(config)
     await server.serve()
 

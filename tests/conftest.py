@@ -24,18 +24,18 @@ SAMPLE_API_KEYS: Dict[str, dict] = {
 
 SAMPLE_MODELS_YAML = """\
 models:
-  GLM-4.7-Flash:
-    path: /models/GLM-4.7-Flash.gguf
-    ngl: 99
-    ctx: 8192
-    max_context: 16384
-    ts: "17,11"
-  Qwen3-30B-A3B:
-    path: /models/Qwen3-30B.gguf
-    ngl: 99
-    ctx: 4096
-    max_context: 32768
-    ts: "20,8"
+    GLM-4.7-Flash:
+        path: /models/GLM-4.7-Flash.gguf
+        ngl: 99
+        ctx: 8192
+        benchmark_context_limit: 16384
+        ts: "17,11"
+    Qwen3-30B-A3B:
+        path: /models/Qwen3-30B.gguf
+        ngl: 99
+        ctx: 4096
+        benchmark_context_limit: 32768
+        ts: "20,8"
 """
 
 SAMPLE_SETTINGS_YAML = """\

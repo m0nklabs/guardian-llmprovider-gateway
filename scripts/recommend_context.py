@@ -13,7 +13,7 @@ def get_optimal_context():
     with open(BENCHMARK_FILE, 'r') as f:
         data = json.load(f)
 
-    model_limits = {}
+    recommended_contexts = {}
 
     # Group by model
     models = {}
@@ -36,17 +36,17 @@ def get_optimal_context():
         successes.sort(key=lambda x: x['context_size'])
         
         # Find the max successful context
-        max_context = successes[-1]['context_size']
+        max_successful_context = successes[-1]['context_size']
         
         # Determine strict limit (if performance drops drastically, maybe clamp it? 
         # But user asked for max context "now that we can tune". 
         # Usually implies setting it to the max working value we found.)
         
         # Let's just use the max successful context for now.
-        model_limits[name] = max_context
-        print(f"✅ {name}: Max successful context = {max_context}")
+        recommended_contexts[name] = max_successful_context
+        print(f"✅ {name}: Max successful context = {max_successful_context}")
 
-    return model_limits
+    return recommended_contexts
 
 if __name__ == "__main__":
     limits = get_optimal_context()
