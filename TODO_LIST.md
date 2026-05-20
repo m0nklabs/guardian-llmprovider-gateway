@@ -1,5 +1,11 @@
 # Guardian TODO List
 
+## 2026-05-20 Repo Path Decoupling
+
+- [x] Centralize repo-sensitive filesystem paths in shared helpers for app runtime and standalone scripts.
+- [x] Remove hardcoded `/home/flip/llama_cpp_guardian` assumptions from `ModelManager`, `start_llama.sh`, tracked script utilities, and unit tests.
+- [x] Update docs to describe the checkout-root and env-override path resolution model.
+
 ## 2026-05-20 Qwen3.6 Guardian Ceiling Follow-up
 
 - [x] Re-run the Qwen3.6 context ceiling search through Guardian `/admin/load` and live proxy requests instead of standalone `llama-server` launches.

@@ -49,11 +49,11 @@ See [docs/CLIENT_INTEGRATION.md](docs/CLIENT_INTEGRATION.md) for client implemen
 
 ### Extensible Backend
 
-Guardian supports per-model backend selection. The official llama.cpp binary is the default. Additional backends (forks, custom builds) can be registered in the `BACKEND_BINARIES` dict — models opt in via the `backend:` field in `config/models.yaml`.
+Guardian supports per-model backend selection. The official llama.cpp binary is the default. Additional backends (forks, custom builds) can be registered in the `BACKEND_BINARIES` dict — models opt in via the `backend:` field in `config/models.yaml`. Repo-sensitive paths are resolved from the checkout root or the `LLAMA_CPP_GUARDIAN_ROOT` / `LLAMA_CPP_OFFICIAL_ROOT` environment overrides.
 
 | Backend | Binary | Use Case |
 |---------|--------|----------|
-| **official** (default) | `/home/flip/llama_cpp_official/build/bin/llama-server` | All models |
+| **official** (default) | `../llama_cpp_official/build/bin/llama-server` by default, or `LLAMA_CPP_OFFICIAL_ROOT` override | All models |
 | *(custom)* | Register in `app/engine/manager.py` | Specific optimizations |
 
 Models without an explicit `backend:` key use the official binary.

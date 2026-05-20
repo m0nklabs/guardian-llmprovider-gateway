@@ -2,8 +2,10 @@ import json
 import os
 import yaml
 
-BENCHMARK_FILE = '/home/flip/llama_cpp_guardian/docs/benchmark_results.json'
-CONFIG_FILE = '/home/flip/llama_cpp_guardian/config/models.yaml'
+from _paths import CONFIG_DIR, DOCS_DIR
+
+BENCHMARK_FILE = DOCS_DIR / 'benchmark_results.json'
+CONFIG_FILE = CONFIG_DIR / 'models.yaml'
 
 def get_optimal_context():
     if not os.path.exists(BENCHMARK_FILE):

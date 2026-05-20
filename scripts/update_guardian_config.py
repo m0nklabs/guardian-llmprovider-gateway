@@ -2,8 +2,10 @@ import json
 import re
 import os
 
-BENCHMARK_FILE = '/home/flip/llama_cpp_guardian/docs/benchmark_results.json'
-CONFIG_FILE = '/home/flip/llama_cpp_guardian/config/models.yaml'
+from _paths import CONFIG_DIR, DOCS_DIR
+
+BENCHMARK_FILE = DOCS_DIR / 'benchmark_results.json'
+CONFIG_FILE = CONFIG_DIR / 'models.yaml'
 
 def get_recommended_contexts():
     if not os.path.exists(BENCHMARK_FILE):

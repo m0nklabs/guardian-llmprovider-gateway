@@ -4,9 +4,11 @@ import os
 import sys
 from collections import defaultdict
 
+from _paths import DOCS_DIR
+
 # Configuration
-JSON_RESULTS_FILE = "/home/flip/llama_cpp_guardian/docs/benchmark_results.json"
-SUMMARY_OUTPUT_FILE = "/home/flip/llama_cpp_guardian/docs/BENCHMARK_SUMMARY.md"
+JSON_RESULTS_FILE = DOCS_DIR / "benchmark_results.json"
+SUMMARY_OUTPUT_FILE = DOCS_DIR / "BENCHMARK_SUMMARY.md"
 
 def load_results():
     if not os.path.exists(JSON_RESULTS_FILE):

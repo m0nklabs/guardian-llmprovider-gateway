@@ -169,15 +169,19 @@ All endpoints require Bearer token authentication:
 Per-model backend selection via the `backend:` field in `models.yaml`:
 
 ```python
+from app.paths import OFFICIAL_LLAMA_SERVER_BIN
+
+
 BACKEND_BINARIES = {
-    "official": "/home/flip/llama_cpp_official/build/bin/llama-server",
-    # Add custom backends here, e.g.:
-    # "my_fork": "/path/to/custom/llama-server",
+  "official": str(OFFICIAL_LLAMA_SERVER_BIN),
+  # Add custom backends here, e.g.:
+  # "my_fork": "/path/to/custom/llama-server",
 }
 DEFAULT_BACKEND = "official"
 ```
 
 - **official** (ggml-org/llama.cpp): Default for all models. Actively maintained upstream.
+- Official binary path resolves from the current checkout or `LLAMA_CPP_OFFICIAL_ROOT`; Guardian no longer assumes a fixed local repo folder name.
 - Additional backends can be registered in `BACKEND_BINARIES` — models opt in via `backend: <key>` in their config.
 - Written to `config/current_model.binary` at switch time for `start_llama.sh`.
 

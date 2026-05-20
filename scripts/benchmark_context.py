@@ -6,14 +6,17 @@ import json
 import os
 import sys
 import glob
+from pathlib import Path
 from datetime import datetime
+
+from _paths import DOCS_DIR, MODELS_DIR as DEFAULT_MODELS_DIR, OFFICIAL_LLAMA_SERVER_BIN
 
 # Model Configuration
 # Use environment variables for flexibility
-MODELS_CONFIG_FILE = os.getenv("MODELS_CONFIG_FILE", "/home/flip/llama_cpp_guardian/docs/model_registry.json")
-RESULTS_FILE = os.getenv("RESULTS_FILE", "/home/flip/llama_cpp_guardian/docs/REAL_BENCHMARK_RESULTS.md")
-JSON_RESULTS_FILE = os.getenv("JSON_RESULTS_FILE", "/home/flip/llama_cpp_guardian/docs/benchmark_results.json")
-MODELS_DIR = os.getenv("MODELS_DIR", "/home/flip/models")
+MODELS_CONFIG_FILE = os.getenv("MODELS_CONFIG_FILE", str(DOCS_DIR / "model_registry.json"))
+RESULTS_FILE = os.getenv("RESULTS_FILE", str(DOCS_DIR / "REAL_BENCHMARK_RESULTS.md"))
+JSON_RESULTS_FILE = os.getenv("JSON_RESULTS_FILE", str(DOCS_DIR / "benchmark_results.json"))
+MODELS_DIR = str(Path(os.getenv("MODELS_DIR", str(DEFAULT_MODELS_DIR))))
 
 # Context sizes to test (incremental)
 CTX_SIZES = [8192, 16384, 32768, 65536, 98304, 131072, 262144, 524288, 1048576]
@@ -22,7 +25,7 @@ CTX_SIZES = [8192, 16384, 32768, 65536, 98304, 131072, 262144, 524288, 1048576]
 KV_CACHE_TYPES = ["f16", "q8_0", "q4_0"]
 
 # Server binary path
-LLAMA_SERVER_BIN = os.getenv("LLAMA_SERVER_BIN", "/home/flip/llama_cpp_official/build/bin/llama-server")
+LLAMA_SERVER_BIN = os.getenv("LLAMA_SERVER_BIN", str(OFFICIAL_LLAMA_SERVER_BIN))
 HOST = "127.0.0.1"
 PORT = int(os.getenv("LLAMA_PORT", "11442"))
 URL = f"http://{HOST}:{PORT}/health"

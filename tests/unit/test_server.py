@@ -230,10 +230,11 @@ async def test_wait_for_proxy_listener_release_returns_true_once_listener_disapp
 @pytest.mark.asyncio
 async def test_stop_stale_guardian_listener_terminates_orphan():
     """A mismatched Guardian uvicorn listener should be terminated before bind."""
+    repo_root = Path(server.__file__).resolve().parents[2]
     listener = {
         "pid": 4242,
         "process_name": "uvicorn",
-        "command": "/home/flip/llama_cpp_guardian/venv/bin/python3.14 /home/flip/llama_cpp_guardian/venv/bin/uvicorn app.proxy.server:app --host 0.0.0.0 --port 11434",
+        "command": f"{repo_root}/venv/bin/python3.14 {repo_root}/venv/bin/uvicorn app.proxy.server:app --host 0.0.0.0 --port 11434",
         "is_current_process": False,
     }
 

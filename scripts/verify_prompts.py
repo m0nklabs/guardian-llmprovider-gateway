@@ -11,10 +11,12 @@ import os
 import sys
 import yaml
 
+from _paths import CONFIG_DIR
+
 # Configuration
 GUARDIAN_URL = "http://127.0.0.1:11434"
 API_KEY = "flip_bdb55f05935da66a9cec280a69464392"
-MODELS_CONFIG = "/home/flip/llama_cpp_guardian/config/models.yaml"
+MODELS_CONFIG = CONFIG_DIR / "models.yaml"
 
 HEADERS = {
     "Authorization": f"Bearer {API_KEY}",

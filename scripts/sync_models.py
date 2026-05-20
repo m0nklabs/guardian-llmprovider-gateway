@@ -1,4 +1,4 @@
-#!/home/flip/llama_cpp_guardian/venv/bin/python3
+#!/usr/bin/env python3
 import os
 import yaml
 from pathlib import Path
@@ -6,12 +6,14 @@ import logging
 import subprocess
 import time
 
+from _paths import CONFIG_DIR, MODELS_DIR as DEFAULT_MODELS_DIR
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-MODELS_DIR = Path("/home/flip/models")
-CONFIG_FILE = Path("/home/flip/llama_cpp_guardian/config/models.yaml")
+MODELS_DIR = Path(os.getenv("MODELS_DIR", str(DEFAULT_MODELS_DIR)))
+CONFIG_FILE = CONFIG_DIR / "models.yaml"
 
 # Intelligent defaults based on filename/size
 DEFAULT_CONTEXT = 32768

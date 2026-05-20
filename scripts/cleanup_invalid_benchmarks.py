@@ -1,8 +1,10 @@
 import json
 import os
 
-RESULTS_FILE = '/home/flip/llama_cpp_guardian/docs/benchmark_results.json'
-STATE_FILE = '/home/flip/llama_cpp_guardian/data/benchmark_state.json'
+from _paths import DATA_DIR, DOCS_DIR
+
+RESULTS_FILE = DOCS_DIR / 'benchmark_results.json'
+STATE_FILE = DATA_DIR / 'benchmark_state.json'
 INVALID_TPS = 1000000.0
 
 def cleanup():

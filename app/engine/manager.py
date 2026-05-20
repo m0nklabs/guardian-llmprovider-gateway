@@ -11,13 +11,21 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from app.paths import (
+    CONFIG_DIR,
+    CURRENT_MODEL_ARGS_FILE,
+    CURRENT_MODEL_BINARY_FILE,
+    LLAMA_SLOTS_DIR,
+    OFFICIAL_LLAMA_SERVER_BIN,
+)
+
 logger = logging.getLogger("model-manager")
 
 # Binary paths for backend support
 # Additional backends (forks, custom builds) can be registered here.
 # Models select their backend via the 'backend' key in models.yaml (default: official).
 BACKEND_BINARIES = {
-    "official": "/home/flip/llama_cpp_official/build/bin/llama-server",
+    "official": str(OFFICIAL_LLAMA_SERVER_BIN),
 }
 DEFAULT_BACKEND = "official"
 
@@ -76,7 +84,7 @@ class VisionCapability:
 
 
 class ModelManager:
-    def __init__(self, config_path: str = "/home/flip/llama_cpp_guardian/config/models.yaml"):
+    def __init__(self, config_path: str = str(CONFIG_DIR / "models.yaml")):
         self.config_path = Path(config_path)
         self.models = self._load_config()
         self._vision_capabilities: Dict[str, VisionCapability] = {}
@@ -836,7 +844,7 @@ class ModelManager:
         Supported config keys (from models.yaml):
             path, context, ngl, kv_type, backend, tensor_split, mmproj, extra_args
         """
-        args_file = Path("/home/flip/llama_cpp_guardian/config/current_model.args")
+        args_file = CURRENT_MODEL_ARGS_FILE
         path = config["path"]
         ctx = config.get("context", 4096)
         ngl = config.get("ngl", 99)
@@ -848,13 +856,16 @@ class ModelManager:
 
         # Resolve binary path and write to separate file for start_llama.sh
         binary_path = BACKEND_BINARIES.get(backend, BACKEND_BINARIES[DEFAULT_BACKEND])
-        binary_file = Path("/home/flip/llama_cpp_guardian/config/current_model.binary")
+        binary_file = CURRENT_MODEL_BINARY_FILE
         with open(binary_file, "w") as f:
             f.write(binary_path)
         logger.info(f"Backend: {backend} -> {binary_path}")
 
         # Build args string
-        args_content = f"-m {path} -c {ctx} -ngl {ngl} -ctk {kv_type} -ctv {kv_type} --host 127.0.0.1 --port 11440 --slot-save-path /home/flip/llama_slots --no-mmap"
+        args_content = (
+            f"-m {path} -c {ctx} -ngl {ngl} -ctk {kv_type} -ctv {kv_type} "
+            f"--host 127.0.0.1 --port 11440 --slot-save-path {LLAMA_SLOTS_DIR} --no-mmap"
+        )
 
         # Multi-GPU weight distribution (e.g. "0.55,0.45" for 2 GPUs)
         if tensor_split:

@@ -1,4 +1,10 @@
-with open("/home/flip/llama_cpp_guardian/app/proxy/server.py", "r") as f:
+from pathlib import Path
+
+
+TARGET_FILE = Path(__file__).resolve().parent / "app" / "proxy" / "server.py"
+
+
+with open(TARGET_FILE, "r") as f:
     text = f.read()
 
 import re
@@ -56,5 +62,5 @@ else:
     print("Target block not found precisely. Falling back to regex.")
     text = re.sub(r'is_stream = False\n        if path == "chat/completions":\n            try:\n                json_body = json\.loads\(body\)\n                is_stream = json_body\.get\("stream", False\)\n            except \(json\.JSONDecodeError, Exception\):\n                pass', replacement, text, flags=re.MULTILINE)
 
-with open("/home/flip/llama_cpp_guardian/app/proxy/server.py", "w") as f:
+with open(TARGET_FILE, "w") as f:
     f.write(text)

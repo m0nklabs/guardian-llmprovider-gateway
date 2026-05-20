@@ -618,7 +618,7 @@ class TestCrashLogParsing:
         lines = [
             "llama_params_fit_impl: cannot meet free memory targets on all devices, need to use 1487 MiB less in total",
             "llama_params_fit: failed to fit params to free device memory: n_gpu_layers already set by user to 99, abort",
-            "/home/flip/llama_cpp_guardian/scripts/start_llama.sh: line 49: 3724619 Segmentation fault      (core dumped) $BINARY $ARGS",
+            "/workspace/scripts/start_llama.sh: line 49: 3724619 Segmentation fault      (core dumped) $BINARY $ARGS",
         ]
 
         result = mgr._extract_crash_error_from_lines(lines)

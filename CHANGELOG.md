@@ -12,6 +12,7 @@
 - Gemma4 Agent now uses the same multimodal projector as the proven OpenWebUI Gemma4 profile so Agent Zero can route image tasks through the bounded agent alias.
 
 ### Changed
+- Centralized repo-sensitive filesystem paths in `app.paths` and `scripts/_paths.py`, so `ModelManager`, `start_llama.sh`, utility scripts, and tests now resolve from the checkout root or environment overrides instead of assuming `/home/flip/llama_cpp_guardian`.
 - Simplified `config/models.yaml` to one runtime entry per remaining GGUF family, removed stale deleted-model paths, stripped `-nkvo`, and moved agent/deep/max-style behavior back to per-request API parameters instead of duplicate config profiles.
 - Raised surviving runtime contexts to the highest repo-documented safe values where empirical benchmark evidence existed, while leaving unproven families on their existing runtime limits.
 - Corrected the Qwen3.6 uncensored runtime rollback: the historical q4 benchmark at `131072` was valid, and the later `65536` result was a false negative caused by forcing an explicit tensor split during re-validation.
@@ -23,6 +24,7 @@
 - Restored `gemma4-agent` to the stable 26B Agent Zero profile after the 31B uncensored route proved too slow for default AZ work.
 
 ### Fixed
+- Removed the last tracked hardcoded underscore-checkout paths from Guardian scripts, tests, and helper utilities so a future rename toward the canonical `llama-cpp-guardian` style no longer requires code edits.
 - Guardian crash parsing now scans a wider recent `llama-server` journal window and recognizes llama.cpp fit-target failures, compute-buffer initialization failures, and CUDA OOM signatures instead of collapsing them into `Unknown error (no recognizable error pattern in logs)`.
 - Guardian now validates multimodal runtime support per model instead of assuming any `mmproj` config is vision-ready, exposes that status through `/v1/models`, and returns explicit 4xx/503 OpenAI-style errors for broken image paths instead of leaking raw 500s.
 - Guardian now starts answering on `11434` immediately after restart by running startup model verification in the background instead of holding FastAPI startup open until `llama-server` on `11440` finishes warming up.
