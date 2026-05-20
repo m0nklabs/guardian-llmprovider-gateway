@@ -6,6 +6,25 @@
 - [x] Remove hardcoded `/home/flip/llama_cpp_guardian` assumptions from `ModelManager`, `start_llama.sh`, tracked script utilities, and unit tests.
 - [x] Update docs to describe the checkout-root and env-override path resolution model.
 
+## 2026-05-20 Fast Model Finetune Suite
+
+- [x] Add a Guardian-native finetune helper that binary-searches the highest stable runtime context instead of sweeping linearly.
+- [x] Explore two-GPU tensor split candidates coarse-to-fine around the current config so `models.yaml` tuning is fast enough for live use.
+- [x] Provide a CLI wrapper that logs finetune runs and optionally writes the winning `context` and `tensor_split` back to `config/models.yaml`.
+- [x] Harden the suite against transient Guardian request resets and guarantee config restoration on failed dry-runs.
+- [x] Persist compatible probe results in `data/model_finetune_results.json` so later runs can skip already tested `context`/`tensor_split` combinations.
+- [x] Validate the suite with focused unit tests and a narrow live Guardian dry-run against the Native-MTP Qwen profile.
+- [x] Re-run the Native-MTP Qwen profile with Guardian image smoke, apply the winning config, and confirm cache hits on the repeat search.
+
+## 2026-05-20 Qwen3.6 Native-MTP Multimodal Bring-up
+
+- [x] Sync the local official `llama.cpp` checkout to an upstream revision that exposes `draft-mtp`, while preserving the known-safe mixed-GPU CUDA build flags.
+- [x] Download `Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-Q4_K_M.gguf` and `Qwen3.6-35B-A3B-mmproj-BF16.gguf` into the shared models directory.
+- [x] Register a Guardian profile and aliases for the preserved-MTP Heretic Qwen3.6 runtime, including `--spec-type draft-mtp` and the required mmproj path.
+- [x] Fix hot model-registry reload so `/admin/load` and `/v1/models` see newly added `models.yaml` entries without restarting Guardian.
+- [x] Tune the runtime fit for the current 3060 + 5060 Ti host until the profile loads stably through Guardian.
+- [x] Validate text and image requests through Guardian and confirm live speculative metrics (`draft_n`, `draft_n_accepted`) appear on responses.
+
 ## 2026-05-20 Qwen3.6 Guardian Ceiling Follow-up
 
 - [x] Re-run the Qwen3.6 context ceiling search through Guardian `/admin/load` and live proxy requests instead of standalone `llama-server` launches.

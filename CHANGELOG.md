@@ -10,6 +10,9 @@
 - Gemma4 31B uncensored max-reasoning Agent Zero profile based on `TrevorJS/gemma-4-31B-it-uncensored`, with unrestricted reasoning and anti-repeat sampler settings under `gemma4-31b-uncensored-max-agent`.
 - Explicit `gemma4-26b-agent` alias for the stable 26B Agent Zero route; the 31B uncensored route remains opt-in as `gemma4-31b-uncensored-max-agent`.
 - Gemma4 Agent now uses the same multimodal projector as the proven OpenWebUI Gemma4 profile so Agent Zero can route image tasks through the bounded agent alias.
+- Qwen3.6 Native-MTP multimodal profile plus `qwen3.6-35b-heretic-mtp`, `qwen3-35b-heretic-mtp`, and `qwen3-35b-mtp` aliases, wired to the preserved-MTP Heretic GGUF, its mmproj companion, and `--spec-type draft-mtp`.
+- Guardian-native finetune suite in `app.tweaker.model_finetune` plus `scripts/finetune_model_config.py`, which binary-searches the highest stable runtime context and coarse-to-fine tests two-GPU `tensor_split` candidates against live `/admin/load` probes.
+- The finetune suite now persists compatible probe results in `data/model_finetune_results.json` and reuses them on later runs when the model signature and smoke-test signature still match, so already-tested `context`/`tensor_split` combos are skipped instead of reloaded.
 
 ### Changed
 - Centralized repo-sensitive filesystem paths in `app.paths` and `scripts/_paths.py`, so `ModelManager`, `start_llama.sh`, utility scripts, and tests now resolve from the checkout root or environment overrides instead of assuming `/home/flip/llama_cpp_guardian`.
@@ -22,6 +25,8 @@
 - Kept `qwen3-35b-uncensored` as the unrestricted deep-reasoning alias while adding a bounded 65k-context agent variant for Agent Zero/OpenAI-compatible tool clients.
 - Raised both Qwen3.6 CrewAI/agent-facing aliases (`qwen3-35b-uncensored-agent` and `qwen3-35b-reasoning-agent`) from 65k to their full 131072-token context so long CrewAI traces stop tripping Guardian with context-overflow 400s.
 - Restored `gemma4-agent` to the stable 26B Agent Zero profile after the 31B uncensored route proved too slow for default AZ work.
+- Synced the local official `llama.cpp` backend to upstream `master` and rebuilt it with `GGML_CUDA_GRAPHS=OFF` plus `GGML_CUDA_NO_PEER_COPY=ON`, which exposes upstream `draft-mtp` support without regressing the mixed 3060 + 5060 Ti host.
+- Tuned the Native-MTP Qwen3.6 multimodal runtime for this host to `context: 196608`, `ngl: 36`, and `tensor_split: "0.55,0.45"` after full-GPU loads failed from extra MTP/mmproj buffer pressure.
 
 ### Fixed
 - Removed the last tracked hardcoded underscore-checkout paths from Guardian scripts, tests, and helper utilities so a future rename toward the canonical `llama-cpp-guardian` style no longer requires code edits.
@@ -38,6 +43,9 @@
 - The live integration suite now includes a restart-race regression that restarts the active Guardian systemd unit, immediately issues `/admin/load` with an alias, checks `/api/status`, and runs a mini chat request.
 - `/api/status` now exposes a `startup` object so authenticated clients can tell whether Guardian is still verifying the backend model, already ready, or ended startup with an error.
 - Claude Code can now switch Guardian models with its dedicated `claudecode_*` API key instead of inheriting whichever sibling app model was already loaded, which prevented restarts from getting stuck on NerveSplat's lighter `gemma4-e4b` runtime.
+- `ModelManager.resolve_model()` and the public model-map path now refresh the in-memory registry before resolving aliases, so freshly added `models.yaml` entries work through `/admin/load` and `/v1/models` without a Guardian restart.
+- The finetune suite now restores the original `models.yaml` state on failure, retries transient Guardian transport errors, and correctly replaces only the targeted model block instead of swallowing top-level YAML sections such as `aliases:`.
+- A full Guardian-native multimodal finetune pass re-validated `Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved` at `context: 262144` with `tensor_split: "0.60,0.40"`, and a repeat run confirmed the results-file cache returns `cached: true` for previously tested combinations.
 - Anthropic-compatible clients such as Claude Code now authenticate successfully through Guardian because the proxy accepts `x-api-key` and `api-key` headers in addition to OpenAI-style `Authorization: Bearer` tokens.
 - OpenAI-compatible inference requests now detect a stale stopped `llama-server` backend, reload the active model once, and retry instead of leaking an ASGI 500 traceback to Agent Zero/LiteLLM clients.
 - Startup model detection now distinguishes profiles that share the same GGUF path by matching generated runtime args, preventing the non-thinking Qwen agent profile from being mistaken for the deep-reasoning profile after Guardian restarts.

@@ -149,6 +149,11 @@ class ModelManager:
         except Exception:
             return {}
 
+    def _refresh_model_registry(self) -> None:
+        """Reload models.yaml-derived registry state for hot config edits."""
+        self.models = self._load_config()
+        self._sync_vision_capabilities()
+
     def resolve_model(self, name: str) -> str:
         """Resolve a model name or alias to the canonical model name.
 
@@ -158,6 +163,8 @@ class ModelManager:
         3. Case-insensitive match against model names
         Raises ValueError if not found.
         """
+        self._refresh_model_registry()
+
         # 1. Exact match
         if name in self.models:
             return name
@@ -325,6 +332,7 @@ class ModelManager:
         clients can look up metadata using the exact ID they use
         for inference requests.
         """
+        self._refresh_model_registry()
         public_models: Dict[str, str] = {name: name for name in self.models}
 
         for alias, target in self._load_aliases().items():
@@ -790,8 +798,7 @@ class ModelManager:
     async def load(self, model_name: Optional[str] = None) -> None:
         """Reload llama-server with current (or specified) model."""
         # Re-read models.yaml so config edits take effect without Guardian restart
-        self.models = self._load_config()
-        self._sync_vision_capabilities()
+        self._refresh_model_registry()
         target = model_name or self.current_model
         if target not in self.models:
             raise ValueError(f"Model '{target}' not found in configuration")

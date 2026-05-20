@@ -97,9 +97,21 @@ Guardian operates on shared GPU hardware alongside other processes. Instead of k
 
 - Automated benchmark suite: models × context sizes × batch sizes
 - Resumable state persisted to `data/benchmark_state.json`
+- Guardian-native model finetune CLI: fast binary search for max stable `context` plus coarse-to-fine two-GPU `tensor_split` tuning against `/admin/load`
 - `RequestOptimizer` injects best-known context/batch settings into requests
 - Scheduled maintenance windows for unattended benchmark runs
 - Dashboard visualization of results
+
+For focused per-model tuning, use the finetune CLI instead of broad sweep benchmarks. Example:
+
+```bash
+python scripts/finetune_model_config.py qwen3-35b-heretic-mtp \
+  --min-context 131072 \
+  --max-context 262144 \
+  --granularity 2048
+```
+
+Omit `--split` to let the CLI search tensor splits dynamically around the current model config. Compatible probe combinations are cached in `data/model_finetune_results.json`, so repeat runs can skip already tested `context`/`tensor_split` pairs when the model signature and smoke-test signature still match. Add `--apply` only when you want the winning `context` and `tensor_split` written back to `config/models.yaml`.
 
 ## Running Guardian
 
@@ -125,6 +137,16 @@ models:
     ngl: 99
     kv_type: q4_0
     extra_args: "--temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
+
+  Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved:
+    path: /home/flip/models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-Q4_K_M.gguf
+    benchmark_context_limit: 262144
+    context: 196608
+    ngl: 36
+    kv_type: q4_0
+    tensor_split: "0.55,0.45"
+    mmproj: /home/flip/models/Qwen3.6-35B-A3B-mmproj-BF16.gguf
+    extra_args: "--spec-type draft-mtp --spec-draft-n-max 3 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
 
   Qwen3-VL-30B-A3B-Thinking:
     path: /home/flip/models/Qwen3-VL-30B-A3B-Thinking-Q4_K_M.gguf
@@ -157,6 +179,9 @@ models:
 aliases:
   qwen3.6-35b: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
   qwen3-35b-uncensored: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
+  qwen3.6-35b-heretic-mtp: "Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved"
+  qwen3-35b-heretic-mtp: "Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved"
+  qwen3-35b-mtp: "Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved"
   qwen3-vl: "Qwen3-VL-30B-A3B-Thinking"
   qwen3-32b-uncensored: "Qwen3-VL-32B-Gemini-Heretic-Uncensored-Thinking"
   gemma4: "Huihui-gemma-4-26B-A4B-it-abliterated"
@@ -171,9 +196,11 @@ guardian:
 
 Supported per-model fields: `path`, `context`, `benchmark_context_limit`, `ngl`, `kv_type`, `backend`, `tensor_split`, `mmproj`, `extra_args`.
 
+Guardian hot-reloads the model registry on `/admin/load` and `/v1/models`, so new `models.yaml` entries and aliases take effect without restarting the API service.
+
 Keep one runtime entry per GGUF family. Use API request parameters for reasoning, sampling, and other per-call behavior instead of duplicating `-agent`, `-deep`, or `-max` profile variants in `models.yaml`.
 
-Treat `context` as the live hardware-safe runtime cap, not the model's theoretical or trained window. Keep `benchmark_context_limit` for the model's paper or metadata ceiling. For the current RTX 3060 + RTX 5060 Ti host, the Qwen3.6 uncensored q4 runtime was re-validated at `131072` without forcing a tensor split; the earlier lower ceiling was a false negative caused by an explicit split probe that did not match the historical benchmark path.
+Treat `context` as the live hardware-safe runtime cap, not the model's theoretical or trained window. Keep `benchmark_context_limit` for the model's paper or metadata ceiling. For the current RTX 3060 + RTX 5060 Ti host, the text-only Qwen3.6 uncensored q4 runtime was re-validated at `262144` without forcing a tensor split, while the multimodal Native-MTP Heretic q4 profile was re-tuned through Guardian image smoke at `262144` with `ngl: 36` and `tensor_split: "0.60,0.40"`.
 
 - `context`: the active runtime context Guardian actually loads for the model.
 - `benchmark_context_limit`: the benchmark or paper ceiling where testing higher stops being useful; Guardian does not use it as the active runtime window.
@@ -291,11 +318,13 @@ scripts/
 ├── generate_key.py      # CLI key generation
 ├── test_system.py       # End-to-end system test
 ├── benchmark_context.py # Context size benchmarking
+├── finetune_model_config.py # Fast Guardian-native context/tensor_split tuning
 ├── stress_test.py       # Load testing
 └── ...                  # Analysis, vision tests, model sync
 
 data/
 └── benchmark_state.json # Persisted benchmark queue + results
+└── model_finetune_results.json # Finetune run history
 
 docs/
 ├── CLIENT_INTEGRATION.md     # Client API guide with code examples

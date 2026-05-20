@@ -100,12 +100,24 @@ models:
     ngl: 99
     kv_type: q4_0
     extra_args: "--temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
+  Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved:
+    path: "/home/flip/models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-Q4_K_M.gguf"
+    benchmark_context_limit: 262144
+    context: 262144
+    ngl: 36
+    kv_type: "q4_0"
+    tensor_split: "0.60,0.40"
+    mmproj: "/home/flip/models/Qwen3.6-35B-A3B-mmproj-BF16.gguf"
+    extra_args: "--spec-type draft-mtp --spec-draft-n-max 3 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
 # === Model Aliases ===
 # Short names that resolve to full model names above.
 # Use in API requests: {"model": "qwen3-35b-uncensored"}
 aliases:
   qwen3.6-35b: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
   qwen3-35b-uncensored: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
+  qwen3.6-35b-heretic-mtp: "Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved"
+  qwen3-35b-heretic-mtp: "Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved"
+  qwen3-35b-mtp: "Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved"
   qwen3-30b: "Qwen3-30B-A3B-Thinking-2507"
   qwen3-vl: "Qwen3-VL-30B-A3B-Thinking"
   qwen3-32b-uncensored: "Qwen3-VL-32B-Gemini-Heretic-Uncensored-Thinking"
