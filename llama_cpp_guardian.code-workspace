@@ -1,0 +1,30 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../github-copilot-config"
+		},
+		{
+			"path": "../models"
+		},
+		{
+			"path": "../.vscode"
+		},
+		{
+			"path": "../.vscode-server"
+		},
+		{
+			"path": "../llama_cpp_official"
+		}
+	],
+	"settings": {
+		"terminal.integrated.automationProfile.linux": {
+			"path": "/bin/bash",
+			"args": [
+				"-l"
+			]
+		}
+	}
+}
