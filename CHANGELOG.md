@@ -13,6 +13,8 @@
 - Qwen3.6 Native-MTP multimodal profile plus `qwen3.6-35b-heretic-mtp`, `qwen3-35b-heretic-mtp`, and `qwen3-35b-mtp` aliases, wired to the preserved-MTP Heretic GGUF, its mmproj companion, and `--spec-type draft-mtp`.
 - Guardian-native finetune suite in `app.tweaker.model_finetune` plus `scripts/finetune_model_config.py`, which binary-searches the highest stable runtime context and coarse-to-fine tests `ngl` plus two-GPU `tensor_split` candidates against live `/admin/load` probes.
 - The finetune suite now persists compatible probe results in `data/model_finetune_results.json` and reuses them on later runs when the model signature and smoke-test signature still match, so already-tested `context`/`ngl`/`tensor_split` combinations are skipped instead of reloaded.
+- Added `docs/HYDRO_CONTEXT_ARCHITECTURE.md`, describing a shared structured-memory and context-assembler design for Daily Grow Journal, Telegram grow assistance, root analysis, and future HydroCodo consumers.
+- Added `docs/SERVER_UPGRADE_PLAN.md`, a normalized English planning document for the next Guardian host hardware upgrade based on the decoded server-upgrade note.
 
 ### Changed
 - The finetune CLI now exposes `--optimization {speed,context,balanced}` instead of manual `--min/max-context` and `--min/max-ngl` range flags, and result selection now applies the requested speed-vs-context policy only after the split has been rebalanced from measured per-GPU free-VRAM data.
