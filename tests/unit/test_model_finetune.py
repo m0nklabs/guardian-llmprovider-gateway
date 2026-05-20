@@ -4,11 +4,13 @@ from app.tweaker.model_finetune import (
     align_context_ceil,
     align_context_floor,
     binary_search_max_success,
+    build_ngl_candidates,
     build_model_signature,
     build_probe_cache_key,
     build_smoke_messages,
     build_smoke_signature,
     build_split_candidates,
+    resolve_context_bounds,
     format_two_gpu_split,
     index_cached_probes,
     parse_two_gpu_split,
@@ -43,6 +45,27 @@ class TestTensorSplitHelpers:
         assert "0.55,0.45" in candidates
 
 
+class TestNglHelpers:
+    def test_build_ngl_candidates_prefers_higher_values(self):
+        candidates = build_ngl_candidates(36, 16, 36, 99)
+        assert candidates == [99, 84, 68, 52, 36]
+
+
+class TestAutoContextBounds:
+    def test_resolve_context_bounds_auto_mode_uses_half_of_current_context(self):
+        lower, upper = resolve_context_bounds(
+            original_context=262144,
+            benchmark_context_limit=262144,
+            min_context=None,
+            max_context=None,
+            granularity=2048,
+            auto_context_range=True,
+            auto_context_floor_ratio=0.5,
+        )
+        assert lower == 131072
+        assert upper == 262144
+
+
 class TestSmokeMessages:
     def test_build_text_smoke_messages(self):
         messages = build_smoke_messages("Reply with exactly: FIT OK")
@@ -70,6 +93,7 @@ class TestPersistentProbeCache:
         variant = {
             **base,
             "context": 196608,
+            "ngl": 52,
             "tensor_split": "0.60,0.40",
         }
         assert build_model_signature("TestModel", base) == build_model_signature("TestModel", variant)
@@ -86,6 +110,7 @@ class TestPersistentProbeCache:
                     {
                         "model": "TestModel",
                         "context": 196608,
+                        "ngl": 52,
                         "tensor_split": "0.55,0.45",
                         "success": True,
                         "load_seconds": 10.0,
@@ -102,6 +127,7 @@ class TestPersistentProbeCache:
                     {
                         "model": "TestModel",
                         "context": 229376,
+                        "ngl": 60,
                         "tensor_split": "0.60,0.40",
                         "success": True,
                         "load_seconds": 11.0,
@@ -117,7 +143,7 @@ class TestPersistentProbeCache:
             model_signature=model_signature,
             smoke_signature=smoke_signature,
         )
-        key = build_probe_cache_key("TestModel", 196608, "0.55,0.45", model_signature, smoke_signature)
+        key = build_probe_cache_key("TestModel", 196608, 52, "0.55,0.45", model_signature, smoke_signature)
         assert key in indexed
         assert indexed[key].cached is True
         assert indexed[key].success is True

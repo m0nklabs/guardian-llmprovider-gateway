@@ -106,12 +106,13 @@ For focused per-model tuning, use the finetune CLI instead of broad sweep benchm
 
 ```bash
 python scripts/finetune_model_config.py qwen3-35b-heretic-mtp \
-  --min-context 131072 \
-  --max-context 262144 \
-  --granularity 2048
+  --auto-context-range \
+  --granularity 2048 \
+  --min-ngl 36 \
+  --max-ngl 68
 ```
 
-Omit `--split` to let the CLI search tensor splits dynamically around the current model config. Compatible probe combinations are cached in `data/model_finetune_results.json`, so repeat runs can skip already tested `context`/`tensor_split` pairs when the model signature and smoke-test signature still match. Add `--apply` only when you want the winning `context` and `tensor_split` written back to `config/models.yaml`.
+`--auto-context-range` derives effective context bounds from the current runtime config and benchmark ceiling; with the default `--auto-context-floor-ratio 0.5`, a model currently pinned at `262144` will auto-search from `131072` up to `262144`. Omit `--split` to let the CLI search tensor splits dynamically around the current model config. Omit `--ngl` to search `ngl` dynamically between the current runtime value and `--max-ngl`. Compatible probe combinations are cached in `data/model_finetune_results.json`, so repeat runs can skip already tested `context`/`ngl`/`tensor_split` triples when the model signature and smoke-test signature still match. Add `--apply` only when you want the winning `context`, `ngl`, and `tensor_split` written back to `config/models.yaml`.
 
 ## Running Guardian
 
@@ -200,7 +201,7 @@ Guardian hot-reloads the model registry on `/admin/load` and `/v1/models`, so ne
 
 Keep one runtime entry per GGUF family. Use API request parameters for reasoning, sampling, and other per-call behavior instead of duplicating `-agent`, `-deep`, or `-max` profile variants in `models.yaml`.
 
-Treat `context` as the live hardware-safe runtime cap, not the model's theoretical or trained window. Keep `benchmark_context_limit` for the model's paper or metadata ceiling. For the current RTX 3060 + RTX 5060 Ti host, the text-only Qwen3.6 uncensored q4 runtime was re-validated at `262144` without forcing a tensor split, while the multimodal Native-MTP Heretic q4 profile was re-tuned through Guardian image smoke at `262144` with `ngl: 36` and `tensor_split: "0.60,0.40"`.
+Treat `context` as the live hardware-safe runtime cap, not the model's theoretical or trained window. Keep `benchmark_context_limit` for the model's paper or metadata ceiling. For the current RTX 3060 + RTX 5060 Ti host, the text-only Qwen3.6 uncensored q4 runtime was re-validated at `262144` without forcing a tensor split, while the multimodal Native-MTP Heretic q4 profile was re-tuned through Guardian image smoke at `262144` with `ngl: 36` and `tensor_split: "0.60,0.40"`. A follow-up full-context `ngl` sweep confirmed that `52` and `68` only fit at lower contexts, so `36` remains the correct full-context runtime for this host.
 
 - `context`: the active runtime context Guardian actually loads for the model.
 - `benchmark_context_limit`: the benchmark or paper ceiling where testing higher stops being useful; Guardian does not use it as the active runtime window.

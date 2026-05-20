@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Fast Guardian-native model finetuning CLI.
 
-This script binary-searches the highest stable `context` and explores two-GPU
-`tensor_split` candidates around the current model config. It talks to Guardian
-directly, so the recommendation matches real `models.yaml` behavior.
+This script binary-searches the highest stable `context` and explores `ngl`
+plus two-GPU `tensor_split` candidates around the current model config. It
+talks to Guardian directly, so the recommendation matches real `models.yaml`
+behavior.
 """
 
 from __future__ import annotations
@@ -31,7 +32,7 @@ def resolve_api_key(explicit_key: Optional[str]) -> str:
 
 def parse_args() -> argparse.Namespace:
     """Parse finetune CLI arguments."""
-    parser = argparse.ArgumentParser(description="Find the best context and tensor split for a Guardian model.")
+    parser = argparse.ArgumentParser(description="Find the best context, ngl, and tensor split for a Guardian model.")
     parser.add_argument("model", help="Canonical model name or configured alias from models.yaml")
     parser.add_argument("--guardian-url", default="http://127.0.0.1:11434", help="Guardian base URL")
     parser.add_argument("--api-key", default=None, help="Guardian bearer token")
@@ -44,6 +45,29 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-context", type=int, default=None, help="Lower search bound for runtime context")
     parser.add_argument("--max-context", type=int, default=None, help="Upper search bound for runtime context")
     parser.add_argument("--granularity", type=int, default=2048, help="Context search step size")
+    parser.add_argument(
+        "--auto-context-range",
+        action="store_true",
+        help="Derive effective context bounds automatically from the current runtime config and benchmark ceiling",
+    )
+    parser.add_argument(
+        "--auto-context-floor-ratio",
+        type=float,
+        default=0.5,
+        help="When auto context range is active, start from this fraction of the current runtime context",
+    )
+    parser.add_argument("--min-ngl", type=int, default=None, help="Lower bound for auto ngl search (default: current ngl)")
+    parser.add_argument("--max-ngl", type=int, default=None, help="Upper bound for auto ngl search (default: 99)")
+    parser.add_argument("--ngl-step", type=int, default=16, help="Primary coarse ngl step")
+    parser.add_argument("--ngl-refine-step", type=int, default=8, help="Refine ngl step around the best coarse result")
+    parser.add_argument(
+        "--ngl",
+        action="append",
+        dest="ngl_candidates",
+        type=int,
+        default=[],
+        help="Explicit ngl candidate. Repeat to test multiple values.",
+    )
     parser.add_argument("--coarse-step", type=float, default=0.05, help="Primary coarse tensor-split step")
     parser.add_argument("--refine-step", type=float, default=0.02, help="Primary refine tensor-split step")
     parser.add_argument("--split-min", type=float, default=0.35, help="Minimum primary GPU share to test")
@@ -88,6 +112,13 @@ def main() -> int:
             min_context=args.min_context,
             max_context=args.max_context,
             granularity=args.granularity,
+            auto_context_range=args.auto_context_range,
+            auto_context_floor_ratio=args.auto_context_floor_ratio,
+            ngl_candidates=args.ngl_candidates or None,
+            min_ngl=args.min_ngl,
+            max_ngl=args.max_ngl,
+            ngl_step=args.ngl_step,
+            ngl_refine_step=args.ngl_refine_step,
             split_candidates=args.split_candidates or None,
             coarse_step=args.coarse_step,
             refine_step=args.refine_step,
@@ -106,8 +137,11 @@ def main() -> int:
 
     print(f"Model: {result.model}")
     print(f"Original context: {result.original_context}")
+    print(f"Original ngl: {result.original_ngl}")
     print(f"Original tensor_split: {result.original_tensor_split or 'auto'}")
+    print(f"Effective context range: {result.search_min_context}-{result.search_max_context}")
     print(f"Recommended context: {result.recommended_context}")
+    print(f"Recommended ngl: {result.recommended_ngl}")
     print(f"Recommended tensor_split: {result.recommended_tensor_split or 'auto'}")
     print(f"Applied to models.yaml: {'yes' if result.applied else 'no'}")
     print(f"Attempts: {len(result.attempts)}")

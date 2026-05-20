@@ -10,11 +10,14 @@
 
 - [x] Add a Guardian-native finetune helper that binary-searches the highest stable runtime context instead of sweeping linearly.
 - [x] Explore two-GPU tensor split candidates coarse-to-fine around the current config so `models.yaml` tuning is fast enough for live use.
+- [x] Extend the live finetune search to include `ngl`, so full-context profiles can prove whether a conservative GPU offload value is still necessary.
 - [x] Provide a CLI wrapper that logs finetune runs and optionally writes the winning `context` and `tensor_split` back to `config/models.yaml`.
+- [x] Add an explicit auto context-range mode so the CLI can derive sensible min/max bounds from the current runtime config.
 - [x] Harden the suite against transient Guardian request resets and guarantee config restoration on failed dry-runs.
 - [x] Persist compatible probe results in `data/model_finetune_results.json` so later runs can skip already tested `context`/`tensor_split` combinations.
 - [x] Validate the suite with focused unit tests and a narrow live Guardian dry-run against the Native-MTP Qwen profile.
 - [x] Re-run the Native-MTP Qwen profile with Guardian image smoke, apply the winning config, and confirm cache hits on the repeat search.
+- [x] Re-run the Native-MTP Qwen profile with full-context `ngl` search and confirm that `ngl: 36` still wins at `262144` on this host.
 
 ## 2026-05-20 Qwen3.6 Native-MTP Multimodal Bring-up
 

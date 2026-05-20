@@ -1,7 +1,7 @@
 """Guardian-native model finetuning helpers.
 
 This module finds the highest stable runtime context for a configured model while
-also exploring two-GPU tensor split candidates. It uses Guardian's own
+also exploring `ngl` and two-GPU tensor split candidates. It uses Guardian's own
 `/admin/load` and `/v1/chat/completions` endpoints so the measured result matches
 real `models.yaml` behavior.
 """
@@ -33,6 +33,7 @@ class ProbeResult:
 
     model: str
     context: int
+    ngl: int
     tensor_split: Optional[str]
     success: bool
     load_seconds: float
@@ -56,11 +57,17 @@ class TuneResult:
 
     model: str
     original_context: Optional[int]
+    original_ngl: Optional[int]
     original_tensor_split: Optional[str]
+    search_min_context: int
+    search_max_context: int
     recommended_context: int
+    recommended_ngl: int
     recommended_tensor_split: Optional[str]
     benchmark_context_limit: Optional[int]
     attempts: List[ProbeResult] = field(default_factory=list)
+    coarse_ngl_candidates: List[int] = field(default_factory=list)
+    refined_ngl_candidates: List[int] = field(default_factory=list)
     coarse_candidates: List[Optional[str]] = field(default_factory=list)
     refined_candidates: List[Optional[str]] = field(default_factory=list)
     applied: bool = False
@@ -73,10 +80,16 @@ class TuneResult:
             "timestamp": datetime.now(UTC).isoformat(),
             "model": self.model,
             "original_context": self.original_context,
+            "original_ngl": self.original_ngl,
             "original_tensor_split": self.original_tensor_split,
+            "search_min_context": self.search_min_context,
+            "search_max_context": self.search_max_context,
             "recommended_context": self.recommended_context,
+            "recommended_ngl": self.recommended_ngl,
             "recommended_tensor_split": self.recommended_tensor_split,
             "benchmark_context_limit": self.benchmark_context_limit,
+            "coarse_ngl_candidates": self.coarse_ngl_candidates,
+            "refined_ngl_candidates": self.refined_ngl_candidates,
             "coarse_candidates": self.coarse_candidates,
             "refined_candidates": self.refined_candidates,
             "applied": self.applied,
@@ -106,7 +119,7 @@ def build_model_signature(model_name: str, model_config: Dict[str, object]) -> s
     signature_config = {
         key: value
         for key, value in model_config.items()
-        if key not in {"context", "tensor_split", "benchmark_context_limit"}
+        if key not in {"context", "ngl", "tensor_split", "benchmark_context_limit"}
     }
     payload = {"model": model_name, "config": signature_config}
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -131,12 +144,13 @@ def build_smoke_signature(
 def build_probe_cache_key(
     model_name: str,
     context: int,
+    ngl: int,
     tensor_split: Optional[str],
     model_signature: str,
     smoke_signature: str,
-) -> Tuple[str, int, Optional[str], str, str]:
+) -> Tuple[str, int, int, Optional[str], str, str]:
     """Build the durable cache key for one probe combination."""
-    return (model_name, int(context), tensor_split, model_signature, smoke_signature)
+    return (model_name, int(context), int(ngl), tensor_split, model_signature, smoke_signature)
 
 
 def index_cached_probes(
@@ -145,9 +159,9 @@ def index_cached_probes(
     model_name: str,
     model_signature: str,
     smoke_signature: str,
-) -> Dict[Tuple[str, int, Optional[str], str, str], ProbeResult]:
+) -> Dict[Tuple[str, int, int, Optional[str], str, str], ProbeResult]:
     """Index compatible historical probes from the finetune results file."""
-    indexed: Dict[Tuple[str, int, Optional[str], str, str], ProbeResult] = {}
+    indexed: Dict[Tuple[str, int, int, Optional[str], str, str], ProbeResult] = {}
     for entry in history:
         if entry.get("model") != model_name:
             continue
@@ -164,12 +178,18 @@ def index_cached_probes(
             context = attempt.get("context")
             if not isinstance(context, int):
                 continue
+            ngl = attempt.get("ngl")
+            if not isinstance(ngl, int):
+                ngl = entry.get("original_ngl") if isinstance(entry.get("original_ngl"), int) else None
+            if not isinstance(ngl, int):
+                continue
             tensor_split = attempt.get("tensor_split")
             if tensor_split is not None:
                 tensor_split = str(tensor_split)
             probe = ProbeResult(
                 model=str(attempt.get("model") or model_name),
                 context=context,
+                ngl=ngl,
                 tensor_split=tensor_split,
                 success=bool(attempt.get("success")),
                 load_seconds=float(attempt.get("load_seconds") or 0.0),
@@ -181,8 +201,58 @@ def index_cached_probes(
                 smoke_signature=smoke_signature,
                 cached=True,
             )
-            indexed[build_probe_cache_key(model_name, context, tensor_split, model_signature, smoke_signature)] = probe
+            indexed[build_probe_cache_key(model_name, context, ngl, tensor_split, model_signature, smoke_signature)] = probe
     return indexed
+
+
+def build_ngl_candidates(anchor_ngl: Optional[int], step: int, min_ngl: int, max_ngl: int) -> List[int]:
+    """Build ordered `ngl` candidates, favoring higher GPU offload first."""
+    if step <= 0:
+        raise ValueError("ngl step must be > 0")
+    if min_ngl < 0 or max_ngl < min_ngl:
+        raise ValueError("ngl bounds must satisfy 0 <= min <= max")
+
+    anchor = anchor_ngl if isinstance(anchor_ngl, int) else max_ngl
+    anchor = min(max(anchor, min_ngl), max_ngl)
+
+    values: set[int] = {anchor, min_ngl, max_ngl}
+    current = min_ngl
+    while current <= max_ngl:
+        values.add(current)
+        current += step
+
+    return sorted(values, reverse=True)
+
+
+def resolve_context_bounds(
+    *,
+    original_context: Optional[int],
+    benchmark_context_limit: Optional[int],
+    min_context: Optional[int],
+    max_context: Optional[int],
+    granularity: int,
+    auto_context_range: bool,
+    auto_context_floor_ratio: float,
+) -> Tuple[int, int]:
+    """Resolve effective context bounds, optionally deriving them automatically."""
+    if not 0 < auto_context_floor_ratio <= 1.0:
+        raise ValueError("auto_context_floor_ratio must satisfy 0 < ratio <= 1")
+
+    upper_candidate = int(max_context or benchmark_context_limit or original_context or 131072)
+    upper_bound = align_context_floor(upper_candidate, granularity)
+
+    if min_context is not None:
+        lower_candidate = int(min_context)
+    elif auto_context_range:
+        anchor_context = int(original_context or upper_bound)
+        lower_candidate = max(granularity, int(min(anchor_context, upper_bound) * auto_context_floor_ratio))
+    else:
+        lower_candidate = granularity
+
+    lower_bound = align_context_ceil(lower_candidate, granularity)
+    if lower_bound > upper_bound:
+        raise ValueError("resolved min_context is greater than resolved max_context")
+    return lower_bound, upper_bound
 
 
 def align_context_floor(value: int, granularity: int) -> int:
@@ -268,6 +338,8 @@ def choose_better_result(
         return candidate
     if candidate.context != current_best.context:
         return candidate if candidate.context > current_best.context else current_best
+    if candidate.ngl != current_best.ngl:
+        return candidate if candidate.ngl > current_best.ngl else current_best
     if candidate.total_seconds != current_best.total_seconds:
         return candidate if candidate.total_seconds < current_best.total_seconds else current_best
 
@@ -409,9 +481,9 @@ class GuardianModelFinetuner:
         self.base_text = self.models_config_path.read_text()
         self.base_config = yaml.safe_load(self.base_text) or {}
         self.result_history = self._load_result_history()
-        self.probe_cache: Dict[Tuple[str, int, Optional[str], str, str], ProbeResult] = {}
+        self.probe_cache: Dict[Tuple[str, int, int, Optional[str], str, str], ProbeResult] = {}
         self._attempt_log: List[ProbeResult] = []
-        self._attempt_keys_seen: set[Tuple[str, int, Optional[str], str, str]] = set()
+        self._attempt_keys_seen: set[Tuple[str, int, int, Optional[str], str, str]] = set()
         self._active_model_signature: Optional[str] = None
         self._active_smoke_signature = build_smoke_signature(
             self.smoke_prompt,
@@ -447,6 +519,13 @@ class GuardianModelFinetuner:
         min_context: Optional[int] = None,
         max_context: Optional[int] = None,
         granularity: int = 2048,
+        auto_context_range: bool = False,
+        auto_context_floor_ratio: float = 0.5,
+        ngl_candidates: Optional[Sequence[int]] = None,
+        min_ngl: Optional[int] = None,
+        max_ngl: Optional[int] = None,
+        ngl_step: int = 16,
+        ngl_refine_step: int = 8,
         split_candidates: Optional[Sequence[Optional[str]]] = None,
         coarse_step: float = 0.05,
         refine_step: float = 0.02,
@@ -456,7 +535,7 @@ class GuardianModelFinetuner:
         apply: bool = False,
         restore_loaded_model: bool = True,
     ) -> TuneResult:
-        """Search for the best context and tensor split for a model entry."""
+        """Search for the best context, `ngl`, and tensor split for a model entry."""
         cleanup_needed = True
         try:
             canonical_model = self.resolve_model(model_name)
@@ -466,11 +545,33 @@ class GuardianModelFinetuner:
             self._active_model_signature = build_model_signature(canonical_model, original_model_config)
             self._seed_probe_cache(canonical_model)
             original_context = original_model_config.get("context")
+            original_ngl = self._normalize_ngl(original_model_config.get("ngl"))
             original_tensor_split = self._normalize_tensor_split(original_model_config.get("tensor_split"))
             benchmark_limit = original_model_config.get("benchmark_context_limit")
-            upper_bound = int(max_context or benchmark_limit or original_context or 131072)
-            lower_bound = int(min_context or max(granularity, granularity))
+            lower_bound, upper_bound = resolve_context_bounds(
+                original_context=int(original_context) if isinstance(original_context, int) else None,
+                benchmark_context_limit=int(benchmark_limit) if isinstance(benchmark_limit, int) else None,
+                min_context=min_context,
+                max_context=max_context,
+                granularity=granularity,
+                auto_context_range=auto_context_range or min_context is None or max_context is None,
+                auto_context_floor_ratio=auto_context_floor_ratio,
+            )
             anchor_context = int(original_context or upper_bound)
+
+            lower_ngl = min_ngl if min_ngl is not None else (original_ngl if original_ngl is not None else 0)
+            upper_ngl = max_ngl if max_ngl is not None else 99
+            if lower_ngl is None:
+                lower_ngl = 0
+            if upper_ngl < lower_ngl:
+                raise ValueError("max_ngl must be >= min_ngl")
+
+            if ngl_candidates:
+                coarse_ngl_candidates = sorted({self._normalize_ngl(candidate) for candidate in ngl_candidates if self._normalize_ngl(candidate) is not None}, reverse=True)
+            else:
+                coarse_ngl_candidates = build_ngl_candidates(original_ngl, ngl_step, lower_ngl, upper_ngl)
+            if not coarse_ngl_candidates:
+                raise RuntimeError(f"No valid ngl candidates found for '{canonical_model}'")
 
             if split_candidates:
                 coarse_candidates = [self._normalize_tensor_split(candidate) for candidate in split_candidates]
@@ -484,20 +585,31 @@ class GuardianModelFinetuner:
                 )
 
             best_result: Optional[ProbeResult] = None
-            for candidate in coarse_candidates:
-                result = self._find_best_context_for_split(
-                    model_name=canonical_model,
-                    model_config=original_model_config,
-                    tensor_split=candidate,
-                    min_context=lower_bound,
-                    max_context=upper_bound,
-                    granularity=granularity,
-                    anchor_context=anchor_context,
-                )
-                best_result = choose_better_result(best_result, result, original_tensor_split)
+            for ngl_candidate in coarse_ngl_candidates:
+                for candidate in coarse_candidates:
+                    result = self._find_best_context_for_combination(
+                        model_name=canonical_model,
+                        model_config=original_model_config,
+                        ngl=ngl_candidate,
+                        tensor_split=candidate,
+                        min_context=lower_bound,
+                        max_context=upper_bound,
+                        granularity=granularity,
+                        anchor_context=anchor_context,
+                    )
+                    best_result = choose_better_result(best_result, result, original_tensor_split)
 
             if best_result is None:
                 raise RuntimeError(f"No successful config found for '{canonical_model}' in range {lower_bound}-{upper_bound}")
+
+            refined_ngl_candidates: List[int] = []
+            if not ngl_candidates and ngl_refine_step > 0:
+                refined_ngl_candidates = build_ngl_candidates(
+                    best_result.ngl,
+                    ngl_refine_step,
+                    max(lower_ngl, best_result.ngl - ngl_step),
+                    min(upper_ngl, best_result.ngl + ngl_step),
+                )
 
             refined_candidates: List[Optional[str]] = []
             if not split_candidates and refine_step > 0:
@@ -509,10 +621,16 @@ class GuardianModelFinetuner:
                         max(split_min, best_primary - coarse_step),
                         min(split_max, best_primary + coarse_step),
                     )
-                    for candidate in refined_candidates:
-                        result = self._find_best_context_for_split(
+
+            ngl_evaluation_candidates = refined_ngl_candidates or [best_result.ngl]
+            split_evaluation_candidates = refined_candidates or [best_result.tensor_split]
+            if refined_ngl_candidates or refined_candidates:
+                for ngl_candidate in ngl_evaluation_candidates:
+                    for candidate in split_evaluation_candidates:
+                        result = self._find_best_context_for_combination(
                             model_name=canonical_model,
                             model_config=original_model_config,
+                            ngl=ngl_candidate,
                             tensor_split=candidate,
                             min_context=lower_bound,
                             max_context=upper_bound,
@@ -527,11 +645,17 @@ class GuardianModelFinetuner:
             result = TuneResult(
                 model=canonical_model,
                 original_context=original_context if isinstance(original_context, int) else None,
+                original_ngl=original_ngl,
                 original_tensor_split=original_tensor_split,
+                search_min_context=lower_bound,
+                search_max_context=upper_bound,
                 recommended_context=best_result.context,
+                recommended_ngl=best_result.ngl,
                 recommended_tensor_split=best_result.tensor_split,
                 benchmark_context_limit=benchmark_limit if isinstance(benchmark_limit, int) else None,
                 attempts=list(self._attempt_log),
+                coarse_ngl_candidates=list(coarse_ngl_candidates),
+                refined_ngl_candidates=list(refined_ngl_candidates),
                 coarse_candidates=list(coarse_candidates),
                 refined_candidates=list(refined_candidates),
                 applied=apply,
@@ -554,18 +678,19 @@ class GuardianModelFinetuner:
                 except Exception as exc:
                     logger.warning("Failed to restore original finetune state: %s", exc)
 
-    def _find_best_context_for_split(
+    def _find_best_context_for_combination(
         self,
         *,
         model_name: str,
         model_config: Dict[str, object],
+        ngl: int,
         tensor_split: Optional[str],
         min_context: int,
         max_context: int,
         granularity: int,
         anchor_context: Optional[int],
     ) -> Optional[ProbeResult]:
-        """Binary-search the highest successful context for one split candidate."""
+        """Binary-search the highest successful context for one `ngl`/split combination."""
         best_context, _ = binary_search_max_success(
             min_context=min_context,
             max_context=max_context,
@@ -575,6 +700,7 @@ class GuardianModelFinetuner:
                 model_name=model_name,
                 model_config=model_config,
                 context=context,
+                ngl=ngl,
                 tensor_split=tensor_split,
             ).success,
         )
@@ -584,6 +710,7 @@ class GuardianModelFinetuner:
             model_name=model_name,
             model_config=model_config,
             context=best_context,
+            ngl=ngl,
             tensor_split=tensor_split,
         )
 
@@ -593,6 +720,7 @@ class GuardianModelFinetuner:
         model_name: str,
         model_config: Dict[str, object],
         context: int,
+        ngl: int,
         tensor_split: Optional[str],
     ) -> ProbeResult:
         """Apply one temporary model config and probe it through Guardian."""
@@ -603,6 +731,7 @@ class GuardianModelFinetuner:
         cache_key = build_probe_cache_key(
             model_name,
             int(context),
+            int(ngl),
             normalized_split,
             self._active_model_signature,
             self._active_smoke_signature,
@@ -614,6 +743,7 @@ class GuardianModelFinetuner:
 
         candidate_config = copy.deepcopy(model_config)
         candidate_config["context"] = int(context)
+        candidate_config["ngl"] = int(ngl)
         if normalized_split:
             candidate_config["tensor_split"] = normalized_split
         else:
@@ -634,6 +764,7 @@ class GuardianModelFinetuner:
             probe_result = ProbeResult(
                 model=model_name,
                 context=int(context),
+                ngl=int(ngl),
                 tensor_split=normalized_split,
                 success=False,
                 load_seconds=time.perf_counter() - load_started,
@@ -650,6 +781,7 @@ class GuardianModelFinetuner:
             probe_result = ProbeResult(
                 model=model_name,
                 context=int(context),
+                ngl=int(ngl),
                 tensor_split=normalized_split,
                 success=False,
                 load_seconds=load_seconds,
@@ -676,6 +808,7 @@ class GuardianModelFinetuner:
                 probe_result = ProbeResult(
                     model=model_name,
                     context=int(context),
+                    ngl=int(ngl),
                     tensor_split=normalized_split,
                     success=False,
                     load_seconds=load_seconds,
@@ -692,6 +825,7 @@ class GuardianModelFinetuner:
                     probe_result = ProbeResult(
                         model=model_name,
                         context=int(context),
+                        ngl=int(ngl),
                         tensor_split=normalized_split,
                         success=True,
                         load_seconds=load_seconds,
@@ -705,6 +839,7 @@ class GuardianModelFinetuner:
                     probe_result = ProbeResult(
                         model=model_name,
                         context=int(context),
+                        ngl=int(ngl),
                         tensor_split=normalized_split,
                         success=False,
                         load_seconds=load_seconds,
@@ -718,9 +853,10 @@ class GuardianModelFinetuner:
         self.probe_cache[cache_key] = probe_result
         self._record_attempt(cache_key, probe_result)
         logger.info(
-            "Probe %s ctx=%s split=%s success=%s",
+            "Probe %s ctx=%s ngl=%s split=%s success=%s",
             model_name,
             context,
+            ngl,
             normalized_split or "auto",
             probe_result.success,
         )
@@ -750,6 +886,7 @@ class GuardianModelFinetuner:
         """Persist the winning config to models.yaml and reload it through Guardian."""
         applied_config = copy.deepcopy(model_config)
         applied_config["context"] = best_result.context
+        applied_config["ngl"] = best_result.ngl
         if best_result.tensor_split:
             applied_config["tensor_split"] = best_result.tensor_split
         else:
@@ -807,7 +944,7 @@ class GuardianModelFinetuner:
 
     def _record_attempt(
         self,
-        cache_key: Tuple[str, int, Optional[str], str, str],
+        cache_key: Tuple[str, int, int, Optional[str], str, str],
         probe_result: ProbeResult,
     ) -> None:
         """Record one probe in the current run exactly once."""
@@ -838,6 +975,17 @@ class GuardianModelFinetuner:
             text = str(tensor_split).strip()
             return text or None
         return format_two_gpu_split(ratio)
+
+    @staticmethod
+    def _normalize_ngl(ngl: Optional[object]) -> Optional[int]:
+        """Normalize optional `ngl` values to integers."""
+        if ngl is None:
+            return None
+        try:
+            value = int(ngl)
+        except (TypeError, ValueError):
+            return None
+        return max(0, value)
 
     @staticmethod
     def _atomic_write(path: Path, text: str) -> None:

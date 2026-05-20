@@ -11,8 +11,8 @@
 - Explicit `gemma4-26b-agent` alias for the stable 26B Agent Zero route; the 31B uncensored route remains opt-in as `gemma4-31b-uncensored-max-agent`.
 - Gemma4 Agent now uses the same multimodal projector as the proven OpenWebUI Gemma4 profile so Agent Zero can route image tasks through the bounded agent alias.
 - Qwen3.6 Native-MTP multimodal profile plus `qwen3.6-35b-heretic-mtp`, `qwen3-35b-heretic-mtp`, and `qwen3-35b-mtp` aliases, wired to the preserved-MTP Heretic GGUF, its mmproj companion, and `--spec-type draft-mtp`.
-- Guardian-native finetune suite in `app.tweaker.model_finetune` plus `scripts/finetune_model_config.py`, which binary-searches the highest stable runtime context and coarse-to-fine tests two-GPU `tensor_split` candidates against live `/admin/load` probes.
-- The finetune suite now persists compatible probe results in `data/model_finetune_results.json` and reuses them on later runs when the model signature and smoke-test signature still match, so already-tested `context`/`tensor_split` combos are skipped instead of reloaded.
+- Guardian-native finetune suite in `app.tweaker.model_finetune` plus `scripts/finetune_model_config.py`, which binary-searches the highest stable runtime context and coarse-to-fine tests `ngl` plus two-GPU `tensor_split` candidates against live `/admin/load` probes.
+- The finetune suite now persists compatible probe results in `data/model_finetune_results.json` and reuses them on later runs when the model signature and smoke-test signature still match, so already-tested `context`/`ngl`/`tensor_split` combinations are skipped instead of reloaded.
 
 ### Changed
 - Centralized repo-sensitive filesystem paths in `app.paths` and `scripts/_paths.py`, so `ModelManager`, `start_llama.sh`, utility scripts, and tests now resolve from the checkout root or environment overrides instead of assuming `/home/flip/llama_cpp_guardian`.
@@ -45,7 +45,9 @@
 - Claude Code can now switch Guardian models with its dedicated `claudecode_*` API key instead of inheriting whichever sibling app model was already loaded, which prevented restarts from getting stuck on NerveSplat's lighter `gemma4-e4b` runtime.
 - `ModelManager.resolve_model()` and the public model-map path now refresh the in-memory registry before resolving aliases, so freshly added `models.yaml` entries work through `/admin/load` and `/v1/models` without a Guardian restart.
 - The finetune suite now restores the original `models.yaml` state on failure, retries transient Guardian transport errors, and correctly replaces only the targeted model block instead of swallowing top-level YAML sections such as `aliases:`.
+- The finetune CLI now has an explicit auto-bounds mode for context search, derives sensible defaults from the active runtime config when bounds are omitted, and records the effective search range in the results log.
 - A full Guardian-native multimodal finetune pass re-validated `Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved` at `context: 262144` with `tensor_split: "0.60,0.40"`, and a repeat run confirmed the results-file cache returns `cached: true` for previously tested combinations.
+- A follow-up full-context `ngl` sweep for `Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved` confirmed that `ngl: 36` remains the correct `262144` runtime on this host; higher `ngl` values such as `52` and `68` only fit after the context drops into the `188k` range.
 - Anthropic-compatible clients such as Claude Code now authenticate successfully through Guardian because the proxy accepts `x-api-key` and `api-key` headers in addition to OpenAI-style `Authorization: Bearer` tokens.
 - OpenAI-compatible inference requests now detect a stale stopped `llama-server` backend, reload the active model once, and retry instead of leaking an ASGI 500 traceback to Agent Zero/LiteLLM clients.
 - Startup model detection now distinguishes profiles that share the same GGUF path by matching generated runtime args, preventing the non-thinking Qwen agent profile from being mistaken for the deep-reasoning profile after Guardian restarts.
