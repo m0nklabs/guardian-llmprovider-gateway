@@ -11,6 +11,7 @@ from app.tweaker.model_finetune import (
     detect_oom_gpu,
     GuardianModelFinetuner,
     next_split_from_vram_balance,
+    smaller_split_step,
     apply_runtime_search_values,
     align_context_ceil,
     align_context_floor,
@@ -32,11 +33,16 @@ from app.tweaker.model_finetune import (
     parse_two_gpu_split,
     render_model_block,
     replace_model_block,
+    resolve_headroom_context_granularity,
     resolve_optimization_mode,
     resolve_runtime_config_value,
     resolve_runtime_mode,
+    should_skip_coarse_split_shift,
+    should_limit_large_context_jumps,
     split_candidates_for_distance,
     split_balance_distance,
+    target_gpu_free_mib_for_balance_shift,
+    two_gpu_free_mib,
     unique_attempt_ngls,
     unique_attempt_splits,
 )
@@ -126,6 +132,45 @@ class TestTensorSplitHelpers:
             "1": {"free_pct": 13.5},
         }
         assert free_vram_delta_pct(gpu_vram) == 7.5
+
+    def test_smaller_split_step_halves_down_to_one_percent(self):
+        assert smaller_split_step(0.05) == 0.03
+        assert smaller_split_step(0.02) == 0.01
+        assert smaller_split_step(0.01) is None
+
+    def test_target_gpu_free_mib_for_balance_shift_uses_receiver_gpu(self):
+        gpu_vram = {
+            "0": {"free": 991.0, "total": 12288.0, "free_pct": 8.06},
+            "1": {"free": 39.0, "total": 16311.0, "free_pct": 0.24},
+        }
+        assert target_gpu_free_mib_for_balance_shift(gpu_vram) == 991.0
+
+    def test_should_skip_coarse_split_shift_when_receiver_has_under_one_gib_free(self):
+        gpu_vram = {
+            "0": {"free": 991.0, "total": 12288.0, "free_pct": 8.06},
+            "1": {"free": 39.0, "total": 16311.0, "free_pct": 0.24},
+        }
+        assert should_skip_coarse_split_shift(gpu_vram, step=0.02) is True
+        assert should_skip_coarse_split_shift(gpu_vram, step=0.01) is False
+
+    def test_two_gpu_free_mib_requires_real_mib_scale(self):
+        assert two_gpu_free_mib({"0": {"free": 10.0, "total": 100.0}, "1": {"free": 5.0, "total": 100.0}}) is None
+
+    def test_headroom_context_policy_shrinks_when_both_gpus_are_under_five_hundred_mib(self):
+        gpu_vram = {
+            "0": {"free": 480.0, "total": 12288.0, "free_pct": 3.9},
+            "1": {"free": 320.0, "total": 16311.0, "free_pct": 2.0},
+        }
+        assert resolve_headroom_context_granularity(gpu_vram, base_granularity=2048) == 1024
+        assert should_limit_large_context_jumps(gpu_vram) is True
+
+    def test_headroom_context_policy_shrinks_more_when_one_gpu_is_under_one_hundred_mib(self):
+        gpu_vram = {
+            "0": {"free": 991.0, "total": 12288.0, "free_pct": 8.06},
+            "1": {"free": 39.0, "total": 16311.0, "free_pct": 0.24},
+        }
+        assert resolve_headroom_context_granularity(gpu_vram, base_granularity=2048) == 512
+        assert should_limit_large_context_jumps(gpu_vram) is True
 
 
 class TestNglHelpers:
@@ -236,6 +281,10 @@ class TestPersistentProbeCache:
                         "load_seconds": 10.0,
                         "smoke_seconds": 1.0,
                         "status_code": 200,
+                        "gpu_vram": {
+                            "0": {"free": 480.0, "total": 12288.0, "free_pct": 3.9},
+                            "1": {"free": 320.0, "total": 16311.0, "free_pct": 2.0},
+                        },
                     }
                 ],
             },
@@ -267,7 +316,155 @@ class TestPersistentProbeCache:
         assert key in indexed
         assert indexed[key].cached is True
         assert indexed[key].success is True
+        assert indexed[key].gpu_vram == {
+            "0": {"free": 480.0, "total": 12288.0, "free_pct": 3.9},
+            "1": {"free": 320.0, "total": 16311.0, "free_pct": 2.0},
+        }
+        assert indexed[key].free_vram_delta_pct == 1.9
         assert len(indexed) == 1
+
+    def test_index_cached_probes_reuses_legacy_runtime_mode_history(self):
+        model_signature = build_model_signature("TestModel", {"path": "/tmp/model.gguf", "ngl": 36})
+        current_smoke_signature = build_smoke_signature(
+            "Reply with exactly: SPEED_OK_55_53_54_V2",
+            8,
+            "https://example.com/test.png",
+            "vision",
+        )
+        history = [
+            {
+                "model": "TestModel",
+                "model_signature": model_signature,
+                "smoke_signature": "legacy-exact-prompt-hash",
+                "runtime_mode": "vision",
+                "attempts": [
+                    {
+                        "model": "TestModel",
+                        "context": 188416,
+                        "ngl": 99,
+                        "tensor_split": "0.60,0.40",
+                        "success": True,
+                        "load_seconds": 10.0,
+                        "smoke_seconds": 1.0,
+                        "status_code": 200,
+                    }
+                ],
+            }
+        ]
+
+        indexed = index_cached_probes(
+            history,
+            model_name="TestModel",
+            model_signature=model_signature,
+            smoke_signature=current_smoke_signature,
+            runtime_mode="vision",
+        )
+
+        key = build_probe_cache_key(
+            "TestModel",
+            188416,
+            99,
+            "0.60,0.40",
+            model_signature,
+            current_smoke_signature,
+        )
+        assert key in indexed
+        assert indexed[key].cached is True
+
+    def test_index_cached_probes_keeps_richer_vram_telemetry_from_older_live_probe(self):
+        model_signature = build_model_signature("TestModel", {"path": "/tmp/model.gguf", "ngl": 36})
+        smoke_signature = build_smoke_signature(
+            "Reply with exactly: SPEED_OK_CACHE_TELEMETRY_CHECK",
+            8,
+            "https://example.com/test.png",
+            "vision",
+        )
+        history = [
+            {
+                "model": "TestModel",
+                "model_signature": model_signature,
+                "smoke_signature": "older-live-smoke",
+                "runtime_mode": "vision",
+                "attempts": [
+                    {
+                        "model": "TestModel",
+                        "context": 186368,
+                        "ngl": 99,
+                        "tensor_split": "0.60,0.40",
+                        "success": True,
+                        "load_seconds": 19.8,
+                        "smoke_seconds": 1.8,
+                        "status_code": 200,
+                        "response_excerpt": "SPEED_OK_55_5",
+                        "gpu_vram": {
+                            "0": {"free": 969.0, "total": 12288.0, "free_pct": 7.88},
+                            "1": {"free": 13.0, "total": 16311.0, "free_pct": 0.08},
+                        },
+                        "free_vram_delta_pct": 7.8,
+                    }
+                ],
+            },
+            {
+                "model": "TestModel",
+                "model_signature": model_signature,
+                "smoke_signature": smoke_signature,
+                "attempts": [
+                    {
+                        "model": "TestModel",
+                        "context": 186368,
+                        "ngl": 99,
+                        "tensor_split": "0.60,0.40",
+                        "success": True,
+                        "load_seconds": 19.86407330899965,
+                        "smoke_seconds": 1.8133850639860611,
+                        "status_code": 200,
+                        "response_excerpt": "SPEED_OK_55_5",
+                        "gpu_vram": None,
+                        "free_vram_delta_pct": None,
+                    }
+                ],
+            },
+        ]
+
+        indexed = index_cached_probes(
+            history,
+            model_name="TestModel",
+            model_signature=model_signature,
+            smoke_signature=smoke_signature,
+            runtime_mode="vision",
+        )
+
+        key = build_probe_cache_key(
+            "TestModel",
+            186368,
+            99,
+            "0.60,0.40",
+            model_signature,
+            smoke_signature,
+        )
+        assert key in indexed
+        assert indexed[key].cached is True
+        assert indexed[key].success is True
+        assert indexed[key].gpu_vram == {
+            "0": {"free": 969.0, "total": 12288.0, "free_pct": 7.88},
+            "1": {"free": 13.0, "total": 16311.0, "free_pct": 0.08},
+        }
+        assert indexed[key].free_vram_delta_pct == 7.8
+
+    def test_build_smoke_signature_ignores_short_marker_text_changes(self):
+        first = build_smoke_signature(
+            "Reply with exactly: SPEED_OK_55_53_54",
+            8,
+            "https://example.com/test.png",
+            "vision",
+        )
+        second = build_smoke_signature(
+            "Reply with exactly: SPEED_OK_55_53_54_V2",
+            8,
+            "https://example.com/test.png",
+            "vision",
+        )
+        assert first == second
 
     def test_live_result_log_updates_per_probe(self, tmp_path: Path):
         finetuner = _make_finetuner(tmp_path)
@@ -456,7 +653,7 @@ class TestPersistentProbeCache:
         assert result.ngl == 36
         assert result.tensor_split == "0.55,0.45"
 
-    def test_speed_mode_halves_context_before_retrying_split_work(self, tmp_path: Path):
+    def test_speed_mode_rebalances_only_after_winning_context(self, tmp_path: Path):
         finetuner = _make_finetuner(tmp_path)
         observed: list[tuple[int, int, str | None]] = []
         cache: dict[tuple[int, int, str | None], ProbeResult] = {}
@@ -529,12 +726,359 @@ class TestPersistentProbeCache:
         assert result.ngl == 52
         assert result.tensor_split == "0.62,0.38"
         first_high_failure = observed.index((262144, 52, "0.60,0.40"))
-        assert observed[first_high_failure + 1 : first_high_failure + 4] == [
-            (131072, 52, "0.60,0.40"),
-            (131072, 52, "0.62,0.38"),
-            (196608, 52, "0.62,0.38"),
-        ]
+        assert observed[first_high_failure + 1] == (131072, 52, "0.60,0.40")
         assert observed.count((262144, 52, "0.60,0.40")) == 1
+        assert (262144, 52, "0.62,0.38") not in observed
+        assert (196608, 52, "0.62,0.38") not in observed
+        assert observed[-1] == (131072, 52, "0.62,0.38")
+
+    def test_speed_mode_returns_highest_successful_context_even_if_balance_is_slightly_worse(self, tmp_path: Path):
+        finetuner = _make_finetuner(tmp_path)
+        cache: dict[tuple[int, int, str | None], ProbeResult] = {}
+        successful_probes = {
+            (262144, 99, "0.55,0.45"): False,
+            (131072, 99, "0.55,0.45"): True,
+            (196608, 99, "0.55,0.45"): False,
+            (163840, 99, "0.55,0.45"): True,
+            (180224, 99, "0.55,0.45"): False,
+            (172032, 99, "0.55,0.45"): False,
+            (167936, 99, "0.55,0.45"): True,
+            (169984, 99, "0.55,0.45"): True,
+        }
+        free_delta_by_context = {
+            131072: 7.30,
+            163840: 6.98,
+            167936: 7.04,
+            169984: 7.15,
+        }
+
+        def fake_probe(*, model_name, model_config, context, ngl, tensor_split):
+            key = (context, ngl, tensor_split)
+            if key in cache:
+                return cache[key]
+            success = successful_probes.get(key, False)
+            result = ProbeResult(
+                model=model_name,
+                context=context,
+                ngl=ngl,
+                tensor_split=tensor_split,
+                success=success,
+                load_seconds=1.0,
+                smoke_seconds=0.1 if success else 0.0,
+                status_code=200 if success else 503,
+                error=None if success else "allocating 469.00 MiB on device 1: cudaMalloc failed: out of memory",
+                gpu_vram={
+                    "0": {"free_pct": 10.0},
+                    "1": {"free_pct": 10.0},
+                }
+                if success
+                else None,
+                free_vram_delta_pct=free_delta_by_context.get(context) if success else None,
+            )
+            cache[key] = result
+            return result
+
+        with patch.object(finetuner, "_probe_candidate", side_effect=fake_probe):
+            result = finetuner._maximize_context_for_speed_mode(
+                model_name="TestModel",
+                model_config={},
+                min_context=131072,
+                max_context=262144,
+                granularity=2048,
+                ngl=99,
+                starting_split="0.55,0.45",
+                refine_step=0.02,
+                split_min=0.30,
+                split_max=0.70,
+            )
+
+        assert result is not None
+        assert result.context == 169984
+        assert result.ngl == 99
+
+    def test_rebalance_split_tries_one_percent_fallback_after_two_percent_failure(self, tmp_path: Path):
+        finetuner = _make_finetuner(tmp_path)
+        observed: list[tuple[int, int, str | None]] = []
+        cache: dict[tuple[int, int, str | None], ProbeResult] = {}
+
+        def build_vram(split: str) -> dict[str, dict[str, float]]:
+            if split == "0.55,0.45":
+                return {
+                    "0": {"used": 85.0, "free": 15.0, "total": 100.0, "free_pct": 15.0},
+                    "1": {"used": 75.0, "free": 25.0, "total": 100.0, "free_pct": 25.0},
+                }
+            return {
+                "0": {"used": 81.0, "free": 19.0, "total": 100.0, "free_pct": 19.0},
+                "1": {"used": 77.0, "free": 23.0, "total": 100.0, "free_pct": 23.0},
+            }
+
+        successful_probes = {
+            (167936, 99, "0.55,0.45"),
+            (167936, 99, "0.54,0.46"),
+        }
+
+        def fake_probe(*, model_name, model_config, context, ngl, tensor_split):
+            key = (context, ngl, tensor_split)
+            if key in cache:
+                return cache[key]
+            observed.append(key)
+            success = key in successful_probes
+            result = ProbeResult(
+                model=model_name,
+                context=context,
+                ngl=ngl,
+                tensor_split=tensor_split,
+                success=success,
+                load_seconds=1.0,
+                smoke_seconds=0.1 if success else 0.0,
+                status_code=200 if success else 503,
+                error=None if success else "allocating 469.00 MiB on device 1: cudaMalloc failed: out of memory",
+                gpu_vram=build_vram(tensor_split or "0.55,0.45") if success else None,
+                free_vram_delta_pct=free_vram_delta_pct(build_vram(tensor_split or "0.55,0.45")) if success else None,
+            )
+            cache[key] = result
+            return result
+
+        starting_result = ProbeResult(
+            model="TestModel",
+            context=167936,
+            ngl=99,
+            tensor_split="0.55,0.45",
+            success=True,
+            load_seconds=1.0,
+            smoke_seconds=0.1,
+            status_code=200,
+            gpu_vram=build_vram("0.55,0.45"),
+            free_vram_delta_pct=free_vram_delta_pct(build_vram("0.55,0.45")),
+        )
+
+        with patch.object(finetuner, "_probe_candidate", side_effect=fake_probe):
+            result = finetuner._rebalance_split_by_vram(
+                model_name="TestModel",
+                model_config={},
+                starting_result=starting_result,
+                step=0.02,
+                balance_threshold_pct=5.0,
+                split_min=0.30,
+                split_max=0.70,
+            )
+
+        assert result.tensor_split == "0.54,0.46"
+        assert observed == [
+            (167936, 99, "0.53,0.47"),
+            (167936, 99, "0.54,0.46"),
+        ]
+
+    def test_speed_mode_uses_local_one_percent_split_near_frontier(self, tmp_path: Path):
+        finetuner = _make_finetuner(tmp_path)
+        observed: list[tuple[int, int, str | None]] = []
+        cache: dict[tuple[int, int, str | None], ProbeResult] = {}
+        successful_probes = {
+            (131072, 99, "0.60,0.40"),
+            (163840, 99, "0.60,0.40"),
+            (180224, 99, "0.60,0.40"),
+            (184320, 99, "0.60,0.40"),
+            (186368, 99, "0.60,0.40"),
+            (188416, 99, "0.61,0.39"),
+        }
+
+        def build_vram(split: str) -> dict[str, dict[str, float]]:
+            if split == "0.61,0.39":
+                return {
+                    "0": {"used": 11880.0, "free": 40.0, "total": 12288.0, "free_pct": 3.20},
+                    "1": {"used": 15820.0, "free": 35.0, "total": 16311.0, "free_pct": 2.90},
+                }
+            return {
+                "0": {"used": 10930.0, "free": 980.0, "total": 12288.0, "free_pct": 7.98},
+                "1": {"used": 15822.0, "free": 27.0, "total": 16311.0, "free_pct": 0.17},
+            }
+
+        def fake_probe(*, model_name, model_config, context, ngl, tensor_split):
+            key = (context, ngl, tensor_split)
+            if key in cache:
+                return cache[key]
+            observed.append(key)
+            success = key in successful_probes
+            vram = build_vram(tensor_split or "0.60,0.40")
+            result = ProbeResult(
+                model=model_name,
+                context=context,
+                ngl=ngl,
+                tensor_split=tensor_split,
+                success=success,
+                load_seconds=1.0,
+                smoke_seconds=0.1 if success else 0.0,
+                status_code=200 if success else 500,
+                error=None if success else "Internal Server Error",
+                gpu_vram=vram,
+                free_vram_delta_pct=free_vram_delta_pct(vram),
+            )
+            cache[key] = result
+            return result
+
+        with patch.object(finetuner, "_probe_candidate", side_effect=fake_probe):
+            result = finetuner._maximize_context_for_speed_mode(
+                model_name="TestModel",
+                model_config={},
+                min_context=131072,
+                max_context=262144,
+                granularity=2048,
+                ngl=99,
+                starting_split="0.60,0.40",
+                refine_step=0.02,
+                split_min=0.30,
+                split_max=0.70,
+            )
+
+        assert result is not None
+        assert result.context == 188416
+        assert result.tensor_split == "0.61,0.39"
+        assert (188416, 99, "0.61,0.39") in observed
+        assert (190464, 99, "0.61,0.39") in observed
+        assert (262144, 99, "0.61,0.39") not in observed
+        assert (196608, 99, "0.61,0.39") not in observed
+
+    def test_speed_mode_uses_smaller_context_bisection_when_headroom_is_critical(self, tmp_path: Path):
+        finetuner = _make_finetuner(tmp_path)
+        observed: list[tuple[int, int, str | None]] = []
+        cache: dict[tuple[int, int, str | None], ProbeResult] = {}
+        successful_probes = {
+            (131072, 99, "0.60,0.40"),
+            (163840, 99, "0.60,0.40"),
+            (180224, 99, "0.60,0.40"),
+            (182272, 99, "0.60,0.40"),
+            (184320, 99, "0.60,0.40"),
+            (186368, 99, "0.60,0.40"),
+            (188416, 99, "0.61,0.39"),
+            (189440, 99, "0.61,0.39"),
+        }
+
+        def build_vram(split: str) -> dict[str, dict[str, float]]:
+            if split == "0.61,0.39":
+                return {
+                    "0": {"used": 11870.0, "free": 41.0, "total": 12288.0, "free_pct": 0.33},
+                    "1": {"used": 16260.0, "free": 51.0, "total": 16311.0, "free_pct": 0.31},
+                }
+            return {
+                "0": {"used": 10920.0, "free": 991.0, "total": 12288.0, "free_pct": 8.06},
+                "1": {"used": 15810.0, "free": 39.0, "total": 16311.0, "free_pct": 0.24},
+            }
+
+        def fake_probe(*, model_name, model_config, context, ngl, tensor_split):
+            key = (context, ngl, tensor_split)
+            if key in cache:
+                return cache[key]
+            observed.append(key)
+            success = key in successful_probes
+            vram = build_vram(tensor_split or "0.60,0.40") if success else None
+            result = ProbeResult(
+                model=model_name,
+                context=context,
+                ngl=ngl,
+                tensor_split=tensor_split,
+                success=success,
+                load_seconds=1.0,
+                smoke_seconds=0.1 if success else 0.0,
+                status_code=200 if success else 500,
+                error=None if success else "Internal Server Error",
+                gpu_vram=vram,
+                free_vram_delta_pct=free_vram_delta_pct(vram) if success else None,
+            )
+            cache[key] = result
+            return result
+
+        with patch.object(finetuner, "_probe_candidate", side_effect=fake_probe):
+            result = finetuner._maximize_context_for_speed_mode(
+                model_name="TestModel",
+                model_config={},
+                min_context=131072,
+                max_context=262144,
+                granularity=2048,
+                ngl=99,
+                starting_split="0.60,0.40",
+                refine_step=0.02,
+                split_min=0.30,
+                split_max=0.70,
+            )
+
+        assert result is not None
+        assert result.context == 189440
+        assert result.tensor_split == "0.61,0.39"
+        assert (194560, 99, "0.61,0.39") not in observed
+        assert (189440, 99, "0.61,0.39") in observed
+
+    def test_rebalance_split_skips_two_percent_shift_below_one_gib_receiver_headroom(self, tmp_path: Path):
+        finetuner = _make_finetuner(tmp_path)
+        observed: list[tuple[int, int, str | None]] = []
+        cache: dict[tuple[int, int, str | None], ProbeResult] = {}
+
+        def build_vram(split: str) -> dict[str, dict[str, float]]:
+            if split == "0.61,0.39":
+                return {
+                    "0": {"used": 11588.0, "free": 700.0, "total": 12288.0, "free_pct": 5.696614583333333},
+                    "1": {"used": 15838.0, "free": 473.0, "total": 16311.0, "free_pct": 2.900496597387652},
+                }
+            return {
+                "0": {"used": 11297.0, "free": 991.0, "total": 12288.0, "free_pct": 8.064778645833332},
+                "1": {"used": 16272.0, "free": 39.0, "total": 16311.0, "free_pct": 0.2391024462019496},
+            }
+
+        successful_probes = {
+            (182272, 99, "0.60,0.40"),
+            (182272, 99, "0.61,0.39"),
+        }
+
+        def fake_probe(*, model_name, model_config, context, ngl, tensor_split):
+            key = (context, ngl, tensor_split)
+            if key in cache:
+                return cache[key]
+            observed.append(key)
+            success = key in successful_probes
+            vram = build_vram(tensor_split or "0.60,0.40") if success else None
+            result = ProbeResult(
+                model=model_name,
+                context=context,
+                ngl=ngl,
+                tensor_split=tensor_split,
+                success=success,
+                load_seconds=1.0,
+                smoke_seconds=0.1 if success else 0.0,
+                status_code=200 if success else 503,
+                error=None if success else "allocating 860.98 MiB on device 0: cudaMalloc failed: out of memory",
+                gpu_vram=vram,
+                free_vram_delta_pct=free_vram_delta_pct(vram) if success else None,
+            )
+            cache[key] = result
+            return result
+
+        starting_result = ProbeResult(
+            model="TestModel",
+            context=182272,
+            ngl=99,
+            tensor_split="0.60,0.40",
+            success=True,
+            load_seconds=1.0,
+            smoke_seconds=0.1,
+            status_code=200,
+            gpu_vram=build_vram("0.60,0.40"),
+            free_vram_delta_pct=free_vram_delta_pct(build_vram("0.60,0.40")),
+        )
+
+        with patch.object(finetuner, "_probe_candidate", side_effect=fake_probe):
+            result = finetuner._rebalance_split_by_vram(
+                model_name="TestModel",
+                model_config={},
+                starting_result=starting_result,
+                step=0.02,
+                balance_threshold_pct=5.0,
+                split_min=0.30,
+                split_max=0.70,
+            )
+
+        assert result.tensor_split == "0.61,0.39"
+        assert observed == [
+            (182272, 99, "0.61,0.39"),
+        ]
 
     def test_optimize_ngl_for_baseline_rebalances_after_ngl_drop(self, tmp_path: Path):
         finetuner = _make_finetuner(tmp_path)

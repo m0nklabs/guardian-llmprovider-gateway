@@ -29,6 +29,9 @@ logger = logging.getLogger("model-finetune")
 DEFAULT_SMOKE_PROMPT = "Reply with exactly: FIT OK"
 DEFAULT_SPLIT_CALIBRATION_CONTEXT = 16384
 DEFAULT_VRAM_BALANCE_THRESHOLD_PCT = 5.0
+DEFAULT_MIN_FREE_MIB_FOR_COARSE_SPLIT_SHIFT = 1024.0
+DEFAULT_LOW_HEADROOM_DUAL_GPU_FREE_MIB = 500.0
+DEFAULT_CRITICAL_HEADROOM_SINGLE_GPU_FREE_MIB = 100.0
 DEFAULT_OPTIMIZATION_MODE = "balanced"
 VALID_OPTIMIZATION_MODES = {"speed", "context", "balanced"}
 
@@ -154,6 +157,91 @@ def next_split_from_vram_balance(
     return candidate_split
 
 
+def smaller_split_step(step: float) -> Optional[float]:
+    """Return the next smaller split step, down to a 1% minimum increment."""
+    if step <= 0.01:
+        return None
+    halved = round(step / 2.0, 2)
+    if halved >= step:
+        return None
+    return max(0.01, halved)
+
+
+def target_gpu_free_mib_for_balance_shift(gpu_vram: Optional[Dict[str, Dict[str, float]]]) -> Optional[float]:
+    """Return free MiB on the GPU that would receive more load from the next rebalance step."""
+    if not gpu_vram or len(gpu_vram) < 2:
+        return None
+    gpu_indices = sorted(gpu_vram.keys(), key=int)
+    first = gpu_vram[gpu_indices[0]]
+    second = gpu_vram[gpu_indices[1]]
+    first_free_pct = first.get("free_pct")
+    second_free_pct = second.get("free_pct")
+    if first_free_pct is None or second_free_pct is None:
+        return None
+    target = first if float(first_free_pct) > float(second_free_pct) else second
+    total_mib = target.get("total")
+    if total_mib is None or float(total_mib) < 2048.0:
+        return None
+    free_mib = target.get("free")
+    return float(free_mib) if free_mib is not None else None
+
+
+def two_gpu_free_mib(gpu_vram: Optional[Dict[str, Dict[str, float]]]) -> Optional[Tuple[float, float]]:
+    """Return real MiB headroom for the first two GPUs when telemetry is in MiB scale."""
+    if not gpu_vram or len(gpu_vram) < 2:
+        return None
+    values: List[float] = []
+    for gpu_index in sorted(gpu_vram.keys(), key=int)[:2]:
+        gpu_stats = gpu_vram[gpu_index]
+        total_mib = gpu_stats.get("total")
+        free_mib = gpu_stats.get("free")
+        if total_mib is None or free_mib is None or float(total_mib) < 2048.0:
+            return None
+        values.append(float(free_mib))
+    return values[0], values[1]
+
+
+def resolve_headroom_context_granularity(
+    gpu_vram: Optional[Dict[str, Dict[str, float]]],
+    *,
+    base_granularity: int,
+) -> int:
+    """Tighten local context bisection when headroom is critically low."""
+    free_values = two_gpu_free_mib(gpu_vram)
+    if free_values is None:
+        return base_granularity
+    if min(free_values) < DEFAULT_CRITICAL_HEADROOM_SINGLE_GPU_FREE_MIB:
+        return max(512, base_granularity // 4)
+    if all(free_mib < DEFAULT_LOW_HEADROOM_DUAL_GPU_FREE_MIB for free_mib in free_values):
+        return max(1024, base_granularity // 2)
+    return base_granularity
+
+
+def should_limit_large_context_jumps(gpu_vram: Optional[Dict[str, Dict[str, float]]]) -> bool:
+    """Return True when broad frontier jumps are unlikely to add signal at low VRAM headroom."""
+    free_values = two_gpu_free_mib(gpu_vram)
+    if free_values is None:
+        return False
+    if min(free_values) < DEFAULT_CRITICAL_HEADROOM_SINGLE_GPU_FREE_MIB:
+        return True
+    return all(free_mib < DEFAULT_LOW_HEADROOM_DUAL_GPU_FREE_MIB for free_mib in free_values)
+
+
+def should_skip_coarse_split_shift(
+    gpu_vram: Optional[Dict[str, Dict[str, float]]],
+    *,
+    step: float,
+    min_free_mib: float = DEFAULT_MIN_FREE_MIB_FOR_COARSE_SPLIT_SHIFT,
+) -> bool:
+    """Return True when a 2% rebalance shift is too unlikely to fit to be worth probing."""
+    if step < 0.02:
+        return False
+    target_free_mib = target_gpu_free_mib_for_balance_shift(gpu_vram)
+    if target_free_mib is None:
+        return False
+    return target_free_mib < min_free_mib
+
+
 @dataclass(slots=True)
 class ProbeResult:
     """Outcome of a single Guardian load probe."""
@@ -276,9 +364,14 @@ def build_smoke_signature(
     smoke_image_url: Optional[str],
     runtime_mode: str,
 ) -> str:
-    """Create a stable cache signature for the current smoke probe shape."""
+    """Create a stable cache signature for the current smoke probe shape.
+
+    Exact marker text should not invalidate a load-fit cache entry. For fit reuse,
+    the rough prompt footprint matters more than the literal success token string.
+    """
+    prompt_length_bucket = max(64, min(1024, ((len(smoke_prompt.strip()) + 63) // 64) * 64))
     payload = {
-        "prompt": smoke_prompt,
+        "prompt_length_bucket": prompt_length_bucket,
         "max_tokens": smoke_max_tokens,
         "image_url": smoke_image_url,
         "runtime_mode": runtime_mode,
@@ -434,15 +527,36 @@ def index_cached_probes(
     model_name: str,
     model_signature: str,
     smoke_signature: str,
+    runtime_mode: Optional[str] = None,
 ) -> Dict[Tuple[str, int, int, Optional[str], str, str], ProbeResult]:
     """Index compatible historical probes from the finetune results file."""
     indexed: Dict[Tuple[str, int, int, Optional[str], str, str], ProbeResult] = {}
+
+    def merge_cached_probe(existing: ProbeResult, candidate: ProbeResult) -> ProbeResult:
+        """Keep the most informative cached probe when history contains duplicates."""
+        merged = copy.deepcopy(candidate)
+        if merged.gpu_vram is None and existing.gpu_vram is not None:
+            merged.gpu_vram = copy.deepcopy(existing.gpu_vram)
+        if merged.free_vram_delta_pct is None and existing.free_vram_delta_pct is not None:
+            merged.free_vram_delta_pct = existing.free_vram_delta_pct
+        if merged.response_excerpt is None and existing.response_excerpt is not None:
+            merged.response_excerpt = existing.response_excerpt
+        if merged.error is None and existing.error is not None:
+            merged.error = existing.error
+        if merged.status_code is None and existing.status_code is not None:
+            merged.status_code = existing.status_code
+        if merged.gpu_vram is not None and merged.free_vram_delta_pct is None:
+            merged.free_vram_delta_pct = free_vram_delta_pct(merged.gpu_vram)
+        return merged
+
     for entry in history:
         if entry.get("model") != model_name:
             continue
         if entry.get("model_signature") != model_signature:
             continue
-        if entry.get("smoke_signature") != smoke_signature:
+        smoke_matches = entry.get("smoke_signature") == smoke_signature
+        runtime_matches = runtime_mode is not None and entry.get("runtime_mode") == runtime_mode
+        if not smoke_matches and not runtime_matches:
             continue
         attempts = entry.get("attempts")
         if not isinstance(attempts, list):
@@ -458,6 +572,10 @@ def index_cached_probes(
                 ngl = entry.get("original_ngl") if isinstance(entry.get("original_ngl"), int) else None
             if not isinstance(ngl, int):
                 continue
+            gpu_vram = copy.deepcopy(attempt.get("gpu_vram")) if isinstance(attempt.get("gpu_vram"), dict) else None
+            cached_free_vram_delta_pct = attempt.get("free_vram_delta_pct")
+            if cached_free_vram_delta_pct is None and gpu_vram is not None:
+                cached_free_vram_delta_pct = free_vram_delta_pct(gpu_vram)
             tensor_split = attempt.get("tensor_split")
             if tensor_split is not None:
                 tensor_split = str(tensor_split)
@@ -472,11 +590,17 @@ def index_cached_probes(
                 status_code=int(attempt["status_code"]) if attempt.get("status_code") is not None else None,
                 error=str(attempt["error"]) if attempt.get("error") is not None else None,
                 response_excerpt=str(attempt["response_excerpt"]) if attempt.get("response_excerpt") is not None else None,
+                gpu_vram=gpu_vram,
+                free_vram_delta_pct=(
+                    float(cached_free_vram_delta_pct) if cached_free_vram_delta_pct is not None else None
+                ),
                 model_signature=model_signature,
                 smoke_signature=smoke_signature,
                 cached=True,
             )
-            indexed[build_probe_cache_key(model_name, context, ngl, tensor_split, model_signature, smoke_signature)] = probe
+            cache_key = build_probe_cache_key(model_name, context, ngl, tensor_split, model_signature, smoke_signature)
+            existing_probe = indexed.get(cache_key)
+            indexed[cache_key] = merge_cached_probe(existing_probe, probe) if existing_probe is not None else probe
     return indexed
 
 
@@ -1369,10 +1493,13 @@ class GuardianModelFinetuner:
             and current_result.free_vram_delta_pct is not None
             and current_result.free_vram_delta_pct > balance_threshold_pct
         ):
+            probe_step = step
+            if should_skip_coarse_split_shift(current_result.gpu_vram, step=probe_step):
+                probe_step = smaller_split_step(probe_step) or probe_step
             next_split = next_split_from_vram_balance(
                 current_result.tensor_split,
                 gpu_vram=current_result.gpu_vram,
-                step=step,
+                step=probe_step,
                 split_min=split_min,
                 split_max=split_max,
             )
@@ -1387,7 +1514,28 @@ class GuardianModelFinetuner:
                 tensor_split=next_split,
             )
             if not candidate_result.success:
-                break
+                retry_step = smaller_split_step(probe_step)
+                if retry_step is None:
+                    break
+                retry_split = next_split_from_vram_balance(
+                    current_result.tensor_split,
+                    gpu_vram=current_result.gpu_vram,
+                    step=retry_step,
+                    split_min=split_min,
+                    split_max=split_max,
+                )
+                if retry_split is None or retry_split in attempted_splits:
+                    break
+                attempted_splits.add(retry_split)
+                candidate_result = self._probe_candidate(
+                    model_name=model_name,
+                    model_config=model_config,
+                    context=current_result.context,
+                    ngl=current_result.ngl,
+                    tensor_split=retry_split,
+                )
+                if not candidate_result.success:
+                    break
             if (
                 candidate_result.free_vram_delta_pct is None
                 or current_result.free_vram_delta_pct is None
@@ -1523,40 +1671,19 @@ class GuardianModelFinetuner:
         split_min: float,
         split_max: float,
     ) -> Optional[ProbeResult]:
-        """Binary-search context first for speed mode and rebalance split only after successful fits."""
-        current_split = starting_split
-        best_result: Optional[ProbeResult] = None
+        """Binary-search context on the current split, then rebalance once at the winning frontier."""
+        probed_results: Dict[int, ProbeResult] = {}
 
         def probe(context: int) -> bool:
-            nonlocal current_split, best_result
             result = self._probe_candidate(
                 model_name=model_name,
                 model_config=model_config,
                 context=context,
                 ngl=ngl,
-                tensor_split=current_split,
+                tensor_split=starting_split,
             )
-            if not result.success:
-                return False
-
-            rebalanced = self._rebalance_split_by_vram(
-                model_name=model_name,
-                model_config=model_config,
-                starting_result=result,
-                step=refine_step,
-                balance_threshold_pct=DEFAULT_VRAM_BALANCE_THRESHOLD_PCT,
-                split_min=split_min,
-                split_max=split_max,
-            )
-            current_split = rebalanced.tensor_split or current_split
-            best_result = choose_better_result(
-                best_result,
-                rebalanced,
-                optimization="context",
-                max_context=max_context,
-                max_ngl=ngl,
-            )
-            return True
+            probed_results[context] = result
+            return result.success
 
         best_context, _ = binary_search_max_success(
             min_context=min_context,
@@ -1567,7 +1694,129 @@ class GuardianModelFinetuner:
         )
         if best_context is None:
             return None
-        return best_result
+        best_result = probed_results[best_context]
+        higher_failures = sorted(
+            context
+            for context, result in probed_results.items()
+            if context > best_context and not result.success
+        )
+        frontier_failure = probed_results[higher_failures[0]] if higher_failures else None
+        return self._refine_speed_frontier_with_split(
+            model_name=model_name,
+            model_config=model_config,
+            best_success=best_result,
+            frontier_failure=frontier_failure,
+            max_context=max_context,
+            granularity=granularity,
+            refine_step=refine_step,
+            split_min=split_min,
+            split_max=split_max,
+        )
+
+    def _refine_speed_frontier_with_split(
+        self,
+        *,
+        model_name: str,
+        model_config: Dict[str, object],
+        best_success: ProbeResult,
+        frontier_failure: Optional[ProbeResult],
+        max_context: int,
+        granularity: int,
+        refine_step: float,
+        split_min: float,
+        split_max: float,
+    ) -> ProbeResult:
+        """Use a tiny local split refinement near a narrow speed frontier instead of restarting a broad search."""
+        baseline = self._rebalance_split_by_vram(
+            model_name=model_name,
+            model_config=model_config,
+            starting_result=best_success,
+            step=refine_step,
+            balance_threshold_pct=DEFAULT_VRAM_BALANCE_THRESHOLD_PCT,
+            split_min=split_min,
+            split_max=split_max,
+        )
+        if frontier_failure is None or frontier_failure.context <= baseline.context:
+            return baseline
+
+        frontier_gap = frontier_failure.context - baseline.context
+        imbalance = max(
+            float(baseline.free_vram_delta_pct or 0.0),
+            float(frontier_failure.free_vram_delta_pct or 0.0),
+        )
+        fine_step = smaller_split_step(refine_step) or refine_step
+        if frontier_gap > (granularity * 3) or imbalance <= DEFAULT_VRAM_BALANCE_THRESHOLD_PCT:
+            return baseline
+
+        split_source = frontier_failure if frontier_failure.gpu_vram else baseline
+        frontier_split = next_split_from_vram_balance(
+            baseline.tensor_split,
+            gpu_vram=split_source.gpu_vram,
+            step=fine_step,
+            split_min=split_min,
+            split_max=split_max,
+        )
+        if frontier_split is None or frontier_split == baseline.tensor_split:
+            return baseline
+
+        frontier_probe = self._probe_candidate(
+            model_name=model_name,
+            model_config=model_config,
+            context=frontier_failure.context,
+            ngl=baseline.ngl,
+            tensor_split=frontier_split,
+        )
+        if not frontier_probe.success:
+            return baseline
+
+        local_results: Dict[int, ProbeResult] = {frontier_probe.context: frontier_probe}
+        local_split = frontier_probe.tensor_split or frontier_split
+        headroom_source = frontier_probe.gpu_vram or baseline.gpu_vram or frontier_failure.gpu_vram
+        local_granularity = resolve_headroom_context_granularity(
+            headroom_source,
+            base_granularity=granularity,
+        )
+        local_jump = granularity if should_limit_large_context_jumps(headroom_source) else max(granularity, frontier_gap)
+        local_upper = min(max_context, frontier_failure.context + local_jump)
+
+        if local_upper > frontier_probe.context:
+            def local_probe(context: int) -> bool:
+                result = self._probe_candidate(
+                    model_name=model_name,
+                    model_config=model_config,
+                    context=context,
+                    ngl=baseline.ngl,
+                    tensor_split=local_split,
+                )
+                local_results[context] = result
+                return result.success
+
+            local_best_context, _ = binary_search_max_success(
+                min_context=frontier_probe.context,
+                max_context=local_upper,
+                granularity=local_granularity,
+                anchor_context=local_upper,
+                probe=local_probe,
+            )
+            if local_best_context is not None:
+                frontier_probe = local_results[local_best_context]
+
+        frontier_best = self._rebalance_split_by_vram(
+            model_name=model_name,
+            model_config=model_config,
+            starting_result=frontier_probe,
+            step=fine_step,
+            balance_threshold_pct=DEFAULT_VRAM_BALANCE_THRESHOLD_PCT,
+            split_min=split_min,
+            split_max=split_max,
+        )
+        return choose_better_result(
+            baseline,
+            frontier_best,
+            optimization="speed",
+            max_context=max_context,
+            max_ngl=baseline.ngl,
+        )
 
     def _ensure_balanced_split_for_values(
         self,
@@ -1994,6 +2243,7 @@ class GuardianModelFinetuner:
             model_name=model_name,
             model_signature=self._active_model_signature,
             smoke_signature=self._active_smoke_signature,
+            runtime_mode=self.runtime_mode,
         )
         self.probe_cache.update(compatible)
 

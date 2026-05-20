@@ -37,6 +37,13 @@
 - The finetune results log now writes an in-progress run entry immediately and flushes every individual probe to `data/model_finetune_results.json`, so long live searches can be monitored while they are still running or interrupted mid-run.
 
 ### Fixed
+- Tensor-split rebalancing now skips a 2% move and goes straight to 1% when the GPU that would receive more load has under 1 GiB free, avoiding low-value coarse probes that are effectively dead on arrival for the current host/model shape.
+- Speed-mode frontier search now also tightens its local context bisection when both GPUs are under 500 MiB free or any single GPU is under 100 MiB free, so low-headroom runs stop making broad post-frontier context jumps and probe with smaller local steps instead.
+- `--optimization speed` now stops broad re-search once it reaches a narrow success/fail frontier and instead tries a local 1% split refinement near that edge, which cuts out low-value repeats like re-testing far-away `262144` / `172032` contexts for every alternate split.
+- Finetune probe-cache reuse no longer depends on the exact short smoke success marker text, so reruns with the same runtime shape and image settings can reuse prior probes even if the operator changes `SPEED_OK_*` wording.
+- Cached finetune probe reuse now preserves the original `gpu_vram` and `free_vram_delta_pct` telemetry too, so low-headroom split/context heuristics still have the VRAM evidence they need on reruns instead of going blind after a cache hit.
+- Cached probe indexing now also merges duplicate history entries instead of letting a later cached replay with `gpu_vram: null` overwrite an older live probe with real telemetry, so reruns keep the richest VRAM data for identical `context` / `ngl` / `tensor_split` combinations.
+- Tensor-split rebalancing now retries the 1% midpoint after a failed 2% move, so speed/context tuning records the intended `0.55 -> 0.53 -> 0.54` fallback path instead of stopping at the first failed coarse rebalance probe.
 - `--optimization speed` no longer burns time recalibrating tensor splits on already-failed high-context probes; it now halves the context range first, then rebalances split only after a successful lower-context fit before trying upward again.
 - Finetune result ranking now prefers measured VRAM-balance deltas over naive distance-to-50/50 when two successful tensor splits compete, which keeps asymmetric dual-GPU hosts from "winning" on the wrong split just because a ratio looks more centered.
 - Removed the last tracked hardcoded underscore-checkout paths from Guardian scripts, tests, and helper utilities so a future rename toward the canonical `llama-cpp-guardian` style no longer requires code edits.
