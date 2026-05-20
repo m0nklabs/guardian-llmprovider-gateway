@@ -15,6 +15,12 @@
 - The finetune suite now persists compatible probe results in `data/model_finetune_results.json` and reuses them on later runs when the model signature and smoke-test signature still match, so already-tested `context`/`ngl`/`tensor_split` combinations are skipped instead of reloaded.
 
 ### Changed
+- The finetune CLI now exposes `--optimization {speed,context,balanced}` instead of manual `--min/max-context` and `--min/max-ngl` range flags, and result selection now applies the requested speed-vs-context policy only after the split has been rebalanced from measured per-GPU free-VRAM data.
+- The Guardian finetune auto-search now runs as a strict 3-phase flow with proactive per-GPU VRAM balancing: safe-baseline split calibration first, `ngl` step-down with split rebalancing after each successful change second, and context bisection last with split rebalanced again for every context candidate.
+- Guardian no longer exposes per-model backend selection; runtime launches now always target the official llama.cpp binary so stale fork plumbing does not linger in the config contract.
+- Guardian no longer writes or reads `config/current_model.binary`, and the public vision metadata no longer pretends there is a selectable backend field when the runtime is official-only.
+- A fresh Guardian-only text rerun for `Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved` proved that the text runtime can stay at the full native `262144` window with `ngl: 99` once the split is rebalanced to `0.61,0.39`; the previous lower-offload text assumption was stale and only the vision runtime still needs the separate `vision_ngl: 36` profile.
+- `data/model_finetune_results.json` now shows only the actually tested `ngl` and tensor-split values for the active run instead of dumping prebuilt candidate arrays before those probes happen.
 - Centralized repo-sensitive filesystem paths in `app.paths` and `scripts/_paths.py`, so `ModelManager`, `start_llama.sh`, utility scripts, and tests now resolve from the checkout root or environment overrides instead of assuming `/home/flip/llama_cpp_guardian`.
 - Simplified `config/models.yaml` to one runtime entry per remaining GGUF family, removed stale deleted-model paths, stripped `-nkvo`, and moved agent/deep/max-style behavior back to per-request API parameters instead of duplicate config profiles.
 - Raised surviving runtime contexts to the highest repo-documented safe values where empirical benchmark evidence existed, while leaving unproven families on their existing runtime limits.
@@ -27,8 +33,11 @@
 - Restored `gemma4-agent` to the stable 26B Agent Zero profile after the 31B uncensored route proved too slow for default AZ work.
 - Synced the local official `llama.cpp` backend to upstream `master` and rebuilt it with `GGML_CUDA_GRAPHS=OFF` plus `GGML_CUDA_NO_PEER_COPY=ON`, which exposes upstream `draft-mtp` support without regressing the mixed 3060 + 5060 Ti host.
 - Tuned the Native-MTP Qwen3.6 multimodal runtime for this host to `context: 196608`, `ngl: 36`, and `tensor_split: "0.55,0.45"` after full-GPU loads failed from extra MTP/mmproj buffer pressure.
+- Vision-capable runtime entries can now keep separate text and `vision_*` tuning fields, Guardian only loads `mmproj` when the request actually contains image input, and the finetune CLI can target `--runtime-mode text|vision` while searching a wider default split range.
+- The finetune results log now writes an in-progress run entry immediately and flushes every individual probe to `data/model_finetune_results.json`, so long live searches can be monitored while they are still running or interrupted mid-run.
 
 ### Fixed
+- Finetune result ranking now prefers measured VRAM-balance deltas over naive distance-to-50/50 when two successful tensor splits compete, which keeps asymmetric dual-GPU hosts from "winning" on the wrong split just because a ratio looks more centered.
 - Removed the last tracked hardcoded underscore-checkout paths from Guardian scripts, tests, and helper utilities so a future rename toward the canonical `llama-cpp-guardian` style no longer requires code edits.
 - Guardian crash parsing now scans a wider recent `llama-server` journal window and recognizes llama.cpp fit-target failures, compute-buffer initialization failures, and CUDA OOM signatures instead of collapsing them into `Unknown error (no recognizable error pattern in logs)`.
 - Guardian now validates multimodal runtime support per model instead of assuming any `mmproj` config is vision-ready, exposes that status through `/v1/models`, and returns explicit 4xx/503 OpenAI-style errors for broken image paths instead of leaking raw 500s.
@@ -49,6 +58,7 @@
 - The finetune objective is now `context > split balance > ngl`, and once a max-context combination is found the search stops retesting lower contexts for later combinations.
 - A full Guardian-native multimodal finetune pass re-validated `Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved` at `context: 262144`; under the new objective the winning full-context config is `ngl: 36` with the more balanced `tensor_split: "0.55,0.45"`, and a repeat run confirmed the results-file cache returns `cached: true` for previously tested combinations.
 - A follow-up full-context `ngl` sweep for `Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved` confirmed that `ngl: 36` remains the correct `262144` runtime on this host; higher `ngl` values such as `52` and `68` only fit after the context drops into the `188k` range.
+- Text-only requests to vision-capable models no longer force `--mmproj`, and the same canonical model can now hot-reload between text and vision runtime mode when Guardian sees image input appear or disappear.
 - Anthropic-compatible clients such as Claude Code now authenticate successfully through Guardian because the proxy accepts `x-api-key` and `api-key` headers in addition to OpenAI-style `Authorization: Bearer` tokens.
 - OpenAI-compatible inference requests now detect a stale stopped `llama-server` backend, reload the active model once, and retry instead of leaking an ASGI 500 traceback to Agent Zero/LiteLLM clients.
 - Startup model detection now distinguishes profiles that share the same GGUF path by matching generated runtime args, preventing the non-thinking Qwen agent profile from being mistaken for the deep-reasoning profile after Guardian restarts.

@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import logging
 import subprocess
 import yaml
@@ -14,20 +15,11 @@ from datetime import UTC, datetime
 from app.paths import (
     CONFIG_DIR,
     CURRENT_MODEL_ARGS_FILE,
-    CURRENT_MODEL_BINARY_FILE,
     LLAMA_SLOTS_DIR,
     OFFICIAL_LLAMA_SERVER_BIN,
 )
 
 logger = logging.getLogger("model-manager")
-
-# Binary paths for backend support
-# Additional backends (forks, custom builds) can be registered here.
-# Models select their backend via the 'backend' key in models.yaml (default: official).
-BACKEND_BINARIES = {
-    "official": str(OFFICIAL_LLAMA_SERVER_BIN),
-}
-DEFAULT_BACKEND = "official"
 
 MAX_CRASH_HISTORY = 50  # Keep last N crash records
 
@@ -64,9 +56,8 @@ class VisionCapability:
     configured: bool
     mmproj: Optional[str]
     mmproj_exists: bool
-    backend: str
     status: str
-    signature: Tuple[str, str, str]
+    signature: Tuple[str, str]
     last_checked_at: Optional[str] = None
     last_error: Optional[str] = None
 
@@ -75,7 +66,6 @@ class VisionCapability:
             "configured": self.configured,
             "mmproj": self.mmproj,
             "mmproj_exists": self.mmproj_exists,
-            "backend": self.backend,
             "status": self.status,
             "validated": self.status in {"supported", "unsupported", "loading", "load_failed", "misconfigured"},
             "last_checked_at": self.last_checked_at,
@@ -106,6 +96,7 @@ class ModelManager:
         # Initial model: use pinned model if set, otherwise fallback
         self.current_model = self._pinned_model or self._detect_initial_model()
         logger.info(f"📌 Initial model set to: {self.current_model}")
+        self.current_vision_enabled = self.current_runtime_uses_mmproj(self.current_model)
 
         # === VRAM management: unload state and idle tracking ===
         self.is_unloaded: bool = False  # True when llama-server stopped to free VRAM
@@ -191,6 +182,72 @@ class ModelManager:
         extra_args = str(config.get("extra_args", ""))
         return "--reasoning on" in extra_args
 
+    def _resolve_vision_mmproj(self, config: Dict[str, Any]) -> Optional[str]:
+        """Return the mmproj path used for vision runtime, if any."""
+        mmproj = str(config.get("vision_mmproj") or config.get("mmproj") or "").strip()
+        return mmproj or None
+
+    def _resolve_runtime_value(self, config: Dict[str, Any], key: str, *, enable_vision: bool) -> Any:
+        """Return the effective runtime value for text or vision mode."""
+        override_key = f"vision_{key}" if enable_vision else f"text_{key}"
+        override_value = config.get(override_key)
+        if override_value not in (None, ""):
+            return override_value
+        return config.get(key)
+
+    def _resolve_runtime_vision_flag(self, model_name: str, enable_vision: Optional[bool]) -> bool:
+        """Resolve whether a load/switch should start the model with mmproj."""
+        config = self.models.get(model_name, {})
+        if not self._resolve_vision_mmproj(config):
+            return False
+        if enable_vision is None:
+            if model_name == self.current_model:
+                return self.current_vision_enabled
+            return False
+        return bool(enable_vision)
+
+    def build_runtime_config(self, model_name: str, *, enable_vision: Optional[bool] = None) -> Dict[str, Any]:
+        """Build the effective runtime config for text or vision mode."""
+        if model_name not in self.models:
+            raise ValueError(f"Model {model_name} not found in configuration")
+
+        runtime_config = copy.deepcopy(self.models[model_name])
+        vision_enabled = self._resolve_runtime_vision_flag(model_name, enable_vision)
+
+        runtime_config["context"] = self._resolve_runtime_value(runtime_config, "context", enable_vision=vision_enabled)
+        runtime_config["ngl"] = self._resolve_runtime_value(runtime_config, "ngl", enable_vision=vision_enabled)
+
+        tensor_split = self._resolve_runtime_value(runtime_config, "tensor_split", enable_vision=vision_enabled)
+        if tensor_split not in (None, ""):
+            runtime_config["tensor_split"] = tensor_split
+        else:
+            runtime_config.pop("tensor_split", None)
+
+        if vision_enabled:
+            mmproj = self._resolve_vision_mmproj(runtime_config)
+            if mmproj:
+                runtime_config["mmproj"] = mmproj
+        else:
+            runtime_config.pop("mmproj", None)
+
+        return runtime_config
+
+    def current_runtime_uses_mmproj(self, model_name: Optional[str] = None) -> bool:
+        """Return whether the current backend args include the model's mmproj path."""
+        target = model_name or self.current_model
+        config = self.models.get(target, {})
+        mmproj_candidates = [self._resolve_vision_mmproj(config)]
+        base_mmproj = str(config.get("mmproj", "")).strip() or None
+        if base_mmproj and base_mmproj not in mmproj_candidates:
+            mmproj_candidates.append(base_mmproj)
+
+        try:
+            args = CURRENT_MODEL_ARGS_FILE.read_text()
+        except Exception:
+            return self.current_vision_enabled if target == self.current_model else False
+
+        return any(candidate and candidate in args for candidate in mmproj_candidates)
+
     def _is_tool_friendly_config(self, config: Dict) -> bool:
         extra_args = str(config.get("extra_args", ""))
         return (
@@ -205,17 +262,14 @@ class ModelManager:
             return []
 
         path = config.get("path")
-        backend = config.get("backend", DEFAULT_BACKEND)
-        mmproj = config.get("mmproj")
+        mmproj = self._resolve_vision_mmproj(config)
         candidates: List[str] = []
         for candidate_name, candidate_cfg in self.models.items():
             if candidate_name == model_name:
                 continue
             if candidate_cfg.get("path") != path:
                 continue
-            if candidate_cfg.get("backend", DEFAULT_BACKEND) != backend:
-                continue
-            if candidate_cfg.get("mmproj") != mmproj:
+            if self._resolve_vision_mmproj(candidate_cfg) != mmproj:
                 continue
             candidates.append(candidate_name)
         return candidates
@@ -345,11 +399,10 @@ class ModelManager:
 
         return public_models
 
-    def _vision_signature(self, config: Dict) -> Tuple[str, str, str]:
+    def _vision_signature(self, config: Dict) -> Tuple[str, str]:
         return (
             str(config.get("path", "")).strip(),
-            str(config.get("mmproj", "")).strip(),
-            str(config.get("backend", DEFAULT_BACKEND)).strip() or DEFAULT_BACKEND,
+            str(self._resolve_vision_mmproj(config) or "").strip(),
         )
 
     def _sync_vision_capabilities(self) -> None:
@@ -358,8 +411,7 @@ class ModelManager:
         refreshed: Dict[str, VisionCapability] = {}
 
         for model_name, config in self.models.items():
-            mmproj = str(config.get("mmproj", "")).strip() or None
-            backend = str(config.get("backend", DEFAULT_BACKEND)).strip() or DEFAULT_BACKEND
+            mmproj = self._resolve_vision_mmproj(config)
             signature = self._vision_signature(config)
             existing = previous.get(model_name)
 
@@ -368,7 +420,6 @@ class ModelManager:
                     configured=False,
                     mmproj=None,
                     mmproj_exists=False,
-                    backend=backend,
                     status="text_only",
                     signature=signature,
                 )
@@ -380,7 +431,6 @@ class ModelManager:
                     configured=True,
                     mmproj=mmproj,
                     mmproj_exists=False,
-                    backend=backend,
                     status="misconfigured",
                     signature=signature,
                     last_error=f"mmproj file not found: {mmproj}",
@@ -392,7 +442,6 @@ class ModelManager:
                     configured=True,
                     mmproj=mmproj,
                     mmproj_exists=True,
-                    backend=backend,
                     status=existing.status,
                     signature=signature,
                     last_checked_at=existing.last_checked_at,
@@ -404,7 +453,6 @@ class ModelManager:
                 configured=True,
                 mmproj=mmproj,
                 mmproj_exists=True,
-                backend=backend,
                 status="unverified",
                 signature=signature,
             )
@@ -419,9 +467,8 @@ class ModelManager:
                 configured=False,
                 mmproj=None,
                 mmproj_exists=False,
-                backend=DEFAULT_BACKEND,
                 status="unknown",
-                signature=("", "", DEFAULT_BACKEND),
+                signature=("", ""),
             ).to_dict()
         return capability.to_dict()
 
@@ -646,7 +693,13 @@ class ModelManager:
             logger.debug(f"Backend health probe failed: {e}")
             return False
 
-    async def switch_model(self, model_name: str, client_id: str = "_system", force: bool = False):
+    async def switch_model(
+        self,
+        model_name: str,
+        client_id: str = "_system",
+        force: bool = False,
+        enable_vision: Optional[bool] = None,
+    ):
         # Re-read models.yaml so config edits take effect without Guardian restart
         self.models = self._load_config()
         self._sync_vision_capabilities()
@@ -671,11 +724,20 @@ class ModelManager:
                 f"('{self._pinned_model}' → '{model_name}')"
             )
 
-        if model_name == self.current_model:
+        desired_vision = self._resolve_runtime_vision_flag(model_name, enable_vision)
+        current_vision = self.current_vision_enabled if model_name == self.current_model else self.current_runtime_uses_mmproj(model_name)
+
+        if model_name == self.current_model and desired_vision == current_vision:
             logger.info(f"Model {model_name} is already active")
             return
 
-        logger.info(f"Switching from {self.current_model} to {model_name}")
+        logger.info(
+            "Switching from %s [%s] to %s [%s]",
+            self.current_model,
+            "vision" if self.current_vision_enabled else "text",
+            model_name,
+            "vision" if desired_vision else "text",
+        )
         
         # 1. Auto-save current context
         await self._save_context(f"auto_save_{self.current_model}")
@@ -684,7 +746,7 @@ class ModelManager:
         await self._stop_server()
 
         # 3. Write new model args + binary selection
-        target_config = self.models[model_name]
+        target_config = self.build_runtime_config(model_name, enable_vision=desired_vision)
         self._write_server_args(target_config)
         
         # 4. Free GPU memory (kill non-Frigate processes)
@@ -705,6 +767,7 @@ class ModelManager:
             )
         
         self.current_model = model_name
+        self.current_vision_enabled = desired_vision
         self.reset_vision_validation(model_name)
         logger.info(f"✅ Model '{model_name}' loaded successfully")
 
@@ -795,15 +858,16 @@ class ModelManager:
         except Exception as e:
             logger.warning(f"⚠️ Failed to request ComfyUI memory free: {e}")
 
-    async def load(self, model_name: Optional[str] = None) -> None:
+    async def load(self, model_name: Optional[str] = None, enable_vision: Optional[bool] = None) -> None:
         """Reload llama-server with current (or specified) model."""
         # Re-read models.yaml so config edits take effect without Guardian restart
         self._refresh_model_registry()
         target = model_name or self.current_model
         if target not in self.models:
             raise ValueError(f"Model '{target}' not found in configuration")
-        logger.info(f"🔄 Loading model '{target}'...")
-        self._write_server_args(self.models[target])
+        desired_vision = self._resolve_runtime_vision_flag(target, enable_vision)
+        logger.info(f"🔄 Loading model '{target}' in {'vision' if desired_vision else 'text'} mode...")
+        self._write_server_args(self.build_runtime_config(target, enable_vision=desired_vision))
         await self._stop_server()
         await self._free_gpu_memory()
         await self._start_server()
@@ -815,6 +879,7 @@ class ModelManager:
                 crash_record=crash,
             )
         self.current_model = target
+        self.current_vision_enabled = desired_vision
         self.reset_vision_validation(target)
         self.is_unloaded = False
         self.last_request_time = time.time()
@@ -849,24 +914,18 @@ class ModelManager:
         """Build llama-server CLI arguments from model config and write to args file.
 
         Supported config keys (from models.yaml):
-            path, context, ngl, kv_type, backend, tensor_split, mmproj, extra_args
+            path, context, ngl, kv_type, tensor_split, mmproj, extra_args
         """
         args_file = CURRENT_MODEL_ARGS_FILE
         path = config["path"]
         ctx = config.get("context", 4096)
         ngl = config.get("ngl", 99)
         kv_type = config.get("kv_type", "q4_0")
-        backend = config.get("backend", DEFAULT_BACKEND)
         tensor_split = config.get("tensor_split", "")
         mmproj = config.get("mmproj", "")
         extra_args = config.get("extra_args", "")
 
-        # Resolve binary path and write to separate file for start_llama.sh
-        binary_path = BACKEND_BINARIES.get(backend, BACKEND_BINARIES[DEFAULT_BACKEND])
-        binary_file = CURRENT_MODEL_BINARY_FILE
-        with open(binary_file, "w") as f:
-            f.write(binary_path)
-        logger.info(f"Backend: {backend} -> {binary_path}")
+        logger.info(f"Using official llama.cpp binary: {OFFICIAL_LLAMA_SERVER_BIN}")
 
         # Build args string
         args_content = (

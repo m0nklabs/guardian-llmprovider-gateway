@@ -1,5 +1,5 @@
 #!/bin/bash
-# Wrapper script to load dynamic model arguments and select correct backend binary
+# Wrapper script to load dynamic model arguments for the official llama.cpp binary
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="${LLAMA_CPP_GUARDIAN_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
@@ -9,7 +9,6 @@ MODELS_DIR="${MODELS_DIR:-$ROOT_DIR/../models}"
 SLOTS_DIR="${LLAMA_CPP_GUARDIAN_SLOTS_DIR:-$HOME/llama_slots}"
 
 CONFIG_FILE="$CONFIG_DIR/current_model.args"
-BINARY_FILE="$CONFIG_DIR/current_model.binary"
 ENV_FILE="$CONFIG_DIR/current_model.env"
 
 # Source optional per-model environment (e.g. CUDA_VISIBLE_DEVICES)
@@ -36,14 +35,8 @@ else
     echo "Config file not found, using default: $ARGS"
 fi
 
-# Select binary: read from binary file, or use default (official)
-if [ -f "$BINARY_FILE" ]; then
-    BINARY=$(cat "$BINARY_FILE")
-    echo "Using backend binary: $BINARY"
-else
-    BINARY="$DEFAULT_BINARY"
-    echo "No binary config, using default (official): $BINARY"
-fi
+BINARY="$DEFAULT_BINARY"
+echo "Using official llama.cpp binary: $BINARY"
 
 # Verify binary exists
 if [ ! -x "$BINARY" ]; then

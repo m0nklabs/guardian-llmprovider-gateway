@@ -179,43 +179,79 @@ class TestWriteServerArgs:
     def test_writes_basic_args(self, tmp_path: Path):
         mgr = _make_manager(tmp_path)
 
-        # Redirect args/binary file writes to tmp
-        args_file = tmp_path / "config" / "current_model.args"
-        binary_file = tmp_path / "config" / "current_model.binary"
+        config = mgr.models["GLM-4.7-Flash"]
+        from app.engine.manager import OFFICIAL_LLAMA_SERVER_BIN
 
-        with patch("app.engine.manager.Path") as MockPath:
-            # Make Path() return our temp paths
-            def side_effect(p):
-                if "current_model.args" in str(p):
-                    return args_file
-                if "current_model.binary" in str(p):
-                    return binary_file
-                return Path(p)
+        path = config["path"]
+        ctx = config.get("context", 4096)
+        ngl = config.get("ngl", 99)
 
-            MockPath.side_effect = side_effect
+        assert path == "/models/GLM-4.7-Flash.gguf"
+        assert ctx == 4096
+        assert ngl == 99
+        assert "official" in str(OFFICIAL_LLAMA_SERVER_BIN)
 
-            # Just call the method directly with test paths
-            config = mgr.models["GLM-4.7-Flash"]
-            # Direct write using the real implementation's logic
-            from app.engine.manager import BACKEND_BINARIES, DEFAULT_BACKEND
-
-            path = config["path"]
-            ctx = config.get("context", 4096)
-            ngl = config.get("ngl", 99)
-            backend = config.get("backend", DEFAULT_BACKEND)
-            binary_path = BACKEND_BINARIES.get(backend, BACKEND_BINARIES[DEFAULT_BACKEND])
-
-            assert backend == DEFAULT_BACKEND or backend not in config
-            assert binary_path == BACKEND_BINARIES["official"]
-
-    def test_unknown_backend_falls_back_to_official(self, tmp_path: Path):
-        """Unknown backend key should gracefully fall back to official."""
+    def test_write_server_args_ignores_legacy_backend_key(self, tmp_path: Path):
         mgr = _make_manager(tmp_path)
-        from app.engine.manager import BACKEND_BINARIES, DEFAULT_BACKEND
 
-        backend = "nonexistent_fork"
-        binary_path = BACKEND_BINARIES.get(backend, BACKEND_BINARIES[DEFAULT_BACKEND])
-        assert binary_path == BACKEND_BINARIES["official"]
+        config = dict(mgr.models["GLM-4.7-Flash"])
+        config["backend"] = "unexpected_backend"
+        args_file = tmp_path / "current_model.args"
+
+        with patch("app.engine.manager.CURRENT_MODEL_ARGS_FILE", args_file):
+            mgr._write_server_args(config)
+
+        args = args_file.read_text()
+        assert "-m /models/GLM-4.7-Flash.gguf" in args
+        assert "--host 127.0.0.1 --port 11440" in args
+
+    def test_build_runtime_config_omits_mmproj_for_text_mode(self, tmp_path: Path):
+        mmproj = tmp_path / "vision-mmproj.gguf"
+        mmproj.write_text("mmproj")
+        models_yaml = f"""\
+models:
+    Vision-Model:
+        path: /models/vision.gguf
+        context: 131072
+        ngl: 99
+        tensor_split: \"0.55,0.45\"
+        mmproj: {mmproj}
+        vision_context: 65536
+        vision_ngl: 36
+        vision_tensor_split: \"0.60,0.40\"
+"""
+        mgr = _make_manager(tmp_path, models_yaml=models_yaml)
+
+        runtime = mgr.build_runtime_config("Vision-Model", enable_vision=False)
+
+        assert "mmproj" not in runtime
+        assert runtime["context"] == 131072
+        assert runtime["ngl"] == 99
+        assert runtime["tensor_split"] == "0.55,0.45"
+
+    def test_build_runtime_config_uses_vision_overrides(self, tmp_path: Path):
+        mmproj = tmp_path / "vision-mmproj.gguf"
+        mmproj.write_text("mmproj")
+        models_yaml = f"""\
+models:
+    Vision-Model:
+        path: /models/vision.gguf
+        context: 131072
+        ngl: 99
+        tensor_split: \"0.55,0.45\"
+        mmproj: {mmproj}
+        vision_context: 65536
+        vision_ngl: 36
+        vision_tensor_split: \"0.60,0.40\"
+"""
+        mgr = _make_manager(tmp_path, models_yaml=models_yaml)
+
+        runtime = mgr.build_runtime_config("Vision-Model", enable_vision=True)
+
+        assert runtime["mmproj"] == str(mmproj)
+        assert runtime["context"] == 65536
+        assert runtime["ngl"] == 36
+        assert runtime["tensor_split"] == "0.60,0.40"
 
 
 # ── _identify_model_by_path ───────────────────────────────────────────
@@ -551,6 +587,43 @@ class TestSwitchModelSecurity:
             await mgr.switch_model("GLM-4.7-Flash")
             mock_stop.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_reloads_same_model_when_vision_mode_changes(self, tmp_path: Path):
+        mmproj = tmp_path / "vision-mmproj.gguf"
+        mmproj.write_text("mmproj")
+        models_yaml = f"""\
+models:
+    Vision-Model:
+        path: /models/vision.gguf
+        context: 131072
+        ngl: 99
+        tensor_split: \"0.55,0.45\"
+        mmproj: {mmproj}
+        vision_context: 65536
+        vision_ngl: 36
+        vision_tensor_split: \"0.60,0.40\"
+"""
+        mgr = _make_manager(tmp_path, models_yaml=models_yaml)
+        mgr.current_model = "Vision-Model"
+        mgr.current_vision_enabled = True
+
+        with (
+            patch.object(mgr, "_save_context", new_callable=AsyncMock),
+            patch.object(mgr, "_stop_server", new_callable=AsyncMock),
+            patch.object(mgr, "_free_gpu_memory", new_callable=AsyncMock),
+            patch.object(mgr, "_start_server", new_callable=AsyncMock),
+            patch.object(mgr, "_wait_for_health", new_callable=AsyncMock, return_value=True),
+            patch.object(mgr, "verify_backend_model", new_callable=AsyncMock, return_value=True),
+            patch.object(mgr, "_load_context", new_callable=AsyncMock, side_effect=Exception("no save")),
+            patch.object(mgr, "_write_server_args") as mock_write,
+        ):
+            await mgr.switch_model("Vision-Model", enable_vision=False)
+
+        mock_write.assert_called_once()
+        runtime_config = mock_write.call_args.args[0]
+        assert "mmproj" not in runtime_config
+        assert mgr.current_vision_enabled is False
+
 
 # ── unload ─────────────────────────────────────────────────────────────
 
@@ -666,17 +739,13 @@ class TestCrashLogParsing:
 # ── Backend binaries ──────────────────────────────────────────────────
 
 
-class TestBackendBinaries:
-    def test_default_is_official(self):
-        from app.engine.manager import DEFAULT_BACKEND
+class TestOfficialBinary:
+    def test_official_binary_path_is_defined(self):
+        from app.engine.manager import OFFICIAL_LLAMA_SERVER_BIN
 
-        assert DEFAULT_BACKEND == "official"
+        assert "official" in str(OFFICIAL_LLAMA_SERVER_BIN)
 
-    def test_binaries_defined(self):
-        from app.engine.manager import BACKEND_BINARIES
-
-        assert "official" in BACKEND_BINARIES
-        assert "official" in BACKEND_BINARIES["official"]  # path contains "official"
+        assert "official" in str(OFFICIAL_LLAMA_SERVER_BIN)
 
 
 # ── Model aliases ─────────────────────────────────────────────────────

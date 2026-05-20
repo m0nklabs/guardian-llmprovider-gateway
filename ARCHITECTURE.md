@@ -177,13 +177,11 @@ BACKEND_BINARIES = {
   # Add custom backends here, e.g.:
   # "my_fork": "/path/to/custom/llama-server",
 }
-DEFAULT_BACKEND = "official"
 ```
 
-- **official** (ggml-org/llama.cpp): Default for all models. Actively maintained upstream.
+- **official** (ggml-org/llama.cpp): The only runtime binary Guardian launches.
 - Official binary path resolves from the current checkout or `LLAMA_CPP_OFFICIAL_ROOT`; Guardian no longer assumes a fixed local repo folder name.
-- Additional backends can be registered in `BACKEND_BINARIES` — models opt in via `backend: <key>` in their config.
-- Written to `config/current_model.binary` at switch time for `start_llama.sh`.
+- `start_llama.sh` always launches that official binary and only reads `config/current_model.args` for per-model runtime flags.
 
 ## GPU Strategy
 
@@ -287,7 +285,6 @@ config/
 ├── settings.yaml        # Ports, VRAM budget, timeouts, queue, scheduler
 ├── api_keys.json        # API key store
 ├── current_model.args   # Runtime: llama-server CLI args
-├── current_model.binary # Runtime: backend binary path
 └── current_model.env    # Runtime: per-model env vars (optional)
 
 data/

@@ -656,6 +656,12 @@ async def _preflight_multimodal_request(
     )
 
 
+def _desired_runtime_vision_enabled(model_name: str, has_image_inputs: bool) -> bool:
+    """Return whether this request should load the target model with mmproj."""
+    capability = model_manager.get_vision_capability(model_name)
+    return bool(has_image_inputs and capability.get("configured"))
+
+
 def _map_multimodal_backend_error(
     model_name: str,
     status_code: int,
@@ -1548,7 +1554,6 @@ async def list_models(client_id: str = Depends(verify_api_key)):
                 "configured": vision["configured"],
                 "status": vision["status"],
                 "validated": vision["validated"],
-                "backend": vision["backend"],
             }
 
             # Claude Code currently compacts against the OpenAI-compatible
@@ -1591,6 +1596,7 @@ async def admin_load(request: Request, client_id: str = Depends(verify_api_key))
             target = model_manager.resolve_model(target)
         except ValueError:
             pass
+    enable_vision = body.get("enable_vision")
     generation = _reset_startup_check_status(
         source="admin",
         phase="manual_load",
@@ -1608,7 +1614,7 @@ async def admin_load(request: Request, client_id: str = Depends(verify_api_key))
                 target_model=target or model_manager.current_model,
                 requested_model=body.get("model"),
                 owner=client_id,
-                operation=lambda: model_manager.load(target),
+                operation=lambda: model_manager.load(target, enable_vision=enable_vision),
                 generation=generation,
             )
     except Exception as e:
@@ -1847,6 +1853,7 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
     try:
         json_body: Optional[Dict[str, Any]] = None
         has_image_inputs = False
+        requested_model: Optional[str] = None
         try:
             json_body = json.loads(body)
             if path in ("chat/completions", "messages"):
@@ -1873,7 +1880,13 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                             target_model=model_manager.current_model,
                             requested_model=model_manager.current_model,
                             owner=client_id,
-                            operation=model_manager.load,
+                            operation=lambda: model_manager.load(
+                                model_manager.current_model,
+                                enable_vision=_desired_runtime_vision_enabled(
+                                    model_manager.current_model,
+                                    has_image_inputs,
+                                ),
+                            ),
                             generation=generation,
                         )
             except Exception as e:
@@ -1895,57 +1908,83 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                 if requested_model:
                     requested_model = _resolve_inference_model(requested_model, current_model)
                 
-                if requested_model and requested_model != current_model:
-                    if requested_model in model_manager.models:
-                        # SECURITY: Check if client is allowed to switch models
-                        if not model_manager.is_switch_allowed(client_id):
-                            logger.warning(
-                                f"🔒 Client '{client_id}' not in switch_allowlist, "
-                                f"blocked switch to '{requested_model}'. Forwarding to current model."
-                            )
-                        else:
-                            generation = _reset_startup_check_status(
-                                source="proxy",
-                                phase="auto_switch",
-                                target_model=requested_model,
-                                requested_model=json_body.get("model"),
-                                owner=client_id,
-                            )
-                            async with _model_switch_lock:
-                                # Re-check after acquiring lock
-                                current_model = await model_manager.get_current_model()
-                                if requested_model != current_model:
-                                    logger.info(f"🔄 Auto-switching backend from {current_model} to {requested_model} (client: {client_id})")
-                                    try:
-                                        await _run_guardian_operation(
-                                            source="proxy",
-                                            phase="auto_switch",
-                                            target_model=requested_model,
-                                            requested_model=json_body.get("model"),
-                                            owner=client_id,
-                                            operation=lambda: model_manager.switch_model(requested_model, client_id=client_id),
-                                            generation=generation,
-                                        )
-                                    except ModelLoadError as e:
-                                        if has_image_inputs and requested_model:
-                                            model_manager.mark_vision_validation(requested_model, "load_failed", str(e))
-                                        crash = e.crash_record
-                                        detail = {
-                                            "error": f"Model '{requested_model}' failed to load",
-                                            "message": str(e),
-                                            "crash_details": crash.to_dict() if crash else None,
-                                        }
-                                        logger.error(f"💥 Model load crash: {detail}")
-                                        raise HTTPException(status_code=503, detail=detail)
-                                    except ValueError as e:
-                                        # Pinned model or permission error
-                                        logger.warning(f"🔒 Switch denied: {e}")
-                                        # Don't raise — just forward to current model
-                                    except Exception as e:
-                                        logger.error(f"❌ Switch failed: {e}")
-                                        raise HTTPException(status_code=500, detail="Model switch failed")
-                    else:
-                        logger.warning(f"⚠️ Requested model {requested_model} not managed by Guardian. Forwarding to current.")
+                desired_model = requested_model or current_model
+                if desired_model in model_manager.models:
+                    desired_vision = _desired_runtime_vision_enabled(desired_model, has_image_inputs)
+                    current_vision = model_manager.current_runtime_uses_mmproj(current_model)
+                    needs_model_switch = desired_model != current_model
+                    needs_runtime_reload = desired_model == current_model and desired_vision != current_vision
+
+                    if needs_model_switch and not model_manager.is_switch_allowed(client_id):
+                        logger.warning(
+                            f"🔒 Client '{client_id}' not in switch_allowlist, blocked switch to '{desired_model}'. Forwarding to current model."
+                        )
+                    elif needs_model_switch or needs_runtime_reload:
+                        phase = "auto_switch" if needs_model_switch else "runtime_reload"
+                        generation = _reset_startup_check_status(
+                            source="proxy",
+                            phase=phase,
+                            target_model=desired_model,
+                            requested_model=json_body.get("model"),
+                            owner=client_id,
+                        )
+                        async with _model_switch_lock:
+                            current_model = await model_manager.get_current_model()
+                            desired_model = requested_model or current_model
+                            desired_vision = _desired_runtime_vision_enabled(desired_model, has_image_inputs)
+                            current_vision = model_manager.current_runtime_uses_mmproj(current_model)
+                            needs_model_switch = desired_model != current_model
+                            needs_runtime_reload = desired_model == current_model and desired_vision != current_vision
+
+                            if needs_model_switch or needs_runtime_reload:
+                                logger.info(
+                                    "🔄 Adjusting backend from %s [%s] to %s [%s] (client: %s)",
+                                    current_model,
+                                    "vision" if current_vision else "text",
+                                    desired_model,
+                                    "vision" if desired_vision else "text",
+                                    client_id,
+                                )
+                                try:
+                                    operation = (
+                                        (lambda: model_manager.switch_model(
+                                            desired_model,
+                                            client_id=client_id,
+                                            enable_vision=desired_vision,
+                                        ))
+                                        if needs_model_switch
+                                        else (lambda: model_manager.load(
+                                            desired_model,
+                                            enable_vision=desired_vision,
+                                        ))
+                                    )
+                                    await _run_guardian_operation(
+                                        source="proxy",
+                                        phase=phase,
+                                        target_model=desired_model,
+                                        requested_model=json_body.get("model"),
+                                        owner=client_id,
+                                        operation=operation,
+                                        generation=generation,
+                                    )
+                                except ModelLoadError as e:
+                                    if has_image_inputs and desired_model:
+                                        model_manager.mark_vision_validation(desired_model, "load_failed", str(e))
+                                    crash = e.crash_record
+                                    detail = {
+                                        "error": f"Model '{desired_model}' failed to load",
+                                        "message": str(e),
+                                        "crash_details": crash.to_dict() if crash else None,
+                                    }
+                                    logger.error(f"💥 Model load crash: {detail}")
+                                    raise HTTPException(status_code=503, detail=detail)
+                                except ValueError as e:
+                                    logger.warning(f"🔒 Switch denied: {e}")
+                                except Exception as e:
+                                    logger.error(f"❌ Switch failed: {e}")
+                                    raise HTTPException(status_code=500, detail="Model switch failed")
+                elif requested_model:
+                    logger.warning(f"⚠️ Requested model {requested_model} not managed by Guardian. Forwarding to current.")
             except json.JSONDecodeError:
                 pass
             except HTTPException:

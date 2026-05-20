@@ -15,9 +15,14 @@
 - [x] Add an explicit auto context-range mode so the CLI can derive sensible min/max bounds from the current runtime config.
 - [x] Harden the suite against transient Guardian request resets and guarantee config restoration on failed dry-runs.
 - [x] Persist compatible probe results in `data/model_finetune_results.json` so later runs can skip already tested `context`/`ngl`/`tensor_split` combinations.
+- [x] Replace sweep-style auto split/`ngl` candidate expansion with a strict 3-phase flow that monitors per-GPU free VRAM and rebalances the split on every successful context/ngl state change.
+- [x] Replace manual finetune range flags with a single `--optimization` mode (`speed`, `context`, `balanced`) so operators steer the tradeoff without hardcoding min/max context or `ngl` bounds.
 - [x] Validate the suite with focused unit tests and a narrow live Guardian dry-run against the Native-MTP Qwen profile.
 - [x] Re-run the Native-MTP Qwen profile with Guardian image smoke, apply the winning config, and confirm cache hits on the repeat search.
 - [x] Re-run the Native-MTP Qwen profile with full-context `ngl` search and confirm that `ngl: 36` still wins at `262144` on this host.
+- [x] Re-run the Native-MTP Qwen profile in text-only Guardian mode and confirm the full native `262144` runtime can hold `ngl: 99` once the split is rebalanced to `0.61,0.39`.
+- [x] Split text and vision finetune/application paths so `mmproj` only loads on image requests and `vision_*` tuning can coexist with a higher text runtime in one model entry.
+- [x] Flush each individual finetune probe into `data/model_finetune_results.json` while a run is still in progress, instead of waiting for only the final summary.
 
 ## 2026-05-20 Qwen3.6 Native-MTP Multimodal Bring-up
 

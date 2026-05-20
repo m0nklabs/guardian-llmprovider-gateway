@@ -141,6 +141,16 @@ def test_stale_status_update_is_ignored():
     assert status["effective_model"] is None
 
 
+def test_desired_runtime_vision_enabled_requires_image_and_configured_model():
+    with patch.object(
+        server.model_manager,
+        "get_vision_capability",
+        return_value={"configured": True},
+    ):
+        assert server._desired_runtime_vision_enabled("Vision-Model", True) is True
+        assert server._desired_runtime_vision_enabled("Vision-Model", False) is False
+
+
 def test_resolve_inference_model_prefers_tool_profile():
     """Auto requests should prefer a tool-friendly sibling when available."""
     with patch.object(server.model_manager, "get_preferred_tool_model", return_value="Qwen-Agent"):
@@ -203,7 +213,6 @@ async def test_list_models_includes_vision_metadata():
                 "configured": True,
                 "status": "supported",
                 "validated": True,
-                "backend": "official",
             },
         ),
     ):

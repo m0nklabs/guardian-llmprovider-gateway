@@ -34,7 +34,6 @@ debug.log
 
 # Dynamic Config
 config/current_model.args
-config/current_model.binary
 config/clients.json
 
 # Runtime

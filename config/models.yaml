@@ -104,10 +104,13 @@ models:
     path: "/home/flip/models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-Q4_K_M.gguf"
     benchmark_context_limit: 262144
     context: 262144
-    ngl: 36
+    ngl: 99
     kv_type: "q4_0"
-    tensor_split: "0.55,0.45"
+    tensor_split: "0.61,0.39"
     mmproj: "/home/flip/models/Qwen3.6-35B-A3B-mmproj-BF16.gguf"
+    vision_context: 262144
+    vision_ngl: 36
+    vision_tensor_split: "0.55,0.45"
     extra_args: "--spec-type draft-mtp --spec-draft-n-max 3 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
 # === Model Aliases ===
 # Short names that resolve to full model names above.

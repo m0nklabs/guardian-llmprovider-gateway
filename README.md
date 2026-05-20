@@ -26,9 +26,7 @@ Clients / Apps / Tools
   llama-server :11440
         │
         ▼
-  Configured backend binary
-    └─ official llama.cpp (default)
-        (extensible — register additional backends in BACKEND_BINARIES)
+  Official llama.cpp binary
 
   Dashboard UI :11437
 ```
@@ -47,16 +45,9 @@ Guardian runs a single-slot backend. Only one inference request is processed at 
 
 See [docs/CLIENT_INTEGRATION.md](docs/CLIENT_INTEGRATION.md) for client implementation patterns and code examples.
 
-### Extensible Backend
+### Official Backend Only
 
-Guardian supports per-model backend selection. The official llama.cpp binary is the default. Additional backends (forks, custom builds) can be registered in the `BACKEND_BINARIES` dict — models opt in via the `backend:` field in `config/models.yaml`. Repo-sensitive paths are resolved from the checkout root or the `LLAMA_CPP_GUARDIAN_ROOT` / `LLAMA_CPP_OFFICIAL_ROOT` environment overrides.
-
-| Backend | Binary | Use Case |
-|---------|--------|----------|
-| **official** (default) | `../llama_cpp_official/build/bin/llama-server` by default, or `LLAMA_CPP_OFFICIAL_ROOT` override | All models |
-| *(custom)* | Register in `app/engine/manager.py` | Specific optimizations |
-
-Models without an explicit `backend:` key use the official binary.
+Guardian now always launches the official llama.cpp `llama-server` binary. Repo-sensitive paths are resolved from the checkout root or the `LLAMA_CPP_GUARDIAN_ROOT` / `LLAMA_CPP_OFFICIAL_ROOT` environment overrides; per-model fork selection is no longer part of the runtime contract.
 
 ### Protocol Bridging
 
@@ -106,13 +97,13 @@ For focused per-model tuning, use the finetune CLI instead of broad sweep benchm
 
 ```bash
 python scripts/finetune_model_config.py qwen3-35b-heretic-mtp \
-  --auto-context-range \
+  --optimization context \
+  --runtime-mode vision \
   --granularity 2048 \
-  --min-ngl 36 \
-  --max-ngl 68
+  --apply
 ```
 
-`--auto-context-range` derives effective context bounds from the current runtime config and benchmark ceiling; with the default `--auto-context-floor-ratio 0.5`, a model currently pinned at `262144` will auto-search from `131072` up to `262144`. Omit `--split` to let the CLI search tensor splits dynamically around the current model config. Omit `--ngl` to search `ngl` dynamically between the current runtime value and `--max-ngl`. The finetune objective is now ordered as `context > split balance > ngl`, and once one combination reaches the current max context the CLI stops re-testing lower contexts for later combinations. Compatible probe combinations are cached in `data/model_finetune_results.json`, so repeat runs can skip already tested `context`/`ngl`/`tensor_split` triples when the model signature and smoke-test signature still match. Add `--apply` only when you want the winning `context`, `ngl`, and `tensor_split` written back to `config/models.yaml`.
+The finetune CLI now exposes one high-level goal selector instead of manual context and `ngl` bounds: `--optimization speed`, `--optimization context`, or `--optimization balanced`. `speed` prioritizes the highest stable GPU offload (`ngl`) first and then maximizes context for that offload level. `context` keeps walking balanced `ngl` candidates until it finds the highest stable runtime window, stopping early if a candidate already reaches the benchmark ceiling. `balanced` evaluates the full balanced search space and picks the strongest equilibrium between normalized context and `ngl`. In every mode, Guardian keeps `tensor_split` automatically balanced from live per-GPU free-VRAM measurements rather than blindly preferring 50/50. Omit `--split` to let the CLI calibrate and rebalance the split dynamically from live Guardian VRAM measurements. Omit `--ngl` to let the CLI explore the full `0..99` offload range on its own. `--runtime-mode auto` resolves to `text` unless `--smoke-image-url` is present; set `--runtime-mode vision` when you want the tuner to populate `vision_context` / `vision_ngl` / `vision_tensor_split` instead of the text runtime fields. Each individual load/smoke probe is flushed immediately to `data/model_finetune_results.json` so live runs can be inspected test-by-test while they are still in progress. Add `--apply` only when you want the winning runtime fields written back to `config/models.yaml`.
 
 ## Running Guardian
 
@@ -142,11 +133,14 @@ models:
   Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved:
     path: /home/flip/models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-Q4_K_M.gguf
     benchmark_context_limit: 262144
-    context: 196608
+    context: 262144
     ngl: 36
     kv_type: q4_0
     tensor_split: "0.55,0.45"
     mmproj: /home/flip/models/Qwen3.6-35B-A3B-mmproj-BF16.gguf
+    vision_context: 262144
+    vision_ngl: 36
+    vision_tensor_split: "0.55,0.45"
     extra_args: "--spec-type draft-mtp --spec-draft-n-max 3 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
 
   Qwen3-VL-30B-A3B-Thinking:
@@ -195,13 +189,13 @@ guardian:
   idle_unload_minutes: 5
 ```
 
-Supported per-model fields: `path`, `context`, `benchmark_context_limit`, `ngl`, `kv_type`, `backend`, `tensor_split`, `mmproj`, `extra_args`.
+Supported per-model fields: `path`, `context`, `benchmark_context_limit`, `ngl`, `kv_type`, `tensor_split`, `mmproj`, `extra_args`, plus optional runtime overrides such as `vision_context`, `vision_ngl`, `vision_tensor_split`, and `text_*` variants.
 
 Guardian hot-reloads the model registry on `/admin/load` and `/v1/models`, so new `models.yaml` entries and aliases take effect without restarting the API service.
 
 Keep one runtime entry per GGUF family. Use API request parameters for reasoning, sampling, and other per-call behavior instead of duplicating `-agent`, `-deep`, or `-max` profile variants in `models.yaml`.
 
-Treat `context` as the live hardware-safe runtime cap, not the model's theoretical or trained window. Keep `benchmark_context_limit` for the model's paper or metadata ceiling. For the current RTX 3060 + RTX 5060 Ti host, the text-only Qwen3.6 uncensored q4 runtime was re-validated at `262144` without forcing a tensor split, while the multimodal Native-MTP Heretic q4 profile was re-tuned through Guardian image smoke at `262144` with `ngl: 36` and the more balanced winning split `tensor_split: "0.55,0.45"`. A follow-up full-context `ngl` sweep confirmed that `52` and `68` only fit at lower contexts, so `36` remains the correct full-context runtime for this host.
+Treat `context` as the live hardware-safe runtime cap, not the model's theoretical or trained window. Keep `benchmark_context_limit` for the model's paper or metadata ceiling. Hugging Face's Qwen3.6-35B-A3B card states `262144` native context with optional YaRN extension up to `1010000`, so Guardian keeps `benchmark_context_limit: 262144` unless you intentionally introduce long-context rope scaling. For the current RTX 3060 + RTX 5060 Ti host, the text-only Qwen3.6 uncensored q4 runtime was re-validated at `262144` without forcing a tensor split, the text-only Native-MTP Heretic q4 profile now loads at the full `262144` with `ngl: 99` and the balanced split `tensor_split: "0.61,0.39"`, and the multimodal Native-MTP vision runtime remains separately tuned at `262144` with `vision_ngl: 36` and `vision_tensor_split: "0.55,0.45"` so mmproj only comes into play on image requests.
 
 - `context`: the active runtime context Guardian actually loads for the model.
 - `benchmark_context_limit`: the benchmark or paper ceiling where testing higher stops being useful; Guardian does not use it as the active runtime window.
@@ -311,11 +305,10 @@ config/
 ├── settings.yaml        # System config (ports, VRAM, timeouts, queue, scheduler)
 ├── api_keys.json        # API key store
 ├── current_model.args   # Runtime: active llama-server CLI args
-├── current_model.binary # Runtime: active backend binary path
 └── current_model.env    # Runtime: per-model env vars (optional)
 
 scripts/
-├── start_llama.sh       # Backend startup wrapper (reads current_model.binary)
+├── start_llama.sh       # Backend startup wrapper (reads current_model.args)
 ├── generate_key.py      # CLI key generation
 ├── test_system.py       # End-to-end system test
 ├── benchmark_context.py # Context size benchmarking
@@ -348,7 +341,7 @@ Guardian runs on a dual-GPU host and coordinates VRAM with 3rd-party processes:
 - **Frigate NVR**: ~440MB (ffmpeg hardware decoding) — always running
 - **ComfyUI**: Releases VRAM on request via `/free` API — cooperative sharing
 
-Models use configured tensor splits (e.g., `"0.57,0.43"`) to distribute weights across both GPUs. Text-focused deep-reasoning profiles may intentionally omit `mmproj` to preserve VRAM for larger context windows; keep multimodal projection on the normal vision-capable profile when image input is needed.
+Models use configured tensor splits (e.g., `"0.57,0.43"`) to distribute weights across both GPUs. Guardian now only loads `mmproj` for requests that actually contain image input, so a vision-capable model can keep one text runtime and one `vision_*` runtime in the same `models.yaml` entry without paying projector VRAM overhead on normal text traffic.
 
 ## Related Docs
 

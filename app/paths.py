@@ -15,7 +15,6 @@ DOCS_DIR = REPO_ROOT / "docs"
 MODELS_DIR = _expand_path(os.getenv("MODELS_DIR", str(REPO_ROOT.parent / "models")))
 
 CURRENT_MODEL_ARGS_FILE = CONFIG_DIR / "current_model.args"
-CURRENT_MODEL_BINARY_FILE = CONFIG_DIR / "current_model.binary"
 CURRENT_MODEL_ENV_FILE = CONFIG_DIR / "current_model.env"
 
 LLAMA_SLOTS_DIR = _expand_path(

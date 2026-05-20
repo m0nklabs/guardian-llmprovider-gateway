@@ -1,9 +1,21 @@
 """Tests for app.tweaker.model_finetune."""
 
+import json
+from pathlib import Path
+from unittest.mock import patch
+
 from app.tweaker.model_finetune import (
+    balance_metric,
+    balanced_tradeoff_score,
+    free_vram_delta_pct,
+    detect_oom_gpu,
+    GuardianModelFinetuner,
+    next_split_from_vram_balance,
+    apply_runtime_search_values,
     align_context_ceil,
     align_context_floor,
     binary_search_max_success,
+    binary_search_max_int_success,
     build_ngl_candidates,
     build_model_signature,
     build_probe_cache_key,
@@ -12,6 +24,7 @@ from app.tweaker.model_finetune import (
     build_split_candidates,
     choose_better_result,
     ProbeResult,
+    TuneResult,
     resolve_context_bounds,
     resolve_candidate_context_bounds,
     format_two_gpu_split,
@@ -19,8 +32,37 @@ from app.tweaker.model_finetune import (
     parse_two_gpu_split,
     render_model_block,
     replace_model_block,
+    resolve_optimization_mode,
+    resolve_runtime_config_value,
+    resolve_runtime_mode,
+    split_candidates_for_distance,
     split_balance_distance,
+    unique_attempt_ngls,
+    unique_attempt_splits,
 )
+
+
+def _make_finetuner(tmp_path: Path) -> GuardianModelFinetuner:
+    models_path = tmp_path / "models.yaml"
+    models_path.write_text(
+        """\
+models:
+  TestModel:
+    path: /tmp/test-model.gguf
+    context: 262144
+    ngl: 36
+    tensor_split: \"0.55,0.45\"
+"""
+    )
+    results_path = tmp_path / "results.json"
+    with patch.object(GuardianModelFinetuner, "_get_current_model", return_value=None):
+        return GuardianModelFinetuner(
+            guardian_url="http://127.0.0.1:11434",
+            api_key="test-key",
+            models_config_path=str(models_path),
+            results_file=str(results_path),
+            runtime_mode="text",
+        )
 
 
 class TestContextAlignment:
@@ -52,11 +94,55 @@ class TestTensorSplitHelpers:
     def test_split_balance_distance_prefers_balanced_values(self):
         assert split_balance_distance("0.50,0.50") < split_balance_distance("0.60,0.40")
 
+    def test_split_candidates_for_distance_prefers_anchor_side_first(self):
+        candidates = split_candidates_for_distance(
+            0.05,
+            min_primary=0.30,
+            max_primary=0.70,
+            anchor_split="0.55,0.45",
+        )
+        assert candidates == ["0.55,0.45", "0.45,0.55"]
+
+    def test_detect_oom_gpu_parses_cuda_device_number(self):
+        error = "allocating 469.00 MiB on device 1: cudaMalloc failed: out of memory"
+        assert detect_oom_gpu(error) == 1
+
+    def test_next_split_from_vram_balance_moves_toward_fuller_gpu(self):
+        gpu_vram = {
+            "0": {"free_pct": 20.0},
+            "1": {"free_pct": 10.0},
+        }
+        assert next_split_from_vram_balance(
+            "0.50,0.50",
+            gpu_vram=gpu_vram,
+            step=0.05,
+            split_min=0.30,
+            split_max=0.70,
+        ) == "0.55,0.45"
+
+    def test_free_vram_delta_pct_uses_first_two_gpus(self):
+        gpu_vram = {
+            "0": {"free_pct": 21.0},
+            "1": {"free_pct": 13.5},
+        }
+        assert free_vram_delta_pct(gpu_vram) == 7.5
+
 
 class TestNglHelpers:
     def test_build_ngl_candidates_prefers_higher_values(self):
         candidates = build_ngl_candidates(36, 16, 36, 99)
         assert candidates == [99, 84, 68, 52, 36]
+
+    def test_binary_search_max_int_success_halves_to_highest_fit(self):
+        result, attempts = binary_search_max_int_success(
+            min_value=36,
+            max_value=99,
+            anchor_value=99,
+            probe=lambda ngl: ngl <= 52,
+        )
+        assert result == 52
+        assert attempts[0] == 99
+        assert len(attempts) <= 8
 
 
 class TestAutoContextBounds:
@@ -117,18 +203,24 @@ class TestPersistentProbeCache:
             "extra_args": "--spec-type draft-mtp",
             "context": 131072,
             "tensor_split": "0.55,0.45",
+            "vision_context": 65536,
+            "vision_ngl": 28,
+            "vision_tensor_split": "0.60,0.40",
         }
         variant = {
             **base,
             "context": 196608,
             "ngl": 52,
             "tensor_split": "0.60,0.40",
+            "vision_context": 81920,
+            "vision_ngl": 36,
+            "vision_tensor_split": "0.55,0.45",
         }
         assert build_model_signature("TestModel", base) == build_model_signature("TestModel", variant)
 
     def test_index_cached_probes_filters_by_model_and_smoke_signature(self):
         model_signature = build_model_signature("TestModel", {"path": "/tmp/model.gguf", "ngl": 36})
-        smoke_signature = build_smoke_signature("Reply with exactly: FIT OK", 8, "https://example.com/test.png")
+        smoke_signature = build_smoke_signature("Reply with exactly: FIT OK", 8, "https://example.com/test.png", "vision")
         history = [
             {
                 "model": "TestModel",
@@ -177,6 +269,409 @@ class TestPersistentProbeCache:
         assert indexed[key].success is True
         assert len(indexed) == 1
 
+    def test_live_result_log_updates_per_probe(self, tmp_path: Path):
+        finetuner = _make_finetuner(tmp_path)
+        finetuner._active_model_signature = "model-sig"
+        finetuner._start_live_result_log(
+            model="TestModel",
+            original_context=262144,
+            original_ngl=36,
+            original_tensor_split="0.55,0.45",
+            search_min_context=131072,
+            search_max_context=262144,
+            benchmark_context_limit=262144,
+            coarse_ngl_candidates=[99, 84, 68, 52, 36],
+            refined_ngl_candidates=[],
+            coarse_candidates=["0.50,0.50", "0.55,0.45"],
+            refined_candidates=[],
+            applied=False,
+            runtime_mode="text",
+        )
+
+        probe = ProbeResult(
+            model="TestModel",
+            context=262144,
+            ngl=36,
+            tensor_split="0.55,0.45",
+            success=True,
+            load_seconds=1.0,
+            smoke_seconds=0.5,
+            status_code=200,
+            model_signature="model-sig",
+            smoke_signature=finetuner._active_smoke_signature,
+        )
+        key = build_probe_cache_key(
+            "TestModel",
+            262144,
+            36,
+            "0.55,0.45",
+            "model-sig",
+            finetuner._active_smoke_signature,
+        )
+
+        finetuner._record_attempt(key, probe)
+
+        payload = json.loads(finetuner.results_file.read_text())
+        assert payload[-1]["status"] == "running"
+        assert len(payload[-1]["attempts"]) == 1
+        assert payload[-1]["attempts"][0]["context"] == 262144
+        assert payload[-1]["coarse_ngl_candidates"] == [36]
+        assert payload[-1]["coarse_candidates"] == ["0.55,0.45"]
+
+        result = TuneResult(
+            model="TestModel",
+            original_context=262144,
+            original_ngl=36,
+            original_tensor_split="0.55,0.45",
+            runtime_mode="text",
+            search_min_context=131072,
+            search_max_context=262144,
+            recommended_context=262144,
+            recommended_ngl=36,
+            recommended_tensor_split="0.55,0.45",
+            benchmark_context_limit=262144,
+            attempts=[probe],
+        )
+        finetuner._append_result_log(result)
+
+        payload = json.loads(finetuner.results_file.read_text())
+        assert payload[-1]["status"] == "completed"
+        assert payload[-1]["recommended_context"] == 262144
+        assert payload[-1]["attempts"][0]["ngl"] == 36
+        finetuner.close()
+
+    def test_unique_attempt_helpers_preserve_first_seen_order(self):
+        attempts = [
+            ProbeResult("TestModel", 262144, 99, "0.50,0.50", False, 1.0),
+            ProbeResult("TestModel", 131072, 99, "0.50,0.50", False, 1.0),
+            ProbeResult("TestModel", 262144, 84, "0.55,0.45", False, 1.0),
+        ]
+
+        assert unique_attempt_ngls(attempts) == [99, 84]
+        assert unique_attempt_splits(attempts) == ["0.50,0.50", "0.55,0.45"]
+
+    def test_auto_search_rebalances_split_on_baseline_then_context(self, tmp_path: Path):
+        finetuner = _make_finetuner(tmp_path)
+        observed: list[tuple[int, int, str | None]] = []
+        cache: dict[tuple[int, int, str | None], ProbeResult] = {}
+        successful_probes = {
+            (16384, 52, "0.50,0.50"),
+            (16384, 52, "0.55,0.45"),
+            (262144, 52, "0.55,0.45"),
+        }
+
+        def build_vram(split: str) -> dict[str, dict[str, float]]:
+            if split == "0.50,0.50":
+                return {
+                    "0": {"used": 80.0, "free": 20.0, "total": 100.0, "free_pct": 20.0},
+                    "1": {"used": 90.0, "free": 10.0, "total": 100.0, "free_pct": 10.0},
+                }
+            return {
+                "0": {"used": 83.0, "free": 17.0, "total": 100.0, "free_pct": 17.0},
+                "1": {"used": 20.0, "free": 15.0, "total": 100.0, "free_pct": 15.0},
+            }
+
+        def fake_probe(*, model_name, model_config, context, ngl, tensor_split):
+            key = (context, ngl, tensor_split)
+            if key in cache:
+                return cache[key]
+            observed.append(key)
+            success = key in successful_probes
+            result = ProbeResult(
+                model=model_name,
+                context=context,
+                ngl=ngl,
+                tensor_split=tensor_split,
+                success=success,
+                load_seconds=1.0,
+                smoke_seconds=0.1 if success else 0.0,
+                status_code=200 if success else 503,
+                error=None if success else "allocating 469.00 MiB on device 1: cudaMalloc failed: out of memory",
+                gpu_vram=build_vram(tensor_split or "0.50,0.50") if success else None,
+                free_vram_delta_pct=free_vram_delta_pct(build_vram(tensor_split or "0.50,0.50")) if success else None,
+            )
+            cache[key] = result
+            return result
+
+        with patch.object(finetuner, "_probe_candidate", side_effect=fake_probe):
+            result = finetuner._search_best_auto_combination(
+                model_name="TestModel",
+                model_config={},
+                lower_bound=131072,
+                upper_bound=262144,
+                granularity=2048,
+                original_ngl=36,
+                lower_ngl=36,
+                upper_ngl=52,
+                ngl_refine_step=8,
+                coarse_step=0.05,
+                refine_step=0.02,
+                split_min=0.30,
+                split_max=0.70,
+                original_tensor_split="0.50,0.50",
+                optimization="context",
+            )
+
+        assert result is not None
+        assert result.context == 262144
+        assert result.ngl == 52
+        assert result.tensor_split == "0.55,0.45"
+        assert observed == [
+            (16384, 52, "0.50,0.50"),
+            (16384, 52, "0.55,0.45"),
+            (262144, 52, "0.55,0.45"),
+        ]
+
+    def test_find_best_context_for_combination_returns_successful_probe(self, tmp_path: Path):
+        finetuner = _make_finetuner(tmp_path)
+        observed: list[tuple[int, int, str | None]] = []
+
+        def fake_probe(*, model_name, model_config, context, ngl, tensor_split):
+            observed.append((context, ngl, tensor_split))
+            return ProbeResult(
+                model=model_name,
+                context=context,
+                ngl=ngl,
+                tensor_split=tensor_split,
+                success=context <= 262144,
+                load_seconds=1.0,
+                smoke_seconds=0.1,
+                status_code=200,
+            )
+
+        with patch.object(finetuner, "_probe_candidate", side_effect=fake_probe):
+            result = finetuner._find_best_context_for_combination(
+                model_name="TestModel",
+                model_config={},
+                ngl=36,
+                tensor_split="0.55,0.45",
+                min_context=131072,
+                max_context=262144,
+                granularity=2048,
+                anchor_context=262144,
+            )
+
+        assert result is not None
+        assert result.context == 262144
+        assert result.ngl == 36
+        assert result.tensor_split == "0.55,0.45"
+
+    def test_optimize_ngl_for_baseline_rebalances_after_ngl_drop(self, tmp_path: Path):
+        finetuner = _make_finetuner(tmp_path)
+        observed: list[tuple[int, int, str | None]] = []
+        cache: dict[tuple[int, int, str | None], ProbeResult] = {}
+        successful_probes = {
+            (16384, 44, "0.55,0.45"),
+            (16384, 44, "0.57,0.43"),
+        }
+
+        def build_vram(split: str) -> dict[str, dict[str, float]]:
+            if split == "0.55,0.45":
+                return {
+                    "0": {"used": 75.0, "free": 25.0, "total": 100.0, "free_pct": 25.0},
+                    "1": {"used": 85.0, "free": 15.0, "total": 100.0, "free_pct": 15.0},
+                }
+            return {
+                "0": {"used": 76.0, "free": 24.0, "total": 100.0, "free_pct": 24.0},
+                "1": {"used": 78.0, "free": 22.0, "total": 100.0, "free_pct": 22.0},
+            }
+
+        def fake_probe(*, model_name, model_config, context, ngl, tensor_split):
+            key = (context, ngl, tensor_split)
+            if key in cache:
+                return cache[key]
+            observed.append(key)
+            success = key in successful_probes
+            result = ProbeResult(
+                model=model_name,
+                context=context,
+                ngl=ngl,
+                tensor_split=tensor_split,
+                success=success,
+                load_seconds=1.0,
+                smoke_seconds=0.1 if success else 0.0,
+                status_code=200 if success else 503,
+                error=None if success else "allocating 469.00 MiB on device 1: cudaMalloc failed: out of memory",
+                gpu_vram=build_vram(tensor_split or "0.55,0.45") if success else None,
+                free_vram_delta_pct=free_vram_delta_pct(build_vram(tensor_split or "0.55,0.45")) if success else None,
+            )
+            cache[key] = result
+            return result
+
+        with patch.object(finetuner, "_probe_candidate", side_effect=fake_probe):
+            result = finetuner._optimize_ngl_for_baseline(
+                model_name="TestModel",
+                model_config={},
+                context=16384,
+                tensor_split="0.55,0.45",
+                min_ngl=36,
+                max_ngl=52,
+                ngl_step=8,
+                refine_step=0.02,
+                split_min=0.30,
+                split_max=0.70,
+            )
+
+        assert result is not None
+        assert result.ngl == 44
+        assert result.tensor_split == "0.57,0.43"
+        assert observed == [
+            (16384, 52, "0.55,0.45"),
+            (16384, 44, "0.55,0.45"),
+            (16384, 44, "0.57,0.43"),
+        ]
+
+    def test_context_bisection_rebalances_split_per_candidate(self, tmp_path: Path):
+        finetuner = _make_finetuner(tmp_path)
+        observed: list[tuple[int, int, str | None]] = []
+        cache: dict[tuple[int, int, str | None], ProbeResult] = {}
+        successful_probes = {
+            (262144, 44, "0.57,0.43"),
+            (262144, 44, "0.59,0.41"),
+        }
+
+        def build_vram(split: str) -> dict[str, dict[str, float]]:
+            if split == "0.57,0.43":
+                return {
+                    "0": {"used": 74.0, "free": 26.0, "total": 100.0, "free_pct": 26.0},
+                    "1": {"used": 84.0, "free": 16.0, "total": 100.0, "free_pct": 16.0},
+                }
+            return {
+                "0": {"used": 79.0, "free": 21.0, "total": 100.0, "free_pct": 21.0},
+                "1": {"used": 82.0, "free": 19.0, "total": 100.0, "free_pct": 19.0},
+            }
+
+        def fake_probe(*, model_name, model_config, context, ngl, tensor_split):
+            key = (context, ngl, tensor_split)
+            if key in cache:
+                return cache[key]
+            observed.append(key)
+            success = key in successful_probes
+            result = ProbeResult(
+                model=model_name,
+                context=context,
+                ngl=ngl,
+                tensor_split=tensor_split,
+                success=success,
+                load_seconds=1.0,
+                smoke_seconds=0.1 if success else 0.0,
+                status_code=200 if success else 503,
+                error=None if success else "allocating 469.00 MiB on device 1: cudaMalloc failed: out of memory",
+                gpu_vram=build_vram(tensor_split or "0.57,0.43") if success else None,
+                free_vram_delta_pct=free_vram_delta_pct(build_vram(tensor_split or "0.57,0.43")) if success else None,
+            )
+            cache[key] = result
+            return result
+
+        with patch.object(finetuner, "_probe_candidate", side_effect=fake_probe):
+            result = finetuner._maximize_context_with_balanced_runtime(
+                model_name="TestModel",
+                model_config={},
+                min_context=131072,
+                max_context=262144,
+                granularity=2048,
+                ngl=44,
+                starting_split="0.57,0.43",
+                refine_step=0.02,
+                split_min=0.30,
+                split_max=0.70,
+            )
+
+        assert result is not None
+        assert result.context == 262144
+        assert result.tensor_split == "0.59,0.41"
+        assert observed == [
+            (262144, 44, "0.57,0.43"),
+            (262144, 44, "0.59,0.41"),
+        ]
+
+
+class TestRuntimeModeHelpers:
+    def test_resolve_runtime_mode_uses_smoke_image_for_auto(self):
+        assert resolve_runtime_mode("auto", None) == "text"
+        assert resolve_runtime_mode("auto", "https://example.com/test.png") == "vision"
+
+    def test_resolve_runtime_config_value_prefers_runtime_override(self):
+        config = {
+            "context": 262144,
+            "ngl": 68,
+            "tensor_split": "0.62,0.38",
+            "vision_context": 131072,
+            "vision_ngl": 36,
+            "vision_tensor_split": "0.55,0.45",
+        }
+
+        assert resolve_runtime_config_value(config, "context", "vision") == 131072
+        assert resolve_runtime_config_value(config, "ngl", "vision") == 36
+        assert resolve_runtime_config_value(config, "tensor_split", "vision") == "0.55,0.45"
+        assert resolve_runtime_config_value(config, "context", "text") == 262144
+
+    def test_apply_runtime_search_values_targets_vision_fields(self):
+        config = {
+            "context": 262144,
+            "ngl": 68,
+            "tensor_split": "0.62,0.38",
+            "mmproj": "/models/mmproj.gguf",
+        }
+
+        updated = apply_runtime_search_values(
+            config,
+            context=131072,
+            ngl=36,
+            tensor_split="0.55,0.45",
+            runtime_mode="vision",
+        )
+
+        assert updated["context"] == 262144
+        assert updated["ngl"] == 68
+        assert updated["vision_context"] == 131072
+        assert updated["vision_ngl"] == 36
+        assert updated["vision_tensor_split"] == "0.55,0.45"
+
+
+class TestOptimizationHelpers:
+    def test_resolve_optimization_mode_validates_known_modes(self):
+        assert resolve_optimization_mode("speed") == "speed"
+        assert resolve_optimization_mode("CONTEXT") == "context"
+        assert resolve_optimization_mode("balanced") == "balanced"
+
+    def test_balanced_tradeoff_score_penalizes_lopsided_results(self):
+        context_heavy = ProbeResult(
+            model="TestModel",
+            context=262144,
+            ngl=36,
+            tensor_split="0.55,0.45",
+            success=True,
+            load_seconds=10.0,
+        )
+        equilibrium = ProbeResult(
+            model="TestModel",
+            context=196608,
+            ngl=68,
+            tensor_split="0.55,0.45",
+            success=True,
+            load_seconds=11.0,
+        )
+
+        assert balanced_tradeoff_score(equilibrium, max_context=262144, max_ngl=99) > balanced_tradeoff_score(
+            context_heavy,
+            max_context=262144,
+            max_ngl=99,
+        )
+
+    def test_balance_metric_prefers_measured_vram_delta(self):
+        result = ProbeResult(
+            model="TestModel",
+            context=262144,
+            ngl=52,
+            tensor_split="0.50,0.50",
+            success=True,
+            load_seconds=10.0,
+            free_vram_delta_pct=3.5,
+        )
+
+        assert balance_metric(result) == 3.5
+
 
 class TestResultSelection:
     def test_choose_better_result_prioritizes_balanced_split_over_higher_ngl_at_same_context(self):
@@ -216,6 +711,86 @@ class TestResultSelection:
             load_seconds=25.0,
         )
         assert choose_better_result(current, candidate) is candidate
+
+    def test_choose_better_result_speed_mode_prefers_higher_ngl_over_context(self):
+        current = ProbeResult(
+            model="TestModel",
+            context=262144,
+            ngl=44,
+            tensor_split="0.55,0.45",
+            success=True,
+            load_seconds=20.0,
+        )
+        candidate = ProbeResult(
+            model="TestModel",
+            context=196608,
+            ngl=52,
+            tensor_split="0.55,0.45",
+            success=True,
+            load_seconds=25.0,
+        )
+
+        assert (
+            choose_better_result(
+                current,
+                candidate,
+                optimization="speed",
+                max_context=262144,
+                max_ngl=99,
+            )
+            is candidate
+        )
+
+    def test_choose_better_result_balanced_mode_prefers_equilibrium(self):
+        current = ProbeResult(
+            model="TestModel",
+            context=262144,
+            ngl=36,
+            tensor_split="0.55,0.45",
+            success=True,
+            load_seconds=20.0,
+        )
+        candidate = ProbeResult(
+            model="TestModel",
+            context=196608,
+            ngl=68,
+            tensor_split="0.55,0.45",
+            success=True,
+            load_seconds=25.0,
+        )
+
+        assert (
+            choose_better_result(
+                current,
+                candidate,
+                optimization="balanced",
+                max_context=262144,
+                max_ngl=99,
+            )
+            is candidate
+        )
+
+    def test_choose_better_result_prefers_lower_vram_delta_over_closer_50_50(self):
+        current = ProbeResult(
+            model="TestModel",
+            context=262144,
+            ngl=52,
+            tensor_split="0.50,0.50",
+            success=True,
+            load_seconds=20.0,
+            free_vram_delta_pct=12.0,
+        )
+        candidate = ProbeResult(
+            model="TestModel",
+            context=262144,
+            ngl=52,
+            tensor_split="0.55,0.45",
+            success=True,
+            load_seconds=25.0,
+            free_vram_delta_pct=4.0,
+        )
+
+        assert choose_better_result(current, candidate, optimization="context") is candidate
 
 
 class TestBinarySearch:
