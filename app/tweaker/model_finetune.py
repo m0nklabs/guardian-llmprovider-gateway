@@ -224,6 +224,14 @@ def build_ngl_candidates(anchor_ngl: Optional[int], step: int, min_ngl: int, max
     return sorted(values, reverse=True)
 
 
+def split_balance_distance(tensor_split: Optional[str]) -> float:
+    """Return how far a split is from a perfectly balanced 50/50 split."""
+    primary = parse_two_gpu_split(tensor_split)
+    if primary is None:
+        return 1.0
+    return abs(primary - 0.5)
+
+
 def resolve_context_bounds(
     *,
     original_context: Optional[int],
@@ -303,7 +311,7 @@ def build_split_candidates(
     *,
     include_auto: bool = False,
 ) -> List[Optional[str]]:
-    """Build ordered two-GPU tensor split candidates around the anchor split."""
+    """Build ordered two-GPU tensor split candidates, preferring balanced splits first."""
     if step <= 0:
         raise ValueError("step must be > 0")
     if min_primary <= 0 or max_primary >= 1 or min_primary > max_primary:
@@ -319,34 +327,61 @@ def build_split_candidates(
         values.add(round(current, 2))
         current += step
 
-    ordered = sorted(values, key=lambda value: (abs(value - anchor_primary), value))
+    ordered = sorted(
+        values,
+        key=lambda value: (
+            round(abs(value - 0.5), 4),
+            round(abs(value - anchor_primary), 4),
+            value,
+        ),
+    )
     candidates: List[Optional[str]] = [format_two_gpu_split(value) for value in ordered]
     if include_auto:
-        return [None, *candidates]
+        return [*candidates, None]
     return candidates
+
+
+def resolve_candidate_context_bounds(
+    *,
+    best_context: Optional[int],
+    lower_bound: int,
+    upper_bound: int,
+    granularity: int,
+) -> Tuple[int, int]:
+    """Return the only context range worth testing for a new combination."""
+    if best_context is None:
+        return lower_bound, upper_bound
+
+    aligned_best = align_context_floor(best_context, granularity)
+    if aligned_best >= upper_bound:
+        return upper_bound, upper_bound
+
+    next_context = align_context_ceil(aligned_best + granularity, granularity)
+    if next_context > upper_bound:
+        return upper_bound, upper_bound
+    return next_context, upper_bound
 
 
 def choose_better_result(
     current_best: Optional[ProbeResult],
     candidate: Optional[ProbeResult],
-    anchor_split: Optional[str],
 ) -> Optional[ProbeResult]:
-    """Return the stronger successful result, preferring higher stable context."""
+    """Return the stronger successful result, preferring context, then split balance, then ngl."""
     if candidate is None or not candidate.success:
         return current_best
     if current_best is None or not current_best.success:
         return candidate
     if candidate.context != current_best.context:
         return candidate if candidate.context > current_best.context else current_best
+    candidate_balance = split_balance_distance(candidate.tensor_split)
+    current_balance = split_balance_distance(current_best.tensor_split)
+    if candidate_balance != current_balance:
+        return candidate if candidate_balance < current_balance else current_best
     if candidate.ngl != current_best.ngl:
         return candidate if candidate.ngl > current_best.ngl else current_best
     if candidate.total_seconds != current_best.total_seconds:
         return candidate if candidate.total_seconds < current_best.total_seconds else current_best
-
-    anchor_primary = parse_two_gpu_split(anchor_split)
-    best_distance = abs((parse_two_gpu_split(current_best.tensor_split) or anchor_primary or 0.5) - (anchor_primary or 0.5))
-    candidate_distance = abs((parse_two_gpu_split(candidate.tensor_split) or anchor_primary or 0.5) - (anchor_primary or 0.5))
-    return candidate if candidate_distance < best_distance else current_best
+    return candidate if (candidate.tensor_split or "") < (current_best.tensor_split or "") else current_best
 
 
 def binary_search_max_success(
@@ -455,7 +490,7 @@ def replace_model_block(config_text: str, model_name: str, replacement_block: st
 
 
 class GuardianModelFinetuner:
-    """Tune a configured Guardian model via fast context and split search."""
+    """Tune a configured Guardian model via fast context, split, and ngl search."""
 
     def __init__(
         self,
@@ -585,19 +620,27 @@ class GuardianModelFinetuner:
                 )
 
             best_result: Optional[ProbeResult] = None
-            for ngl_candidate in coarse_ngl_candidates:
-                for candidate in coarse_candidates:
+            for candidate in coarse_candidates:
+                for ngl_candidate in coarse_ngl_candidates:
+                    candidate_min_context, candidate_max_context = resolve_candidate_context_bounds(
+                        best_context=best_result.context if best_result is not None else None,
+                        lower_bound=lower_bound,
+                        upper_bound=upper_bound,
+                        granularity=granularity,
+                    )
                     result = self._find_best_context_for_combination(
                         model_name=canonical_model,
                         model_config=original_model_config,
                         ngl=ngl_candidate,
                         tensor_split=candidate,
-                        min_context=lower_bound,
-                        max_context=upper_bound,
+                        min_context=candidate_min_context,
+                        max_context=candidate_max_context,
                         granularity=granularity,
-                        anchor_context=anchor_context,
+                        anchor_context=upper_bound,
                     )
-                    best_result = choose_better_result(best_result, result, original_tensor_split)
+                    best_result = choose_better_result(best_result, result)
+                    if result is not None and result.success and result.context >= upper_bound:
+                        break
 
             if best_result is None:
                 raise RuntimeError(f"No successful config found for '{canonical_model}' in range {lower_bound}-{upper_bound}")
@@ -625,19 +668,27 @@ class GuardianModelFinetuner:
             ngl_evaluation_candidates = refined_ngl_candidates or [best_result.ngl]
             split_evaluation_candidates = refined_candidates or [best_result.tensor_split]
             if refined_ngl_candidates or refined_candidates:
-                for ngl_candidate in ngl_evaluation_candidates:
-                    for candidate in split_evaluation_candidates:
+                for candidate in split_evaluation_candidates:
+                    for ngl_candidate in ngl_evaluation_candidates:
+                        candidate_min_context, candidate_max_context = resolve_candidate_context_bounds(
+                            best_context=best_result.context if best_result is not None else None,
+                            lower_bound=lower_bound,
+                            upper_bound=upper_bound,
+                            granularity=granularity,
+                        )
                         result = self._find_best_context_for_combination(
                             model_name=canonical_model,
                             model_config=original_model_config,
                             ngl=ngl_candidate,
                             tensor_split=candidate,
-                            min_context=lower_bound,
-                            max_context=upper_bound,
+                            min_context=candidate_min_context,
+                            max_context=candidate_max_context,
                             granularity=granularity,
-                            anchor_context=best_result.context,
+                            anchor_context=upper_bound,
                         )
-                        best_result = choose_better_result(best_result, result, original_tensor_split)
+                        best_result = choose_better_result(best_result, result)
+                        if result is not None and result.success and result.context >= upper_bound:
+                            break
 
             if best_result is None:
                 raise RuntimeError(f"No successful config found for '{canonical_model}'")

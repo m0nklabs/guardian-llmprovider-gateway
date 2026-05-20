@@ -10,12 +10,16 @@ from app.tweaker.model_finetune import (
     build_smoke_messages,
     build_smoke_signature,
     build_split_candidates,
+    choose_better_result,
+    ProbeResult,
     resolve_context_bounds,
+    resolve_candidate_context_bounds,
     format_two_gpu_split,
     index_cached_probes,
     parse_two_gpu_split,
     render_model_block,
     replace_model_block,
+    split_balance_distance,
 )
 
 
@@ -33,16 +37,20 @@ class TestTensorSplitHelpers:
         assert ratio == 0.62
         assert format_two_gpu_split(ratio) == "0.62,0.38"
 
-    def test_build_split_candidates_orders_by_anchor_distance(self):
+    def test_build_split_candidates_prefers_balanced_splits(self):
         candidates = build_split_candidates("0.55,0.45", 0.05, 0.45, 0.65)
-        assert candidates[0] == "0.55,0.45"
+        assert candidates[0] == "0.50,0.50"
+        assert candidates[1] == "0.55,0.45"
         assert "0.50,0.50" in candidates
         assert "0.60,0.40" in candidates
 
     def test_build_split_candidates_can_include_auto(self):
         candidates = build_split_candidates(None, 0.05, 0.45, 0.55, include_auto=True)
-        assert candidates[0] is None
+        assert candidates[-1] is None
         assert "0.55,0.45" in candidates
+
+    def test_split_balance_distance_prefers_balanced_values(self):
+        assert split_balance_distance("0.50,0.50") < split_balance_distance("0.60,0.40")
 
 
 class TestNglHelpers:
@@ -63,6 +71,26 @@ class TestAutoContextBounds:
             auto_context_floor_ratio=0.5,
         )
         assert lower == 131072
+        assert upper == 262144
+
+    def test_resolve_candidate_context_bounds_skips_lower_contexts_after_best(self):
+        lower, upper = resolve_candidate_context_bounds(
+            best_context=262144,
+            lower_bound=131072,
+            upper_bound=262144,
+            granularity=2048,
+        )
+        assert lower == 262144
+        assert upper == 262144
+
+    def test_resolve_candidate_context_bounds_only_searches_above_current_best(self):
+        lower, upper = resolve_candidate_context_bounds(
+            best_context=196608,
+            lower_bound=131072,
+            upper_bound=262144,
+            granularity=2048,
+        )
+        assert lower == 198656
         assert upper == 262144
 
 
@@ -148,6 +176,46 @@ class TestPersistentProbeCache:
         assert indexed[key].cached is True
         assert indexed[key].success is True
         assert len(indexed) == 1
+
+
+class TestResultSelection:
+    def test_choose_better_result_prioritizes_balanced_split_over_higher_ngl_at_same_context(self):
+        current = ProbeResult(
+            model="TestModel",
+            context=262144,
+            ngl=68,
+            tensor_split="0.60,0.40",
+            success=True,
+            load_seconds=20.0,
+        )
+        candidate = ProbeResult(
+            model="TestModel",
+            context=262144,
+            ngl=52,
+            tensor_split="0.50,0.50",
+            success=True,
+            load_seconds=25.0,
+        )
+        assert choose_better_result(current, candidate) is candidate
+
+    def test_choose_better_result_prioritizes_higher_ngl_when_context_and_split_match(self):
+        current = ProbeResult(
+            model="TestModel",
+            context=262144,
+            ngl=44,
+            tensor_split="0.50,0.50",
+            success=True,
+            load_seconds=20.0,
+        )
+        candidate = ProbeResult(
+            model="TestModel",
+            context=262144,
+            ngl=52,
+            tensor_split="0.50,0.50",
+            success=True,
+            load_seconds=25.0,
+        )
+        assert choose_better_result(current, candidate) is candidate
 
 
 class TestBinarySearch:
