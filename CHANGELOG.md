@@ -37,6 +37,7 @@
 - The finetune results log now writes an in-progress run entry immediately and flushes every individual probe to `data/model_finetune_results.json`, so long live searches can be monitored while they are still running or interrupted mid-run.
 
 ### Fixed
+- `--optimization speed` no longer burns time recalibrating tensor splits on already-failed high-context probes; it now halves the context range first, then rebalances split only after a successful lower-context fit before trying upward again.
 - Finetune result ranking now prefers measured VRAM-balance deltas over naive distance-to-50/50 when two successful tensor splits compete, which keeps asymmetric dual-GPU hosts from "winning" on the wrong split just because a ratio looks more centered.
 - Removed the last tracked hardcoded underscore-checkout paths from Guardian scripts, tests, and helper utilities so a future rename toward the canonical `llama-cpp-guardian` style no longer requires code edits.
 - Guardian crash parsing now scans a wider recent `llama-server` journal window and recognizes llama.cpp fit-target failures, compute-buffer initialization failures, and CUDA OOM signatures instead of collapsing them into `Unknown error (no recognizable error pattern in logs)`.

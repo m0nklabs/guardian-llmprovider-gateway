@@ -456,6 +456,86 @@ class TestPersistentProbeCache:
         assert result.ngl == 36
         assert result.tensor_split == "0.55,0.45"
 
+    def test_speed_mode_halves_context_before_retrying_split_work(self, tmp_path: Path):
+        finetuner = _make_finetuner(tmp_path)
+        observed: list[tuple[int, int, str | None]] = []
+        cache: dict[tuple[int, int, str | None], ProbeResult] = {}
+        successful_probes = {
+            (16384, 52, "0.55,0.45"),
+            (16384, 52, "0.60,0.40"),
+            (131072, 52, "0.60,0.40"),
+            (131072, 52, "0.62,0.38"),
+        }
+
+        def build_vram(split: str) -> dict[str, dict[str, float]]:
+            if split == "0.55,0.45":
+                return {
+                    "0": {"used": 70.0, "free": 30.0, "total": 100.0, "free_pct": 30.0},
+                    "1": {"used": 85.0, "free": 15.0, "total": 100.0, "free_pct": 15.0},
+                }
+            if split == "0.60,0.40":
+                return {
+                    "0": {"used": 74.0, "free": 26.0, "total": 100.0, "free_pct": 26.0},
+                    "1": {"used": 82.0, "free": 18.0, "total": 100.0, "free_pct": 18.0},
+                }
+            return {
+                "0": {"used": 80.0, "free": 20.0, "total": 100.0, "free_pct": 20.0},
+                "1": {"used": 82.0, "free": 18.0, "total": 100.0, "free_pct": 18.0},
+            }
+
+        def fake_probe(*, model_name, model_config, context, ngl, tensor_split):
+            key = (context, ngl, tensor_split)
+            if key in cache:
+                return cache[key]
+            observed.append(key)
+            success = key in successful_probes
+            result = ProbeResult(
+                model=model_name,
+                context=context,
+                ngl=ngl,
+                tensor_split=tensor_split,
+                success=success,
+                load_seconds=1.0,
+                smoke_seconds=0.1 if success else 0.0,
+                status_code=200 if success else 503,
+                error=None if success else "allocating 469.00 MiB on device 1: cudaMalloc failed: out of memory",
+                gpu_vram=build_vram(tensor_split or "0.55,0.45") if success else None,
+                free_vram_delta_pct=free_vram_delta_pct(build_vram(tensor_split or "0.55,0.45")) if success else None,
+            )
+            cache[key] = result
+            return result
+
+        with patch.object(finetuner, "_probe_candidate", side_effect=fake_probe):
+            result = finetuner._search_best_auto_combination(
+                model_name="TestModel",
+                model_config={},
+                lower_bound=131072,
+                upper_bound=262144,
+                granularity=2048,
+                original_ngl=52,
+                lower_ngl=52,
+                upper_ngl=52,
+                ngl_refine_step=8,
+                coarse_step=0.05,
+                refine_step=0.02,
+                split_min=0.30,
+                split_max=0.70,
+                original_tensor_split="0.55,0.45",
+                optimization="speed",
+            )
+
+        assert result is not None
+        assert result.context == 131072
+        assert result.ngl == 52
+        assert result.tensor_split == "0.62,0.38"
+        first_high_failure = observed.index((262144, 52, "0.60,0.40"))
+        assert observed[first_high_failure + 1 : first_high_failure + 4] == [
+            (131072, 52, "0.60,0.40"),
+            (131072, 52, "0.62,0.38"),
+            (196608, 52, "0.62,0.38"),
+        ]
+        assert observed.count((262144, 52, "0.60,0.40")) == 1
+
     def test_optimize_ngl_for_baseline_rebalances_after_ngl_drop(self, tmp_path: Path):
         finetuner = _make_finetuner(tmp_path)
         observed: list[tuple[int, int, str | None]] = []

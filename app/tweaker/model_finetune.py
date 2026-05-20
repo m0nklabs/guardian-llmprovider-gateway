@@ -1253,18 +1253,32 @@ class GuardianModelFinetuner:
             if split_result is None or split_result.tensor_split is None:
                 continue
 
-            candidate_result = self._maximize_context_with_balanced_runtime(
-                model_name=model_name,
-                model_config=model_config,
-                min_context=lower_bound,
-                max_context=upper_bound,
-                granularity=granularity,
-                ngl=ngl_candidate,
-                starting_split=split_result.tensor_split,
-                refine_step=refine_step,
-                split_min=split_min,
-                split_max=split_max,
-            )
+            if optimization == "speed":
+                candidate_result = self._maximize_context_for_speed_mode(
+                    model_name=model_name,
+                    model_config=model_config,
+                    min_context=lower_bound,
+                    max_context=upper_bound,
+                    granularity=granularity,
+                    ngl=ngl_candidate,
+                    starting_split=split_result.tensor_split,
+                    refine_step=refine_step,
+                    split_min=split_min,
+                    split_max=split_max,
+                )
+            else:
+                candidate_result = self._maximize_context_with_balanced_runtime(
+                    model_name=model_name,
+                    model_config=model_config,
+                    min_context=lower_bound,
+                    max_context=upper_bound,
+                    granularity=granularity,
+                    ngl=ngl_candidate,
+                    starting_split=split_result.tensor_split,
+                    refine_step=refine_step,
+                    split_min=split_min,
+                    split_max=split_max,
+                )
             if candidate_result is None:
                 continue
 
@@ -1494,6 +1508,66 @@ class GuardianModelFinetuner:
         if best_context is None:
             return None
         return evaluate_context(best_context)
+
+    def _maximize_context_for_speed_mode(
+        self,
+        *,
+        model_name: str,
+        model_config: Dict[str, object],
+        min_context: int,
+        max_context: int,
+        granularity: int,
+        ngl: int,
+        starting_split: str,
+        refine_step: float,
+        split_min: float,
+        split_max: float,
+    ) -> Optional[ProbeResult]:
+        """Binary-search context first for speed mode and rebalance split only after successful fits."""
+        current_split = starting_split
+        best_result: Optional[ProbeResult] = None
+
+        def probe(context: int) -> bool:
+            nonlocal current_split, best_result
+            result = self._probe_candidate(
+                model_name=model_name,
+                model_config=model_config,
+                context=context,
+                ngl=ngl,
+                tensor_split=current_split,
+            )
+            if not result.success:
+                return False
+
+            rebalanced = self._rebalance_split_by_vram(
+                model_name=model_name,
+                model_config=model_config,
+                starting_result=result,
+                step=refine_step,
+                balance_threshold_pct=DEFAULT_VRAM_BALANCE_THRESHOLD_PCT,
+                split_min=split_min,
+                split_max=split_max,
+            )
+            current_split = rebalanced.tensor_split or current_split
+            best_result = choose_better_result(
+                best_result,
+                rebalanced,
+                optimization="context",
+                max_context=max_context,
+                max_ngl=ngl,
+            )
+            return True
+
+        best_context, _ = binary_search_max_success(
+            min_context=min_context,
+            max_context=max_context,
+            granularity=granularity,
+            anchor_context=max_context,
+            probe=probe,
+        )
+        if best_context is None:
+            return None
+        return best_result
 
     def _ensure_balanced_split_for_values(
         self,
