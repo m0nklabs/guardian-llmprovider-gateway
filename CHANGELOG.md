@@ -11,11 +11,19 @@
 - Gemma4 Agent now uses the same multimodal projector as the proven OpenWebUI Gemma4 profile so Agent Zero can route image tasks through the bounded agent alias.
 
 ### Changed
+- Simplified `config/models.yaml` to one runtime entry per remaining GGUF family, removed stale deleted-model paths, stripped `-nkvo`, and moved agent/deep/max-style behavior back to per-request API parameters instead of duplicate config profiles.
+- Raised surviving runtime contexts to the highest repo-documented safe values where empirical benchmark evidence existed, while leaving unproven families on their existing runtime limits.
+- Corrected the Qwen3.6 uncensored runtime rollback: the historical q4 benchmark at `131072` was valid, and the later `65536` result was a false negative caused by forcing an explicit tensor split during re-validation.
+- Restored `qwen3-35b-uncensored` to `context: 131072`, restored `benchmark_context_limit` to the model's metadata ceiling `262144`, and removed the explicit tensor split from that runtime entry.
+- Re-ran the Qwen3.6 context search through Guardian itself (`/admin/load` + live chat) instead of standalone backend launches, proved `262144` as the stable default runtime, measured `524288` as the highest stable Guardian load/runtime headroom on this host, and observed runtime instability by `540672` with load failures from `557056` upward.
+- Retuned `gemma-4-31B-it-uncensored-heretic` for the current dual-GPU host after Guardian proved the old `context: 262144` / `tensor_split: "0.55,0.45"` profile could not fit on the RTX 3060. With the improved split `0.62,0.38`, the profile's tiny-request ceiling reached `196096` before failing at `196608`, while a heavier `~12k`-token prompt stayed stable at `190464` and failed by `191488`. The runtime config now uses the last practically proven value `context: 190464`.
 - Kept `qwen3-35b-uncensored` as the unrestricted deep-reasoning alias while adding a bounded 65k-context agent variant for Agent Zero/OpenAI-compatible tool clients.
 - Raised both Qwen3.6 CrewAI/agent-facing aliases (`qwen3-35b-uncensored-agent` and `qwen3-35b-reasoning-agent`) from 65k to their full 131072-token context so long CrewAI traces stop tripping Guardian with context-overflow 400s.
 - Restored `gemma4-agent` to the stable 26B Agent Zero profile after the 31B uncensored route proved too slow for default AZ work.
 
 ### Fixed
+- Guardian crash parsing now scans a wider recent `llama-server` journal window and recognizes llama.cpp fit-target failures, compute-buffer initialization failures, and CUDA OOM signatures instead of collapsing them into `Unknown error (no recognizable error pattern in logs)`.
+- Guardian now validates multimodal runtime support per model instead of assuming any `mmproj` config is vision-ready, exposes that status through `/v1/models`, and returns explicit 4xx/503 OpenAI-style errors for broken image paths instead of leaking raw 500s.
 - Guardian now starts answering on `11434` immediately after restart by running startup model verification in the background instead of holding FastAPI startup open until `llama-server` on `11440` finishes warming up.
 - Guardian no longer kills `systemctl --user restart llama-guardian-live.service` because of a momentarily live `guardian.pid`; the PID-file guard now overwrites old entries and relies on socket binding to reject real duplicate listeners.
 - `/admin/load` now accepts public model aliases such as `qwen3-35b-uncensored` and serializes manual loads behind the shared model-switch lock so operator-triggered loads cannot race the background startup check.
@@ -35,6 +43,10 @@
 - Guardian runtime sizing now treats `context` as the only active runtime window; `benchmark_context_limit` is treated as a separate benchmark or paper ceiling instead of feeding the advertised runtime headroom calculation.
 - `/v1/models` now exposes the benchmark ceiling under the clearer `benchmark_context_limit` field alongside the configured runtime `context` and the conservative `advertised_context` headroom field.
 - Claude Code specifically still receives the conservative `advertised_context` value through the OpenAI-compatible `max_context` response field because this Claude build compacts against that field only; the response keeps the explicit runtime and benchmark fields visible next to that compatibility override.
+
+### Removed
+- Removed stale `Qwen3.6-35B-A3B` and `gemma-4-31B-it` registry entries whose GGUF files no longer exist locally.
+- Removed duplicate `-Agent`, `-Deep`, and `-Max-Agent` model entries and the aliases that only existed to target those duplicate profiles.
 
 ## [2026-05-06] - Model Registry Cleanup, Qwen 3.6, Gemma Deep, and Load Guard
 
@@ -60,7 +72,7 @@
 ## [2026-04-17] - Backend Strategy Flip, Middleware Rebrand & Documentation Overhaul
 
 ### Changed
-- **Backend strategy flipped**: Official llama.cpp is now the PRIMARY backend; ik_llama.cpp fork is FALLBACK. `DEFAULT_BACKEND` changed from `"ik_fork"` to `"official"` in `manager.py`.
+- **Backend strategy flipped**: Official llama.cpp is the documented and default backend. `DEFAULT_BACKEND` changed to `"official"` in `manager.py`.
 - **Middleware rebrand**: Guardian is now positioned as middleware (not proxy). Logger renamed from `"Proxy"` to `"Guardian"` in `server.py`.
 - **3rd-party GPU process awareness**: Replaced Frigate-specific language with generalized "3rd-party GPU process" awareness throughout configuration and documentation.
 - **models.yaml cleanup**: Removed explicit `backend: official` from all 10 models that had it — they now use the default (official).

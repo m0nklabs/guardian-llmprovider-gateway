@@ -309,6 +309,65 @@ aliases:
         assert "missing" not in public_models
 
 
+class TestVisionCapabilityState:
+        def test_marks_existing_mmproj_models_unverified(self, tmp_path: Path):
+                mmproj = tmp_path / "vision-mmproj.gguf"
+                mmproj.write_text("mmproj")
+                models_yaml = f"""\
+models:
+    Vision-Model:
+        path: /models/vision.gguf
+        mmproj: {mmproj}
+    Text-Only:
+        path: /models/text.gguf
+"""
+                mgr = _make_manager(tmp_path, models_yaml=models_yaml)
+
+                vision = mgr.get_vision_capability("Vision-Model")
+                text_only = mgr.get_vision_capability("Text-Only")
+
+                assert vision["configured"] is True
+                assert vision["status"] == "unverified"
+                assert vision["mmproj_exists"] is True
+                assert text_only["configured"] is False
+                assert text_only["status"] == "text_only"
+
+        def test_marks_missing_mmproj_as_misconfigured(self, tmp_path: Path):
+                models_yaml = """\
+models:
+    Broken-Vision:
+        path: /models/vision.gguf
+        mmproj: /models/missing-mmproj.gguf
+"""
+                mgr = _make_manager(tmp_path, models_yaml=models_yaml)
+
+                vision = mgr.get_vision_capability("Broken-Vision")
+
+                assert vision["configured"] is True
+                assert vision["status"] == "misconfigured"
+                assert "mmproj file not found" in vision["last_error"]
+
+        def test_reset_vision_validation_clears_cached_result(self, tmp_path: Path):
+                mmproj = tmp_path / "vision-mmproj.gguf"
+                mmproj.write_text("mmproj")
+                models_yaml = f"""\
+models:
+    Vision-Model:
+        path: /models/vision.gguf
+        mmproj: {mmproj}
+"""
+                mgr = _make_manager(tmp_path, models_yaml=models_yaml)
+
+                mgr.mark_vision_validation("Vision-Model", "supported")
+                assert mgr.get_vision_capability("Vision-Model")["status"] == "supported"
+
+                mgr.reset_vision_validation("Vision-Model")
+
+                vision = mgr.get_vision_capability("Vision-Model")
+                assert vision["status"] == "unverified"
+                assert vision["last_error"] is None
+
+
 # ── _get_backend_model_path ───────────────────────────────────────────
 
 
@@ -550,6 +609,58 @@ class TestCrashRecord:
         assert d["model"] == "test-model"
         assert d["exit_code"] == 137
         assert d["config_snapshot"]["ngl"] == 99
+
+
+class TestCrashLogParsing:
+    def test_extracts_fit_failure_messages(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+
+        lines = [
+            "llama_params_fit_impl: cannot meet free memory targets on all devices, need to use 1487 MiB less in total",
+            "llama_params_fit: failed to fit params to free device memory: n_gpu_layers already set by user to 99, abort",
+            "/home/flip/llama_cpp_guardian/scripts/start_llama.sh: line 49: 3724619 Segmentation fault      (core dumped) $BINARY $ARGS",
+        ]
+
+        result = mgr._extract_crash_error_from_lines(lines)
+
+        assert "cannot meet free memory targets" in result
+        assert "failed to fit params to free device memory" in result
+        assert "Segmentation fault" in result
+
+    def test_extracts_runtime_cuda_failure_messages(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+
+        lines = [
+            "CUDA error: out of memory",
+            "ggml_gallocr_reserve_n_impl: failed to allocate CUDA1 buffer of size 547880960",
+            "graph_reserve: failed to allocate compute buffers",
+            "llama_init_from_model: failed to initialize the context: failed to allocate compute pp buffers",
+        ]
+
+        result = mgr._extract_crash_error_from_lines(lines)
+
+        assert "CUDA error: out of memory" in result
+        assert "failed to allocate CUDA1 buffer" in result
+        assert "failed to initialize the context: failed to allocate compute pp buffers" in result
+
+    @pytest.mark.asyncio
+    async def test_get_crash_error_reads_larger_recent_log_window(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        proc = AsyncMock()
+        proc.communicate.return_value = (
+            b"llama_params_fit_impl: cannot meet free memory targets on all devices\n"
+            b"llama_params_fit: failed to fit params to free device memory: n_gpu_layers already set by user to 99, abort\n",
+            b"",
+        )
+
+        with patch("app.engine.manager.asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=proc) as mock_exec:
+            result = await mgr._get_crash_error()
+
+        assert "cannot meet free memory targets" in result
+        assert "failed to fit params to free device memory" in result
+        assert mock_exec.await_args.args[:7] == (
+            "journalctl", "-u", "llama-server", "-n", "120", "--no-pager", "-o",
+        )
 
 
 # ── Backend binaries ──────────────────────────────────────────────────

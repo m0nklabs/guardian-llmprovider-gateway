@@ -7,7 +7,7 @@ import re
 import shlex
 import httpx
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -50,10 +50,37 @@ class ModelLoadError(Exception):
         self.crash_record = crash_record
 
 
+@dataclass
+class VisionCapability:
+    """Runtime multimodal capability state for a configured model."""
+    configured: bool
+    mmproj: Optional[str]
+    mmproj_exists: bool
+    backend: str
+    status: str
+    signature: Tuple[str, str, str]
+    last_checked_at: Optional[str] = None
+    last_error: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "configured": self.configured,
+            "mmproj": self.mmproj,
+            "mmproj_exists": self.mmproj_exists,
+            "backend": self.backend,
+            "status": self.status,
+            "validated": self.status in {"supported", "unsupported", "loading", "load_failed", "misconfigured"},
+            "last_checked_at": self.last_checked_at,
+            "last_error": self.last_error,
+        }
+
+
 class ModelManager:
     def __init__(self, config_path: str = "/home/flip/llama_cpp_guardian/config/models.yaml"):
         self.config_path = Path(config_path)
         self.models = self._load_config()
+        self._vision_capabilities: Dict[str, VisionCapability] = {}
+        self._sync_vision_capabilities()
         self.server_process: Optional[int] = None # Systemd manages main process, but we might control it via systemctl
         self.server_url = "http://127.0.0.1:11440"
         self.crash_history: List[CrashRecord] = []
@@ -302,6 +329,127 @@ class ModelManager:
 
         return public_models
 
+    def _vision_signature(self, config: Dict) -> Tuple[str, str, str]:
+        return (
+            str(config.get("path", "")).strip(),
+            str(config.get("mmproj", "")).strip(),
+            str(config.get("backend", DEFAULT_BACKEND)).strip() or DEFAULT_BACKEND,
+        )
+
+    def _sync_vision_capabilities(self) -> None:
+        """Refresh cached multimodal capability state from the current config."""
+        previous = getattr(self, "_vision_capabilities", {})
+        refreshed: Dict[str, VisionCapability] = {}
+
+        for model_name, config in self.models.items():
+            mmproj = str(config.get("mmproj", "")).strip() or None
+            backend = str(config.get("backend", DEFAULT_BACKEND)).strip() or DEFAULT_BACKEND
+            signature = self._vision_signature(config)
+            existing = previous.get(model_name)
+
+            if not mmproj:
+                refreshed[model_name] = VisionCapability(
+                    configured=False,
+                    mmproj=None,
+                    mmproj_exists=False,
+                    backend=backend,
+                    status="text_only",
+                    signature=signature,
+                )
+                continue
+
+            mmproj_exists = Path(mmproj).exists()
+            if not mmproj_exists:
+                refreshed[model_name] = VisionCapability(
+                    configured=True,
+                    mmproj=mmproj,
+                    mmproj_exists=False,
+                    backend=backend,
+                    status="misconfigured",
+                    signature=signature,
+                    last_error=f"mmproj file not found: {mmproj}",
+                )
+                continue
+
+            if existing and existing.signature == signature and existing.status in {"supported", "unsupported", "loading", "load_failed"}:
+                refreshed[model_name] = VisionCapability(
+                    configured=True,
+                    mmproj=mmproj,
+                    mmproj_exists=True,
+                    backend=backend,
+                    status=existing.status,
+                    signature=signature,
+                    last_checked_at=existing.last_checked_at,
+                    last_error=existing.last_error,
+                )
+                continue
+
+            refreshed[model_name] = VisionCapability(
+                configured=True,
+                mmproj=mmproj,
+                mmproj_exists=True,
+                backend=backend,
+                status="unverified",
+                signature=signature,
+            )
+
+        self._vision_capabilities = refreshed
+
+    def get_vision_capability(self, model_name: str) -> Dict[str, Any]:
+        """Return multimodal capability metadata for a configured model."""
+        capability = self._vision_capabilities.get(model_name)
+        if capability is None:
+            return VisionCapability(
+                configured=False,
+                mmproj=None,
+                mmproj_exists=False,
+                backend=DEFAULT_BACKEND,
+                status="unknown",
+                signature=("", "", DEFAULT_BACKEND),
+            ).to_dict()
+        return capability.to_dict()
+
+    def reset_vision_validation(self, model_name: str) -> None:
+        """Reset runtime validation after a fresh backend load or switch."""
+        capability = self._vision_capabilities.get(model_name)
+        if capability is None:
+            return
+        if not capability.configured:
+            capability.status = "text_only"
+            capability.last_error = None
+            capability.last_checked_at = None
+            return
+        if not capability.mmproj_exists:
+            capability.status = "misconfigured"
+            capability.last_error = f"mmproj file not found: {capability.mmproj}"
+            capability.last_checked_at = None
+            return
+        capability.status = "unverified"
+        capability.last_error = None
+        capability.last_checked_at = None
+
+    def mark_vision_validation(self, model_name: str, status: str, error: Optional[str] = None) -> None:
+        """Persist the latest observed runtime multimodal state for a model."""
+        capability = self._vision_capabilities.get(model_name)
+        if capability is None:
+            return
+
+        checked_at = datetime.now(UTC).isoformat()
+        if not capability.configured:
+            capability.status = "text_only"
+            capability.last_error = error
+            capability.last_checked_at = checked_at
+            return
+        if not capability.mmproj_exists:
+            capability.status = "misconfigured"
+            capability.last_error = f"mmproj file not found: {capability.mmproj}"
+            capability.last_checked_at = checked_at
+            return
+
+        capability.status = status
+        capability.last_error = error
+        capability.last_checked_at = checked_at
+
     @property
     def pinned_model(self) -> Optional[str]:
         return self._pinned_model
@@ -485,6 +633,7 @@ class ModelManager:
     async def switch_model(self, model_name: str, client_id: str = "_system", force: bool = False):
         # Re-read models.yaml so config edits take effect without Guardian restart
         self.models = self._load_config()
+        self._sync_vision_capabilities()
         if model_name not in self.models:
             raise ValueError(f"Model {model_name} not found in configuration")
 
@@ -540,6 +689,7 @@ class ModelManager:
             )
         
         self.current_model = model_name
+        self.reset_vision_validation(model_name)
         logger.info(f"✅ Model '{model_name}' loaded successfully")
 
         # SECURITY: Post-switch verification — confirm backend actually loaded right model
@@ -633,6 +783,7 @@ class ModelManager:
         """Reload llama-server with current (or specified) model."""
         # Re-read models.yaml so config edits take effect without Guardian restart
         self.models = self._load_config()
+        self._sync_vision_capabilities()
         target = model_name or self.current_model
         if target not in self.models:
             raise ValueError(f"Model '{target}' not found in configuration")
@@ -649,6 +800,7 @@ class ModelManager:
                 crash_record=crash,
             )
         self.current_model = target
+        self.reset_vision_validation(target)
         self.is_unloaded = False
         self.last_request_time = time.time()
         logger.info(f"✅ Model '{target}' loaded and ready")
@@ -840,36 +992,51 @@ class ModelManager:
         """Extract the relevant error lines from journalctl for the last llama-server run."""
         try:
             proc = await asyncio.create_subprocess_exec(
-                "journalctl", "-u", "llama-server", "-n", "30", "--no-pager", "-o", "cat",
+                "journalctl", "-u", "llama-server", "-n", "120", "--no-pager", "-o", "cat",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
             stdout, _ = await proc.communicate()
             lines = stdout.decode().strip().splitlines()
-
-            # Find the most relevant error lines
-            error_lines = []
-            error_keywords = [
-                "cudaMalloc failed",
-                "out of memory",
-                "failed to load model",
-                "failed to allocate",
-                "error loading model",
-                "unknown model architecture",
-                "CUDA error",
-                "exiting due to",
-                "alloc_tensor_range: failed",
-            ]
-            for line in lines:
-                lower = line.lower()
-                if any(kw.lower() in lower for kw in error_keywords):
-                    error_lines.append(line.strip())
-
-            if error_lines:
-                return " | ".join(error_lines[-5:])  # Last 5 relevant error lines
-            return "Unknown error (no recognizable error pattern in logs)"
+            return self._extract_crash_error_from_lines(lines)
         except Exception as e:
             return f"Failed to read crash logs: {e}"
+
+    @staticmethod
+    def _extract_crash_error_from_lines(lines: List[str]) -> str:
+        """Summarize the most relevant llama-server crash lines from recent logs."""
+        error_keywords = [
+            "cudamalloc failed",
+            "cuda error",
+            "out of memory",
+            "failed to load model",
+            "failed to allocate",
+            "failed to fit params to free device memory",
+            "cannot meet free memory targets",
+            "failed to initialize the context",
+            "failed to allocate compute pp buffers",
+            "error loading model",
+            "unknown model architecture",
+            "alloc_tensor_range: failed",
+            "graph_reserve: failed",
+            "segmentation fault",
+            "core dumped",
+            "exiting due to",
+        ]
+
+        error_lines: List[str] = []
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line:
+                continue
+            lower = line.lower()
+            if any(keyword in lower for keyword in error_keywords):
+                if not error_lines or error_lines[-1] != line:
+                    error_lines.append(line)
+
+        if error_lines:
+            return " | ".join(error_lines[-6:])
+        return "Unknown error (no recognizable error pattern in logs)"
 
     async def _get_service_exit_code(self) -> Optional[int]:
         """Get the exit code of the last llama-server run."""

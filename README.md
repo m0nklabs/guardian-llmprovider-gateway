@@ -120,58 +120,48 @@ Defines per-model runtime behavior:
 models:
   Qwen3.6-35B-A3B-HauhauCS-Aggressive:
     path: /home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf
-    benchmark_context_limit: 131072
-    context: 131072
+    benchmark_context_limit: 262144
+    context: 262144
     ngl: 99
     kv_type: q4_0
-    tensor_split: "0.57,0.43"
-    extra_args: "--reasoning on --reasoning-format deepseek --reasoning-budget -1"
+    extra_args: "--temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
 
-  Qwen3.6-35B-A3B-HauhauCS-Aggressive-Agent:
-    path: /home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf
-    benchmark_context_limit: 131072
-    context: 65536
+  Qwen3-VL-30B-A3B-Thinking:
+    path: /home/flip/models/Qwen3-VL-30B-A3B-Thinking-Q4_K_M.gguf
+    benchmark_context_limit: 524288
+    context: 524288
     ngl: 99
-    kv_type: q4_0
-    tensor_split: "0.57,0.43"
-    extra_args: "--chat-template-file /home/flip/llama_cpp_guardian/config/qwen3_nonthinking.jinja --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0.0"
+    kv_type: f16
+    tensor_split: "0.55,0.45"
+    mmproj: /home/flip/models/mmproj-Qwen3-VL-30B-A3B-F16.gguf
 
-  Qwen3.6-35B-A3B-HauhauCS-Aggressive-Reasoning-Agent:
-    path: /home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf
-    benchmark_context_limit: 131072
-    context: 65536
-    ngl: 99
-    kv_type: q4_0
-    tensor_split: "0.57,0.43"
-    extra_args: "--reasoning on --reasoning-format deepseek --reasoning-budget 2048 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0"
-
-  Huihui-gemma-4-26B-A4B-it-abliterated-Agent:
+  Huihui-gemma-4-26B-A4B-it-abliterated:
     path: /home/flip/models/gemma-4-26B-A4B.unsloth-imatrix-UD-Q4_K_XL.gguf
     benchmark_context_limit: 262144
-    context: 65536
+    context: 262144
     ngl: 99
     kv_type: q4_0
     tensor_split: "0.55,0.45"
-    extra_args: "-nkvo --reasoning-budget 0 --temp 0.7 --top-k 40"
+    mmproj: /home/flip/models/gemma4-26b-a4b-mmproj-BF16.gguf
 
-  gemma-4-31B-it-uncensored-heretic-Deep:
+  gemma-4-31B-it-uncensored-heretic:
     path: /home/flip/models/gemma-4-31B-it-uncensored-heretic-Q4_K_M.gguf
     benchmark_context_limit: 262144
-    context: 216064
+    context: 262144
     ngl: 99
     kv_type: q4_0
-    tensor_split: "0.62,0.38"
-    extra_args: "--reasoning on --reasoning-budget -1"
+    tensor_split: "0.55,0.45"
+    mmproj: /home/flip/models/gemma-4-31B-it-mmproj-BF16.gguf
+    extra_args: "--repeat-penalty 1.3 --repeat-last-n 128 --dry-multiplier 1.0 --dry-base 1.75 --dry-penalty-last-n 256 --temp 0.6 --top-k 40"
 
 aliases:
+  qwen3.6-35b: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
   qwen3-35b-uncensored: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
-  qwen3-35b-uncensored-agent: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Agent"
-  qwen3-35b-reasoning-agent: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Reasoning-Agent"
+  qwen3-vl: "Qwen3-VL-30B-A3B-Thinking"
   qwen3-32b-uncensored: "Qwen3-VL-32B-Gemini-Heretic-Uncensored-Thinking"
-  gemma4-agent: "Huihui-gemma-4-26B-A4B-it-abliterated-Agent"
-  gemma4-26b-agent: "Huihui-gemma-4-26B-A4B-it-abliterated-Agent"
-  gemma4-heretic-deep: "gemma-4-31B-it-uncensored-heretic-Deep"
-  gemma4-31b-uncensored-max-agent: "gemma-4-31B-it-uncensored-heretic-Max-Agent"
+  gemma4: "Huihui-gemma-4-26B-A4B-it-abliterated"
+  gemma4-heretic: "gemma-4-31B-it-uncensored-heretic"
+  gemma4-31b-uncensored: "gemma-4-31B-it-uncensored-heretic"
 
 guardian:
   pinned_model: "Huihui-gemma-4-26B-A4B-it-abliterated"
@@ -180,6 +170,10 @@ guardian:
 ```
 
 Supported per-model fields: `path`, `context`, `benchmark_context_limit`, `ngl`, `kv_type`, `backend`, `tensor_split`, `mmproj`, `extra_args`.
+
+Keep one runtime entry per GGUF family. Use API request parameters for reasoning, sampling, and other per-call behavior instead of duplicating `-agent`, `-deep`, or `-max` profile variants in `models.yaml`.
+
+Treat `context` as the live hardware-safe runtime cap, not the model's theoretical or trained window. Keep `benchmark_context_limit` for the model's paper or metadata ceiling. For the current RTX 3060 + RTX 5060 Ti host, the Qwen3.6 uncensored q4 runtime was re-validated at `131072` without forcing a tensor split; the earlier lower ceiling was a false negative caused by an explicit split probe that did not match the historical benchmark path.
 
 - `context`: the active runtime context Guardian actually loads for the model.
 - `benchmark_context_limit`: the benchmark or paper ceiling where testing higher stops being useful; Guardian does not use it as the active runtime window.

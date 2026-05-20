@@ -1,6 +1,7 @@
 """Unit tests for Guardian server startup behavior."""
 
 import asyncio
+import json
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -150,6 +151,69 @@ def test_reasoning_falls_back_for_ollama_clients():
     """Ollama bridges should use reasoning text when no visible content is present."""
     assert server._extract_assistant_delta_text({"reasoning_content": "thinking"}) == "thinking"
     assert server._extract_assistant_message_text({"reasoning_content": "answer"}) == "answer"
+
+
+def test_messages_contain_image_input_detects_openai_parts():
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "hello"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+            ],
+        }
+    ]
+
+    assert server._messages_contain_image_input(messages) is True
+
+
+def test_map_multimodal_backend_error_returns_clean_422():
+    with patch.object(server.model_manager, "mark_vision_validation") as mark_validation:
+        response = server._map_multimodal_backend_error(
+            "Qwen3-VL-30B-A3B-Thinking",
+            500,
+            b"Internal Server Error",
+            "req-123",
+            0,
+        )
+
+    assert response is not None
+    assert response.status_code == 422
+    payload = json.loads(response.body)
+    assert payload["error"]["code"] == "vision_runtime_unavailable"
+    mark_validation.assert_called_once_with(
+        "Qwen3-VL-30B-A3B-Thinking",
+        "unsupported",
+        "Internal Server Error",
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_models_includes_vision_metadata():
+    with (
+        patch.object(server.model_manager, "get_current_model", return_value="Vision-Model"),
+        patch.object(server.model_manager, "get_public_model_map", return_value={"vision-alias": "Vision-Model"}),
+        patch.object(server.model_manager, "get_benchmark_context_limit", return_value=65536),
+        patch.object(server.model_manager, "get_runtime_context_window", return_value=32768),
+        patch.object(server.model_manager, "get_advertised_context_window", return_value=31744),
+        patch.object(
+            server.model_manager,
+            "get_vision_capability",
+            return_value={
+                "configured": True,
+                "status": "supported",
+                "validated": True,
+                "backend": "official",
+            },
+        ),
+    ):
+        payload = await server.list_models(client_id="test-user")
+
+    model_entry = payload["data"][0]
+    assert model_entry["id"] == "vision-alias"
+    assert model_entry["input_modalities"] == ["text", "image"]
+    assert model_entry["configured_input_modalities"] == ["text", "image"]
+    assert model_entry["vision"]["status"] == "supported"
 
 
 @pytest.mark.asyncio

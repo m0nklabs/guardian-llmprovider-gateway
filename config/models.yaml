@@ -1,15 +1,16 @@
 models:
   Step3-VL-10B:
     path: /home/flip/models/Step3-VL-10B-F16.gguf
-    benchmark_context_limit: 65536
-    context: 32768
+    benchmark_context_limit: 262144
+    context: 262144
     ngl: 99
+    kv_type: q4_0
     tensor_split: "0.55,0.45"
     mmproj: /home/flip/models/mmproj-Step3-VL-10B-F16.gguf
   Ministral-3-14B-Reasoning-2512:
     path: /home/flip/models/Ministral-3-14B-Reasoning-2512-Q8_0.gguf
     benchmark_context_limit: 262144
-    context: 32768
+    context: 262144
     ngl: 99
     kv_type: f16
     tensor_split: "0.55,0.45"
@@ -22,19 +23,18 @@ models:
   Phi-4-reasoning-plus:
     path: /home/flip/models/Phi-4-reasoning-plus-Q8_0.gguf
     benchmark_context_limit: 32768
-    context: 131072
+    context: 32768
     ngl: 99
     kv_type: f16
     tensor_split: "0.55,0.45"
   Qwen3-VL-30B-A3B-Thinking:
     path: /home/flip/models/Qwen3-VL-30B-A3B-Thinking-Q4_K_M.gguf
-    benchmark_context_limit: 262144
-    context: 32768
+    benchmark_context_limit: 524288
+    context: 524288
     ngl: 99
     kv_type: f16
     tensor_split: "0.55,0.45"
     mmproj: /home/flip/models/mmproj-Qwen3-VL-30B-A3B-F16.gguf
-    extra_args: "-nkvo"
   llama3.2-3b:
     path: /home/flip/models/llama3.2-3b.gguf
     benchmark_context_limit: 131072
@@ -46,32 +46,13 @@ models:
     benchmark_context_limit: 2048
     context: 32768
     ngl: 99
-
-  Qwen3.6-35B-A3B:
-    path: /home/flip/models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
-    benchmark_context_limit: 262144
-    context: 131072
-    ngl: 99
-    kv_type: q4_0
-    tensor_split: "0.62,0.38"
-    extra_args: "--temp 0.6 --top-k 40"
-
-  gemma-4-31B-it:
-    path: /home/flip/models/gemma-4-31B-it-Q4_K_M.gguf
-    benchmark_context_limit: 262144
-    context: 216064
-    ngl: 99
-    kv_type: q4_0
-    tensor_split: "0.62,0.38"
-    extra_args: "--temp 0.6 --top-k 40"
   Qwen3-30B-A3B-Thinking-2507:
     path: /home/flip/models/Qwen3-30B-A3B-Thinking-2507-Q4_K_M.gguf
-    benchmark_context_limit: 262144
-    context: 131072
+    benchmark_context_limit: 1048576
+    context: 1048576
     ngl: 99
     kv_type: q8_0
     tensor_split: "0.55,0.45"
-    extra_args: "-nkvo"
   Nemotron-3-Nano-30B-A3B:
     path: /home/flip/models/Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf
     benchmark_context_limit: 1048576
@@ -87,7 +68,6 @@ models:
     kv_type: q4_0
     tensor_split: "0.57,0.43"
     mmproj: /home/flip/models/mmproj-Qwen3-VL-32B-F16.gguf
-    extra_args: "-nkvo"
   Huihui-gemma-4-26B-A4B-it-abliterated:
     path: /home/flip/models/gemma-4-26B-A4B.unsloth-imatrix-UD-Q4_K_XL.gguf
     benchmark_context_limit: 262144
@@ -95,45 +75,16 @@ models:
     ngl: 99
     kv_type: q4_0
     tensor_split: "0.55,0.45"
-    mmproj: /home/flip/models/gemma4-26b-a4b-mmproj-BF16.gguf
-    extra_args: "-nkvo"
-  Huihui-gemma-4-26B-A4B-it-abliterated-Agent:
-    path: /home/flip/models/gemma-4-26B-A4B.unsloth-imatrix-UD-Q4_K_XL.gguf
-    benchmark_context_limit: 262144
-    context: 65536
-    ngl: 99
-    kv_type: q4_0
-    tensor_split: "0.55,0.45"
-    mmproj: /home/flip/models/gemma4-26b-a4b-mmproj-BF16.gguf
-    extra_args: "-nkvo --reasoning-budget 0 --temp 0.7 --top-k 40"
+    mmproj: /home/flip/models/gemma-4-26b-a4b-mmproj-BF16.gguf
   gemma-4-31B-it-uncensored-heretic:
     path: /home/flip/models/gemma-4-31B-it-uncensored-heretic-Q4_K_M.gguf
     benchmark_context_limit: 262144
-    context: 262144
-    ngl: 99
-    kv_type: q4_0
-    tensor_split: "0.55,0.45"
-    mmproj: /home/flip/models/gemma-4-31B-it-mmproj-BF16.gguf
-    extra_args: "-nkvo --reasoning-budget 1024 --repeat-penalty 1.3 --repeat-last-n 128 --dry-multiplier 1.0 --dry-base 1.75 --dry-penalty-last-n 256 --temp 0.6 --top-k 40"
-  gemma-4-31B-it-uncensored-heretic-Deep:
-    path: /home/flip/models/gemma-4-31B-it-uncensored-heretic-Q4_K_M.gguf
-    benchmark_context_limit: 262144
-    context: 216064
-    ngl: 99
-    kv_type: q4_0
-    tensor_split: "0.62,0.38"
-    extra_args: "--reasoning on --reasoning-budget -1 --repeat-penalty 1.3 --repeat-last-n 128 --dry-multiplier 1.0 --dry-base 1.75 --dry-penalty-last-n 256 --temp 0.6 --top-k 40"
-  gemma-4-31B-it-uncensored-heretic-Max-Agent:
-    path: /home/flip/models/gemma-4-31B-it-uncensored-heretic-Q4_K_M.gguf
-    benchmark_context_limit: 262144
-    context: 65536
+    context: 190464
     ngl: 99
     kv_type: q4_0
     tensor_split: "0.62,0.38"
     mmproj: /home/flip/models/gemma-4-31B-it-mmproj-BF16.gguf
-    # Max-reasoning AZ profile for TrevorJS/gemma-4-31B-it-uncensored.
-    # Reasoning stays unrestricted; repeat/DRY penalties reduce visible loops.
-    extra_args: "-nkvo --reasoning on --reasoning-budget -1 --repeat-penalty 1.3 --repeat-last-n 128 --dry-multiplier 1.0 --dry-base 1.75 --dry-penalty-last-n 512 --temp 0.6 --top-k 40"
+    extra_args: "--repeat-penalty 1.3 --repeat-last-n 128 --dry-multiplier 1.0 --dry-base 1.75 --dry-penalty-last-n 256 --temp 0.6 --top-k 40"
   gemma-4-E4B-it-uncensored:
     path: /home/flip/models/gemma-4-E4B-it-uncensored-Q4_K_M.gguf
     benchmark_context_limit: 131072
@@ -141,50 +92,20 @@ models:
     ngl: 99
     kv_type: f16
     tensor_split: "1.0,0.0"
-    extra_args: "--reasoning-budget 0"
-
 
   Qwen3.6-35B-A3B-HauhauCS-Aggressive:
     path: /home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf
-    benchmark_context_limit: 131072
-    context: 131072
+    benchmark_context_limit: 262144
+    context: 262144
     ngl: 99
     kv_type: q4_0
-    tensor_split: "0.57,0.43"
-    # 2026-05-06: max mode requested; keep KV cache on GPU and leave reasoning unrestricted.
-    # Sampler params per Unsloth Qwen3.6 docs (thinking mode, precise coding tasks):
-    #   https://unsloth.ai/docs/models/qwen3.6 — temp=0.6, top-p=0.95, top-k=20,
-    #   min-p=0.0, presence-penalty=0.0, repeat-penalty=1.0.
-    extra_args: "--reasoning on --reasoning-format deepseek --reasoning-budget -1 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
-  Qwen3.6-35B-A3B-HauhauCS-Aggressive-Agent:
-    path: /home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf
-    benchmark_context_limit: 131072
-    context: 131072
-    ngl: 99
-    kv_type: q4_0
-    tensor_split: "0.57,0.43"
-    # Agent tools need fast, visible answers more than unbounded hidden reasoning.
-    # Qwen documents non-thinking mode for efficient dialogue; for llama.cpp the
-    # hard switch is implemented with the official non-thinking chat template.
-    extra_args: "--chat-template-file /home/flip/llama_cpp_guardian/config/qwen3_nonthinking.jinja --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
-  Qwen3.6-35B-A3B-HauhauCS-Aggressive-Reasoning-Agent:
-    path: /home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf
-    benchmark_context_limit: 131072
-    context: 131072
-    ngl: 99
-    kv_type: q4_0
-    tensor_split: "0.57,0.43"
-    # Daily local-agent profile: keep Qwen reasoning enabled, but bounded so
-    # agent frameworks cannot burn minutes in invisible deep-think loops.
-    extra_args: "--reasoning on --reasoning-format deepseek --reasoning-budget 2048 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
+    extra_args: "--temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
 # === Model Aliases ===
 # Short names that resolve to full model names above.
 # Use in API requests: {"model": "qwen3-35b-uncensored"}
 aliases:
-  qwen3.6-35b: "Qwen3.6-35B-A3B"
+  qwen3.6-35b: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
   qwen3-35b-uncensored: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
-  qwen3-35b-uncensored-agent: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Agent"
-  qwen3-35b-reasoning-agent: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Reasoning-Agent"
   qwen3-30b: "Qwen3-30B-A3B-Thinking-2507"
   qwen3-vl: "Qwen3-VL-30B-A3B-Thinking"
   qwen3-32b-uncensored: "Qwen3-VL-32B-Gemini-Heretic-Uncensored-Thinking"
@@ -193,12 +114,8 @@ aliases:
   phi4: "Phi-4-reasoning-plus"
   ministral: "Ministral-3-14B-Reasoning-2512"
   gemma4: "Huihui-gemma-4-26B-A4B-it-abliterated"
-  gemma4-agent: "Huihui-gemma-4-26B-A4B-it-abliterated-Agent"
-  gemma4-26b-agent: "Huihui-gemma-4-26B-A4B-it-abliterated-Agent"
   gemma4-heretic: "gemma-4-31B-it-uncensored-heretic"
-  gemma4-heretic-deep: "gemma-4-31B-it-uncensored-heretic-Deep"
   gemma4-31b-uncensored: "gemma-4-31B-it-uncensored-heretic"
-  gemma4-31b-uncensored-max-agent: "gemma-4-31B-it-uncensored-heretic-Max-Agent"
   gemma4-e4b: "gemma-4-E4B-it-uncensored"
   step3-vl: "Step3-VL-10B"
   llama3: "llama3.2-3b"

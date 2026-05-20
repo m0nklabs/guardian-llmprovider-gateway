@@ -1,4 +1,5 @@
 import os
+import base64
 import json
 import asyncio
 import logging
@@ -7,14 +8,16 @@ import signal
 import subprocess
 import time
 import errno
+import struct
+import zlib
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import yaml
 import httpx
 from fastapi import FastAPI, Request, HTTPException, Response, Depends
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.status import HTTP_401_UNAUTHORIZED
 
 from collections import defaultdict
@@ -109,6 +112,8 @@ _startup_check_status: Dict[str, Optional[object]] = {
     "error": None,
     "generation": 0,
 }
+
+_VISION_PROBE_IMAGE_DATA_URL: Optional[str] = None
 
 
 def _get_pid_file_path() -> Path:
@@ -457,6 +462,245 @@ def _resolve_inference_model(raw_model: Optional[str], current_model: str) -> Op
         return model_manager.resolve_model(raw_model)
     except ValueError:
         return raw_model
+
+
+def _queue_headers(request_id: str, queue_wait_ms: float) -> Dict[str, str]:
+    return {
+        "X-Request-Id": request_id,
+        "X-Queue-Wait-Ms": str(int(queue_wait_ms)),
+    }
+
+
+def _messages_contain_image_input(messages: List[Dict[str, Any]]) -> bool:
+    for message in messages:
+        content = message.get("content", "")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") in {"image_url", "input_image"}:
+                return True
+    return False
+
+
+def _build_probe_image_data_url() -> str:
+    global _VISION_PROBE_IMAGE_DATA_URL
+    if _VISION_PROBE_IMAGE_DATA_URL is not None:
+        return _VISION_PROBE_IMAGE_DATA_URL
+
+    width = 128
+    height = 128
+    row = b"\x00" + (b"\xff\xff\xff" * width)
+    raw = row * height
+    compressed = zlib.compress(raw)
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        checksum = zlib.crc32(tag + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", checksum)
+
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", compressed)
+        + chunk(b"IEND", b"")
+    )
+    _VISION_PROBE_IMAGE_DATA_URL = "data:image/png;base64," + base64.b64encode(png).decode("ascii")
+    return _VISION_PROBE_IMAGE_DATA_URL
+
+
+def _extract_backend_error_message(body: bytes) -> str:
+    text = body.decode("utf-8", errors="replace").strip()
+    if not text:
+        return ""
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+    if isinstance(parsed, dict):
+        error = parsed.get("error")
+        if isinstance(error, dict):
+            return str(error.get("message") or error.get("detail") or text)
+        detail = parsed.get("detail")
+        if isinstance(detail, str):
+            return detail
+    return text
+
+
+def _truncate_error_message(message: str, limit: int = 300) -> str:
+    cleaned = " ".join(message.split())
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: limit - 3] + "..."
+
+
+def _openai_error_response(
+    *,
+    status_code: int,
+    message: str,
+    error_type: str,
+    code: str,
+    headers: Optional[Dict[str, str]] = None,
+) -> JSONResponse:
+    payload = {
+        "error": {
+            "message": message,
+            "type": error_type,
+            "code": code,
+        }
+    }
+    return JSONResponse(status_code=status_code, content=payload, headers=headers or {})
+
+
+async def _probe_multimodal_runtime(model_name: str) -> Dict[str, Any]:
+    capability = model_manager.get_vision_capability(model_name)
+    if capability["status"] in {"supported", "unsupported", "misconfigured", "text_only", "load_failed"}:
+        return capability
+
+    payload = {
+        "model": model_name,
+        "stream": False,
+        "max_tokens": 1,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": _build_probe_image_data_url()}},
+                    {"type": "text", "text": "Reply with one short word."},
+                ],
+            }
+        ],
+    }
+
+    timeout = httpx.Timeout(180.0, connect=10.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        for attempt in range(3):
+            resp = await client.post(f"{LLAMA_SERVER_URL}/v1/chat/completions", json=payload)
+            message = _extract_backend_error_message(resp.content)
+            lowered = message.lower()
+
+            if 200 <= resp.status_code < 300:
+                model_manager.mark_vision_validation(model_name, "supported")
+                return model_manager.get_vision_capability(model_name)
+
+            if resp.status_code == 503 and "loading model" in lowered and attempt < 2:
+                model_manager.mark_vision_validation(model_name, "loading", message)
+                await asyncio.sleep(1.0)
+                continue
+
+            if resp.status_code == 503 and "loading model" in lowered:
+                model_manager.mark_vision_validation(model_name, "loading", message)
+                return model_manager.get_vision_capability(model_name)
+
+            failure_status = "unsupported"
+            if resp.status_code == 503:
+                failure_status = "loading"
+            model_manager.mark_vision_validation(model_name, failure_status, message or f"HTTP {resp.status_code}")
+            return model_manager.get_vision_capability(model_name)
+
+    return model_manager.get_vision_capability(model_name)
+
+
+async def _preflight_multimodal_request(
+    model_name: str,
+    request_id: str,
+    queue_wait_ms: float,
+) -> Optional[JSONResponse]:
+    headers = _queue_headers(request_id, queue_wait_ms)
+    capability = model_manager.get_vision_capability(model_name)
+
+    if not capability["configured"]:
+        return _openai_error_response(
+            status_code=400,
+            message=f"Model '{model_name}' is text-only in Guardian and cannot accept image_url content.",
+            error_type="invalid_request_error",
+            code="vision_not_configured",
+            headers=headers,
+        )
+
+    if not capability["mmproj_exists"]:
+        return _openai_error_response(
+            status_code=400,
+            message=f"Model '{model_name}' is configured for vision but its mmproj file is missing.",
+            error_type="invalid_request_error",
+            code="mmproj_missing",
+            headers=headers,
+        )
+
+    if capability["status"] != "supported":
+        capability = await _probe_multimodal_runtime(model_name)
+
+    status = capability["status"]
+    if status == "supported":
+        return None
+
+    if status in {"loading", "load_failed"}:
+        return _openai_error_response(
+            status_code=503,
+            message=f"Model '{model_name}' is not ready for image requests yet: {_truncate_error_message(capability.get('last_error') or 'still loading')}",
+            error_type="unavailable_error",
+            code="vision_model_unavailable",
+            headers=headers,
+        )
+
+    return _openai_error_response(
+        status_code=422,
+        message=(
+            f"Model '{model_name}' is configured for vision, but its runtime rejected OpenAI image_url content. "
+            f"Backend detail: {_truncate_error_message(capability.get('last_error') or 'unknown multimodal error')}"
+        ),
+        error_type="invalid_request_error",
+        code="vision_not_supported",
+        headers=headers,
+    )
+
+
+def _map_multimodal_backend_error(
+    model_name: str,
+    status_code: int,
+    body: bytes,
+    request_id: str,
+    queue_wait_ms: float,
+) -> Optional[JSONResponse]:
+    message = _extract_backend_error_message(body)
+    lowered = message.lower()
+    headers = _queue_headers(request_id, queue_wait_ms)
+
+    if status_code == 503 and "loading model" in lowered:
+        model_manager.mark_vision_validation(model_name, "loading", message)
+        return _openai_error_response(
+            status_code=503,
+            message=f"Model '{model_name}' is still loading its multimodal runtime. Retry shortly.",
+            error_type="unavailable_error",
+            code="vision_model_unavailable",
+            headers=headers,
+        )
+
+    if "image input is not supported" in lowered or "mmproj" in lowered:
+        model_manager.mark_vision_validation(model_name, "unsupported", message)
+        return _openai_error_response(
+            status_code=422,
+            message=f"Model '{model_name}' rejected image_url content at runtime: {_truncate_error_message(message)}",
+            error_type="invalid_request_error",
+            code="vision_not_supported",
+            headers=headers,
+        )
+
+    if status_code >= 500:
+        model_manager.mark_vision_validation(model_name, "unsupported", message or f"HTTP {status_code}")
+        return _openai_error_response(
+            status_code=422,
+            message=(
+                f"Model '{model_name}' is configured for vision, but the backend image path failed. "
+                f"Backend detail: {_truncate_error_message(message or f'HTTP {status_code}') }"
+            ),
+            error_type="invalid_request_error",
+            code="vision_runtime_unavailable",
+            headers=headers,
+        )
+
+    return None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -1293,6 +1537,20 @@ async def list_models(client_id: str = Depends(verify_api_key)):
             if advertised_context is not None:
                 model_entry["advertised_context"] = advertised_context
 
+            vision = model_manager.get_vision_capability(canonical_name)
+            model_entry["input_modalities"] = ["text"]
+            if vision["status"] == "supported":
+                model_entry["input_modalities"].append("image")
+            model_entry["configured_input_modalities"] = ["text"]
+            if vision["configured"]:
+                model_entry["configured_input_modalities"].append("image")
+            model_entry["vision"] = {
+                "configured": vision["configured"],
+                "status": vision["status"],
+                "validated": vision["validated"],
+                "backend": vision["backend"],
+            }
+
             # Claude Code currently compacts against the OpenAI-compatible
             # max_context field only. Preserve benchmark-cap semantics for
             # normal clients, but return the safer advertised window for Claude
@@ -1587,6 +1845,15 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
 
     _release_in_finally = True
     try:
+        json_body: Optional[Dict[str, Any]] = None
+        has_image_inputs = False
+        try:
+            json_body = json.loads(body)
+            if path in ("chat/completions", "messages"):
+                has_image_inputs = _messages_contain_image_input(json_body.get("messages", []))
+        except (json.JSONDecodeError, Exception):
+            json_body = None
+
         # If llama-server was unloaded, auto-reload before forwarding
         if model_manager.is_unloaded:
             logger.info(f"🔄 Incoming request while unloaded — auto-reloading '{model_manager.current_model}'...")
@@ -1619,7 +1886,8 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
         # Auto-switch logic for chat completions & messages (with concurrency lock)
         if path in ("chat/completions", "messages"):
             try:
-                json_body = json.loads(body)
+                if json_body is None:
+                    json_body = json.loads(body)
                 requested_model = json_body.get("model")
 
                 # Resolve aliases and case-insensitive names
@@ -1659,6 +1927,8 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                                             generation=generation,
                                         )
                                     except ModelLoadError as e:
+                                        if has_image_inputs and requested_model:
+                                            model_manager.mark_vision_validation(requested_model, "load_failed", str(e))
                                         crash = e.crash_record
                                         detail = {
                                             "error": f"Model '{requested_model}' failed to load",
@@ -1682,6 +1952,18 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                 raise  # Let model-load errors propagate to the client
             except Exception as e:
                 logger.error(f"Error checking model switch: {e}")
+
+        active_model_for_request = requested_model or await model_manager.get_current_model()
+        if path in ("chat/completions", "messages") and has_image_inputs:
+            queue_wait_ms = inference_queue.get_queue_wait_ms(request_id)
+            preflight_error = await _preflight_multimodal_request(
+                active_model_for_request,
+                request_id,
+                queue_wait_ms,
+            )
+            if preflight_error is not None:
+                model_manager.active_requests = max(0, model_manager.active_requests - 1)
+                return preflight_error
 
         timeout = httpx.Timeout(600.0, connect=10.0)
         logger.info(f"OpenAI-compat request from client '{client_id}': POST /v1/{path}")
@@ -1754,6 +2036,34 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                 await client.aclose()
                 raise HTTPException(status_code=502, detail=f"Backend request failed: {e}")
 
+            if has_image_inputs:
+                queue_wait_ms = inference_queue.get_queue_wait_ms(request_id)
+                if 200 <= resp.status_code < 400:
+                    model_manager.mark_vision_validation(active_model_for_request, "supported")
+                else:
+                    body_bytes = await resp.aread()
+                    headers = {
+                        k: v for k, v in resp.headers.items()
+                        if k.lower() not in ("transfer-encoding", "content-length")
+                    }
+                    await resp.aclose()
+                    await client.aclose()
+                    model_manager.active_requests = max(0, model_manager.active_requests - 1)
+                    mapped = _map_multimodal_backend_error(
+                        active_model_for_request,
+                        resp.status_code,
+                        body_bytes,
+                        request_id,
+                        queue_wait_ms,
+                    )
+                    if mapped is not None:
+                        return mapped
+                    return Response(
+                        content=body_bytes,
+                        status_code=resp.status_code,
+                        headers=headers | _queue_headers(request_id, queue_wait_ms),
+                    )
+
             async def stream_passthrough():
                 try:
                     async for chunk in resp.aiter_bytes():
@@ -1798,10 +2108,23 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                 model_manager.active_requests = max(0, model_manager.active_requests - 1)
                 model_manager.last_request_time = time.time()
                 queue_wait_ms = inference_queue.get_queue_wait_ms(request_id)
+                if has_image_inputs:
+                    if 200 <= resp.status_code < 400:
+                        model_manager.mark_vision_validation(active_model_for_request, "supported")
+                    else:
+                        mapped = _map_multimodal_backend_error(
+                            active_model_for_request,
+                            resp.status_code,
+                            resp.content,
+                            request_id,
+                            queue_wait_ms,
+                        )
+                        if mapped is not None:
+                            return mapped
                 return Response(
                     content=resp.content,
                     status_code=resp.status_code,
-                    headers=dict(resp.headers) | {"X-Request-Id": request_id, "X-Queue-Wait-Ms": str(int(queue_wait_ms))},
+                    headers=dict(resp.headers) | _queue_headers(request_id, queue_wait_ms),
                 )
     finally:
         if _release_in_finally:
