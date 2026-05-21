@@ -38,6 +38,7 @@ from app.tweaker.model_finetune import (
     resolve_headroom_context_granularity,
     resolve_optimization_mode,
     resolve_runtime_config_value,
+    resolve_runtime_total_layers,
     resolve_runtime_mode,
     should_skip_coarse_split_shift,
     should_limit_large_context_jumps,
@@ -217,6 +218,66 @@ class TestNglHelpers:
     def test_build_ngl_candidates_prefers_higher_values(self):
         candidates = build_ngl_candidates(36, 16, 36, 99)
         assert candidates == [99, 84, 68, 52, 36]
+
+    def test_resolve_runtime_total_layers_prefers_runtime_override(self):
+        config = {
+            "total_layers": 41,
+            "vision_total_layers": 43,
+        }
+
+        assert resolve_runtime_total_layers(config, "text") == 41
+        assert resolve_runtime_total_layers(config, "vision") == 43
+
+    def test_tune_model_caps_auto_ngl_search_to_total_layers(self, tmp_path: Path):
+        finetuner = _make_finetuner(tmp_path)
+        finetuner.base_config["models"]["TestModel"]["ngl"] = 99
+        finetuner.base_config["models"]["TestModel"]["total_layers"] = 41
+        winning_probe = ProbeResult(
+            model="TestModel",
+            context=262144,
+            ngl=41,
+            tensor_split="0.55,0.45",
+            success=True,
+            load_seconds=1.0,
+            smoke_seconds=0.1,
+            status_code=200,
+        )
+
+        with (
+            patch.object(finetuner, "_search_best_auto_combination", return_value=winning_probe) as search_mock,
+            patch.object(finetuner, "_restore_original_config"),
+            patch.object(finetuner, "_append_result_log"),
+        ):
+            result = finetuner.tune_model("TestModel")
+
+        assert result.recommended_ngl == 41
+        assert search_mock.call_args.kwargs["upper_ngl"] == 41
+
+    def test_tune_model_clamps_explicit_ngl_candidates_to_total_layers(self, tmp_path: Path):
+        finetuner = _make_finetuner(tmp_path)
+        finetuner.base_config["models"]["TestModel"]["ngl"] = 99
+        finetuner.base_config["models"]["TestModel"]["total_layers"] = 41
+        winning_probe = ProbeResult(
+            model="TestModel",
+            context=262144,
+            ngl=41,
+            tensor_split="0.55,0.45",
+            success=True,
+            load_seconds=1.0,
+            smoke_seconds=0.1,
+            status_code=200,
+        )
+
+        with (
+            patch.object(finetuner, "_search_explicit_candidate_grid", return_value=winning_probe) as search_mock,
+            patch.object(finetuner, "_restore_original_config"),
+            patch.object(finetuner, "_append_result_log"),
+        ):
+            result = finetuner.tune_model("TestModel", ngl_candidates=[99, 96, 40])
+
+        assert result.recommended_ngl == 41
+        assert search_mock.call_args.kwargs["upper_ngl"] == 41
+        assert search_mock.call_args.kwargs["explicit_ngl_candidates"] == [41, 40]
 
     def test_binary_search_max_int_success_halves_to_highest_fit(self):
         result, attempts = binary_search_max_int_success(

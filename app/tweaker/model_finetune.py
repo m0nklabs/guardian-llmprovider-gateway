@@ -345,13 +345,17 @@ def build_model_signature(model_name: str, model_config: Dict[str, object]) -> s
             "context",
             "ngl",
             "tensor_split",
+            "total_layers",
             "benchmark_context_limit",
             "text_context",
             "text_ngl",
             "text_tensor_split",
+            "text_total_layers",
             "vision_context",
             "vision_ngl",
             "vision_tensor_split",
+            "vision_total_layers",
+            "mmproj_total_layers",
         }
     }
     payload = {"model": model_name, "config": signature_config}
@@ -471,6 +475,23 @@ def resolve_runtime_config_value(model_config: Dict[str, object], key: str, runt
     if override_value not in (None, ""):
         return override_value
     return model_config.get(key)
+
+
+def resolve_runtime_total_layers(model_config: Dict[str, object], runtime_mode: str) -> Optional[int]:
+    """Return the configured main-model layer ceiling for `ngl` search.
+
+    llama.cpp handles multimodal projectors through the separate `mmproj_use_gpu`
+    path, so projector metadata does not extend the main model's `n_gpu_layers`
+    range.
+    """
+    value = resolve_runtime_config_value(model_config, "total_layers", runtime_mode)
+    if value in (None, ""):
+        return None
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        return None
+    return normalized if normalized > 0 else None
 
 
 def apply_runtime_search_values(
@@ -1121,6 +1142,10 @@ class GuardianModelFinetuner:
                 auto_context_floor_ratio=auto_context_floor_ratio,
                 optimization=normalized_optimization,
             )
+            configured_total_layers = resolve_runtime_total_layers(original_model_config, self.runtime_mode)
+            if configured_total_layers is not None:
+                upper_ngl = min(upper_ngl, configured_total_layers)
+                lower_ngl = min(lower_ngl, upper_ngl)
 
             self._start_live_result_log(
                 model=canonical_model,
@@ -1147,7 +1172,11 @@ class GuardianModelFinetuner:
                     for normalized in [self._normalize_ngl(candidate)]
                     if normalized is not None
                 ]
-                explicit_ngl_candidates = sorted(set(normalized_ngls), reverse=True)
+                clamped_ngls = [min(candidate, upper_ngl) for candidate in normalized_ngls]
+                explicit_ngl_candidates = sorted(
+                    {candidate for candidate in clamped_ngls if lower_ngl <= candidate <= upper_ngl},
+                    reverse=True,
+                ) or None
             explicit_split_candidates = None
             if split_candidates:
                 explicit_split_candidates = [self._normalize_tensor_split(candidate) for candidate in split_candidates]

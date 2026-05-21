@@ -1,5 +1,11 @@
 # Guardian TODO List
 
+## 2026-05-21 Layer Ceiling Metadata
+
+- [x] Record each configured model's GGUF backbone layer count in `config/models.yaml` as `total_layers`.
+- [x] Clamp finetune `ngl` search to `total_layers` so Guardian stops probing synthetic offload values above the model's real layer count.
+- [x] Verify the multimodal projector path separately and avoid incorrectly adding `mmproj` metadata to the main-model `ngl` ceiling.
+
 ## 2026-05-21 Qwen3.6 Vision Context Rebaseline
 
 - [x] Re-run the Native-MTP Qwen vision finetune with `--optimization context`, auto `ngl` search, and split rebalancing only after a successful probe.
