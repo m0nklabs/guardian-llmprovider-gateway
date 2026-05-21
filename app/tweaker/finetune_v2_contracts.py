@@ -291,12 +291,15 @@ class FixtureProbeRunner:
     def __init__(self, fixture_rows: Sequence[Mapping[str, object]]) -> None:
         self._fixtures: dict[tuple[str, int, int, str, bool], Mapping[str, object]] = {}
         for row in fixture_rows:
+            has_mmproj = row.get("has_mmproj", False)
+            if not isinstance(has_mmproj, bool):
+                raise ValueError("fixture has_mmproj must be a boolean")
             key = (
                 str(row["runtime_mode"]),
                 int(row["context"]),
                 int(row["ngl"]),
                 str(row["tensor_split"]),
-                bool(row.get("has_mmproj", False)),
+                has_mmproj,
             )
             if key in self._fixtures:
                 raise ValueError(f"duplicate finetune v2 fixture key: {key}")
@@ -321,15 +324,28 @@ class FixtureProbeRunner:
             or any(not isinstance(value, (int, float)) for value in free_vram_mib)
         ):
             raise ValueError(f"fixture free_vram_mib must contain two values for {key}")
+
+        success = row["success"]
+        if not isinstance(success, bool):
+            raise ValueError(f"fixture success must be a boolean for {key}")
+
+        cache_backed = row.get("cache_backed", False)
+        if not isinstance(cache_backed, bool):
+            raise ValueError(f"fixture cache_backed must be a boolean for {key}")
+
+        error = row.get("error")
+        if error is not None and not isinstance(error, str):
+            raise ValueError(f"fixture error must be a string or null for {key}")
+
         probe = Probe(
             candidate=candidate,
-            success=bool(row["success"]),
+            success=success,
             free_vram_mib=(float(free_vram_mib[0]), float(free_vram_mib[1])),
             total_seconds=float(row["total_seconds"]),
             order=len(self.probes),
             telemetry_source=str(row.get("telemetry_source", "post_smoke")),
-            cache_backed=bool(row.get("cache_backed", False)),
-            error=row.get("error"),  # type: ignore[arg-type]
+            cache_backed=cache_backed,
+            error=error,
         )
         self.probes.append(probe)
         return probe

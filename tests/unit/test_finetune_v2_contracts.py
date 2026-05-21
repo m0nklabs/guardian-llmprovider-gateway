@@ -364,6 +364,85 @@ def test_fixture_probe_key_distinguishes_mmproj_state():
     assert with_mmproj.free_vram_mib == (900.0, 800.0)
 
 
+def test_fixture_probe_runner_rejects_non_boolean_has_mmproj():
+    invalid_rows = [
+        {
+            "runtime_mode": "vision",
+            "context": 65536,
+            "ngl": 40,
+            "tensor_split": "0.55,0.45",
+            "has_mmproj": "false",
+            "success": True,
+            "free_vram_mib": [900, 800],
+            "total_seconds": 1.2,
+        }
+    ]
+
+    with pytest.raises(ValueError, match="has_mmproj must be a boolean"):
+        FixtureProbeRunner(invalid_rows)
+
+
+def test_fixture_probe_runner_rejects_non_boolean_probe_flags():
+    runner = FixtureProbeRunner(
+        [
+            {
+                "runtime_mode": "text",
+                "context": 65536,
+                "ngl": 40,
+                "tensor_split": "0.55,0.45",
+                "success": "false",
+                "free_vram_mib": [900, 620],
+                "total_seconds": 4.1,
+                "cache_backed": "false",
+            }
+        ]
+    )
+
+    with pytest.raises(ValueError, match="success must be a boolean"):
+        runner.probe(Candidate(context=65536, ngl=40, tensor_split="0.55,0.45"))
+
+
+def test_fixture_probe_runner_rejects_non_boolean_cache_backed():
+    runner = FixtureProbeRunner(
+        [
+            {
+                "runtime_mode": "text",
+                "context": 65536,
+                "ngl": 40,
+                "tensor_split": "0.55,0.45",
+                "success": True,
+                "free_vram_mib": [900, 620],
+                "total_seconds": 4.1,
+                "cache_backed": "false",
+            }
+        ]
+    )
+
+    with pytest.raises(ValueError, match="cache_backed must be a boolean"):
+        runner.probe(Candidate(context=65536, ngl=40, tensor_split="0.55,0.45"))
+
+
+def test_fixture_probe_runner_rejects_non_string_error():
+    runner = FixtureProbeRunner(
+        [
+            {
+                "runtime_mode": "text",
+                "context": 65536,
+                "ngl": 40,
+                "tensor_split": "0.55,0.45",
+                "success": True,
+                "free_vram_mib": [900, 620],
+                "total_seconds": 4.1,
+                "cache_backed": False,
+                "error": 123,
+            }
+        ]
+    )
+
+    with pytest.raises(ValueError, match="error must be a string or null"):
+        runner.probe(Candidate(context=65536, ngl=40, tensor_split="0.55,0.45"))
+
+
 def test_final_winner_explanation_is_machine_readable_and_recorded():
     runner = load_fixture_runner()
     text_probe = runner.probe(Candidate(context=65536, ngl=40, tensor_split="0.55,0.45"))

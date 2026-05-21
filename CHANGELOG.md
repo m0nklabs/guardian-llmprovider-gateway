@@ -18,6 +18,7 @@
 - Added `docs/SERVER_UPGRADE_PLAN.md`, a normalized English planning document for the next Guardian host hardware upgrade based on the decoded server-upgrade note.
 
 ### Changed
+- The finetune v2 contract helper now rejects malformed fixture booleans and non-string `error` payloads instead of silently coercing them, and the wrapper smoke test now has an explicit timeout so CI cannot hang indefinitely in the subprocess path.
 - `docs/FINETUNE_V2_REQUIREMENTS.md` now explicitly defines Guardian finetune as
 	host-specific runtime tuning (`context` / `ngl` / `tensor_split` and vision
 	projector fit), not model-weight training, so the rewrite brief starts from
