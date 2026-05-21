@@ -1,0 +1,39 @@
+[
+  {
+    "runtime_mode": "text",
+    "context": 65536,
+    "ngl": 40,
+    "tensor_split": "0.55,0.45",
+    "success": true,
+    "free_vram_mib": [900, 620],
+    "total_seconds": 4.1
+  },
+  {
+    "runtime_mode": "text",
+    "context": 65536,
+    "ngl": 41,
+    "tensor_split": "0.55,0.45",
+    "success": false,
+    "free_vram_mib": [0, 0],
+    "total_seconds": 2.0,
+    "error": "oom"
+  },
+  {
+    "runtime_mode": "text",
+    "context": 65536,
+    "ngl": 40,
+    "tensor_split": "0.60,0.40",
+    "success": true,
+    "free_vram_mib": [680, 650],
+    "total_seconds": 4.0
+  },
+  {
+    "runtime_mode": "vision",
+    "context": 65536,
+    "ngl": 40,
+    "tensor_split": "0.55,0.45",
+    "success": true,
+    "free_vram_mib": [520, 510],
+    "total_seconds": 5.3
+  }
+]
