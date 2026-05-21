@@ -132,7 +132,7 @@ def _ranking_key(probe: Probe, optimization: str) -> tuple[float, ...]:
         )
     if optimization == "balanced":
         # Scale ngl to one 1024-token context step so balanced mode uses an
-        # explicit, deterministic combined score instead of split aesthetics.
+        # explicit score instead of preferring splits merely for being close to 50/50.
         score = candidate.context + (candidate.ngl * 1024) + _bottleneck_headroom(probe)
         return (score, -probe.total_seconds, -probe.order)
     raise ValueError(f"unknown optimization mode: {optimization}")
