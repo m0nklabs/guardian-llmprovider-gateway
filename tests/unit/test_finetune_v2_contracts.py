@@ -245,6 +245,58 @@ def test_convergence_completes_only_below_500_or_at_max_shape():
     }
 
 
+def test_convergence_uses_fixed_shape_limits_when_present():
+    limits = RuntimeLimits(total_layers=41, max_context=131072, active_context=65536)
+    fixed_shape = Probe(
+        candidate=Candidate(context=32768, ngl=30, tensor_split="0.55,0.45"),
+        success=True,
+        free_vram_mib=(1400, 1300),
+    )
+
+    assert convergence_status(
+        fixed_shape,
+        limits,
+        allowed_context=32768,
+        allowed_ngl=30,
+    ) == {
+        "should_continue": False,
+        "reason": "max_context_and_ngl",
+    }
+
+
+def test_speed_mode_history_keeps_context_floor_when_picking_best_success():
+    limits = RuntimeLimits(total_layers=41, max_context=131072, active_context=65536)
+    below_floor_higher_ngl = Probe(
+        candidate=Candidate(context=32768, ngl=41, tensor_split="0.55,0.45"),
+        success=True,
+        free_vram_mib=(1200, 1150),
+        order=0,
+    )
+    floor_meeting_best = Probe(
+        candidate=Candidate(context=65536, ngl=40, tensor_split="0.60,0.40"),
+        success=True,
+        free_vram_mib=(1400, 1300),
+        order=1,
+    )
+
+    status = convergence_status_from_history(
+        [below_floor_higher_ngl, floor_meeting_best],
+        limits,
+        optimization="speed",
+        context_floor=65536,
+        allowed_context=65536,
+        allowed_ngl=40,
+    )
+
+    assert status == {
+        "should_continue": False,
+        "reason": "max_context_and_ngl",
+        "best_order": 1,
+        "best_context": 65536,
+        "best_ngl": 40,
+    }
+
+
 def test_text_and_vision_probe_results_are_never_ranked_together():
     runner = load_fixture_runner()
     text_probe = runner.probe(Candidate(context=65536, ngl=40, tensor_split="0.55,0.45"))

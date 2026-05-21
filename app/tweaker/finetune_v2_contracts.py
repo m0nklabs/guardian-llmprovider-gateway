@@ -230,10 +230,14 @@ def convergence_status(
     limits: RuntimeLimits,
     *,
     low_headroom_followups_used: int = 0,
+    allowed_context: int | None = None,
+    allowed_ngl: int | None = None,
 ) -> dict[str, object]:
     candidate = best_success.candidate
+    target_context = allowed_context if allowed_context is not None else limits.max_context
+    target_ngl = allowed_ngl if allowed_ngl is not None else limits.total_layers
     both_under_final = all(value < FINAL_HEADROOM_MIB for value in best_success.free_vram_mib)
-    at_max_shape = candidate.context >= limits.max_context and candidate.ngl >= limits.total_layers
+    at_max_shape = candidate.context >= target_context and candidate.ngl >= target_ngl
     if both_under_final:
         return {"should_continue": False, "reason": "both_gpus_below_500_mib"}
     if at_max_shape:
@@ -256,13 +260,22 @@ def convergence_status_from_history(
     limits: RuntimeLimits,
     *,
     optimization: str,
+    context_floor: int | None = None,
     low_headroom_followups_used: int = 0,
+    allowed_context: int | None = None,
+    allowed_ngl: int | None = None,
 ) -> dict[str, object]:
-    best_success, _ = rank_successes(probes, optimization=optimization)
+    best_success, _ = rank_successes(
+        probes,
+        optimization=optimization,
+        context_floor=context_floor,
+    )
     status = convergence_status(
         best_success,
         limits,
         low_headroom_followups_used=low_headroom_followups_used,
+        allowed_context=allowed_context,
+        allowed_ngl=allowed_ngl,
     )
     return {
         **status,
