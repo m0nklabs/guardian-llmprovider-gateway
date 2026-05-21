@@ -60,6 +60,39 @@ explicit reason string and see why every other successful candidate lost.
   be logged separately, but it must stay separate from the main model layer
   ceiling unless upstream llama.cpp changes its semantics.
 
+## Split Balancing Contract
+
+- Split balancing exists to move pressure away from the bottleneck GPU, not to
+   chase a visually pretty split such as `0.50,0.50`.
+- The primary balancing signal must be absolute free MiB on both GPUs after a
+   successful probe. Percentages may be logged, but they are secondary.
+- A split candidate is only better if it preserves the current required
+   `context` and `ngl` while improving bottleneck-GPU headroom or reducing the
+   cross-GPU free-VRAM gap.
+- Split balancing must never silently lower `context` or `ngl` just to make the
+   split look better.
+- Split balancing only runs after a successful probe at the current
+   `context`/`ngl` state.
+- Split balancing must never be computed from a failed probe. Failed probes may
+   inform planner direction, but the balancing target is always the latest
+   successful runtime state.
+- After a successful rebalance, v2 must be allowed to retry higher `ngl` values
+   against the improved split instead of assuming earlier failed splits are the
+   final word.
+
+### Run completion rule
+
+A successful finetune run is only complete when at least one of these terminal
+conditions is true for the current best successful state:
+
+1. Both GPUs have less than `500 MiB` free VRAM.
+2. The state is already at the maximum allowed `context` and maximum allowed
+   `ngl` for the selected runtime.
+
+If the current best successful state still leaves one GPU above `500 MiB` free
+and the selected runtime is not already at both maxima, the planner must keep
+searching.
+
 ## Optimization Modes
 
 ### `context`
@@ -114,14 +147,16 @@ flowchart TD
    E -- No --> F[Step ngl downward<br/>never above total_layers]
    F --> D
    E -- Yes --> G[Run local split rebalance<br/>using measured GPU headroom]
-   G --> H[Probe maximum stable context]
-   H --> I{Target context reached?}
-   I -- No --> F
-   I -- Yes --> J[Rank successful candidates<br/>with mode-aware comparator]
-   J --> K[Return winner reason and losing reasons]
-   K --> L{Apply requested?}
-   L -- No --> M[Restore original loaded model<br/>leave models.yaml unchanged]
-   L -- Yes --> N[Write winning runtime once<br/>to models.yaml]
+   G --> H[Retry upward ngl around the better split]
+   H --> I[Probe maximum stable context]
+   I --> J{Current best successful state:<br/>both GPUs < 500 MiB free<br/>or context and ngl already maxed?}
+   J -- No --> K[Continue planner loop<br/>with the new best state]
+   K --> G
+   J -- Yes --> L[Rank successful candidates<br/>with mode-aware comparator]
+   L --> M[Return winner reason and losing reasons]
+   M --> N{Apply requested?}
+   N -- No --> O[Restore original loaded model<br/>leave models.yaml unchanged]
+   N -- Yes --> P[Write winning runtime once<br/>to models.yaml]
 ```
 
 ### Context mode search flow
@@ -132,12 +167,16 @@ flowchart TD
 3. Start from one seed split only.
 4. At a fixed calibration context, walk `ngl` downward until the first success.
 5. Only after that success, run localized split rebalance using measured GPU
-   headroom.
-6. With the successful `ngl` plus split state, search the maximum stable
-   context.
-7. If the max context is still below target, continue the `ngl` descent and
-   repeat from step 5.
-8. Choose the final winner with the `context` comparator defined above.
+   headroom from the latest successful probe.
+6. After a successful rebalance, retry upward `ngl` values around that better
+   split before assuming the earlier lower-`ngl` state is the best reachable
+   offload level.
+7. With the best successful `ngl` plus split state so far, search the maximum
+   stable context.
+8. Repeat the balance and local `ngl` retry loop until the current best
+   successful state either leaves both GPUs below `500 MiB` free VRAM or is
+   already at max `context` and max `ngl` for that runtime.
+9. Choose the final winner with the `context` comparator defined above.
 
 ### Vision mode specifics
 
@@ -157,8 +196,9 @@ If the operator passes explicit `ngl` or split candidates:
 ## Ranking and Explainability
 
 The diagram above is intentionally strict: split rebalancing only begins after a
-successful probe at the current `ngl`, and the final winner is chosen by the
-requested mode comparator instead of by a hidden balance-first override.
+successful probe at the current `ngl`, the planner may retry upward `ngl` after
+that rebalance, and the final winner is chosen by the requested mode comparator
+instead of by a hidden balance-first override.
 
 V2 must separate these concerns:
 
@@ -208,8 +248,13 @@ V2 is not done until all of the following are true:
    higher context or higher `ngl`.
 2. A regression test proves no probe is ever attempted with `ngl > total_layers`.
 3. A regression test proves `mmproj` does not change the `ngl` ceiling.
-4. A dry-run failure leaves `models.yaml` byte-identical.
-5. A live Qwen vision replay can explain why the winning split won without
+4. A regression test proves split balancing can retry upward `ngl` after a
+   successful rebalance instead of treating the first lower-`ngl` success as
+   final.
+5. A dry-run failure leaves `models.yaml` byte-identical.
+6. A live run is only marked complete when both GPUs are below `500 MiB` free
+   or the winning state is already at max `context` and max `ngl`.
+7. A live Qwen vision replay can explain why the winning split won without
    relying on "closer to 50/50" as the hidden primary reason.
 
 ## Rewrite Strategy
