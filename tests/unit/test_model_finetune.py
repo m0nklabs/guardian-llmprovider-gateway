@@ -1251,6 +1251,106 @@ class TestPersistentProbeCache:
             (262144, 44, "0.59,0.41"),
         ]
 
+    def test_context_bisection_does_not_chase_new_splits_after_failed_probe(self, tmp_path: Path):
+        finetuner = _make_finetuner(tmp_path)
+        observed: list[tuple[int, int, str | None]] = []
+
+        def fake_probe(*, model_name, model_config, context, ngl, tensor_split):
+            observed.append((context, ngl, tensor_split))
+            return ProbeResult(
+                model=model_name,
+                context=context,
+                ngl=ngl,
+                tensor_split=tensor_split,
+                success=False,
+                load_seconds=1.0,
+                smoke_seconds=0.0,
+                status_code=503,
+                error="allocating 469.00 MiB on device 1: cudaMalloc failed: out of memory",
+            )
+
+        with patch.object(finetuner, "_probe_candidate", side_effect=fake_probe):
+            result = finetuner._maximize_context_with_balanced_runtime(
+                model_name="TestModel",
+                model_config={},
+                min_context=131072,
+                max_context=262144,
+                granularity=2048,
+                ngl=44,
+                starting_split="0.57,0.43",
+                refine_step=0.02,
+                split_min=0.30,
+                split_max=0.70,
+            )
+
+        assert result is None
+        assert observed == [
+            (262144, 44, "0.57,0.43"),
+            (131072, 44, "0.57,0.43"),
+        ]
+
+    def test_context_mode_calibration_does_not_chase_new_splits_after_failed_seed(self, tmp_path: Path):
+        finetuner = _make_finetuner(tmp_path)
+        observed: list[tuple[int, int, str | None]] = []
+
+        def fake_probe(*, model_name, model_config, context, ngl, tensor_split):
+            observed.append((context, ngl, tensor_split))
+            success = ngl == 96 and tensor_split == "0.50,0.50"
+            return ProbeResult(
+                model=model_name,
+                context=context,
+                ngl=ngl,
+                tensor_split=tensor_split,
+                success=success,
+                load_seconds=1.0,
+                smoke_seconds=0.1 if success else 0.0,
+                status_code=200 if success else 503,
+                error=None if success else "allocating 469.00 MiB on device 1: cudaMalloc failed: out of memory",
+                gpu_vram=(
+                    {
+                        "0": {"used": 74.0, "free": 26.0, "total": 100.0, "free_pct": 26.0},
+                        "1": {"used": 84.0, "free": 16.0, "total": 100.0, "free_pct": 16.0},
+                    }
+                    if success
+                    else None
+                ),
+                free_vram_delta_pct=10.0 if success else None,
+            )
+
+        with patch.object(finetuner, "_probe_candidate", side_effect=fake_probe):
+            result = finetuner._search_best_auto_combination(
+                model_name="TestModel",
+                model_config={},
+                lower_bound=131072,
+                upper_bound=131072,
+                granularity=2048,
+                original_ngl=36,
+                lower_ngl=0,
+                upper_ngl=99,
+                ngl_refine_step=8,
+                coarse_step=0.05,
+                refine_step=0.02,
+                split_min=0.30,
+                split_max=0.70,
+                original_tensor_split="0.50,0.50",
+                optimization="context",
+            )
+
+        assert result is not None
+        assert observed[:2] == [
+            (16384, 99, "0.50,0.50"),
+            (16384, 96, "0.50,0.50"),
+        ]
+        assert not any(
+            context == 16384 and ngl == 99 and tensor_split != "0.50,0.50"
+            for context, ngl, tensor_split in observed
+        )
+        assert any(
+            context == 16384 and ngl == 96 and tensor_split != "0.50,0.50"
+            for context, ngl, tensor_split in observed
+        )
+        assert any(context == 131072 and ngl == 96 for context, ngl, _ in observed)
+
 
 class TestRuntimeModeHelpers:
     def test_resolve_runtime_mode_uses_smoke_image_for_auto(self):

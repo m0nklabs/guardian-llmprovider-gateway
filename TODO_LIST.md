@@ -1,5 +1,11 @@
 # Guardian TODO List
 
+## 2026-05-21 Qwen3.6 Vision Context Rebaseline
+
+- [x] Re-run the Native-MTP Qwen vision finetune with `--optimization context`, auto `ngl` search, and split rebalancing only after a successful probe.
+- [x] Use the earlier `262144 / 36 / 0.55,0.45` result only as the recovery baseline; the rerun supersedes it with the applied `262144 / 32 / 0.50,0.50` vision runtime.
+- [x] Validate the applied winning vision config through Guardian after the rerun.
+
 ## 2026-05-20 Repo Path Decoupling
 
 - [x] Centralize repo-sensitive filesystem paths in shared helpers for app runtime and standalone scripts.

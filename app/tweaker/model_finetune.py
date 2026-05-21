@@ -1378,6 +1378,7 @@ class GuardianModelFinetuner:
                 balance_threshold_pct=DEFAULT_VRAM_BALANCE_THRESHOLD_PCT,
                 split_min=split_min,
                 split_max=split_max,
+                retry_failed_splits=optimization != "context",
             )
             if split_result is None or split_result.tensor_split is None:
                 continue
@@ -1439,6 +1440,7 @@ class GuardianModelFinetuner:
         balance_threshold_pct: float,
         split_min: float,
         split_max: float,
+        retry_failed_splits: bool = True,
     ) -> Optional[ProbeResult]:
         """Find a stable split for one context/ngl state and proactively rebalance it by VRAM."""
         current_split = starting_split or format_two_gpu_split(min(max(0.5, split_min), split_max))
@@ -1464,6 +1466,9 @@ class GuardianModelFinetuner:
                     split_min=split_min,
                     split_max=split_max,
                 )
+                return best_success
+
+            if not retry_failed_splits:
                 return best_success
 
             next_candidates = next_split_candidates_after_oom(
@@ -1563,6 +1568,7 @@ class GuardianModelFinetuner:
         balance_threshold_pct: float,
         split_min: float,
         split_max: float,
+        retry_failed_splits: bool = True,
     ) -> Optional[ProbeResult]:
         """Calibrate the baseline split first, then proactively rebalance it by free VRAM."""
         return self._stabilize_split_for_state(
@@ -1575,6 +1581,7 @@ class GuardianModelFinetuner:
             balance_threshold_pct=balance_threshold_pct,
             split_min=split_min,
             split_max=split_max,
+            retry_failed_splits=retry_failed_splits,
         )
 
     def _optimize_ngl_for_baseline(
@@ -1648,6 +1655,7 @@ class GuardianModelFinetuner:
                     balance_threshold_pct=DEFAULT_VRAM_BALANCE_THRESHOLD_PCT,
                     split_min=split_min,
                     split_max=split_max,
+                    retry_failed_splits=False,
                 )
             return context_results[context]
 

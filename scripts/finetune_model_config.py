@@ -52,14 +52,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--ngl-step", type=int, default=16, help="Primary coarse ngl step")
     parser.add_argument("--ngl-refine-step", type=int, default=8, help="Refine ngl step around the best coarse result")
-    parser.add_argument(
-        "--ngl",
-        action="append",
-        dest="ngl_candidates",
-        type=int,
-        default=[],
-        help="Explicit ngl candidate. Repeat to test multiple values.",
-    )
     parser.add_argument("--coarse-step", type=float, default=0.05, help="Primary coarse tensor-split step")
     parser.add_argument("--refine-step", type=float, default=0.02, help="Primary refine tensor-split step")
     parser.add_argument("--split-min", type=float, default=0.30, help="Minimum primary GPU share to test")
@@ -114,7 +106,7 @@ def main() -> int:
             args.model,
             granularity=args.granularity,
             optimization=args.optimization,
-            ngl_candidates=args.ngl_candidates or None,
+            ngl_candidates=None,
             ngl_step=args.ngl_step,
             ngl_refine_step=args.ngl_refine_step,
             split_candidates=args.split_candidates or None,
