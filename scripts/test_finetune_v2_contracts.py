@@ -18,7 +18,11 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, l
     parser.add_argument(
         "--live",
         action="store_true",
-        help="Also run Guardian-backed live smoke checks (requires FINETUNE_V2_LIVE inputs)",
+        help=(
+            "Also run Guardian-backed live smoke checks "
+            "(sets FINETUNE_V2_LIVE=1; requires GUARDIAN_TEST_KEY; "
+            "uses GUARDIAN_URL when set)"
+        ),
     )
     return parser.parse_known_args(argv)
 

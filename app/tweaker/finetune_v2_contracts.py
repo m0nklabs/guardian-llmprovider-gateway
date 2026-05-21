@@ -311,7 +311,11 @@ class FixtureProbeRunner:
             raise KeyError(f"missing finetune v2 fixture for {key}")
         row = self._fixtures[key]
         free_vram_mib = row["free_vram_mib"]
-        if not isinstance(free_vram_mib, Sequence) or len(free_vram_mib) != 2:
+        if (
+            not isinstance(free_vram_mib, (list, tuple))
+            or len(free_vram_mib) != 2
+            or any(not isinstance(value, int | float) for value in free_vram_mib)
+        ):
             raise ValueError(f"fixture free_vram_mib must contain two values for {key}")
         probe = Probe(
             candidate=candidate,

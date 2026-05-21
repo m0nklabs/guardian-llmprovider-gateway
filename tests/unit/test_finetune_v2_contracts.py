@@ -308,6 +308,25 @@ def test_text_and_vision_probe_results_are_never_ranked_together():
         rank_successes([text_probe, vision_probe], optimization="context")
 
 
+def test_fixture_probe_rejects_string_free_vram_payload():
+    runner = FixtureProbeRunner(
+        [
+            {
+                "runtime_mode": "text",
+                "context": 65536,
+                "ngl": 40,
+                "tensor_split": "0.55,0.45",
+                "success": True,
+                "free_vram_mib": "1200,1100",
+                "total_seconds": 1.0,
+            }
+        ]
+    )
+
+    with pytest.raises(ValueError, match="free_vram_mib must contain two values"):
+        runner.probe(Candidate(context=65536, ngl=40, tensor_split="0.55,0.45"))
+
+
 def test_final_winner_explanation_is_machine_readable_and_recorded():
     runner = load_fixture_runner()
     text_probe = runner.probe(Candidate(context=65536, ngl=40, tensor_split="0.55,0.45"))
