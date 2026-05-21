@@ -12,6 +12,7 @@ from app.tweaker.finetune_v2_contracts import (
     RuntimeLimits,
     clamp_candidate,
     convergence_status,
+    convergence_status_from_history,
     dry_run_preserves_models_yaml,
     initial_seed_candidates,
     next_after_seed_failure,
@@ -157,6 +158,42 @@ def test_convergence_uses_current_best_and_low_headroom_budget():
     assert convergence_status(best, limits, low_headroom_followups_used=5) == {
         "should_continue": False,
         "reason": "low_headroom_budget_exhausted",
+    }
+
+
+def test_convergence_from_history_ignores_failed_and_lower_ranked_latest_probe():
+    limits = RuntimeLimits(total_layers=41, max_context=131072, active_context=65536)
+    best = Probe(
+        candidate=Candidate(context=131072, ngl=41, tensor_split="0.55,0.45"),
+        success=True,
+        free_vram_mib=(900, 850),
+        order=0,
+    )
+    failed_later = Probe(
+        candidate=Candidate(context=131072, ngl=42, tensor_split="0.55,0.45"),
+        success=False,
+        free_vram_mib=(0, 0),
+        order=1,
+    )
+    lower_ranked_later = Probe(
+        candidate=Candidate(context=65536, ngl=41, tensor_split="0.60,0.40"),
+        success=True,
+        free_vram_mib=(100, 100),
+        order=2,
+    )
+
+    status = convergence_status_from_history(
+        [best, failed_later, lower_ranked_later],
+        limits,
+        optimization="context",
+    )
+
+    assert status == {
+        "should_continue": False,
+        "reason": "max_context_and_ngl",
+        "best_order": 0,
+        "best_context": 131072,
+        "best_ngl": 41,
     }
 
 

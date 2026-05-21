@@ -247,6 +247,27 @@ def convergence_status(
     return {"should_continue": True, "reason": "search_not_converged"}
 
 
+def convergence_status_from_history(
+    probes: Sequence[Probe],
+    limits: RuntimeLimits,
+    *,
+    optimization: str,
+    low_headroom_followups_used: int = 0,
+) -> dict[str, object]:
+    best_success, _ = rank_successes(probes, optimization=optimization)
+    status = convergence_status(
+        best_success,
+        limits,
+        low_headroom_followups_used=low_headroom_followups_used,
+    )
+    return {
+        **status,
+        "best_order": best_success.order,
+        "best_context": best_success.candidate.context,
+        "best_ngl": best_success.candidate.ngl,
+    }
+
+
 class FixtureProbeRunner:
     """Deterministic text/vision probe replay keyed by exact candidate shape."""
 
