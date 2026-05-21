@@ -144,10 +144,10 @@ def rank_successes(
     optimization: str,
     context_floor: int | None = None,
 ) -> tuple[Probe, dict[str, object]]:
+    _ensure_single_runtime_pool(probes)
     successes = _successful(probes)
     if not successes:
         raise ValueError("cannot rank without a successful probe")
-    _ensure_single_runtime_pool(successes)
     if optimization == "speed" and context_floor is not None:
         successes = [probe for probe in successes if probe.candidate.context >= context_floor]
         if not successes:
@@ -289,16 +289,18 @@ class FixtureProbeRunner:
     """Deterministic text/vision probe replay keyed by exact candidate shape."""
 
     def __init__(self, fixture_rows: Sequence[Mapping[str, object]]) -> None:
-        self._fixtures = {
-            (
+        self._fixtures: dict[tuple[str, int, int, str, bool], Mapping[str, object]] = {}
+        for row in fixture_rows:
+            key = (
                 str(row["runtime_mode"]),
                 int(row["context"]),
                 int(row["ngl"]),
                 str(row["tensor_split"]),
                 bool(row.get("has_mmproj", False)),
-            ): row
-            for row in fixture_rows
-        }
+            )
+            if key in self._fixtures:
+                raise ValueError(f"duplicate finetune v2 fixture key: {key}")
+            self._fixtures[key] = row
         self.probes: list[Probe] = []
 
     def probe(self, candidate: Candidate) -> Probe:

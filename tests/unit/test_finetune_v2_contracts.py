@@ -413,3 +413,47 @@ def test_fixed_context_and_fixed_ngl_pin_those_dimensions():
     )[0]
 
     assert seed == Candidate(context=32768, ngl=41, tensor_split="0.55,0.45")
+
+
+def test_mixed_mode_probes_rejected_even_when_one_mode_has_only_failures():
+    text_success = Probe(
+        candidate=Candidate(context=65536, ngl=40, tensor_split="0.55,0.45", runtime_mode="text"),
+        success=True,
+        free_vram_mib=(900, 850),
+        order=0,
+    )
+    vision_failure = Probe(
+        candidate=Candidate(context=65536, ngl=40, tensor_split="0.55,0.45", runtime_mode="vision", has_mmproj=True),
+        success=False,
+        free_vram_mib=(0, 0),
+        order=1,
+    )
+
+    with pytest.raises(ValueError, match="must not mix text and vision"):
+        rank_successes([text_success, vision_failure], optimization="context")
+
+
+def test_fixture_probe_runner_rejects_duplicate_keys():
+    duplicate_rows = [
+        {
+            "runtime_mode": "text",
+            "context": 65536,
+            "ngl": 40,
+            "tensor_split": "0.55,0.45",
+            "success": True,
+            "free_vram_mib": [900, 620],
+            "total_seconds": 4.1,
+        },
+        {
+            "runtime_mode": "text",
+            "context": 65536,
+            "ngl": 40,
+            "tensor_split": "0.55,0.45",
+            "success": False,
+            "free_vram_mib": [0, 0],
+            "total_seconds": 2.0,
+        },
+    ]
+
+    with pytest.raises(ValueError, match="duplicate finetune v2 fixture key"):
+        FixtureProbeRunner(duplicate_rows)
