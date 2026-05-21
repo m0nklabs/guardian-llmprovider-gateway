@@ -41,6 +41,11 @@ explicit reason string and see why every other successful candidate lost.
    `ngl` has produced at least one successful probe.
 8. Candidate ranking must never compare text and vision probes in the same pool.
 9. The final winner must include a machine-readable explanation of why it won.
+10. Once both GPUs are below `750 MiB` free VRAM, the planner may spend at most
+   5 additional follow-up probes trying to get below the final `500 MiB`
+   threshold unless the runtime is already at max `context` and max `ngl`.
+11. V2 must support fixed `--context` and fixed `--ngl` constraints, while
+   `--optimization speed|context` remains the primary steering interface.
 
 ## Metadata Rules
 
@@ -93,6 +98,36 @@ If the current best successful state still leaves one GPU above `500 MiB` free
 and the selected runtime is not already at both maxima, the planner must keep
 searching.
 
+### Low-headroom follow-up budget
+
+- Once the current best successful state leaves both GPUs below `750 MiB` free
+   VRAM, the planner enters low-headroom follow-up mode.
+- In that mode, the planner may spend at most 5 additional follow-up probes to
+   try to reach the final `<500 MiB` convergence target.
+- If those 5 follow-up probes are exhausted and the state is still not below
+   `500 MiB` on both GPUs, the planner must stop and return the best successful
+   state found so far with an explicit budget-exhausted reason.
+- This budget does not apply once the runtime is already at max `context` and
+   max `ngl`, because that state already satisfies the completion rule.
+
+## CLI Contract
+
+- The default operator interface should be `--optimization speed` or
+   `--optimization context`.
+- `--optimization context` means: keep `ngl` as high as possible and search for
+   the highest stable context, stepping `ngl` downward only when needed.
+- `--optimization speed` means: keep context at the active target or floor and
+   search for the highest stable `ngl`, stepping context only when that is the
+   only way to preserve a valid run.
+- A fixed `--context` must pin context and turn the remaining search into
+   `ngl` plus split tuning.
+- A fixed `--ngl` must pin `ngl` and turn the remaining search into context plus
+   split tuning.
+- If both `--context` and `--ngl` are fixed, the planner must only validate,
+   split-tune, and evaluate convergence for that exact runtime shape.
+- `balanced` mode may still exist, but it is secondary to the primary operator
+   paths `speed` and `context`.
+
 ## Optimization Modes
 
 ### `context`
@@ -107,6 +142,9 @@ searching.
 
 Important rule: a more balanced-looking split must never beat a higher-context
 or higher-`ngl` result just because it is closer to `0.50,0.50`.
+
+When `--ngl` is not fixed, `context` mode should begin from the maximum allowed
+`ngl` and only step downward when needed to unlock more stable context.
 
 ### `speed`
 
@@ -123,6 +161,9 @@ The winner is chosen in this order:
 
 The default context floor should be the currently configured runtime context for
 the selected mode unless the CLI explicitly overrides it.
+
+When `--context` is fixed, `speed` mode must keep that context pinned and search
+only for the best `ngl` and split combination around it.
 
 ### `balanced`
 
@@ -150,13 +191,16 @@ flowchart TD
    G --> H[Retry upward ngl around the better split]
    H --> I[Probe maximum stable context]
    I --> J{Current best successful state:<br/>both GPUs < 500 MiB free<br/>or context and ngl already maxed?}
-   J -- No --> K[Continue planner loop<br/>with the new best state]
-   K --> G
-   J -- Yes --> L[Rank successful candidates<br/>with mode-aware comparator]
-   L --> M[Return winner reason and losing reasons]
-   M --> N{Apply requested?}
-   N -- No --> O[Restore original loaded model<br/>leave models.yaml unchanged]
-   N -- Yes --> P[Write winning runtime once<br/>to models.yaml]
+   J -- No --> K{Both GPUs < 750 MiB free?}
+   K -- Yes --> L[Enter low-headroom mode<br/>max 5 follow-up probes]
+   K -- No --> M[Continue planner loop<br/>with the new best state]
+   L --> M
+   M --> G
+   J -- Yes --> N[Rank successful candidates<br/>with mode-aware comparator]
+   N --> O[Return winner reason and losing reasons]
+   O --> P{Apply requested?}
+   P -- No --> Q[Restore original loaded model<br/>leave models.yaml unchanged]
+   P -- Yes --> R[Write winning runtime once<br/>to models.yaml]
 ```
 
 ### Context mode search flow
@@ -176,7 +220,9 @@ flowchart TD
 8. Repeat the balance and local `ngl` retry loop until the current best
    successful state either leaves both GPUs below `500 MiB` free VRAM or is
    already at max `context` and max `ngl` for that runtime.
-9. Choose the final winner with the `context` comparator defined above.
+9. If both GPUs are already below `750 MiB` free but not yet below `500 MiB`,
+   cap the remaining follow-up search to 5 additional probes.
+10. Choose the final winner with the `context` comparator defined above.
 
 ### Vision mode specifics
 
@@ -192,6 +238,13 @@ If the operator passes explicit `ngl` or split candidates:
 - `ngl` values must still be clamped to `total_layers`.
 - Duplicate candidates must be removed after clamping.
 - Explicit candidates must still be ranked by the same mode-aware comparator.
+
+If the operator passes fixed `--context` and/or fixed `--ngl`:
+
+- Fixed `--context` pins context.
+- Fixed `--ngl` pins `ngl`.
+- If both are fixed, only split tuning, smoke validation, and convergence checks
+   remain in scope.
 
 ## Ranking and Explainability
 
@@ -251,10 +304,15 @@ V2 is not done until all of the following are true:
 4. A regression test proves split balancing can retry upward `ngl` after a
    successful rebalance instead of treating the first lower-`ngl` success as
    final.
-5. A dry-run failure leaves `models.yaml` byte-identical.
-6. A live run is only marked complete when both GPUs are below `500 MiB` free
+5. A regression test proves the low-headroom mode caps remaining follow-up
+   probes at 5 once both GPUs are below `750 MiB` free but not yet below
+   `500 MiB`.
+6. A regression test proves fixed `--context` and fixed `--ngl` pin those
+   dimensions while `--optimization speed|context` drives the remaining search.
+7. A dry-run failure leaves `models.yaml` byte-identical.
+8. A live run is only marked complete when both GPUs are below `500 MiB` free
    or the winning state is already at max `context` and max `ngl`.
-7. A live Qwen vision replay can explain why the winning split won without
+9. A live Qwen vision replay can explain why the winning split won without
    relying on "closer to 50/50" as the hidden primary reason.
 
 ## Rewrite Strategy
@@ -268,7 +326,8 @@ V2 is not done until all of the following are true:
 ## Open Decisions
 
 1. Whether `speed` mode should accept an explicit `--context-floor` flag in v2
-   or only derive that floor from the active runtime config.
+   or only derive that floor from the active runtime config when `--context` is
+   not fixed.
 2. Whether `balanced` mode should optimize on load+smoke wall time alone or on a
    combined latency-plus-headroom score.
 3. Whether v2 should preserve the current results JSON shape or write a new v2
