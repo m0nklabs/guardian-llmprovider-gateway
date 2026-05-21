@@ -32,6 +32,7 @@
     "context": 65536,
     "ngl": 40,
     "tensor_split": "0.55,0.45",
+    "has_mmproj": true,
     "success": true,
     "free_vram_mib": [520, 510],
     "total_seconds": 5.3

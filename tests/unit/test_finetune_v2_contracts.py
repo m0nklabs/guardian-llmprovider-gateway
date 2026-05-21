@@ -327,6 +327,43 @@ def test_fixture_probe_rejects_string_free_vram_payload():
         runner.probe(Candidate(context=65536, ngl=40, tensor_split="0.55,0.45"))
 
 
+def test_fixture_probe_key_distinguishes_mmproj_state():
+    runner = FixtureProbeRunner(
+        [
+            {
+                "runtime_mode": "vision",
+                "context": 65536,
+                "ngl": 40,
+                "tensor_split": "0.55,0.45",
+                "has_mmproj": False,
+                "success": True,
+                "free_vram_mib": [1400, 1300],
+                "total_seconds": 1.0,
+            },
+            {
+                "runtime_mode": "vision",
+                "context": 65536,
+                "ngl": 40,
+                "tensor_split": "0.55,0.45",
+                "has_mmproj": True,
+                "success": True,
+                "free_vram_mib": [900, 800],
+                "total_seconds": 1.2,
+            },
+        ]
+    )
+
+    no_mmproj = runner.probe(
+        Candidate(context=65536, ngl=40, tensor_split="0.55,0.45", runtime_mode="vision", has_mmproj=False)
+    )
+    with_mmproj = runner.probe(
+        Candidate(context=65536, ngl=40, tensor_split="0.55,0.45", runtime_mode="vision", has_mmproj=True)
+    )
+
+    assert no_mmproj.free_vram_mib == (1400.0, 1300.0)
+    assert with_mmproj.free_vram_mib == (900.0, 800.0)
+
+
 def test_final_winner_explanation_is_machine_readable_and_recorded():
     runner = load_fixture_runner()
     text_probe = runner.probe(Candidate(context=65536, ngl=40, tensor_split="0.55,0.45"))

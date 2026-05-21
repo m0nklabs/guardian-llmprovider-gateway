@@ -295,6 +295,7 @@ class FixtureProbeRunner:
                 int(row["context"]),
                 int(row["ngl"]),
                 str(row["tensor_split"]),
+                bool(row.get("has_mmproj", False)),
             ): row
             for row in fixture_rows
         }
@@ -306,6 +307,7 @@ class FixtureProbeRunner:
             candidate.context,
             candidate.ngl,
             candidate.tensor_split,
+            candidate.has_mmproj,
         )
         if key not in self._fixtures:
             raise KeyError(f"missing finetune v2 fixture for {key}")
@@ -314,7 +316,7 @@ class FixtureProbeRunner:
         if (
             not isinstance(free_vram_mib, (list, tuple))
             or len(free_vram_mib) != 2
-            or any(not isinstance(value, int | float) for value in free_vram_mib)
+            or any(not isinstance(value, (int, float)) for value in free_vram_mib)
         ):
             raise ValueError(f"fixture free_vram_mib must contain two values for {key}")
         probe = Probe(
