@@ -24,6 +24,7 @@ from app.tweaker.finetune_v2_contracts import (
 
 
 FIXTURE_PATH = Path(__file__).parents[1] / "fixtures" / "finetune_v2_probe_fixtures.json"
+NGL_ABOVE_TOTAL_LAYERS = 99
 
 
 def load_fixture_runner() -> FixtureProbeRunner:
@@ -139,6 +140,18 @@ def test_dry_run_failure_leaves_models_yaml_byte_identical(tmp_path: Path):
         dry_run_preserves_models_yaml(models_path, failing_dry_run)
 
     assert models_path.read_bytes() == b"models:\n  Test:\n    ngl: 41\n"
+
+
+def test_dry_run_partial_write_failure_is_reported(tmp_path: Path):
+    models_path = tmp_path / "models.yaml"
+    models_path.write_bytes(b"models:\n  Test:\n    ngl: 41\n")
+
+    def corrupting_dry_run() -> None:
+        models_path.write_bytes(b"truncated")
+        raise RuntimeError("probe failed after partial write")
+
+    with pytest.raises(AssertionError, match="changed models.yaml bytes"):
+        dry_run_preserves_models_yaml(models_path, corrupting_dry_run)
 
 
 def test_convergence_uses_current_best_and_low_headroom_budget():
@@ -279,7 +292,7 @@ def test_fixed_context_and_fixed_ngl_pin_those_dimensions():
         optimization="context",
         seed_split="0.55,0.45",
         fixed_context=32768,
-        fixed_ngl=99,
+        fixed_ngl=NGL_ABOVE_TOTAL_LAYERS,
     )[0]
 
     assert seed == Candidate(context=32768, ngl=41, tensor_split="0.55,0.45")

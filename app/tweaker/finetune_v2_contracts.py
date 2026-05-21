@@ -311,7 +311,11 @@ def dry_run_preserves_models_yaml(models_path: Path, operation: Callable[[], obj
     before = models_path.read_bytes()
     try:
         operation()
-    finally:
+    except BaseException as exc:
         after = models_path.read_bytes()
+        if before != after:
+            raise AssertionError("dry-run operation changed models.yaml bytes") from exc
+        raise
+    after = models_path.read_bytes()
     if before != after:
         raise AssertionError("dry-run operation changed models.yaml bytes")
