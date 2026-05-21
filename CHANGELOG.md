@@ -18,6 +18,10 @@
 - Added `docs/SERVER_UPGRADE_PLAN.md`, a normalized English planning document for the next Guardian host hardware upgrade based on the decoded server-upgrade note.
 
 ### Changed
+- `docs/FINETUNE_V2_REQUIREMENTS.md` now explicitly defines Guardian finetune as
+	host-specific runtime tuning (`context` / `ngl` / `tensor_split` and vision
+	projector fit), not model-weight training, so the rewrite brief starts from
+	the operator outcome it is meant to deliver.
 - The finetune rewrite plan is now explicit: v2 must treat split balance as a search heuristic instead of a global winner-selection override, compute balancing only from the latest successful probe, use documented lexicographic comparators for context/speed modes, reintroduce fixed `--context` / `--ngl` constraints under optimization-led defaults, and cap low-headroom follow-up search to 5 probes once both GPUs are below `750 MiB` free unless the runtime is already at max `context` and max `ngl`.
 - The finetune CLI now exposes `--optimization {speed,context,balanced}` instead of manual `--min/max-context` and `--min/max-ngl` range flags, and result selection now applies the requested speed-vs-context policy only after the split has been rebalanced from measured per-GPU free-VRAM data.
 - The finetune CLI no longer accepts explicit `--ngl` candidate overrides; `ngl` is now always auto-tuned via the search flow, and there is still no manual `--context` override in the current CLI.

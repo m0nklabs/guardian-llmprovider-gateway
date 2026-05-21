@@ -2,6 +2,25 @@
 
 ## Purpose
 
+In this document, "finetune" does not mean model-weight training, LoRA
+training, or checkpoint adaptation. Here it means runtime tuning for one
+specific Guardian host.
+
+The finetune flow exists to find the best loadable runtime shape for a model on
+this machine:
+
+- highest stable `context` when the operator chooses context-first tuning
+- highest stable `ngl` when the operator chooses speed-first tuning
+- a `tensor_split` that avoids wasting VRAM on one GPU while the other becomes
+   the bottleneck
+- separate winning runtime shapes for text and vision when projector overhead
+   changes the fit
+
+The intended output is an explainable runtime config that Guardian can validate
+live against `/admin/load` and optionally write back to `models.yaml` with
+`--apply`. In short: the finetune is meant to answer "what is the best stable
+runtime config for this model on this exact host, for this operator goal?"
+
 Guardian's current finetune flow has become too entangled to trust as the source
 of truth for runtime tuning. The immediate trigger for a rewrite is the latest
 vision rerun for `Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved`, where the tool
