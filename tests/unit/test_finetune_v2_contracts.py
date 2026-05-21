@@ -24,7 +24,7 @@ from app.tweaker.finetune_v2_contracts import (
 
 
 FIXTURE_PATH = Path(__file__).parents[1] / "fixtures" / "finetune_v2_probe_fixtures.json"
-NGL_ABOVE_TOTAL_LAYERS = 99
+INTENTIONALLY_HIGH_NGL = 99
 
 
 def load_fixture_runner() -> FixtureProbeRunner:
@@ -292,7 +292,7 @@ def test_fixed_context_and_fixed_ngl_pin_those_dimensions():
         optimization="context",
         seed_split="0.55,0.45",
         fixed_context=32768,
-        fixed_ngl=NGL_ABOVE_TOTAL_LAYERS,
+        fixed_ngl=INTENTIONALLY_HIGH_NGL,
     )[0]
 
     assert seed == Candidate(context=32768, ngl=41, tensor_split="0.55,0.45")

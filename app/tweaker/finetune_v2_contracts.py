@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Callable, Iterable, Mapping, Sequence
 
 
+# Requirement thresholds: below 750 MiB starts the limited follow-up budget,
+# while below 500 MiB on both GPUs is the final VRAM convergence target.
 LOW_HEADROOM_MIB = 750.0
 FINAL_HEADROOM_MIB = 500.0
 LOW_HEADROOM_FOLLOWUP_LIMIT = 5
@@ -129,6 +131,8 @@ def _ranking_key(probe: Probe, optimization: str) -> tuple[float, ...]:
             -probe.order,
         )
     if optimization == "balanced":
+        # Scale ngl to one 1024-token context step so balanced mode uses an
+        # explicit, deterministic combined score instead of split aesthetics.
         score = candidate.context + (candidate.ngl * 1024) + _bottleneck_headroom(probe)
         return (score, -probe.total_seconds, -probe.order)
     raise ValueError(f"unknown optimization mode: {optimization}")
@@ -293,10 +297,13 @@ class FixtureProbeRunner:
         if key not in self._fixtures:
             raise KeyError(f"missing finetune v2 fixture for {key}")
         row = self._fixtures[key]
+        free_vram_mib = row["free_vram_mib"]
+        if not isinstance(free_vram_mib, Sequence) or len(free_vram_mib) != 2:
+            raise ValueError(f"fixture free_vram_mib must contain two values for {key}")
         probe = Probe(
             candidate=candidate,
             success=bool(row["success"]),
-            free_vram_mib=tuple(row["free_vram_mib"]),  # type: ignore[arg-type]
+            free_vram_mib=(float(free_vram_mib[0]), float(free_vram_mib[1])),
             total_seconds=float(row["total_seconds"]),
             order=len(self.probes),
             telemetry_source=str(row.get("telemetry_source", "post_smoke")),

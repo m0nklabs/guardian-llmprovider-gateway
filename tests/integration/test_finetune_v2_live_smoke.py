@@ -1,6 +1,7 @@
 """Opt-in live smoke checks for the finetune v2 contract layer."""
 
 import os
+from urllib.parse import urlparse
 
 import httpx
 import pytest
@@ -18,6 +19,9 @@ pytestmark = [
 
 def test_live_guardian_status_for_finetune_v2_smoke():
     guardian_url = os.environ.get("GUARDIAN_URL", "http://127.0.0.1:11434")
+    parsed_url = urlparse(guardian_url)
+    if parsed_url.scheme not in {"http", "https"}:
+        pytest.fail("GUARDIAN_URL must use http or https")
     api_key = os.environ.get("GUARDIAN_TEST_KEY")
     if not api_key:
         pytest.skip("set GUARDIAN_TEST_KEY for live finetune v2 smoke checks")
