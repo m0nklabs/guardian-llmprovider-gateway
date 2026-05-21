@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Added `docs/FINETUNE_V2_REQUIREMENTS.md`, a rewrite brief for a cleaner finetune v2 flow with explicit mode-aware ranking, layer ceilings, projector handling, acceptance criteria, and a Mermaid search-flow diagram.
 - Public liveness probe `GET /healthz` (no auth) returning `{"ok": true}` for external monitors (monifuse, uptime checks). Does not reflect llama-server backend health; for that use the auth-gated `/api/status`.
 - Added the tracked `llama_cpp_guardian.code-workspace` file so the intended multi-root VS Code workspace layout for Guardian, config, models, editor settings, and local llama.cpp sources is reproducible.
 - Qwen3.6 Agent profile and `qwen3-35b-uncensored-agent` alias using Qwen's official non-thinking llama.cpp chat template for low-latency tool-facing agents.
@@ -17,6 +18,7 @@
 - Added `docs/SERVER_UPGRADE_PLAN.md`, a normalized English planning document for the next Guardian host hardware upgrade based on the decoded server-upgrade note.
 
 ### Changed
+- The finetune rewrite plan is now explicit: v2 must treat split balance as a search heuristic instead of a global winner-selection override, and context/speed modes must use documented lexicographic comparators.
 - The finetune CLI now exposes `--optimization {speed,context,balanced}` instead of manual `--min/max-context` and `--min/max-ngl` range flags, and result selection now applies the requested speed-vs-context policy only after the split has been rebalanced from measured per-GPU free-VRAM data.
 - The finetune CLI no longer accepts explicit `--ngl` candidate overrides; `ngl` is now always auto-tuned via the search flow, and there is still no manual `--context` override in the current CLI.
 - The Guardian finetune auto-search now runs as a strict 3-phase flow with proactive per-GPU VRAM balancing: safe-baseline split calibration first, `ngl` step-down with split rebalancing after each successful change second, and context bisection last with split rebalanced again for every context candidate.

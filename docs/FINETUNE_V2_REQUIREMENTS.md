@@ -1,0 +1,230 @@
+# Guardian Finetune V2 Requirements
+
+## Purpose
+
+Guardian's current finetune flow has become too entangled to trust as the source
+of truth for runtime tuning. The immediate trigger for a rewrite is the latest
+vision rerun for `Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved`, where the tool
+reported `0.50,0.50` as the winning split even though that choice was driven by
+the current ranking logic more than by an explicit operator goal.
+
+The concrete failure mode in v1 is straightforward:
+
+- `choose_better_result()` compares `balance_metric()` before it applies the
+  requested optimization mode.
+- That means a candidate with a more centered split or a smaller VRAM delta can
+  outrank the actual requested objective.
+- In practice, `context` mode and `speed` mode are therefore not truly
+  lexicographic. They are still being pre-filtered by a balance heuristic.
+
+This document defines the target behavior for a clean `finetune v2` rewrite.
+
+## Core Outcome
+
+V2 must produce results that are deterministic, explainable, and mode-aware.
+When the tool says a config won, the operator must be able to point to a short,
+explicit reason string and see why every other successful candidate lost.
+
+## Hard Requirements
+
+1. `ngl` candidates must never exceed the model's configured `total_layers`.
+2. `mmproj` must affect measured fit and GPU headroom, but it must not extend
+   the main model's `n_gpu_layers` range.
+3. Text and vision tuning must be treated as separate runtime problems.
+4. `models.yaml` must stay unchanged during a dry run. Only a final
+   `--apply` may write the winning config.
+5. Every probe must be appended to the results log immediately so interrupted
+   runs still leave an auditable trail.
+6. Split balancing is a search heuristic, not a global winner-selection
+   override.
+7. Failed seed probes must not fan out into alternate splits until that same
+   `ngl` has produced at least one successful probe.
+8. Candidate ranking must never compare text and vision probes in the same pool.
+9. The final winner must include a machine-readable explanation of why it won.
+
+## Metadata Rules
+
+### Main model layers
+
+- Each model entry in `models.yaml` must declare `total_layers`.
+- V2 must clamp all `ngl` generation and explicit `ngl` inputs to that ceiling.
+- If `total_layers` is missing, V2 must fail fast instead of guessing.
+
+### Multimodal projector handling
+
+- `mmproj` is separate GPU-loaded overhead.
+- V2 must account for projector cost through measured load success, VRAM
+  telemetry, and latency.
+- V2 must not treat projector metadata as additional `ngl` layers.
+- If future projector formats expose a meaningful stage count, that metadata may
+  be logged separately, but it must stay separate from the main model layer
+  ceiling unless upstream llama.cpp changes its semantics.
+
+## Optimization Modes
+
+### `context`
+
+`context` mode is lexicographic. The winner is chosen in this exact order:
+
+1. Highest stable context.
+2. Highest stable `ngl` at that context.
+3. Best measured bottleneck-GPU headroom.
+4. Lowest total probe time.
+5. Stable deterministic tie-breaker.
+
+Important rule: a more balanced-looking split must never beat a higher-context
+or higher-`ngl` result just because it is closer to `0.50,0.50`.
+
+### `speed`
+
+`speed` mode must optimize for runtime speed at or above a required context
+floor.
+
+The winner is chosen in this order:
+
+1. Highest stable `ngl` that meets the active context floor.
+2. Lowest total probe time.
+3. Highest stable context.
+4. Best measured bottleneck-GPU headroom.
+5. Stable deterministic tie-breaker.
+
+The default context floor should be the currently configured runtime context for
+the selected mode unless the CLI explicitly overrides it.
+
+### `balanced`
+
+`balanced` mode is the only mode allowed to use a combined score.
+
+Requirements:
+
+1. The score formula must be explicit and documented in code and CLI output.
+2. The score must be applied only after invalid or below-floor candidates are
+   removed.
+3. The score must not silently fall back to `distance from 50/50` as a proxy
+   for overall quality.
+
+## Search Flow
+
+```mermaid
+flowchart TD
+   A[Resolve runtime mode and active config] --> B[Load hard ceilings<br/>total_layers, context range, split bounds]
+   B --> C[Start with one seed split]
+   C --> D[Probe calibration context at current ngl]
+   D --> E{First success at this ngl?}
+   E -- No --> F[Step ngl downward<br/>never above total_layers]
+   F --> D
+   E -- Yes --> G[Run local split rebalance<br/>using measured GPU headroom]
+   G --> H[Probe maximum stable context]
+   H --> I{Target context reached?}
+   I -- No --> F
+   I -- Yes --> J[Rank successful candidates<br/>with mode-aware comparator]
+   J --> K[Return winner reason and losing reasons]
+   K --> L{Apply requested?}
+   L -- No --> M[Restore original loaded model<br/>leave models.yaml unchanged]
+   L -- Yes --> N[Write winning runtime once<br/>to models.yaml]
+```
+
+### Context mode search flow
+
+1. Resolve the runtime mode (`text` or `vision`) and load its active config.
+2. Resolve hard ceilings: `total_layers`, context search range, split bounds,
+   smoke shape, and current runtime fields.
+3. Start from one seed split only.
+4. At a fixed calibration context, walk `ngl` downward until the first success.
+5. Only after that success, run localized split rebalance using measured GPU
+   headroom.
+6. With the successful `ngl` plus split state, search the maximum stable
+   context.
+7. If the max context is still below target, continue the `ngl` descent and
+   repeat from step 5.
+8. Choose the final winner with the `context` comparator defined above.
+
+### Vision mode specifics
+
+- Vision tuning must always run with the projector path active.
+- Vision results must be stored separately from text results.
+- The search plan must acknowledge that projector cost changes fit and latency,
+  but not `total_layers`.
+
+### Explicit candidate mode
+
+If the operator passes explicit `ngl` or split candidates:
+
+- `ngl` values must still be clamped to `total_layers`.
+- Duplicate candidates must be removed after clamping.
+- Explicit candidates must still be ranked by the same mode-aware comparator.
+
+## Ranking and Explainability
+
+The diagram above is intentionally strict: split rebalancing only begins after a
+successful probe at the current `ngl`, and the final winner is chosen by the
+requested mode comparator instead of by a hidden balance-first override.
+
+V2 must separate these concerns:
+
+- Search heuristic: what to try next.
+- Acceptance: did the candidate load and pass smoke.
+- Ranking: which successful candidate wins.
+
+The results log must record:
+
+- Probe order.
+- Comparator mode.
+- Winner reason.
+- Losing reason for each successful candidate that was rejected.
+- VRAM telemetry source (`pre_load`, `post_smoke`, or unavailable).
+- Whether the probe was live or cache-backed.
+
+## State Management Rules
+
+1. The active working candidate must live in memory, not in `models.yaml`.
+2. `models.yaml` may only be written once at the end of a successful `--apply`.
+3. Failures, crashes, or Ctrl-C must leave the config file unchanged.
+4. The original loaded model must be restored unless the operator explicitly
+   opts out.
+
+## Code Structure Goals
+
+V2 should be split into small, testable parts instead of one sprawling control
+module.
+
+Suggested boundaries:
+
+- `metadata.py`: resolve runtime metadata, ceilings, and smoke shape.
+- `planner.py`: generate the next candidate based on mode and prior outcomes.
+- `probe_runner.py`: perform load + smoke + VRAM capture.
+- `ranking.py`: mode-aware comparators and winner explanations.
+- `persistence.py`: result logging, caching, and final apply behavior.
+- `cli.py`: argument parsing and operator-facing summaries.
+
+The public entrypoint can still expose one orchestration class, but the logic
+must be decomposed behind it.
+
+## Acceptance Criteria
+
+V2 is not done until all of the following are true:
+
+1. A regression test proves `context` mode does not let split balance override
+   higher context or higher `ngl`.
+2. A regression test proves no probe is ever attempted with `ngl > total_layers`.
+3. A regression test proves `mmproj` does not change the `ngl` ceiling.
+4. A dry-run failure leaves `models.yaml` byte-identical.
+5. A live Qwen vision replay can explain why the winning split won without
+   relying on "closer to 50/50" as the hidden primary reason.
+
+## Rewrite Strategy
+
+1. Freeze v1 behavior and stop layering more heuristics into it.
+2. Build the mode comparators and planner as pure functions first.
+3. Add unit tests for the comparator contract before wiring live Guardian probes.
+4. Reintroduce live probing only after the ranking contract is stable.
+5. Keep cache reuse optional until correctness is proven.
+
+## Open Decisions
+
+1. Whether `speed` mode should accept an explicit `--context-floor` flag in v2
+   or only derive that floor from the active runtime config.
+2. Whether `balanced` mode should optimize on load+smoke wall time alone or on a
+   combined latency-plus-headroom score.
+3. Whether v2 should preserve the current results JSON shape or write a new v2
+   schema with explicit winner-reason fields.
