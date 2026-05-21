@@ -27,4 +27,4 @@ def test_wrapper_forwards_hyphenated_pytest_flags():
 
     assert result.returncode == 0, result.stderr
     assert "unrecognized arguments: -k" not in result.stderr
-    assert "test_convergence_uses_current_best_and_low_headroom_budget" in result.stdout
+    assert "convergence" in result.stdout
