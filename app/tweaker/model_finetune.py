@@ -257,6 +257,7 @@ class ProbeResult:
     error: Optional[str] = None
     response_excerpt: Optional[str] = None
     gpu_vram: Optional[Dict[str, Dict[str, float]]] = None
+    gpu_vram_phase: Optional[str] = None
     free_vram_delta_pct: Optional[float] = None
     model_signature: Optional[str] = None
     smoke_signature: Optional[str] = None
@@ -537,6 +538,8 @@ def index_cached_probes(
         merged = copy.deepcopy(candidate)
         if merged.gpu_vram is None and existing.gpu_vram is not None:
             merged.gpu_vram = copy.deepcopy(existing.gpu_vram)
+        if merged.gpu_vram_phase is None and existing.gpu_vram_phase is not None:
+            merged.gpu_vram_phase = existing.gpu_vram_phase
         if merged.free_vram_delta_pct is None and existing.free_vram_delta_pct is not None:
             merged.free_vram_delta_pct = existing.free_vram_delta_pct
         if merged.response_excerpt is None and existing.response_excerpt is not None:
@@ -573,6 +576,7 @@ def index_cached_probes(
             if not isinstance(ngl, int):
                 continue
             gpu_vram = copy.deepcopy(attempt.get("gpu_vram")) if isinstance(attempt.get("gpu_vram"), dict) else None
+            gpu_vram_phase = str(attempt["gpu_vram_phase"]) if attempt.get("gpu_vram_phase") is not None else None
             cached_free_vram_delta_pct = attempt.get("free_vram_delta_pct")
             if cached_free_vram_delta_pct is None and gpu_vram is not None:
                 cached_free_vram_delta_pct = free_vram_delta_pct(gpu_vram)
@@ -591,6 +595,7 @@ def index_cached_probes(
                 error=str(attempt["error"]) if attempt.get("error") is not None else None,
                 response_excerpt=str(attempt["response_excerpt"]) if attempt.get("response_excerpt") is not None else None,
                 gpu_vram=gpu_vram,
+                gpu_vram_phase=gpu_vram_phase,
                 free_vram_delta_pct=(
                     float(cached_free_vram_delta_pct) if cached_free_vram_delta_pct is not None else None
                 ),
@@ -2039,6 +2044,7 @@ class GuardianModelFinetuner:
         candidate_text = replace_model_block(self.base_text, model_name, rendered)
         self._atomic_write(self.models_config_path, candidate_text)
 
+        pre_load_gpu_vram = read_gpu_vram_snapshot()
         load_started = time.perf_counter()
         try:
             load_response = self._request_with_retry(
@@ -2058,6 +2064,9 @@ class GuardianModelFinetuner:
                 success=False,
                 load_seconds=time.perf_counter() - load_started,
                 error=str(exc),
+                gpu_vram=pre_load_gpu_vram,
+                gpu_vram_phase="pre_load",
+                free_vram_delta_pct=free_vram_delta_pct(pre_load_gpu_vram),
                 model_signature=self._active_model_signature,
                 smoke_signature=self._active_smoke_signature,
             )
@@ -2076,6 +2085,9 @@ class GuardianModelFinetuner:
                 load_seconds=load_seconds,
                 status_code=load_response.status_code,
                 error=load_response.text,
+                gpu_vram=pre_load_gpu_vram,
+                gpu_vram_phase="pre_load",
+                free_vram_delta_pct=free_vram_delta_pct(pre_load_gpu_vram),
                 model_signature=self._active_model_signature,
                 smoke_signature=self._active_smoke_signature,
             )
@@ -2094,6 +2106,7 @@ class GuardianModelFinetuner:
                     },
                 )
             except httpx.RequestError as exc:
+                gpu_vram = read_gpu_vram_snapshot()
                 probe_result = ProbeResult(
                     model=model_name,
                     context=int(context),
@@ -2103,6 +2116,9 @@ class GuardianModelFinetuner:
                     load_seconds=load_seconds,
                     smoke_seconds=time.perf_counter() - smoke_started,
                     error=str(exc),
+                    gpu_vram=gpu_vram,
+                    gpu_vram_phase="post_load",
+                    free_vram_delta_pct=free_vram_delta_pct(gpu_vram),
                     model_signature=self._active_model_signature,
                     smoke_signature=self._active_smoke_signature,
                 )
@@ -2124,6 +2140,7 @@ class GuardianModelFinetuner:
                         status_code=smoke_response.status_code,
                         response_excerpt=excerpt[:120] or None,
                         gpu_vram=gpu_vram,
+                        gpu_vram_phase="post_smoke",
                         free_vram_delta_pct=delta_pct,
                         model_signature=self._active_model_signature,
                         smoke_signature=self._active_smoke_signature,
@@ -2140,6 +2157,7 @@ class GuardianModelFinetuner:
                         status_code=smoke_response.status_code,
                         error=smoke_response.text,
                         gpu_vram=gpu_vram,
+                        gpu_vram_phase="post_smoke",
                         free_vram_delta_pct=delta_pct,
                         model_signature=self._active_model_signature,
                         smoke_signature=self._active_smoke_signature,

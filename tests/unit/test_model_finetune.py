@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
+
 from app.tweaker.model_finetune import (
     balance_metric,
     balanced_tradeoff_score,
@@ -137,6 +139,44 @@ class TestTensorSplitHelpers:
         assert smaller_split_step(0.05) == 0.03
         assert smaller_split_step(0.02) == 0.01
         assert smaller_split_step(0.01) is None
+
+
+class TestProbeCapture:
+    def test_probe_candidate_captures_vram_on_load_failure(self, tmp_path: Path):
+        finetuner = _make_finetuner(tmp_path)
+        finetuner._active_model_signature = build_model_signature(
+            "TestModel",
+            {"path": "/tmp/test-model.gguf", "context": 262144, "ngl": 36, "tensor_split": "0.55,0.45"},
+        )
+        gpu_vram = {
+            "0": {"used": 11880.0, "free": 40.0, "total": 12288.0, "free_pct": 0.33},
+            "1": {"used": 16260.0, "free": 51.0, "total": 16311.0, "free_pct": 0.31},
+        }
+        load_failure = httpx.Response(503, text="load failed")
+
+        with (
+            patch.object(finetuner, "_request_with_retry", return_value=load_failure),
+            patch("app.tweaker.model_finetune.read_gpu_vram_snapshot", return_value=gpu_vram),
+        ):
+            result = finetuner._probe_candidate(
+                model_name="TestModel",
+                model_config={
+                    "path": "/tmp/test-model.gguf",
+                    "context": 262144,
+                    "ngl": 36,
+                    "tensor_split": "0.55,0.45",
+                },
+                context=196608,
+                ngl=99,
+                tensor_split="0.60,0.40",
+            )
+
+        assert result.success is False
+        assert result.status_code == 503
+        assert result.gpu_vram == gpu_vram
+        assert result.gpu_vram_phase == "pre_load"
+        assert result.free_vram_delta_pct == free_vram_delta_pct(gpu_vram)
+        assert finetuner._attempt_log[-1].gpu_vram == gpu_vram
 
     def test_target_gpu_free_mib_for_balance_shift_uses_receiver_gpu(self):
         gpu_vram = {
@@ -400,6 +440,7 @@ class TestPersistentProbeCache:
                             "0": {"free": 969.0, "total": 12288.0, "free_pct": 7.88},
                             "1": {"free": 13.0, "total": 16311.0, "free_pct": 0.08},
                         },
+                        "gpu_vram_phase": "pre_load",
                         "free_vram_delta_pct": 7.8,
                     }
                 ],
@@ -449,6 +490,7 @@ class TestPersistentProbeCache:
             "0": {"free": 969.0, "total": 12288.0, "free_pct": 7.88},
             "1": {"free": 13.0, "total": 16311.0, "free_pct": 0.08},
         }
+        assert indexed[key].gpu_vram_phase == "pre_load"
         assert indexed[key].free_vram_delta_pct == 7.8
 
     def test_build_smoke_signature_ignores_short_marker_text_changes(self):

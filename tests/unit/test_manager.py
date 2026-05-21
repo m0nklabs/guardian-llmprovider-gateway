@@ -253,6 +253,36 @@ models:
         assert runtime["ngl"] == 36
         assert runtime["tensor_split"] == "0.60,0.40"
 
+    def test_build_crash_config_snapshot_keeps_effective_runtime_shape(self, tmp_path: Path):
+        mmproj = tmp_path / "vision-mmproj.gguf"
+        mmproj.write_text("mmproj")
+        models_yaml = f"""\
+models:
+    Vision-Model:
+        path: /models/vision.gguf
+        context: 131072
+        ngl: 99
+        tensor_split: \"0.55,0.45\"
+        mmproj: {mmproj}
+        vision_context: 65536
+        vision_ngl: 36
+        vision_tensor_split: \"0.60,0.40\"
+"""
+        mgr = _make_manager(tmp_path, models_yaml=models_yaml)
+
+        runtime = mgr.build_runtime_config("Vision-Model", enable_vision=True)
+        snapshot = mgr._build_crash_config_snapshot(
+            "Vision-Model",
+            runtime_config=runtime,
+            vision_enabled=True,
+        )
+
+        assert snapshot["runtime_mode"] == "vision"
+        assert snapshot["vision_ngl"] == 36
+        assert snapshot["effective_runtime_config"]["ngl"] == 36
+        assert snapshot["effective_runtime_config"]["tensor_split"] == "0.60,0.40"
+        assert snapshot["effective_runtime_config"]["mmproj"] == str(mmproj)
+
 
 # ── _identify_model_by_path ───────────────────────────────────────────
 

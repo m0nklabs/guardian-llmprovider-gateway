@@ -232,6 +232,21 @@ class ModelManager:
 
         return runtime_config
 
+    def _build_crash_config_snapshot(
+        self,
+        model_name: str,
+        *,
+        runtime_config: Optional[Dict[str, Any]] = None,
+        vision_enabled: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Capture both the configured profile and the resolved runtime shape for crash reports."""
+        snapshot = copy.deepcopy(self.models.get(model_name, {}))
+        if vision_enabled is not None:
+            snapshot["runtime_mode"] = "vision" if vision_enabled else "text"
+        if runtime_config is not None:
+            snapshot["effective_runtime_config"] = copy.deepcopy(runtime_config)
+        return snapshot
+
     def current_runtime_uses_mmproj(self, model_name: Optional[str] = None) -> bool:
         """Return whether the current backend args include the model's mmproj path."""
         target = model_name or self.current_model
@@ -747,6 +762,15 @@ class ModelManager:
 
         # 3. Write new model args + binary selection
         target_config = self.build_runtime_config(model_name, enable_vision=desired_vision)
+        logger.info(
+            "Runtime config for %s [%s]: context=%s ngl=%s split=%s mmproj=%s",
+            model_name,
+            "vision" if desired_vision else "text",
+            target_config.get("context"),
+            target_config.get("ngl"),
+            target_config.get("tensor_split") or "auto",
+            target_config.get("mmproj") or "none",
+        )
         self._write_server_args(target_config)
         
         # 4. Free GPU memory (kill non-Frigate processes)
@@ -760,7 +784,14 @@ class ModelManager:
         
         if not healthy:
             # Server crashed or failed to start — record and raise
-            crash = await self._detect_crash(model_name)
+            crash = await self._detect_crash(
+                model_name,
+                config_snapshot=self._build_crash_config_snapshot(
+                    model_name,
+                    runtime_config=target_config,
+                    vision_enabled=desired_vision,
+                ),
+            )
             raise ModelLoadError(
                 f"Model '{model_name}' failed to load: {crash.error_message}",
                 crash_record=crash,
@@ -867,13 +898,30 @@ class ModelManager:
             raise ValueError(f"Model '{target}' not found in configuration")
         desired_vision = self._resolve_runtime_vision_flag(target, enable_vision)
         logger.info(f"🔄 Loading model '{target}' in {'vision' if desired_vision else 'text'} mode...")
-        self._write_server_args(self.build_runtime_config(target, enable_vision=desired_vision))
+        target_config = self.build_runtime_config(target, enable_vision=desired_vision)
+        logger.info(
+            "Runtime config for %s [%s]: context=%s ngl=%s split=%s mmproj=%s",
+            target,
+            "vision" if desired_vision else "text",
+            target_config.get("context"),
+            target_config.get("ngl"),
+            target_config.get("tensor_split") or "auto",
+            target_config.get("mmproj") or "none",
+        )
+        self._write_server_args(target_config)
         await self._stop_server()
         await self._free_gpu_memory()
         await self._start_server()
         healthy = await self._wait_for_health(target)
         if not healthy:
-            crash = await self._detect_crash(target)
+            crash = await self._detect_crash(
+                target,
+                config_snapshot=self._build_crash_config_snapshot(
+                    target,
+                    runtime_config=target_config,
+                    vision_enabled=desired_vision,
+                ),
+            )
             raise ModelLoadError(
                 f"Model '{target}' failed to load: {crash.error_message}",
                 crash_record=crash,
@@ -1040,10 +1088,10 @@ class ModelManager:
         except Exception:
             return False
 
-    async def _detect_crash(self, model_name: str) -> CrashRecord:
+    async def _detect_crash(self, model_name: str, config_snapshot: Optional[Dict[str, Any]] = None) -> CrashRecord:
         """Extract error details from journalctl and record the crash."""
         error_msg = await self._get_crash_error()
-        config_snap = self.models.get(model_name, {}).copy()
+        config_snap = copy.deepcopy(config_snapshot) if config_snapshot is not None else self.models.get(model_name, {}).copy()
 
         crash = CrashRecord(
             timestamp=datetime.now().isoformat(),
@@ -1058,7 +1106,15 @@ class ModelManager:
         if len(self.crash_history) > MAX_CRASH_HISTORY:
             self.crash_history = self.crash_history[-MAX_CRASH_HISTORY:]
 
-        logger.error(f"💥 Crash recorded: model={model_name} error={error_msg}")
+        runtime_mode = config_snap.get("runtime_mode") if isinstance(config_snap, dict) else None
+        effective = config_snap.get("effective_runtime_config") if isinstance(config_snap, dict) else None
+        logger.error(
+            "💥 Crash recorded: model=%s runtime_mode=%s effective_runtime=%s error=%s",
+            model_name,
+            runtime_mode or "unknown",
+            effective or {},
+            error_msg,
+        )
 
         # Stop the service to prevent restart loops
         await self._stop_server()
