@@ -295,11 +295,18 @@ class FixtureProbeRunner:
     def __init__(self, fixture_rows: Sequence[Mapping[str, object]]) -> None:
         self._fixtures: dict[tuple[str, int, int, str, bool], Mapping[str, object]] = {}
         for row in fixture_rows:
+            runtime_mode = row.get("runtime_mode")
+            if not isinstance(runtime_mode, str):
+                raise ValueError("fixture runtime_mode must be a string")
+            runtime_mode = runtime_mode.strip().lower()
+            if runtime_mode not in {"text", "vision"}:
+                raise ValueError("fixture runtime_mode must be 'text' or 'vision'")
+
             has_mmproj = row.get("has_mmproj", False)
             if not isinstance(has_mmproj, bool):
                 raise ValueError("fixture has_mmproj must be a boolean")
             key = (
-                str(row["runtime_mode"]),
+                runtime_mode,
                 int(row["context"]),
                 int(row["ngl"]),
                 str(row["tensor_split"]),
