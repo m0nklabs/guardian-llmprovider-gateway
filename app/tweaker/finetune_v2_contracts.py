@@ -82,6 +82,10 @@ def initial_seed_candidates(
     runtime_mode: str = "text",
     has_mmproj: bool = False,
 ) -> list[Candidate]:
+    runtime_mode = runtime_mode.strip().lower()
+    if runtime_mode not in {"text", "vision"}:
+        raise ValueError("runtime_mode must be one of: text, vision")
+
     context = fixed_context if fixed_context is not None else limits.active_context
     if optimization == "context" and fixed_context is None:
         context = limits.max_context
