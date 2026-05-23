@@ -49,6 +49,7 @@
 - The finetune results log now writes an in-progress run entry immediately and flushes every individual probe to `data/model_finetune_results.json`, so long live searches can be monitored while they are still running or interrupted mid-run.
 
 ### Fixed
+- Fixed a merge-conflict regression in `app/tweaker/finetune_v2_runner.py` where a duplicated `start_run()` block made the merged finetune v2 path fail at import time with `SyntaxError: positional argument follows keyword argument`.
 - Context-mode finetuning no longer keeps chasing alternate split candidates after a failed seed probe during either baseline calibration or later context evaluation; failed context-mode probes now hand control back to the broader ngl/context search, and split balancing only resumes after a successful probe.
 - Restored the proven interim multimodal recovery baseline for `Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved` in `models.yaml` after drift had pushed the vision path back to `vision_ngl: 99` with `vision_tensor_split: "0.50,0.50"`, which caused Guardian 503 auto-reload failures and llama-server segfaults on image requests. That recovery baseline put the vision path back on a known-good `262144 / 36 / 0.55,0.45` shape before the final context rerun.
 - The final context-mode rerun then replaced that recovery baseline with the better stable vision runtime `262144 / 32 / 0.50,0.50`; split rebalancing now resumes only after a successful seed probe instead of chasing alternate splits while the current `ngl` still fails to load.
