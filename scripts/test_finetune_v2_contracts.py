@@ -32,6 +32,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     test_paths = [
         "tests/unit/test_finetune_v2_contracts.py",
         "tests/unit/test_finetune_v2_runner.py",
+        "tests/unit/test_finetune_v2_model_config_script.py",
     ]
     env = os.environ.copy()
     if args.live:
