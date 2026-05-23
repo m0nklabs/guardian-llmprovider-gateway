@@ -36,6 +36,11 @@ class FakeProbeRunner:
     def __init__(self, free_vram_mib=(300.0, 280.0)) -> None:
         self.free_vram_mib = free_vram_mib
         self.calls: list[tuple[str, Candidate]] = []
+        self.disk_load_calls: list[tuple[str, bool]] = []
+
+    def verify_disk_load(self, model: str, *, enable_vision: bool = False) -> bool:
+        self.disk_load_calls.append((model, enable_vision))
+        return True
 
     def probe(self, model: str, candidate: Candidate) -> Probe:
         self.calls.append((model, candidate))
@@ -107,7 +112,9 @@ def test_v2_apply_writes_winner_once_to_runtime_specific_models_yaml_keys(tmp_pa
     assert 'vision_ngl: 38' in rendered
     assert 'vision_tensor_split: "0.60,0.40"' in rendered
     assert len(result.probes) == 1
-    # Applying writes the winner once and then verifies the persisted runtime reloads.
+    # Applying: 1 probe during tuning + 1 disk-load verification + 1 override probe to confirm reload.
+    assert len(fake_runner.disk_load_calls) == 1
+    assert fake_runner.disk_load_calls[0] == ("TestModel", True)
     assert len(fake_runner.calls) == 2
 
 
@@ -180,3 +187,28 @@ def test_guardian_v2_probe_runner_uses_admin_load_runtime_overrides():
             },
         }
     ]
+
+
+def test_guardian_v2_probe_runner_verify_disk_load_sends_no_overrides():
+    load_payloads = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/admin/load":
+            load_payloads.append(json.loads(request.content.decode()))
+            return httpx.Response(200, json={"status": "loaded"})
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    runner = GuardianV2ProbeRunner(
+        guardian_url="http://guardian.test",
+        api_key="test-key",
+        smoke_prompt="FIT?",
+        smoke_max_tokens=4,
+        smoke_image_url=None,
+        client=client,
+    )
+
+    result = runner.verify_disk_load("TestModel", enable_vision=True)
+
+    assert result is True
+    assert load_payloads == [{"model": "TestModel", "enable_vision": True}]

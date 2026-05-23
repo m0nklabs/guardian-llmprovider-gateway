@@ -259,7 +259,7 @@ class ModelManager:
         try:
             args = CURRENT_MODEL_ARGS_FILE.read_text()
         except Exception:
-            return self.current_vision_enabled if target == self.current_model else False
+            return getattr(self, "current_vision_enabled", False) if target == self.current_model else False
 
         return any(candidate and candidate in args for candidate in mmproj_candidates)
 
@@ -910,7 +910,24 @@ class ModelManager:
                     continue
                 value = runtime_overrides[key]
                 if key in {"context", "ngl"}:
-                    target_config[key] = int(value)
+                    if isinstance(value, bool) or not isinstance(value, (int, str)):
+                        raise ValueError(
+                            f"runtime_overrides.{key} must be an integer, got {type(value).__name__!r}"
+                        )
+                    if isinstance(value, str) and not value.strip().isdigit():
+                        raise ValueError(
+                            f"runtime_overrides.{key} must be a digit-only string, got {value!r}"
+                        )
+                    int_value = int(value)
+                    if key == "context" and int_value <= 0:
+                        raise ValueError(
+                            f"runtime_overrides.context must be a positive integer, got {int_value}"
+                        )
+                    if key == "ngl" and int_value < 0:
+                        raise ValueError(
+                            f"runtime_overrides.ngl must be a non-negative integer, got {int_value}"
+                        )
+                    target_config[key] = int_value
                 elif key == "tensor_split" and value in (None, ""):
                     target_config.pop("tensor_split", None)
                 elif key == "tensor_split":

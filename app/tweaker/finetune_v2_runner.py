@@ -14,7 +14,7 @@ import time
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Mapping, Protocol, Sequence
 
 import httpx
 import yaml
@@ -165,6 +165,14 @@ class FinetuneV2ResultsLog:
         tmp_path.replace(self.path)
 
 
+class ProbeRunnerProtocol(Protocol):
+    """Minimal interface required by FinetuneV2Runner."""
+
+    def probe(self, model: str, candidate: Candidate) -> Probe: ...
+
+    def verify_disk_load(self, model: str, *, enable_vision: bool = False) -> bool: ...
+
+
 class GuardianV2ProbeRunner:
     """Execute one v2 probe through Guardian runtime overrides."""
 
@@ -192,6 +200,15 @@ class GuardianV2ProbeRunner:
     def close(self) -> None:
         if self._owns_client:
             self.client.close()
+
+    def verify_disk_load(self, model: str, *, enable_vision: bool = False) -> bool:
+        """Load the model from disk without runtime overrides to verify the on-disk config."""
+        load_payload: dict[str, object] = {"model": model, "enable_vision": enable_vision}
+        try:
+            response = self.client.post(f"{self.guardian_url}/admin/load", json=load_payload)
+            return response.status_code == 200
+        except httpx.RequestError:
+            return False
 
     def probe(self, model: str, candidate: Candidate) -> Probe:
         started = time.perf_counter()
@@ -296,7 +313,7 @@ class FinetuneV2Runner:
         *,
         models_config_path: str | Path,
         results_file: str | Path,
-        probe_runner: GuardianV2ProbeRunner,
+        probe_runner: ProbeRunnerProtocol,
         runtime_mode: str = "auto",
         smoke_image_url: str | None = None,
     ) -> None:
@@ -600,6 +617,13 @@ class FinetuneV2Runner:
         tmp_path.write_text(applied_text)
         tmp_path.replace(self.models_config_path)
         try:
+            enable_vision = runtime_mode_uses_vision(self.runtime_mode)
+            disk_ok = self.probe_runner.verify_disk_load(model_name, enable_vision=enable_vision)
+            if not disk_ok:
+                restore_previous_config()
+                raise RuntimeError(
+                    f"Applied finetune v2 winner failed no-override disk-load verification for '{model_name}'"
+                )
             applied_probe = self.probe_runner.probe(model_name, winner.candidate)
             if not applied_probe.success:
                 restore_previous_config()
