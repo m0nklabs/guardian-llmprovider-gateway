@@ -858,3 +858,120 @@ class TestPreferredModelRecommendations:
         def test_prefers_unbounded_reasoning_sibling(self, tmp_path: Path):
                 mgr = _make_manager(tmp_path, models_yaml=TOOL_ROUTING_YAML)
                 assert mgr.get_preferred_reasoning_model("Qwen-Agent") == "Qwen-Deep"
+
+
+# ── runtime_overrides validation ───────────────────────────────────────
+
+
+class TestRuntimeOverridesValidation:
+    @pytest.mark.asyncio
+    async def test_non_dict_runtime_overrides_raises(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+        with pytest.raises(ValueError, match="must be an object/dict"):
+            await mgr.load(runtime_overrides=["context", 65536])
+
+    @pytest.mark.asyncio
+    async def test_unknown_runtime_override_key_raises(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+        with pytest.raises(ValueError, match="unsupported keys"):
+            await mgr.load(runtime_overrides={"contex": 65536})
+
+    @pytest.mark.asyncio
+    async def test_context_bool_raises(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+        with pytest.raises(ValueError, match="context"):
+            await mgr.load(runtime_overrides={"context": True})
+
+    @pytest.mark.asyncio
+    async def test_ngl_bool_raises(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+        with pytest.raises(ValueError, match="ngl"):
+            await mgr.load(runtime_overrides={"ngl": False})
+
+    @pytest.mark.asyncio
+    async def test_context_float_raises(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+        with pytest.raises(ValueError, match="context"):
+            await mgr.load(runtime_overrides={"context": 65536.0})
+
+    @pytest.mark.asyncio
+    async def test_context_float_string_raises(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+        with pytest.raises(ValueError, match="context"):
+            await mgr.load(runtime_overrides={"context": "65536.0"})
+
+    @pytest.mark.asyncio
+    async def test_context_zero_raises(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+        with pytest.raises(ValueError, match="context"):
+            await mgr.load(runtime_overrides={"context": 0})
+
+    @pytest.mark.asyncio
+    async def test_ngl_negative_raises(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+        with pytest.raises(ValueError, match="ngl"):
+            await mgr.load(runtime_overrides={"ngl": -1})
+
+    @pytest.mark.asyncio
+    async def test_ngl_above_total_layers_raises(self, tmp_path: Path):
+        models_yaml = """\
+models:
+    GLM-4.7-Flash:
+        path: /models/GLM-4.7-Flash.gguf
+        context: 8192
+        ngl: 40
+        total_layers: 41
+        tensor_split: \"0.55,0.45\"
+"""
+        mgr = _make_manager(tmp_path, models_yaml=models_yaml)
+        mgr.current_model = "GLM-4.7-Flash"
+        with pytest.raises(ValueError, match="total_layers"):
+            await mgr.load(runtime_overrides={"ngl": 100})
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tensor_split", ["nan,0.5", "0.5,inf", "0.5,-inf"])
+    async def test_tensor_split_non_finite_values_raise(self, tmp_path: Path, tensor_split: str):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+        with pytest.raises(ValueError, match="finite"):
+            await mgr.load(runtime_overrides={"tensor_split": tensor_split})
+
+    @pytest.mark.asyncio
+    async def test_valid_int_context_and_ngl_accepted(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+        with (
+            patch.object(mgr, "_write_server_args"),
+            patch.object(mgr, "_stop_server", new_callable=AsyncMock),
+            patch.object(mgr, "_free_gpu_memory", new_callable=AsyncMock),
+            patch.object(mgr, "_start_server", new_callable=AsyncMock),
+            patch.object(mgr, "_wait_for_health", new_callable=AsyncMock, return_value=True),
+            patch.object(mgr, "verify_backend_model", new_callable=AsyncMock, return_value=True),
+            patch.object(mgr, "_save_context", new_callable=AsyncMock),
+        ):
+            await mgr.load(runtime_overrides={"context": 65536, "ngl": 40})
+
+    @pytest.mark.asyncio
+    async def test_valid_digit_string_context_accepted(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+        with (
+            patch.object(mgr, "_write_server_args") as mock_write,
+            patch.object(mgr, "_stop_server", new_callable=AsyncMock),
+            patch.object(mgr, "_free_gpu_memory", new_callable=AsyncMock),
+            patch.object(mgr, "_start_server", new_callable=AsyncMock),
+            patch.object(mgr, "_wait_for_health", new_callable=AsyncMock, return_value=True),
+            patch.object(mgr, "verify_backend_model", new_callable=AsyncMock, return_value=True),
+            patch.object(mgr, "_save_context", new_callable=AsyncMock),
+        ):
+            await mgr.load(runtime_overrides={"context": "65536"})
+        written_config = mock_write.call_args.args[0]
+        assert written_config["context"] == 65536

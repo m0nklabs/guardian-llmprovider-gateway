@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import logging
+import math
 import subprocess
 import yaml
 import time
@@ -92,6 +93,7 @@ class ModelManager:
         self._last_successful_verification_at: Optional[str] = None
         self._last_verified_model: Optional[str] = None
         self._last_backend_model: Optional[str] = None
+        self.current_vision_enabled = False
 
         # Initial model: use pinned model if set, otherwise fallback
         self.current_model = self._pinned_model or self._detect_initial_model()
@@ -889,7 +891,12 @@ class ModelManager:
         except Exception as e:
             logger.warning(f"⚠️ Failed to request ComfyUI memory free: {e}")
 
-    async def load(self, model_name: Optional[str] = None, enable_vision: Optional[bool] = None) -> None:
+    async def load(
+        self,
+        model_name: Optional[str] = None,
+        enable_vision: Optional[bool] = None,
+        runtime_overrides: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Reload llama-server with current (or specified) model."""
         # Re-read models.yaml so config edits take effect without Guardian restart
         self._refresh_model_registry()
@@ -899,6 +906,98 @@ class ModelManager:
         desired_vision = self._resolve_runtime_vision_flag(target, enable_vision)
         logger.info(f"🔄 Loading model '{target}' in {'vision' if desired_vision else 'text'} mode...")
         target_config = self.build_runtime_config(target, enable_vision=desired_vision)
+        if runtime_overrides is not None:
+            if not isinstance(runtime_overrides, dict):
+                raise ValueError(
+                    f"runtime_overrides must be an object/dict, got {type(runtime_overrides).__name__!r}"
+                )
+            runtime_total_layers: int | None = None
+            total_layers_value = self._resolve_runtime_value(target_config, "total_layers", enable_vision=desired_vision)
+            if total_layers_value not in (None, ""):
+                try:
+                    runtime_total_layers = int(total_layers_value)
+                except (TypeError, ValueError):
+                    runtime_total_layers = None
+            allowed_keys = {"context", "ngl", "tensor_split"}
+            unknown_keys = set(runtime_overrides) - allowed_keys
+            if unknown_keys:
+                unknown_keys_list = ", ".join(sorted(repr(key) for key in unknown_keys))
+                raise ValueError(
+                    "runtime_overrides contains unsupported keys: "
+                    f"{unknown_keys_list}. Allowed keys: context, ngl, tensor_split"
+                )
+            for key in ("context", "ngl", "tensor_split"):
+                if key not in runtime_overrides:
+                    continue
+                value = runtime_overrides[key]
+                if key in {"context", "ngl"}:
+                    if not isinstance(value, (int, str)) or isinstance(value, bool):
+                        raise ValueError(
+                            f"runtime_overrides.{key} must be an integer, got {type(value).__name__!r}"
+                        )
+                    if isinstance(value, str):
+                        stripped_value = value.strip()
+                        if not re.fullmatch(r"[0-9]+", stripped_value):
+                            raise ValueError(
+                                f"runtime_overrides.{key} string values must contain only digits, got {value!r}"
+                            )
+                        try:
+                            int_value = int(stripped_value)
+                        except ValueError:
+                            raise ValueError(
+                                f"runtime_overrides.{key} string values must contain only digits, got {value!r}"
+                            ) from None
+                    else:
+                        int_value = int(value)
+                    if key == "context" and int_value <= 0:
+                        raise ValueError(
+                            f"runtime_overrides.context must be a positive integer, got {int_value}"
+                        )
+                    if key == "ngl" and int_value < 0:
+                        raise ValueError(
+                            f"runtime_overrides.ngl must be a non-negative integer, got {int_value}"
+                        )
+                    if key == "ngl" and runtime_total_layers is not None and int_value > runtime_total_layers:
+                        raise ValueError(
+                            "runtime_overrides.ngl must not exceed the configured total_layers "
+                            f"({runtime_total_layers}), got {int_value}"
+                        )
+                    target_config[key] = int_value
+                elif key == "tensor_split" and value in (None, ""):
+                    target_config.pop("tensor_split", None)
+                elif key == "tensor_split":
+                    tensor_split = str(value)
+                    raw_split_parts = tensor_split.split(",")
+                    if len(raw_split_parts) != 2:
+                        raise ValueError(
+                            "runtime_overrides.tensor_split must contain exactly two comma-separated values, "
+                            f"got {len(raw_split_parts)} parts: {tensor_split}"
+                        )
+                    split_parts = [part.strip() for part in raw_split_parts]
+                    if any(not part for part in split_parts):
+                        raise ValueError(
+                            "runtime_overrides.tensor_split must contain two non-empty comma-separated values"
+                        )
+                    parsed_split_parts = []
+                    for raw_part in split_parts:
+                        try:
+                            parsed_part = float(raw_part)
+                        except ValueError as exc:
+                            raise ValueError("runtime_overrides.tensor_split must contain numeric values") from exc
+                        if not math.isfinite(parsed_part):
+                            raise ValueError(
+                                "runtime_overrides.tensor_split values must be finite numbers, "
+                                f"got {raw_part!r}"
+                            )
+                        parsed_split_parts.append(parsed_part)
+                    if any(part < 0 for part in parsed_split_parts):
+                        raise ValueError(
+                            "runtime_overrides.tensor_split values must be non-negative"
+                        )
+                    split_total = sum(parsed_split_parts)
+                    if split_total <= 0:
+                        raise ValueError("runtime_overrides.tensor_split must have a positive total")
+                    target_config["tensor_split"] = ",".join(split_parts)
         logger.info(
             "Runtime config for %s [%s]: context=%s ngl=%s split=%s mmproj=%s",
             target,

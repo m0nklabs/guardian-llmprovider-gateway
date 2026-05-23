@@ -147,6 +147,21 @@ searching.
 - `balanced` mode may still exist, but it is secondary to the primary operator
    paths `speed` and `context`.
 
+## Migration and Deprecation Plan
+
+- `scripts/finetune_model_config.py` remains the legacy v1 operator CLI while
+   v2 is being validated against each production host.
+- `scripts/finetune_v2_model_config.py` is the explicit v2 CLI. It uses
+   Guardian `/admin/load` runtime overrides for every dry-run probe and writes
+   only `data/model_finetune_v2_results.json` unless `--apply` is provided.
+- Operators should run v2 first with fixed `--context` or fixed `--ngl` when
+   validating parity against a known v1 result, then use
+   `--optimization speed|context` for exploratory tuning.
+- V1 should remain available only for fallback until live text and vision v2
+   runs on the target host produce auditable winners with no regression. Once
+   that parity is confirmed, the v2 CLI can become the default operator path and
+   v1 should be treated as deprecated.
+
 ## Optimization Modes
 
 ### `context`
