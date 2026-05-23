@@ -372,15 +372,18 @@ class FixtureProbeRunner:
         if key not in self._fixtures:
             raise KeyError(f"missing finetune v2 fixture for {key}")
         row = self._fixtures[key]
-        free_vram_mib = row["free_vram_mib"]
+        free_vram_mib = row.get("free_vram_mib")
         if (
             not isinstance(free_vram_mib, (list, tuple))
             or len(free_vram_mib) != 2
-            or any(not isinstance(value, (int, float)) for value in free_vram_mib)
+            or any(
+                isinstance(value, bool) or not isinstance(value, (int, float))
+                for value in free_vram_mib
+            )
         ):
             raise ValueError(f"fixture free_vram_mib must contain two values for {key}")
 
-        success = row["success"]
+        success = row.get("success")
         if not isinstance(success, bool):
             raise ValueError(f"fixture success must be a boolean for {key}")
 
@@ -392,11 +395,15 @@ class FixtureProbeRunner:
         if error is not None and not isinstance(error, str):
             raise ValueError(f"fixture error must be a string or null for {key}")
 
+        total_seconds = row.get("total_seconds")
+        if not isinstance(total_seconds, (int, float)) or isinstance(total_seconds, bool):
+            raise ValueError(f"fixture total_seconds must be a number for {key}")
+
         probe = Probe(
             candidate=candidate,
             success=success,
             free_vram_mib=(float(free_vram_mib[0]), float(free_vram_mib[1])),
-            total_seconds=float(row["total_seconds"]),
+            total_seconds=float(total_seconds),
             order=len(self.probes),
             telemetry_source=str(row.get("telemetry_source", "post_smoke")),
             cache_backed=cache_backed,
