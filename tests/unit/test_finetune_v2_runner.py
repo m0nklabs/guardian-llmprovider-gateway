@@ -1,0 +1,182 @@
+"""Tests for the Guardian-backed finetune v2 runner."""
+
+import json
+from pathlib import Path
+from unittest.mock import patch
+
+import httpx
+
+from app.tweaker.finetune_v2_contracts import Candidate, Probe
+from app.tweaker.finetune_v2_runner import FinetuneV2Runner, GuardianV2ProbeRunner
+
+
+def _write_models(path: Path) -> None:
+    path.write_text(
+        """\
+models:
+  TestModel:
+    path: /tmp/test-model.gguf
+    context: 65536
+    benchmark_context_limit: 131072
+    ngl: 40
+    total_layers: 41
+    tensor_split: "0.55,0.45"
+    vision_mmproj: /tmp/mmproj.gguf
+    vision_context: 32768
+    vision_ngl: 38
+    vision_total_layers: 41
+    vision_tensor_split: "0.60,0.40"
+aliases:
+  test: TestModel
+"""
+    )
+
+
+class FakeProbeRunner:
+    def __init__(self, free_vram_mib=(300.0, 280.0)) -> None:
+        self.free_vram_mib = free_vram_mib
+        self.calls: list[tuple[str, Candidate]] = []
+
+    def probe(self, model: str, candidate: Candidate) -> Probe:
+        self.calls.append((model, candidate))
+        return Probe(
+            candidate=candidate,
+            success=True,
+            free_vram_mib=self.free_vram_mib,
+            total_seconds=float(len(self.calls)),
+            order=len(self.calls) - 1,
+        )
+
+
+def test_v2_dry_run_keeps_models_yaml_unchanged_and_logs_probe_history(tmp_path: Path):
+    models_path = tmp_path / "models.yaml"
+    results_path = tmp_path / "v2_results.json"
+    _write_models(models_path)
+    before = models_path.read_bytes()
+    fake_runner = FakeProbeRunner()
+
+    runner = FinetuneV2Runner(
+        models_config_path=models_path,
+        results_file=results_path,
+        probe_runner=fake_runner,
+        runtime_mode="text",
+    )
+    result = runner.tune_model(
+        "test",
+        optimization="context",
+        fixed_context=65536,
+        fixed_ngl=40,
+        split_candidates=["0.55,0.45"],
+    )
+
+    assert models_path.read_bytes() == before
+    assert result.applied is False
+    assert result.winner.candidate.context == 65536
+    assert result.winner_explanation["comparator_mode"] == "context"
+    history = json.loads(results_path.read_text())
+    assert history[-1]["status"] == "completed"
+    assert history[-1]["version"] == 2
+    assert history[-1]["probes"][0]["candidate"]["context"] == 65536
+    assert history[-1]["winner_explanation"]["winner_reason"]["code"] == "context_lexicographic_winner"
+
+
+def test_v2_apply_writes_winner_once_to_runtime_specific_models_yaml_keys(tmp_path: Path):
+    models_path = tmp_path / "models.yaml"
+    results_path = tmp_path / "v2_results.json"
+    _write_models(models_path)
+    fake_runner = FakeProbeRunner()
+
+    runner = FinetuneV2Runner(
+        models_config_path=models_path,
+        results_file=results_path,
+        probe_runner=fake_runner,
+        runtime_mode="vision",
+    )
+    result = runner.tune_model(
+        "TestModel",
+        optimization="speed",
+        fixed_context=32768,
+        fixed_ngl=38,
+        split_candidates=["0.60,0.40"],
+        apply=True,
+    )
+
+    assert result.applied is True
+    rendered = models_path.read_text()
+    assert 'vision_context: 32768' in rendered
+    assert 'vision_ngl: 38' in rendered
+    assert 'vision_tensor_split: "0.60,0.40"' in rendered
+    assert len(result.probes) == 1
+    assert len(fake_runner.calls) == 2
+
+
+def test_v2_fixed_context_and_ngl_pin_all_probes(tmp_path: Path):
+    models_path = tmp_path / "models.yaml"
+    results_path = tmp_path / "v2_results.json"
+    _write_models(models_path)
+    fake_runner = FakeProbeRunner(free_vram_mib=(900.0, 850.0))
+
+    runner = FinetuneV2Runner(
+        models_config_path=models_path,
+        results_file=results_path,
+        probe_runner=fake_runner,
+        runtime_mode="text",
+    )
+    runner.tune_model(
+        "TestModel",
+        optimization="speed",
+        fixed_context=65536,
+        fixed_ngl=39,
+        split_candidates=["0.55,0.45", "0.60,0.40"],
+    )
+
+    assert fake_runner.calls
+    assert {call[1].context for call in fake_runner.calls} == {65536}
+    assert {call[1].ngl for call in fake_runner.calls} == {39}
+
+
+def test_guardian_v2_probe_runner_uses_admin_load_runtime_overrides():
+    load_payloads = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/admin/load":
+            load_payloads.append(json.loads(request.content.decode()))
+            return httpx.Response(200, json={"status": "loaded"})
+        if request.url.path == "/v1/chat/completions":
+            return httpx.Response(200, json={"choices": [{"message": {"content": "FIT OK"}}]})
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    runner = GuardianV2ProbeRunner(
+        guardian_url="http://guardian.test",
+        api_key="test-key",
+        smoke_prompt="FIT?",
+        smoke_max_tokens=4,
+        smoke_image_url=None,
+        client=client,
+    )
+    candidate = Candidate(context=65536, ngl=40, tensor_split="0.55,0.45")
+
+    with patch(
+        "app.tweaker.finetune_v2_runner.read_gpu_vram_snapshot",
+        return_value={
+            "0": {"free": 300.0, "total": 12000.0, "free_pct": 2.5},
+            "1": {"free": 280.0, "total": 16000.0, "free_pct": 1.75},
+        },
+    ):
+        probe = runner.probe("TestModel", candidate)
+
+    assert probe.success is True
+    assert probe.free_vram_mib == (300.0, 280.0)
+    assert load_payloads == [
+        {
+            "model": "TestModel",
+            "enable_vision": False,
+            "runtime_overrides": {
+                "context": 65536,
+                "ngl": 40,
+                "tensor_split": "0.55,0.45",
+            },
+        }
+    ]
+

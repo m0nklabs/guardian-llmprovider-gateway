@@ -3,9 +3,9 @@
 ## 2026-05-21 Finetune V2 Rewrite
 
 - [x] Write a requirements doc for finetune v2 before touching the implementation.
-- [ ] Rebuild finetune winner selection so `context` and `speed` use explicit mode-aware comparators instead of a hidden balance-first override.
-- [ ] Move v2 search state to in-memory working configs and only write `models.yaml` once on final `--apply`.
-- [ ] Split the finetune engine into smaller planner, probe, ranking, and persistence units.
+- [x] Rebuild finetune winner selection so `context` and `speed` use explicit mode-aware comparators instead of a hidden balance-first override.
+- [x] Move v2 search state to in-memory working configs and only write `models.yaml` once on final `--apply`.
+- [x] Split the finetune engine into smaller planner, probe, ranking, and persistence units.
 
 ## 2026-05-21 Layer Ceiling Metadata
 

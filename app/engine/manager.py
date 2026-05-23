@@ -889,7 +889,12 @@ class ModelManager:
         except Exception as e:
             logger.warning(f"⚠️ Failed to request ComfyUI memory free: {e}")
 
-    async def load(self, model_name: Optional[str] = None, enable_vision: Optional[bool] = None) -> None:
+    async def load(
+        self,
+        model_name: Optional[str] = None,
+        enable_vision: Optional[bool] = None,
+        runtime_overrides: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Reload llama-server with current (or specified) model."""
         # Re-read models.yaml so config edits take effect without Guardian restart
         self._refresh_model_registry()
@@ -899,6 +904,16 @@ class ModelManager:
         desired_vision = self._resolve_runtime_vision_flag(target, enable_vision)
         logger.info(f"🔄 Loading model '{target}' in {'vision' if desired_vision else 'text'} mode...")
         target_config = self.build_runtime_config(target, enable_vision=desired_vision)
+        if runtime_overrides:
+            for key in ("context", "ngl", "tensor_split"):
+                if key in runtime_overrides:
+                    value = runtime_overrides[key]
+                    if value in (None, "") and key == "tensor_split":
+                        target_config.pop("tensor_split", None)
+                    elif key in {"context", "ngl"}:
+                        target_config[key] = int(value)
+                    else:
+                        target_config[key] = str(value)
         logger.info(
             "Runtime config for %s [%s]: context=%s ngl=%s split=%s mmproj=%s",
             target,

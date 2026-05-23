@@ -1597,6 +1597,9 @@ async def admin_load(request: Request, client_id: str = Depends(verify_api_key))
         except ValueError:
             pass
     enable_vision = body.get("enable_vision")
+    runtime_overrides = body.get("runtime_overrides")
+    if runtime_overrides is not None and not isinstance(runtime_overrides, dict):
+        raise HTTPException(status_code=400, detail="runtime_overrides must be an object")
     generation = _reset_startup_check_status(
         source="admin",
         phase="manual_load",
@@ -1614,7 +1617,11 @@ async def admin_load(request: Request, client_id: str = Depends(verify_api_key))
                 target_model=target or model_manager.current_model,
                 requested_model=body.get("model"),
                 owner=client_id,
-                operation=lambda: model_manager.load(target, enable_vision=enable_vision),
+                operation=lambda: model_manager.load(
+                    target,
+                    enable_vision=enable_vision,
+                    runtime_overrides=runtime_overrides,
+                ),
                 generation=generation,
             )
     except Exception as e:

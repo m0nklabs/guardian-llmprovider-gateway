@@ -29,7 +29,10 @@ def parse_args(argv: Sequence[str] | None = None) -> tuple[argparse.Namespace, l
 
 def main(argv: Sequence[str] | None = None) -> int:
     args, pytest_args = parse_args(argv)
-    test_paths = ["tests/unit/test_finetune_v2_contracts.py"]
+    test_paths = [
+        "tests/unit/test_finetune_v2_contracts.py",
+        "tests/unit/test_finetune_v2_runner.py",
+    ]
     env = os.environ.copy()
     if args.live:
         env["FINETUNE_V2_LIVE"] = "1"
