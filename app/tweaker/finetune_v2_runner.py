@@ -465,6 +465,7 @@ class FinetuneV2Runner:
         )
         seen_candidates: set[tuple[int, int, str, str, bool]] = set()
         low_headroom_followups_used = 0
+        remaining_low_headroom_followups: int | None = None
         convergence: dict[str, object] = {"should_continue": True, "reason": "not_started"}
 
         self.results.start_run(
@@ -477,6 +478,12 @@ class FinetuneV2Runner:
         )
         try:
             while queued:
+                if remaining_low_headroom_followups is not None:
+                    if remaining_low_headroom_followups <= 0:
+                        break
+                    remaining_low_headroom_followups -= 1
+                    low_headroom_followups_used += 1
+
                 action = queued.pop(0)
                 candidate = self._clamp_candidate(action.candidate, limits, fixed_context, fixed_ngl)
                 key = (
@@ -505,8 +512,11 @@ class FinetuneV2Runner:
                     )
                     if convergence["should_continue"] is False:
                         break
-                    if convergence["reason"] == "low_headroom_followup":
-                        low_headroom_followups_used += 1
+                    if (
+                        convergence["reason"] == "low_headroom_followup"
+                        and remaining_low_headroom_followups is None
+                    ):
+                        remaining_low_headroom_followups = int(convergence["remaining_followups"])
                     if fixed_ngl is None:
                         queued[:0] = upward_ngl_retry_actions(probe, limits, max_retries=1)
                     rebalance = split_rebalance_action(probes, better_split=self._better_split(probe, split_min, split_max))
@@ -635,10 +645,14 @@ class FinetuneV2Runner:
         fixed_context: int | None,
         fixed_ngl: int | None,
     ) -> Candidate:
+        clamped_context = fixed_context if fixed_context is not None else min(candidate.context, limits.max_context)
+        clamped_ngl = fixed_ngl if fixed_ngl is not None else candidate.ngl
+        clamped_ngl = min(int(clamped_ngl), limits.total_layers)
+
         return replace(
             candidate,
-            context=int(fixed_context if fixed_context is not None else min(candidate.context, limits.max_context)),
-            ngl=int(fixed_ngl if fixed_ngl is not None else min(candidate.ngl, limits.total_layers)),
+            context=int(clamped_context),
+            ngl=clamped_ngl,
         )
 
     def _apply_winner(self, model_name: str, model_config: dict[str, object], winner: Probe) -> None:
@@ -658,6 +672,10 @@ class FinetuneV2Runner:
         def restore_previous_config() -> None:
             rollback_path.write_text(previous_text)
             rollback_path.replace(self.models_config_path)
+            self.probe_runner.verify_disk_load(
+                model_name,
+                enable_vision=runtime_mode_uses_vision(self.runtime_mode),
+            )
 
         tmp_path.write_text(applied_text)
         tmp_path.replace(self.models_config_path)

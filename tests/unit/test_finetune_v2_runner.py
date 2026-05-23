@@ -71,6 +71,30 @@ class FakeProbeRunner:
         )
 
 
+class SequencedProbeRunner:
+    def __init__(self, outcomes: list[bool]) -> None:
+        self.outcomes = outcomes
+        self.calls: list[tuple[str, Candidate]] = []
+        self.disk_load_calls: list[tuple[str, bool]] = []
+
+    def verify_disk_load(self, model: str, *, enable_vision: bool = False) -> bool:
+        self.disk_load_calls.append((model, enable_vision))
+        return True
+
+    def probe(self, model: str, candidate: Candidate) -> Probe:
+        self.calls.append((model, candidate))
+        index = min(len(self.calls) - 1, len(self.outcomes) - 1)
+        success = self.outcomes[index]
+        return Probe(
+            candidate=candidate,
+            success=success,
+            free_vram_mib=(300.0, 280.0),
+            total_seconds=float(len(self.calls)),
+            order=len(self.calls) - 1,
+            error=None if success else "probe failed",
+        )
+
+
 def test_v2_dry_run_keeps_models_yaml_unchanged_and_logs_probe_history(tmp_path: Path):
     models_path = tmp_path / "models.yaml"
     results_path = tmp_path / "v2_results.json"
@@ -159,6 +183,91 @@ def test_v2_fixed_context_and_ngl_pin_all_probes(tmp_path: Path):
     assert fake_runner.calls
     assert {call[1].context for call in fake_runner.calls} == {65536}
     assert {call[1].ngl for call in fake_runner.calls} == {39}
+
+
+def test_v2_fixed_ngl_is_capped_to_total_layers(tmp_path: Path):
+    models_path = tmp_path / "models.yaml"
+    results_path = tmp_path / "v2_results.json"
+    _write_models(models_path)
+    fake_runner = FakeProbeRunner()
+
+    runner = FinetuneV2Runner(
+        models_config_path=models_path,
+        results_file=results_path,
+        probe_runner=fake_runner,
+        runtime_mode="text",
+    )
+    result = runner.tune_model(
+        "TestModel",
+        optimization="speed",
+        fixed_context=65536,
+        fixed_ngl=99,
+        split_candidates=["0.55,0.45"],
+    )
+
+    assert result.winner.candidate.ngl == 41
+    assert {call[1].ngl for call in fake_runner.calls} == {41}
+
+
+def test_v2_low_headroom_followup_budget_counts_all_followup_attempts(tmp_path: Path):
+    models_path = tmp_path / "models.yaml"
+    results_path = tmp_path / "v2_results.json"
+    _write_models(models_path)
+    fake_runner = SequencedProbeRunner([True, False, False, False, False, False])
+
+    runner = FinetuneV2Runner(
+        models_config_path=models_path,
+        results_file=results_path,
+        probe_runner=fake_runner,
+        runtime_mode="text",
+    )
+
+    with patch(
+        "app.tweaker.finetune_v2_runner.convergence_status_from_history",
+        side_effect=lambda probes, limits, **kwargs: {
+            "should_continue": True,
+            "reason": "low_headroom_followup" if len(probes) == 1 else "not_started",
+            "remaining_followups": 2,
+        },
+    ):
+        result = runner.tune_model(
+            "TestModel",
+            optimization="speed",
+            fixed_context=65536,
+            split_candidates=["0.55,0.45"],
+        )
+
+    assert len(result.probes) == 2
+    assert len(fake_runner.calls) == 2
+    assert result.convergence["reason"] == "not_started"
+
+
+def test_v2_apply_failure_restores_yaml_and_reloads_previous_config(tmp_path: Path):
+    models_path = tmp_path / "models.yaml"
+    results_path = tmp_path / "v2_results.json"
+    _write_models(models_path)
+    before = models_path.read_text()
+    fake_runner = SequencedProbeRunner([True, False])
+
+    runner = FinetuneV2Runner(
+        models_config_path=models_path,
+        results_file=results_path,
+        probe_runner=fake_runner,
+        runtime_mode="text",
+    )
+
+    with pytest.raises(RuntimeError, match="failed to reload"):
+        runner.tune_model(
+            "TestModel",
+            optimization="speed",
+            fixed_context=65536,
+            fixed_ngl=40,
+            split_candidates=["0.55,0.45"],
+            apply=True,
+        )
+
+    assert models_path.read_text() == before
+    assert len(fake_runner.disk_load_calls) == 2
 
 
 def test_v2_vision_mode_requires_configured_vision_runtime(tmp_path: Path):
