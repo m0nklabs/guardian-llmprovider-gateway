@@ -184,7 +184,9 @@ def rank_successes(
         "comparator_mode": optimization,
         "runtime_mode": runtime_mode,
         "winner_reason": {
-            "code": f"{optimization}_lexicographic_winner",
+            "code": (
+                "balanced_score_winner" if optimization == "balanced" else f"{optimization}_lexicographic_winner"
+            ),
             "key": _ranking_key(winner, optimization),
         },
         "losing_reasons": [
