@@ -490,7 +490,7 @@ class FinetuneV2Runner:
             optimization=optimization,
             fixed_context=fixed_context,
             fixed_ngl=fixed_ngl,
-            applied=False,
+            applied=apply,
         )
         try:
             while queued:
