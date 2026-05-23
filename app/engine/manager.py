@@ -911,6 +911,13 @@ class ModelManager:
                 raise ValueError(
                     f"runtime_overrides must be an object/dict, got {type(runtime_overrides).__name__!r}"
                 )
+            runtime_total_layers: int | None = None
+            total_layers_value = self._resolve_runtime_value(target_config, "total_layers", enable_vision=desired_vision)
+            if total_layers_value not in (None, ""):
+                try:
+                    runtime_total_layers = int(total_layers_value)
+                except (TypeError, ValueError):
+                    runtime_total_layers = None
             allowed_keys = {"context", "ngl", "tensor_split"}
             unknown_keys = set(runtime_overrides) - allowed_keys
             if unknown_keys:
@@ -940,6 +947,11 @@ class ModelManager:
                     if key == "ngl" and int_value < 0:
                         raise ValueError(
                             f"runtime_overrides.ngl must be a non-negative integer, got {int_value}"
+                        )
+                    if key == "ngl" and runtime_total_layers is not None and int_value > runtime_total_layers:
+                        raise ValueError(
+                            "runtime_overrides.ngl must not exceed the configured total_layers "
+                            f"({runtime_total_layers}), got {int_value}"
                         )
                     target_config[key] = int_value
                 elif key == "tensor_split" and value in (None, ""):

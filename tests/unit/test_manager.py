@@ -921,6 +921,22 @@ class TestRuntimeOverridesValidation:
             await mgr.load(runtime_overrides={"ngl": -1})
 
     @pytest.mark.asyncio
+    async def test_ngl_above_total_layers_raises(self, tmp_path: Path):
+        models_yaml = """\
+models:
+    GLM-4.7-Flash:
+        path: /models/GLM-4.7-Flash.gguf
+        context: 8192
+        ngl: 40
+        total_layers: 41
+        tensor_split: \"0.55,0.45\"
+"""
+        mgr = _make_manager(tmp_path, models_yaml=models_yaml)
+        mgr.current_model = "GLM-4.7-Flash"
+        with pytest.raises(ValueError, match="total_layers"):
+            await mgr.load(runtime_overrides={"ngl": 100})
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("tensor_split", ["nan,0.5", "0.5,inf", "0.5,-inf"])
     async def test_tensor_split_non_finite_values_raise(self, tmp_path: Path, tensor_split: str):
         mgr = _make_manager(tmp_path)

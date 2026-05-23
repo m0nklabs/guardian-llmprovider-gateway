@@ -443,7 +443,10 @@ class FinetuneV2Runner:
         limits = self._runtime_limits(model_config, fixed_context=fixed_context)
         seed_split = self._seed_split(model_config, split_min=split_min, split_max=split_max)
         has_mmproj = self.runtime_mode == "vision"
-        allowed_context = fixed_context or limits.max_context
+        speed_context_floor = None
+        if optimization == "speed":
+            speed_context_floor = fixed_context if fixed_context is not None else limits.active_context
+        allowed_context = speed_context_floor if speed_context_floor is not None else (fixed_context or limits.max_context)
         allowed_ngl = fixed_ngl if fixed_ngl is not None else limits.total_layers
         probes: list[Probe] = []
         # Upward ngl retries are prepended so local follow-ups run before the wider candidate grid.
@@ -522,7 +525,7 @@ class FinetuneV2Runner:
                         probes,
                         limits,
                         optimization=optimization,
-                        context_floor=fixed_context if optimization == "speed" else None,
+                        context_floor=speed_context_floor,
                         low_headroom_followups_used=low_headroom_followups_used,
                         allowed_context=allowed_context,
                         allowed_ngl=allowed_ngl,
@@ -534,6 +537,8 @@ class FinetuneV2Runner:
                         and remaining_low_headroom_followups is None
                     ):
                         remaining_low_headroom_followups = int(convergence["remaining_followups"])
+                    elif remaining_low_headroom_followups is not None and convergence["reason"] != "low_headroom_followup":
+                        break
                     if fixed_ngl is None:
                         retry_actions = upward_ngl_retry_actions(probe, limits, max_retries=1)
                         for retry_action in reversed(retry_actions):
@@ -542,6 +547,20 @@ class FinetuneV2Runner:
                     if rebalance is not None:
                         queued.append(rebalance)
                 else:
+                    if remaining_low_headroom_followups is not None:
+                        convergence = convergence_status_from_history(
+                            probes,
+                            limits,
+                            optimization=optimization,
+                            context_floor=speed_context_floor,
+                            low_headroom_followups_used=low_headroom_followups_used,
+                            allowed_context=allowed_context,
+                            allowed_ngl=allowed_ngl,
+                        )
+                        if convergence["should_continue"] is False:
+                            break
+                        if convergence["reason"] != "low_headroom_followup":
+                            break
                     seed_retry = next_after_seed_failure(probes, limits)
                     if seed_retry is not None and fixed_ngl is None:
                         queued.append(seed_retry)
@@ -549,13 +568,13 @@ class FinetuneV2Runner:
             winner, explanation = rank_successes(
                 probes,
                 optimization=optimization,
-                context_floor=fixed_context if optimization == "speed" else None,
+                context_floor=speed_context_floor,
             )
             convergence = convergence_status_from_history(
                 probes,
                 limits,
                 optimization=optimization,
-                context_floor=fixed_context if optimization == "speed" else None,
+                context_floor=speed_context_floor,
                 low_headroom_followups_used=low_headroom_followups_used,
                 allowed_context=allowed_context,
                 allowed_ngl=allowed_ngl,
@@ -599,6 +618,8 @@ class FinetuneV2Runner:
         split_max: float,
     ) -> list[Candidate]:
         contexts = [fixed_context] if fixed_context is not None else [limits.active_context, limits.max_context]
+        if optimization == "speed" and fixed_context is None:
+            contexts = [limits.active_context]
         if optimization == "context" and fixed_context is None:
             contexts = [limits.max_context, limits.active_context]
         ngl_stride = max(1, ngl_step)

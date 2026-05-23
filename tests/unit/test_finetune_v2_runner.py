@@ -244,6 +244,30 @@ def test_v2_low_headroom_followup_budget_counts_all_followup_attempts(tmp_path: 
     assert result.convergence["reason"] == "not_started"
 
 
+def test_v2_speed_mode_uses_active_context_as_default_floor(tmp_path: Path):
+    models_path = tmp_path / "models.yaml"
+    results_path = tmp_path / "v2_results.json"
+    _write_models(models_path)
+    fake_runner = FakeProbeRunner(free_vram_mib=(1200.0, 1200.0))
+
+    runner = FinetuneV2Runner(
+        models_config_path=models_path,
+        results_file=results_path,
+        probe_runner=fake_runner,
+        runtime_mode="text",
+    )
+    result = runner.tune_model(
+        "TestModel",
+        optimization="speed",
+        fixed_ngl=41,
+        split_candidates=["0.55,0.45"],
+    )
+
+    assert len(result.probes) == 1
+    assert result.winner.candidate.context == 65536
+    assert result.convergence["reason"] == "max_context_and_ngl"
+
+
 def test_v2_apply_failure_restores_yaml_and_reloads_previous_config(tmp_path: Path):
     models_path = tmp_path / "models.yaml"
     results_path = tmp_path / "v2_results.json"
