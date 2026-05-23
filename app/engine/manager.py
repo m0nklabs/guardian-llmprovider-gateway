@@ -935,11 +935,20 @@ class ModelManager:
                         raise ValueError(
                             f"runtime_overrides.{key} must be an integer, got {type(value).__name__!r}"
                         )
-                    if isinstance(value, str) and not value.strip().isdigit():
-                        raise ValueError(
-                            f"runtime_overrides.{key} string values must contain only digits, got {value!r}"
-                        )
-                    int_value = int(value)
+                    if isinstance(value, str):
+                        stripped_value = value.strip()
+                        if not re.fullmatch(r"[0-9]+", stripped_value):
+                            raise ValueError(
+                                f"runtime_overrides.{key} string values must contain only digits, got {value!r}"
+                            )
+                        try:
+                            int_value = int(stripped_value)
+                        except ValueError:
+                            raise ValueError(
+                                f"runtime_overrides.{key} string values must contain only digits, got {value!r}"
+                            ) from None
+                    else:
+                        int_value = int(value)
                     if key == "context" and int_value <= 0:
                         raise ValueError(
                             f"runtime_overrides.context must be a positive integer, got {int_value}"
