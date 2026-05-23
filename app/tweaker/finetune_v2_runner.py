@@ -533,7 +533,8 @@ class FinetuneV2Runner:
                         remaining_low_headroom_followups = int(convergence["remaining_followups"])
                     if fixed_ngl is None:
                         retry_actions = upward_ngl_retry_actions(probe, limits, max_retries=1)
-                        queued.extendleft(reversed(retry_actions))
+                        for retry_action in reversed(retry_actions):
+                            queued.appendleft(retry_action)
                     rebalance = split_rebalance_action(probes, better_split=self._better_split(probe, split_min, split_max))
                     if rebalance is not None:
                         queued.append(rebalance)

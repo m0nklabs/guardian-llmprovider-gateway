@@ -93,6 +93,7 @@ class ModelManager:
         self._last_successful_verification_at: Optional[str] = None
         self._last_verified_model: Optional[str] = None
         self._last_backend_model: Optional[str] = None
+        self.current_vision_enabled = False
 
         # Initial model: use pinned model if set, otherwise fallback
         self.current_model = self._pinned_model or self._detect_initial_model()
