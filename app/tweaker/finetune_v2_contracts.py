@@ -16,6 +16,7 @@ from typing import Callable, Iterable, Mapping, Sequence
 LOW_HEADROOM_MIB = 750.0
 FINAL_HEADROOM_MIB = 500.0
 LOW_HEADROOM_FOLLOWUP_LIMIT = 5
+VALID_RUNTIME_MODES = {"text", "vision"}
 
 
 @dataclass(frozen=True)
@@ -38,8 +39,8 @@ class Candidate:
 class Probe:
     candidate: Candidate
     success: bool
-    free_vram_mib: tuple[float, float] = (0.0, 0.0)
-    total_seconds: float = 0.0
+    free_vram_mib: tuple[float, float] | None = None
+    total_seconds: float | None = None
     order: int = 0
     telemetry_source: str = "post_smoke"
     cache_backed: bool = False
@@ -59,6 +60,27 @@ def clamp_ngl(ngl: int, limits: RuntimeLimits) -> int:
 
 def clamp_candidate(candidate: Candidate, limits: RuntimeLimits) -> Candidate:
     return replace(candidate, ngl=clamp_ngl(candidate.ngl, limits))
+
+
+def _normalize_runtime_mode(runtime_mode: object) -> str:
+    if not isinstance(runtime_mode, str):
+        raise ValueError("runtime_mode must be a string")
+    runtime_mode = runtime_mode.strip().lower()
+    if runtime_mode not in VALID_RUNTIME_MODES:
+        raise ValueError("runtime_mode must be one of: text, vision")
+    return runtime_mode
+
+
+def _required_free_vram_mib(probe: Probe) -> tuple[float, float]:
+    if probe.free_vram_mib is None:
+        raise ValueError("successful probe free_vram_mib telemetry is required")
+    return probe.free_vram_mib
+
+
+def _required_total_seconds(probe: Probe) -> float:
+    if probe.total_seconds is None:
+        raise ValueError("successful probe total_seconds telemetry is required")
+    return probe.total_seconds
 
 
 def unique_explicit_ngls(ngls: Iterable[int], limits: RuntimeLimits) -> list[int]:
@@ -82,9 +104,7 @@ def initial_seed_candidates(
     runtime_mode: str = "text",
     has_mmproj: bool = False,
 ) -> list[Candidate]:
-    runtime_mode = runtime_mode.strip().lower()
-    if runtime_mode not in {"text", "vision"}:
-        raise ValueError("runtime_mode must be one of: text, vision")
+    runtime_mode = _normalize_runtime_mode(runtime_mode)
 
     context = fixed_context if fixed_context is not None else limits.active_context
     if optimization == "context" and fixed_context is None:
@@ -107,29 +127,30 @@ def _successful(probes: Sequence[Probe]) -> list[Probe]:
 
 
 def _ensure_single_runtime_pool(probes: Sequence[Probe]) -> None:
-    runtime_modes = {probe.candidate.runtime_mode for probe in probes}
+    runtime_modes = {_normalize_runtime_mode(probe.candidate.runtime_mode) for probe in probes}
     if len(runtime_modes) > 1:
         raise ValueError("finetune v2 ranking pools must not mix text and vision probes")
 
 
 def _bottleneck_headroom(probe: Probe) -> float:
-    return min(probe.free_vram_mib)
+    return min(_required_free_vram_mib(probe))
 
 
 def _ranking_key(probe: Probe, optimization: str) -> tuple[float, ...]:
     candidate = probe.candidate
+    total_seconds = _required_total_seconds(probe)
     if optimization == "context":
         return (
             candidate.context,
             candidate.ngl,
             _bottleneck_headroom(probe),
-            -probe.total_seconds,
+            -total_seconds,
             -probe.order,
         )
     if optimization == "speed":
         return (
             candidate.ngl,
-            -probe.total_seconds,
+            -total_seconds,
             candidate.context,
             _bottleneck_headroom(probe),
             -probe.order,
@@ -138,7 +159,7 @@ def _ranking_key(probe: Probe, optimization: str) -> tuple[float, ...]:
         # Scale ngl to one 1024-token context step so balanced mode uses an
         # explicit score instead of preferring splits merely for being close to 50/50.
         score = candidate.context + (candidate.ngl * 1024) + _bottleneck_headroom(probe)
-        return (score, -probe.total_seconds, -probe.order)
+        return (score, -total_seconds, -probe.order)
     raise ValueError(f"unknown optimization mode: {optimization}")
 
 
@@ -158,9 +179,10 @@ def rank_successes(
             raise ValueError("no successful probe met the speed-mode context floor")
 
     winner = max(successes, key=lambda probe: _ranking_key(probe, optimization))
+    runtime_mode = _normalize_runtime_mode(winner.candidate.runtime_mode)
     explanation = {
         "comparator_mode": optimization,
-        "runtime_mode": winner.candidate.runtime_mode,
+        "runtime_mode": runtime_mode,
         "winner_reason": {
             "code": f"{optimization}_lexicographic_winner",
             "key": _ranking_key(winner, optimization),
@@ -238,15 +260,16 @@ def convergence_status(
     allowed_ngl: int | None = None,
 ) -> dict[str, object]:
     candidate = best_success.candidate
+    free_vram_mib = _required_free_vram_mib(best_success)
     target_context = allowed_context if allowed_context is not None else limits.max_context
     target_ngl = allowed_ngl if allowed_ngl is not None else limits.total_layers
-    both_under_final = all(value < FINAL_HEADROOM_MIB for value in best_success.free_vram_mib)
+    both_under_final = all(value < FINAL_HEADROOM_MIB for value in free_vram_mib)
     at_max_shape = candidate.context >= target_context and candidate.ngl >= target_ngl
     if both_under_final:
         return {"should_continue": False, "reason": "both_gpus_below_500_mib"}
     if at_max_shape:
         return {"should_continue": False, "reason": "max_context_and_ngl"}
-    both_under_low = all(value < LOW_HEADROOM_MIB for value in best_success.free_vram_mib)
+    both_under_low = all(value < LOW_HEADROOM_MIB for value in free_vram_mib)
     if both_under_low:
         remaining = LOW_HEADROOM_FOLLOWUP_LIMIT - low_headroom_followups_used
         if remaining <= 0:
@@ -295,12 +318,13 @@ class FixtureProbeRunner:
     def __init__(self, fixture_rows: Sequence[Mapping[str, object]]) -> None:
         self._fixtures: dict[tuple[str, int, int, str, bool], Mapping[str, object]] = {}
         for row in fixture_rows:
-            runtime_mode = row.get("runtime_mode")
-            if not isinstance(runtime_mode, str):
+            raw_runtime_mode = row.get("runtime_mode")
+            if not isinstance(raw_runtime_mode, str):
                 raise ValueError("fixture runtime_mode must be a string")
-            runtime_mode = runtime_mode.strip().lower()
-            if runtime_mode not in {"text", "vision"}:
-                raise ValueError("fixture runtime_mode must be 'text' or 'vision'")
+            try:
+                runtime_mode = _normalize_runtime_mode(raw_runtime_mode)
+            except ValueError as exc:
+                raise ValueError("fixture runtime_mode must be 'text' or 'vision'") from exc
 
             has_mmproj = row.get("has_mmproj", False)
             if not isinstance(has_mmproj, bool):
@@ -318,8 +342,10 @@ class FixtureProbeRunner:
         self.probes: list[Probe] = []
 
     def probe(self, candidate: Candidate) -> Probe:
+        runtime_mode = _normalize_runtime_mode(candidate.runtime_mode)
+        candidate = replace(candidate, runtime_mode=runtime_mode)
         key = (
-            candidate.runtime_mode,
+            runtime_mode,
             candidate.context,
             candidate.ngl,
             candidate.tensor_split,

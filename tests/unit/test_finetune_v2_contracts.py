@@ -189,6 +189,7 @@ def test_convergence_from_history_ignores_failed_and_lower_ranked_latest_probe()
         candidate=Candidate(context=131072, ngl=41, tensor_split="0.55,0.45"),
         success=True,
         free_vram_mib=(900, 850),
+        total_seconds=5.0,
         order=0,
     )
     failed_later = Probe(
@@ -201,6 +202,7 @@ def test_convergence_from_history_ignores_failed_and_lower_ranked_latest_probe()
         candidate=Candidate(context=65536, ngl=41, tensor_split="0.60,0.40"),
         success=True,
         free_vram_mib=(100, 100),
+        total_seconds=4.0,
         order=2,
     )
 
@@ -270,12 +272,14 @@ def test_speed_mode_history_keeps_context_floor_when_picking_best_success():
         candidate=Candidate(context=32768, ngl=41, tensor_split="0.55,0.45"),
         success=True,
         free_vram_mib=(1200, 1150),
+        total_seconds=4.0,
         order=0,
     )
     floor_meeting_best = Probe(
         candidate=Candidate(context=65536, ngl=40, tensor_split="0.60,0.40"),
         success=True,
         free_vram_mib=(1400, 1300),
+        total_seconds=5.0,
         order=1,
     )
 
@@ -306,6 +310,59 @@ def test_text_and_vision_probe_results_are_never_ranked_together():
 
     with pytest.raises(ValueError, match="must not mix text and vision"):
         rank_successes([text_probe, vision_probe], optimization="context")
+
+
+def test_runtime_pool_normalizes_and_validates_modes_before_ranking():
+    vision_probe = Probe(
+        candidate=Candidate(context=65536, ngl=40, tensor_split="0.55,0.45", runtime_mode=" Vision "),
+        success=True,
+        free_vram_mib=(900, 850),
+        total_seconds=5.0,
+        order=0,
+    )
+    equivalent_vision_probe = Probe(
+        candidate=Candidate(context=65536, ngl=39, tensor_split="0.60,0.40", runtime_mode="vision"),
+        success=True,
+        free_vram_mib=(950, 900),
+        total_seconds=4.0,
+        order=1,
+    )
+
+    winner, explanation = rank_successes([vision_probe, equivalent_vision_probe], optimization="context")
+
+    assert winner is vision_probe
+    assert explanation["runtime_mode"] == "vision"
+
+
+def test_runtime_pool_rejects_invalid_modes_before_ranking():
+    invalid_mode_probe = Probe(
+        candidate=Candidate(context=65536, ngl=40, tensor_split="0.55,0.45", runtime_mode="audio"),
+        success=True,
+        free_vram_mib=(900, 850),
+        total_seconds=5.0,
+    )
+
+    with pytest.raises(ValueError, match="runtime_mode must be one of"):
+        rank_successes([invalid_mode_probe], optimization="context")
+
+
+def test_successful_probe_missing_telemetry_is_rejected():
+    missing_headroom = Probe(
+        candidate=Candidate(context=65536, ngl=40, tensor_split="0.55,0.45"),
+        success=True,
+        total_seconds=5.0,
+    )
+    missing_seconds = Probe(
+        candidate=Candidate(context=65536, ngl=40, tensor_split="0.55,0.45"),
+        success=True,
+        free_vram_mib=(900, 850),
+    )
+    limits = RuntimeLimits(total_layers=41, max_context=131072, active_context=65536)
+
+    with pytest.raises(ValueError, match="free_vram_mib telemetry is required"):
+        convergence_status(missing_headroom, limits)
+    with pytest.raises(ValueError, match="total_seconds telemetry is required"):
+        rank_successes([missing_seconds], optimization="context")
 
 
 def test_fixture_probe_rejects_string_free_vram_payload():
@@ -362,6 +419,30 @@ def test_fixture_probe_key_distinguishes_mmproj_state():
 
     assert no_mmproj.free_vram_mib == (1400.0, 1300.0)
     assert with_mmproj.free_vram_mib == (900.0, 800.0)
+
+
+def test_fixture_probe_normalizes_candidate_runtime_mode_before_lookup():
+    runner = FixtureProbeRunner(
+        [
+            {
+                "runtime_mode": "vision",
+                "context": 65536,
+                "ngl": 40,
+                "tensor_split": "0.55,0.45",
+                "has_mmproj": True,
+                "success": True,
+                "free_vram_mib": [900, 800],
+                "total_seconds": 1.2,
+            }
+        ]
+    )
+
+    probe = runner.probe(
+        Candidate(context=65536, ngl=40, tensor_split="0.55,0.45", runtime_mode=" Vision ", has_mmproj=True)
+    )
+
+    assert probe.candidate.runtime_mode == "vision"
+    assert probe.free_vram_mib == (900.0, 800.0)
 
 
 def test_fixture_probe_runner_rejects_non_boolean_has_mmproj():
@@ -499,6 +580,7 @@ def test_mixed_mode_probes_rejected_even_when_one_mode_has_only_failures():
         candidate=Candidate(context=65536, ngl=40, tensor_split="0.55,0.45", runtime_mode="text"),
         success=True,
         free_vram_mib=(900, 850),
+        total_seconds=5.0,
         order=0,
     )
     vision_failure = Probe(
