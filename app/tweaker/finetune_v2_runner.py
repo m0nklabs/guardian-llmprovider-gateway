@@ -497,8 +497,6 @@ class FinetuneV2Runner:
                 if remaining_low_headroom_followups is not None:
                     if remaining_low_headroom_followups <= 0:
                         break
-                    remaining_low_headroom_followups -= 1
-                    low_headroom_followups_used += 1
 
                 action = queued.popleft()
                 candidate = self._clamp_candidate(action.candidate, limits, fixed_context, fixed_ngl)
@@ -511,6 +509,9 @@ class FinetuneV2Runner:
                 )
                 if key in seen_candidates:
                     continue
+                if remaining_low_headroom_followups is not None:
+                    remaining_low_headroom_followups -= 1
+                    low_headroom_followups_used += 1
                 seen_candidates.add(key)
                 probe = self.probe_runner.probe(canonical_model, candidate)
                 probes.append(probe)
