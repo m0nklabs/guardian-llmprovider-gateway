@@ -473,17 +473,17 @@ def test_guardian_v2_probe_runner_verify_disk_load_sends_no_overrides():
             return httpx.Response(200, json={"status": "loaded"})
         return httpx.Response(404)
 
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    runner = GuardianV2ProbeRunner(
-        guardian_url="http://guardian.test",
-        api_key="test-key",
-        smoke_prompt="FIT?",
-        smoke_max_tokens=4,
-        smoke_image_url=None,
-        client=client,
-    )
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        runner = GuardianV2ProbeRunner(
+            guardian_url="http://guardian.test",
+            api_key="test-key",
+            smoke_prompt="FIT?",
+            smoke_max_tokens=4,
+            smoke_image_url=None,
+            client=client,
+        )
 
-    result = runner.verify_disk_load("TestModel", enable_vision=True)
+        result = runner.verify_disk_load("TestModel", enable_vision=True)
 
     assert result is True
     assert load_payloads == [{"model": "TestModel", "enable_vision": True}]
