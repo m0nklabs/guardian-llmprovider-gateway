@@ -589,12 +589,26 @@ class FinetuneV2Runner:
         )
         rendered = render_model_block(model_name, applied_config)
         applied_text = replace_model_block(self.base_text, model_name, rendered)
+        previous_text = self.models_config_path.read_text()
         tmp_path = self.models_config_path.with_suffix(f"{self.models_config_path.suffix}.tmp")
+        rollback_path = self.models_config_path.with_suffix(f"{self.models_config_path.suffix}.rollback")
+
+        def restore_previous_config() -> None:
+            rollback_path.write_text(previous_text)
+            rollback_path.replace(self.models_config_path)
+
         tmp_path.write_text(applied_text)
         tmp_path.replace(self.models_config_path)
-        applied_probe = self.probe_runner.probe(model_name, winner.candidate)
-        if not applied_probe.success:
-            raise RuntimeError(f"Applied finetune v2 winner failed to reload: {applied_probe.error or 'unknown error'}")
+        try:
+            applied_probe = self.probe_runner.probe(model_name, winner.candidate)
+            if not applied_probe.success:
+                restore_previous_config()
+                raise RuntimeError(
+                    f"Applied finetune v2 winner failed to reload: {applied_probe.error or 'unknown error'}"
+                )
+        except Exception:
+            restore_previous_config()
+            raise
 
     def _resolve_model(self, requested_name: str) -> str:
         models = self.base_config.get("models", {})
