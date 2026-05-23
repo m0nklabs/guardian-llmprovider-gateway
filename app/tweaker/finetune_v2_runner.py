@@ -293,6 +293,26 @@ class GuardianV2ProbeRunner:
                 f"{self.guardian_url}/v1/chat/completions",
                 json={
                     "model": model,
+        load_response.close()
+        if runtime_mode_uses_vision(getattr(candidate, "runtime_mode", "text")) and not self.smoke_image_url:
+            gpu_vram = read_gpu_vram_snapshot()
+            probe = self._build_probe(
+                candidate,
+                success=False,
+                started=started,
+                free_vram_mib=two_gpu_free_mib(gpu_vram),
+                telemetry_source="post_load",
+                error="vision finetune requires smoke_image_url to exercise the multimodal path",
+            )
+            self.probes.append(probe)
+            return probe
+
+        smoke_response: httpx.Response | None = None
+        try:
+            smoke_response = self.client.post(
+                f"{self.guardian_url}/v1/chat/completions",
+                json={
+                    "model": model,
                     "messages": build_smoke_messages(self.smoke_prompt, self.smoke_image_url),
                     "temperature": 0.0,
                     "max_tokens": self.smoke_max_tokens,
