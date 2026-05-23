@@ -997,9 +997,7 @@ class ModelManager:
                     split_total = sum(parsed_split_parts)
                     if split_total <= 0:
                         raise ValueError("runtime_overrides.tensor_split must have a positive total")
-                    target_config["tensor_split"] = ",".join(
-                        str(part) for part in parsed_split_parts
-                    )
+                    target_config["tensor_split"] = ",".join(split_parts)
         logger.info(
             "Runtime config for %s [%s]: context=%s ngl=%s split=%s mmproj=%s",
             target,
