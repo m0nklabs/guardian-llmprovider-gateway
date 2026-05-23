@@ -42,24 +42,30 @@ def test_live_guardian_status_for_finetune_v2_smoke():
     assert isinstance(response.json(), dict)
 
 
-def test_live_guardian_finetune_v2_fixed_shape_dry_run(tmp_path: Path):
-    guardian_url = os.environ.get("GUARDIAN_URL", "http://127.0.0.1:11434")
-    api_key = os.environ.get("GUARDIAN_TEST_KEY")
-    model = os.environ.get("FINETUNE_V2_LIVE_MODEL")
-    context = os.environ.get("FINETUNE_V2_LIVE_CONTEXT")
-    ngl = os.environ.get("FINETUNE_V2_LIVE_NGL")
     split = os.environ.get("FINETUNE_V2_LIVE_SPLIT", "0.50,0.50")
     models_config = Path(os.environ.get("FINETUNE_V2_LIVE_MODELS_CONFIG", "config/models.yaml"))
+    runtime_mode = os.environ.get("FINETUNE_V2_LIVE_RUNTIME_MODE", "auto")
+    smoke_image_url = os.environ.get("FINETUNE_V2_LIVE_SMOKE_IMAGE_URL")
     if not api_key:
         pytest.skip("set GUARDIAN_TEST_KEY for live finetune v2 smoke checks")
     if not model or not context or not ngl:
         pytest.skip("set FINETUNE_V2_LIVE_MODEL, FINETUNE_V2_LIVE_CONTEXT, and FINETUNE_V2_LIVE_NGL")
+    if runtime_mode == "vision" and not smoke_image_url:
+        pytest.skip("set FINETUNE_V2_LIVE_SMOKE_IMAGE_URL for live vision finetune smoke checks")
     before = models_config.read_bytes()
     probe_runner = GuardianV2ProbeRunner(
         guardian_url=guardian_url,
         api_key=api_key,
         smoke_prompt=os.environ.get("FINETUNE_V2_LIVE_SMOKE_PROMPT", "Reply with exactly: FIT OK"),
         smoke_max_tokens=int(os.environ.get("FINETUNE_V2_LIVE_SMOKE_MAX_TOKENS", "8")),
+        smoke_image_url=smoke_image_url,
+    )
+    runner = FinetuneV2Runner(
+        models_config_path=models_config,
+        results_file=tmp_path / "model_finetune_v2_results.json",
+        probe_runner=probe_runner,
+        runtime_mode=runtime_mode,
+    )
         smoke_image_url=os.environ.get("FINETUNE_V2_LIVE_SMOKE_IMAGE_URL"),
     )
     runner = FinetuneV2Runner(
