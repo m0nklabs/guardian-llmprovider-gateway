@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import time
 from collections import deque
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import Lock
 from typing import Mapping, Protocol, Sequence
 
 import httpx
@@ -39,6 +41,7 @@ from app.tweaker.model_finetune import (
     build_split_candidates,
     format_two_gpu_split,
     has_vision_runtime,
+    parse_two_gpu_split,
     read_gpu_vram_snapshot,
     render_model_block,
     replace_model_block,
@@ -96,6 +99,8 @@ class FinetuneV2ResultsLog:
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
+        self._active_path = self.path.with_suffix(f"{self.path.suffix}.active")
+        self._write_lock = Lock()
         self.history = self._load()
         self.active_index: int | None = None
 
@@ -110,6 +115,7 @@ class FinetuneV2ResultsLog:
         self.history.append(entry)
         self.active_index = len(self.history) - 1
         self._persist()
+        self._persist_active_entry()
 
     def append_probe(self, probe: Probe) -> None:
         entry = self._active_entry()
@@ -118,7 +124,7 @@ class FinetuneV2ResultsLog:
             probes = []
             entry["probes"] = probes
         probes.append(_probe_to_dict(probe))
-        self._persist()
+        self._persist_active_entry()
 
     def complete_run(self, **fields: object) -> None:
         entry = self._active_entry()
@@ -126,6 +132,7 @@ class FinetuneV2ResultsLog:
         entry["status"] = "completed"
         entry["completed_at"] = datetime.now(UTC).isoformat()
         self._persist()
+        self._clear_active_entry()
         self.active_index = None
 
     def fail_run(self, exc: BaseException) -> None:
@@ -140,6 +147,7 @@ class FinetuneV2ResultsLog:
             }
         )
         self._persist()
+        self._clear_active_entry()
         self.active_index = None
 
     def _active_entry(self) -> dict[str, object]:
@@ -189,10 +197,27 @@ class FinetuneV2ResultsLog:
         return payload if isinstance(payload, list) else []
 
     def _persist(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = self.path.with_suffix(f"{self.path.suffix}.tmp")
-        tmp_path.write_text(json.dumps(self.history, indent=2))
-        tmp_path.replace(self.path)
+        with self._write_lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self.path.with_suffix(f"{self.path.suffix}.tmp")
+            tmp_path.write_text(json.dumps(self.history, indent=2))
+            tmp_path.replace(self.path)
+
+    def _persist_active_entry(self) -> None:
+        if self.active_index is None:
+            return
+        with self._write_lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = self._active_path.with_suffix(f"{self._active_path.suffix}.tmp")
+            tmp_path.write_text(json.dumps(self._active_entry(), indent=2))
+            tmp_path.replace(self._active_path)
+
+    def _clear_active_entry(self) -> None:
+        with self._write_lock:
+            try:
+                self._active_path.unlink()
+            except FileNotFoundError:
+                pass
 
 
 class ProbeRunnerProtocol(Protocol):
@@ -388,13 +413,46 @@ class FinetuneV2Runner:
 
     def _reload_base_snapshot(self) -> None:
         self._base_text = self.models_config_path.read_text()
-        self._base_config = yaml.safe_load(self._base_text) or {}
+        self._base_config = self._load_models_config(self._base_text)
         self._base_mtime_ns = self.models_config_path.stat().st_mtime_ns
 
     def _refresh_base_snapshot_if_changed(self) -> None:
         current_mtime_ns = self.models_config_path.stat().st_mtime_ns
         if self._base_mtime_ns != current_mtime_ns:
             self._reload_base_snapshot()
+
+    def _load_models_config(self, text: str) -> Mapping[str, object]:
+        loaded = yaml.safe_load(text)
+        if loaded is None:
+            return {}
+        if not isinstance(loaded, dict):
+            raise ValueError(
+                "models.yaml root must be a mapping/object; "
+                f"found {type(loaded).__name__}"
+            )
+        return loaded
+
+    def _normalize_split_candidates(
+        self, split_candidates: Sequence[str] | None
+    ) -> Sequence[str] | None:
+        if split_candidates is None:
+            return None
+        normalized: list[str] = []
+        for split in split_candidates:
+            text = str(split).strip()
+            if not text:
+                raise ValueError("split_candidates entries must be non-empty")
+            ratio = parse_two_gpu_split(text)
+            if ratio is None or not math.isfinite(ratio):
+                raise ValueError(
+                    f"Invalid split candidate '{text}'; expected two finite numeric values like '0.55,0.45'"
+                )
+            candidate = format_two_gpu_split(ratio)
+            if candidate not in normalized:
+                normalized.append(candidate)
+        if not normalized:
+            raise ValueError("split_candidates must include at least one valid split")
+        return normalized
 
     @property
     def base_text(self) -> str:
@@ -404,7 +462,7 @@ class FinetuneV2Runner:
     @base_text.setter
     def base_text(self, value: str) -> None:
         self._base_text = value
-        self._base_config = yaml.safe_load(value) or {}
+        self._base_config = self._load_models_config(value)
         try:
             self._base_mtime_ns = self.models_config_path.stat().st_mtime_ns
         except FileNotFoundError:
@@ -437,6 +495,7 @@ class FinetuneV2Runner:
         apply: bool = False,
     ) -> FinetuneV2Result:
         canonical_model = self._resolve_model(model_name)
+        split_candidates = self._normalize_split_candidates(split_candidates)
         model_config = copy.deepcopy(self.base_config.get("models", {}).get(canonical_model, {}))
         if self.runtime_mode == "vision" and not has_vision_runtime(model_config):
             raise ValueError(f"Model '{canonical_model}' does not have a configured vision runtime")

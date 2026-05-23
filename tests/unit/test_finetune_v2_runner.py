@@ -10,7 +10,11 @@ import httpx
 import pytest
 
 from app.tweaker.finetune_v2_contracts import Candidate, Probe
-from app.tweaker.finetune_v2_runner import FinetuneV2Runner, GuardianV2ProbeRunner
+from app.tweaker.finetune_v2_runner import (
+    FinetuneV2ResultsLog,
+    FinetuneV2Runner,
+    GuardianV2ProbeRunner,
+)
 
 
 def _write_models(path: Path) -> None:
@@ -129,6 +133,29 @@ def test_v2_dry_run_keeps_models_yaml_unchanged_and_logs_probe_history(tmp_path:
     assert history[-1]["winner_explanation"]["winner_reason"]["code"] == "context_lexicographic_winner"
 
 
+def test_v2_results_log_persists_active_run_incrementally(tmp_path: Path):
+    results_path = tmp_path / "v2_results.json"
+    log = FinetuneV2ResultsLog(results_path)
+    candidate = Candidate(context=65536, ngl=40, tensor_split="0.55,0.45")
+    probe = Probe(candidate=candidate, success=True, free_vram_mib=(300.0, 280.0), total_seconds=1.0, order=0)
+
+    log.start_run(model="TestModel", runtime_mode="text", optimization="speed", applied=False)
+    history_after_start = results_path.read_text()
+    active_path = results_path.with_suffix(f"{results_path.suffix}.active")
+
+    log.append_probe(probe)
+
+    assert results_path.read_text() == history_after_start
+    assert active_path.exists()
+
+    log.complete_run(applied=False)
+
+    assert not active_path.exists()
+    history = json.loads(results_path.read_text())
+    assert history[-1]["status"] == "completed"
+    assert history[-1]["probes"][0]["candidate"]["tensor_split"] == "0.55,0.45"
+
+
 def test_v2_apply_writes_winner_once_to_runtime_specific_models_yaml_keys(tmp_path: Path):
     models_path = tmp_path / "models.yaml"
     results_path = tmp_path / "v2_results.json"
@@ -160,6 +187,20 @@ def test_v2_apply_writes_winner_once_to_runtime_specific_models_yaml_keys(tmp_pa
     assert len(fake_runner.disk_load_calls) == 1
     assert fake_runner.disk_load_calls[0] == ("TestModel", True)
     assert len(fake_runner.calls) == 2
+
+
+def test_v2_runner_rejects_non_mapping_models_yaml_root(tmp_path: Path):
+    models_path = tmp_path / "models.yaml"
+    results_path = tmp_path / "v2_results.json"
+    models_path.write_text("- TestModel\n")
+
+    with pytest.raises(ValueError, match="models.yaml root must be a mapping/object"):
+        FinetuneV2Runner(
+            models_config_path=models_path,
+            results_file=results_path,
+            probe_runner=FakeProbeRunner(),
+            runtime_mode="text",
+        )
 
 
 def test_v2_fixed_context_and_ngl_pin_all_probes(tmp_path: Path):
@@ -209,6 +250,45 @@ def test_v2_fixed_ngl_is_capped_to_total_layers(tmp_path: Path):
 
     assert result.winner.candidate.ngl == 41
     assert {call[1].ngl for call in fake_runner.calls} == {41}
+
+
+def test_v2_normalizes_explicit_split_candidates(tmp_path: Path):
+    models_path = tmp_path / "models.yaml"
+    results_path = tmp_path / "v2_results.json"
+    _write_models(models_path)
+    fake_runner = FakeProbeRunner()
+    runner = FinetuneV2Runner(
+        models_config_path=models_path,
+        results_file=results_path,
+        probe_runner=fake_runner,
+        runtime_mode="text",
+    )
+
+    normalized = runner._normalize_split_candidates(["1,3"])
+
+    assert normalized == ["0.25,0.75"]
+
+
+@pytest.mark.parametrize("split", ["0.55", "abc,def", "nan,1", "inf,1"])
+def test_v2_rejects_invalid_explicit_split_candidates(tmp_path: Path, split: str):
+    models_path = tmp_path / "models.yaml"
+    results_path = tmp_path / "v2_results.json"
+    _write_models(models_path)
+    runner = FinetuneV2Runner(
+        models_config_path=models_path,
+        results_file=results_path,
+        probe_runner=FakeProbeRunner(),
+        runtime_mode="text",
+    )
+
+    with pytest.raises(ValueError, match="Invalid split candidate"):
+        runner.tune_model(
+            "TestModel",
+            optimization="speed",
+            fixed_context=65536,
+            fixed_ngl=40,
+            split_candidates=[split],
+        )
 
 
 def test_v2_low_headroom_followup_budget_counts_all_followup_attempts(tmp_path: Path):
