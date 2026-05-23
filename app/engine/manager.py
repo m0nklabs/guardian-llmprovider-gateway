@@ -906,14 +906,15 @@ class ModelManager:
         target_config = self.build_runtime_config(target, enable_vision=desired_vision)
         if runtime_overrides:
             for key in ("context", "ngl", "tensor_split"):
-                if key in runtime_overrides:
-                    value = runtime_overrides[key]
-                    if value in (None, "") and key == "tensor_split":
-                        target_config.pop("tensor_split", None)
-                    elif key in {"context", "ngl"}:
-                        target_config[key] = int(value)
-                    else:
-                        target_config[key] = str(value)
+                if key not in runtime_overrides:
+                    continue
+                value = runtime_overrides[key]
+                if key in {"context", "ngl"}:
+                    target_config[key] = int(value)
+                elif value in (None, ""):
+                    target_config.pop("tensor_split", None)
+                else:
+                    target_config["tensor_split"] = str(value)
         logger.info(
             "Runtime config for %s [%s]: context=%s ngl=%s split=%s mmproj=%s",
             target,

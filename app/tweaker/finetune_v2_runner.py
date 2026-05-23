@@ -468,7 +468,8 @@ class FinetuneV2Runner:
         contexts = [fixed_context] if fixed_context is not None else [limits.active_context, limits.max_context]
         if optimization == "context" and fixed_context is None:
             contexts = [limits.max_context, limits.active_context]
-        ngls = [fixed_ngl] if fixed_ngl is not None else list(range(limits.total_layers, -1, -max(1, ngl_step)))
+        ngl_stride = max(1, ngl_step)
+        ngls = [fixed_ngl] if fixed_ngl is not None else list(range(limits.total_layers, -1, -ngl_stride))
         ngls = unique_explicit_ngls([ngl for ngl in ngls if ngl is not None], limits)
         splits = list(split_candidates or build_split_candidates(seed_split, 0.05, split_min, split_max))
         candidates: list[Candidate] = []
@@ -540,7 +541,9 @@ class FinetuneV2Runner:
         tmp_path = self.models_config_path.with_suffix(f"{self.models_config_path.suffix}.tmp")
         tmp_path.write_text(applied_text)
         tmp_path.replace(self.models_config_path)
-        self.probe_runner.probe(model_name, winner.candidate)
+        applied_probe = self.probe_runner.probe(model_name, winner.candidate)
+        if not applied_probe.success:
+            raise RuntimeError(f"Applied finetune v2 winner failed to reload: {applied_probe.error or 'unknown error'}")
 
     def _resolve_model(self, requested_name: str) -> str:
         models = self.base_config.get("models", {})
