@@ -509,13 +509,13 @@ class FinetuneV2Runner:
                 )
                 if key in seen_candidates:
                     continue
-                if remaining_low_headroom_followups is not None:
-                    remaining_low_headroom_followups -= 1
-                    low_headroom_followups_used += 1
                 seen_candidates.add(key)
                 probe = self.probe_runner.probe(canonical_model, candidate)
                 probes.append(probe)
                 self.results.append_probe(probe)
+                if remaining_low_headroom_followups is not None:
+                    remaining_low_headroom_followups -= 1
+                    low_headroom_followups_used += 1
 
                 if probe.success:
                     convergence = convergence_status_from_history(
