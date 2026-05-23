@@ -584,7 +584,14 @@ class FinetuneV2Runner:
             optimization=optimization,
             fixed_context=fixed_context,
             fixed_ngl=fixed_ngl,
-            applied=apply,
+        self.results.start_run(
+            model=canonical_model,
+            runtime_mode=self.runtime_mode,
+            optimization=optimization,
+            fixed_context=fixed_context,
+            fixed_ngl=fixed_ngl,
+            applied=False,
+        )
         )
         try:
             while queued:
