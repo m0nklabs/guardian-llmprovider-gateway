@@ -13,11 +13,12 @@ import json
 import math
 import time
 from collections import deque
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
-from typing import Mapping, Protocol, Sequence
+from typing import Protocol, Sequence
 
 import httpx
 import yaml
@@ -452,6 +453,13 @@ class FinetuneV2Runner:
                 "models.yaml root must be a mapping/object; "
                 f"found {type(loaded).__name__}"
             )
+        for section in ("models", "aliases"):
+            section_value = loaded.get(section)
+            if section_value is not None and not isinstance(section_value, Mapping):
+                raise ValueError(
+                    f"models.yaml '{section}' must be a mapping/object; "
+                    f"found {type(section_value).__name__}"
+                )
         return loaded
 
     def _normalize_split_candidates(

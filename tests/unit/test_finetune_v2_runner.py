@@ -203,6 +203,29 @@ def test_v2_runner_rejects_non_mapping_models_yaml_root(tmp_path: Path):
         )
 
 
+@pytest.mark.parametrize(
+    ("yaml_text", "expected_section"),
+    [
+        ("models: []\n", "models"),
+        ("models: {}\naliases: []\n", "aliases"),
+    ],
+)
+def test_v2_runner_rejects_non_mapping_models_or_aliases_sections(
+    tmp_path: Path, yaml_text: str, expected_section: str
+):
+    models_path = tmp_path / "models.yaml"
+    results_path = tmp_path / "v2_results.json"
+    models_path.write_text(yaml_text)
+
+    with pytest.raises(ValueError, match=rf"models.yaml '{expected_section}' must be a mapping/object"):
+        FinetuneV2Runner(
+            models_config_path=models_path,
+            results_file=results_path,
+            probe_runner=FakeProbeRunner(),
+            runtime_mode="text",
+        )
+
+
 def test_v2_fixed_context_and_ngl_pin_all_probes(tmp_path: Path):
     models_path = tmp_path / "models.yaml"
     results_path = tmp_path / "v2_results.json"
