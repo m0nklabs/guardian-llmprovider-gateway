@@ -22,6 +22,10 @@ def _load_script_module(monkeypatch: pytest.MonkeyPatch):
         (["TestModel", "--context", "0"], "--context must be > 0"),
         (["TestModel", "--ngl", "-1"], "--ngl must be >= 0"),
         (["TestModel", "--ngl-step", "0"], "--ngl-step must be > 0"),
+        (
+            ["TestModel", "--runtime-mode", "vision"],
+            "--runtime-mode vision requires --smoke-image-url to exercise the multimodal path",
+        ),
     ],
 )
 def test_validate_args_rejects_invalid_runtime_ranges(monkeypatch: pytest.MonkeyPatch, argv: list[str], error_message: str):

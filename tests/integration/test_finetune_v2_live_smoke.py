@@ -42,6 +42,12 @@ def test_live_guardian_status_for_finetune_v2_smoke():
     assert isinstance(response.json(), dict)
 
 
+def test_live_guardian_finetune_v2_fixed_shape_dry_run(tmp_path: Path):
+    guardian_url = os.environ.get("GUARDIAN_URL", "http://127.0.0.1:11434")
+    api_key = os.environ.get("GUARDIAN_TEST_KEY")
+    model = os.environ.get("FINETUNE_V2_LIVE_MODEL")
+    context = os.environ.get("FINETUNE_V2_LIVE_CONTEXT")
+    ngl = os.environ.get("FINETUNE_V2_LIVE_NGL")
     split = os.environ.get("FINETUNE_V2_LIVE_SPLIT", "0.50,0.50")
     models_config = Path(os.environ.get("FINETUNE_V2_LIVE_MODELS_CONFIG", "config/models.yaml"))
     runtime_mode = os.environ.get("FINETUNE_V2_LIVE_RUNTIME_MODE", "auto")
@@ -65,14 +71,6 @@ def test_live_guardian_status_for_finetune_v2_smoke():
         results_file=tmp_path / "model_finetune_v2_results.json",
         probe_runner=probe_runner,
         runtime_mode=runtime_mode,
-    )
-        smoke_image_url=os.environ.get("FINETUNE_V2_LIVE_SMOKE_IMAGE_URL"),
-    )
-    runner = FinetuneV2Runner(
-        models_config_path=models_config,
-        results_file=tmp_path / "model_finetune_v2_results.json",
-        probe_runner=probe_runner,
-        runtime_mode=os.environ.get("FINETUNE_V2_LIVE_RUNTIME_MODE", "auto"),
     )
 
     try:

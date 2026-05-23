@@ -405,3 +405,54 @@ def test_guardian_v2_probe_runner_probe_closes_load_and_smoke_responses():
     assert probe.success is True
     load_response.close.assert_called_once()
     smoke_response.close.assert_called_once()
+
+
+def test_guardian_v2_probe_runner_requires_image_for_vision_smoke():
+    load_payloads = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/admin/load":
+            load_payloads.append(json.loads(request.content.decode()))
+            return httpx.Response(200, json={"status": "loaded"})
+        pytest.fail("vision probe without smoke_image_url should not call chat completions")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    runner = GuardianV2ProbeRunner(
+        guardian_url="http://guardian.test",
+        api_key="test-key",
+        smoke_prompt="FIT?",
+        smoke_max_tokens=4,
+        smoke_image_url=None,
+        client=client,
+    )
+    candidate = Candidate(
+        context=32768,
+        ngl=38,
+        tensor_split="0.60,0.40",
+        runtime_mode="vision",
+        has_mmproj=True,
+    )
+
+    with patch(
+        "app.tweaker.finetune_v2_runner.read_gpu_vram_snapshot",
+        return_value={
+            "0": {"free": 300.0, "total": 12000.0, "free_pct": 2.5},
+            "1": {"free": 280.0, "total": 16000.0, "free_pct": 1.75},
+        },
+    ):
+        probe = runner.probe("TestModel", candidate)
+
+    assert probe.success is False
+    assert probe.telemetry_source == "post_load"
+    assert probe.error == "vision finetune requires smoke_image_url to exercise the multimodal path"
+    assert load_payloads == [
+        {
+            "model": "TestModel",
+            "enable_vision": True,
+            "runtime_overrides": {
+                "context": 32768,
+                "ngl": 38,
+                "tensor_split": "0.60,0.40",
+            },
+        }
+    ]
