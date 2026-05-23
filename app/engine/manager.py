@@ -928,7 +928,7 @@ class ModelManager:
                         )
                     if isinstance(value, str) and not value.strip().isdigit():
                         raise ValueError(
-                            f"runtime_overrides.{key} must be a non-negative digit-only string, got {value!r}"
+                            f"runtime_overrides.{key} string values must contain only digits, got {value!r}"
                         )
                     int_value = int(value)
                     if key == "context" and int_value <= 0:
