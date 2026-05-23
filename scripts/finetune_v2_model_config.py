@@ -71,8 +71,18 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def validate_args(args: argparse.Namespace) -> None:
+    if args.context is not None and args.context <= 0:
+        raise SystemExit("--context must be > 0")
+    if args.ngl is not None and args.ngl < 0:
+        raise SystemExit("--ngl must be >= 0")
+    if args.ngl_step <= 0:
+        raise SystemExit("--ngl-step must be > 0")
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
+    validate_args(args)
     probe_runner = GuardianV2ProbeRunner(
         guardian_url=args.guardian_url,
         api_key=resolve_api_key(args.api_key),

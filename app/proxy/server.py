@@ -1624,6 +1624,8 @@ async def admin_load(request: Request, client_id: str = Depends(verify_api_key))
                 ),
                 generation=generation,
             )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=503, detail=str(e))
     finally:

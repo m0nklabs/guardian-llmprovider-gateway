@@ -253,3 +253,18 @@ async def test_stop_stale_guardian_listener_terminates_orphan():
     ):
         assert await server._stop_stale_guardian_listener(listener) is True
         kill_mock.assert_called_once_with(4242, server.signal.SIGTERM)
+
+
+@pytest.mark.asyncio
+async def test_admin_load_returns_400_for_runtime_override_validation_error():
+    class DummyRequest:
+        async def json(self):
+            return {"runtime_overrides": {"context": 0}}
+
+    async def raise_validation_error(**kwargs):
+        raise ValueError("runtime_overrides.context must be > 0")
+
+    with patch.object(server, "_run_guardian_operation", side_effect=raise_validation_error):
+        with pytest.raises(server.HTTPException) as exc:
+            await server.admin_load(DummyRequest(), client_id="test-user")
+    assert exc.value.status_code == 400

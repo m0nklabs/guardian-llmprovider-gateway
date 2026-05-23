@@ -410,9 +410,11 @@ class FinetuneV2Runner:
     ) -> FinetuneV2Result:
         canonical_model = self._resolve_model(model_name)
         model_config = copy.deepcopy(self.base_config.get("models", {}).get(canonical_model, {}))
+        if self.runtime_mode == "vision" and not has_vision_runtime(model_config):
+            raise ValueError(f"Model '{canonical_model}' does not have a configured vision runtime")
         limits = self._runtime_limits(model_config, fixed_context=fixed_context)
         seed_split = self._seed_split(model_config, split_min=split_min, split_max=split_max)
-        has_mmproj = self.runtime_mode == "vision" and has_vision_runtime(model_config)
+        has_mmproj = self.runtime_mode == "vision"
         allowed_context = fixed_context or limits.max_context
         allowed_ngl = fixed_ngl if fixed_ngl is not None else limits.total_layers
         probes: list[Probe] = []
@@ -649,13 +651,11 @@ class FinetuneV2Runner:
             enable_vision = runtime_mode_uses_vision(self.runtime_mode)
             disk_ok = self.probe_runner.verify_disk_load(model_name, enable_vision=enable_vision)
             if not disk_ok:
-                restore_previous_config()
                 raise RuntimeError(
                     f"Applied finetune v2 winner failed no-override disk-load verification for '{model_name}'"
                 )
             applied_probe = self.probe_runner.probe(model_name, winner.candidate)
             if not applied_probe.success:
-                restore_previous_config()
                 raise RuntimeError(
                     f"Applied finetune v2 winner failed to reload: {applied_probe.error or 'unknown error'}"
                 )

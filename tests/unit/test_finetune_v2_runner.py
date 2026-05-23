@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import httpx
+import pytest
 
 from app.tweaker.finetune_v2_contracts import Candidate, Probe
 from app.tweaker.finetune_v2_runner import FinetuneV2Runner, GuardianV2ProbeRunner
@@ -26,6 +27,23 @@ models:
     vision_ngl: 38
     vision_total_layers: 41
     vision_tensor_split: "0.60,0.40"
+aliases:
+  test: TestModel
+"""
+    )
+
+
+def _write_text_only_models(path: Path) -> None:
+    path.write_text(
+        """\
+models:
+  TestModel:
+    path: /tmp/test-model.gguf
+    context: 65536
+    benchmark_context_limit: 131072
+    ngl: 40
+    total_layers: 41
+    tensor_split: "0.55,0.45"
 aliases:
   test: TestModel
 """
@@ -141,6 +159,25 @@ def test_v2_fixed_context_and_ngl_pin_all_probes(tmp_path: Path):
     assert fake_runner.calls
     assert {call[1].context for call in fake_runner.calls} == {65536}
     assert {call[1].ngl for call in fake_runner.calls} == {39}
+
+
+def test_v2_vision_mode_requires_configured_vision_runtime(tmp_path: Path):
+    models_path = tmp_path / "models.yaml"
+    results_path = tmp_path / "v2_results.json"
+    _write_text_only_models(models_path)
+    fake_runner = FakeProbeRunner()
+    runner = FinetuneV2Runner(
+        models_config_path=models_path,
+        results_file=results_path,
+        probe_runner=fake_runner,
+        runtime_mode="vision",
+    )
+
+    with patch("app.tweaker.finetune_v2_runner.has_vision_runtime", return_value=False):
+        with patch.object(runner, "_runtime_limits") as mock_runtime_limits:
+            with pytest.raises(ValueError, match="does not have a configured vision runtime"):
+                runner.tune_model("TestModel", optimization="context", fixed_context=65536, fixed_ngl=40)
+            mock_runtime_limits.assert_not_called()
 
 
 def test_guardian_v2_probe_runner_uses_admin_load_runtime_overrides():
