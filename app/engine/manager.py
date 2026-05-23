@@ -932,19 +932,31 @@ class ModelManager:
                     target_config.pop("tensor_split", None)
                 elif key == "tensor_split":
                     tensor_split = str(value)
-                    split_parts = [part.strip() for part in tensor_split.split(",") if part.strip()]
-                    if len(split_parts) != 2:
+                    raw_split_parts = tensor_split.split(",")
+                    if len(raw_split_parts) != 2:
                         raise ValueError(
-                            "runtime_overrides.tensor_split must contain two comma-separated values, "
-                            f"got {len(split_parts)} parts: {tensor_split}"
+                            "runtime_overrides.tensor_split must contain exactly two comma-separated values, "
+                            f"got {len(raw_split_parts)} parts: {tensor_split}"
+                        )
+                    split_parts = [part.strip() for part in raw_split_parts]
+                    if any(not part for part in split_parts):
+                        raise ValueError(
+                            "runtime_overrides.tensor_split must contain two non-empty comma-separated values"
                         )
                     try:
-                        split_total = sum(float(part) for part in split_parts)
+                        parsed_split_parts = [float(part) for part in split_parts]
                     except ValueError as exc:
                         raise ValueError("runtime_overrides.tensor_split must contain numeric values") from exc
+                    if any(part < 0 for part in parsed_split_parts):
+                        raise ValueError(
+                            "runtime_overrides.tensor_split values must be non-negative"
+                        )
+                    split_total = sum(parsed_split_parts)
                     if split_total <= 0:
                         raise ValueError("runtime_overrides.tensor_split must have a positive total")
-                    target_config["tensor_split"] = tensor_split
+                    target_config["tensor_split"] = ",".join(
+                        str(part) for part in parsed_split_parts
+                    )
         logger.info(
             "Runtime config for %s [%s]: context=%s ngl=%s split=%s mmproj=%s",
             target,
