@@ -77,7 +77,15 @@ def validate_args(args: argparse.Namespace) -> None:
     if args.ngl is not None and args.ngl < 0:
         raise SystemExit("--ngl must be >= 0")
     if args.ngl_step <= 0:
+def validate_args(args: argparse.Namespace) -> None:
+    if args.context is not None and args.context <= 0:
+        raise SystemExit("--context must be > 0")
+    if args.ngl is not None and args.ngl < 0:
+        raise SystemExit("--ngl must be >= 0")
+    if args.ngl_step <= 0:
         raise SystemExit("--ngl-step must be > 0")
+    if args.runtime_mode == "vision" and not args.smoke_image_url:
+        raise SystemExit("--runtime-mode vision requires --smoke-image-url to exercise the multimodal path")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
