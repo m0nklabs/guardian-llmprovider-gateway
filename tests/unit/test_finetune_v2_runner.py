@@ -173,11 +173,10 @@ def test_v2_vision_mode_requires_configured_vision_runtime(tmp_path: Path):
         runtime_mode="vision",
     )
 
-    with patch("app.tweaker.finetune_v2_runner.has_vision_runtime", return_value=False):
-        with patch.object(runner, "_runtime_limits") as mock_runtime_limits:
-            with pytest.raises(ValueError, match="does not have a configured vision runtime"):
-                runner.tune_model("TestModel", optimization="context", fixed_context=65536, fixed_ngl=40)
-            mock_runtime_limits.assert_not_called()
+    with patch.object(runner, "_runtime_limits") as mock_runtime_limits:
+        with pytest.raises(ValueError, match="does not have a configured vision runtime"):
+            runner.tune_model("TestModel", optimization="context", fixed_context=65536, fixed_ngl=40)
+        mock_runtime_limits.assert_not_called()
 
 
 def test_guardian_v2_probe_runner_uses_admin_load_runtime_overrides():
