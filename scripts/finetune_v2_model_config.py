@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 from typing import Optional, Sequence
 
 from _paths import CONFIG_DIR, DATA_DIR
@@ -35,7 +36,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--models-config", default=str(CONFIG_DIR / "models.yaml"), help="Path to models.yaml")
     parser.add_argument(
         "--results-file",
-        default=str(DATA_DIR / DEFAULT_V2_RESULTS_FILE.split("/", 1)[1]),
+        default=str(DATA_DIR / Path(DEFAULT_V2_RESULTS_FILE).name),
         help="Dedicated JSON history file for finetune v2 probes",
     )
     parser.add_argument(
