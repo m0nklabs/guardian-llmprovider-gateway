@@ -336,11 +336,22 @@ class FixtureProbeRunner:
             has_mmproj = row.get("has_mmproj", False)
             if not isinstance(has_mmproj, bool):
                 raise ValueError("fixture has_mmproj must be a boolean")
+
+            context = row.get("context")
+            if not isinstance(context, int) or isinstance(context, bool):
+                raise ValueError("fixture context must be an integer")
+            ngl = row.get("ngl")
+            if not isinstance(ngl, int) or isinstance(ngl, bool):
+                raise ValueError("fixture ngl must be an integer")
+            tensor_split = row.get("tensor_split")
+            if not isinstance(tensor_split, str):
+                raise ValueError("fixture tensor_split must be a string")
+
             key = (
                 runtime_mode,
-                int(row["context"]),
-                int(row["ngl"]),
-                str(row["tensor_split"]),
+                context,
+                ngl,
+                tensor_split,
                 has_mmproj,
             )
             if key in self._fixtures:
