@@ -472,7 +472,7 @@ class FinetuneV2Runner:
         if optimization == "context" and fixed_context is None:
             contexts = [limits.max_context, limits.active_context]
         ngl_stride = max(1, ngl_step)
-        # Use -1 as the exclusive stop so ngl=0 remains a valid last fallback.
+        # Use -1 as the stop value so ngl=0 is included as a valid last fallback.
         ngls = [fixed_ngl] if fixed_ngl is not None else list(range(limits.total_layers, -1, -ngl_stride))
         ngls = unique_explicit_ngls([ngl for ngl in ngls if ngl is not None], limits)
         splits = list(split_candidates or build_split_candidates(seed_split, 0.05, split_min, split_max))

@@ -914,7 +914,17 @@ class ModelManager:
                 elif key == "tensor_split" and value in (None, ""):
                     target_config.pop("tensor_split", None)
                 elif key == "tensor_split":
-                    target_config["tensor_split"] = str(value)
+                    tensor_split = str(value)
+                    split_parts = [part.strip() for part in tensor_split.split(",") if part.strip()]
+                    if len(split_parts) != 2:
+                        raise ValueError("runtime_overrides.tensor_split must contain two comma-separated values")
+                    try:
+                        split_total = sum(float(part) for part in split_parts)
+                    except ValueError as exc:
+                        raise ValueError("runtime_overrides.tensor_split must contain numeric values") from exc
+                    if split_total <= 0:
+                        raise ValueError("runtime_overrides.tensor_split must have a positive total")
+                    target_config["tensor_split"] = tensor_split
         logger.info(
             "Runtime config for %s [%s]: context=%s ngl=%s split=%s mmproj=%s",
             target,
