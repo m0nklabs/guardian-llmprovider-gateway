@@ -910,13 +910,13 @@ class ModelManager:
                     continue
                 value = runtime_overrides[key]
                 if key in {"context", "ngl"}:
-                    if isinstance(value, bool) or not isinstance(value, (int, str)):
+                    if not isinstance(value, (int, str)) or isinstance(value, bool):
                         raise ValueError(
                             f"runtime_overrides.{key} must be an integer, got {type(value).__name__!r}"
                         )
                     if isinstance(value, str) and not value.strip().isdigit():
                         raise ValueError(
-                            f"runtime_overrides.{key} must be a digit-only string, got {value!r}"
+                            f"runtime_overrides.{key} must be a non-negative digit-only string, got {value!r}"
                         )
                     int_value = int(value)
                     if key == "context" and int_value <= 0:
