@@ -270,6 +270,7 @@ def convergence_status(
         raise ValueError("convergence_status requires a successful probe")
     candidate = best_success.candidate
     free_vram_mib = _required_free_vram_mib(best_success)
+    target_context = allowed_context if allowed_context is not None else limits.max_context
     target_ngl = allowed_ngl if allowed_ngl is not None else limits.total_layers
     both_under_final = all(value < FINAL_HEADROOM_MIB for value in free_vram_mib)
     at_max_shape = candidate.context >= target_context and candidate.ngl >= target_ngl
