@@ -197,7 +197,7 @@ class GuardianV2ProbeRunner:
         started = time.perf_counter()
         load_payload = {
             "model": model,
-            "enable_vision": runtime_mode_uses_vision(candidate.runtime_mode),
+            "enable_vision": runtime_mode_uses_vision(getattr(candidate, "runtime_mode", "text")),
             "runtime_overrides": {
                 "context": candidate.context,
                 "ngl": candidate.ngl,
@@ -303,7 +303,10 @@ class FinetuneV2Runner:
         self.models_config_path = Path(models_config_path)
         self.results = FinetuneV2ResultsLog(results_file)
         self.probe_runner = probe_runner
-        self.runtime_mode = resolve_runtime_mode(runtime_mode, smoke_image_url)
+        effective_smoke_image_url = smoke_image_url
+        if effective_smoke_image_url is None:
+            effective_smoke_image_url = getattr(probe_runner, "smoke_image_url", None)
+        self.runtime_mode = resolve_runtime_mode(runtime_mode, effective_smoke_image_url)
         self.base_text = self.models_config_path.read_text()
         self.base_config = yaml.safe_load(self.base_text) or {}
 
@@ -403,9 +406,9 @@ class FinetuneV2Runner:
                         break
                     if convergence["reason"] == "low_headroom_followup":
                         low_headroom_followups_used += 1
-                    rebalance = split_rebalance_action(probes, better_split=self._better_split(probe, split_min, split_max))
-                    if rebalance is not None and fixed_ngl is None:
+                    if fixed_ngl is None:
                         queued[:0] = upward_ngl_retry_actions(probe, limits, max_retries=1)
+                    rebalance = split_rebalance_action(probes, better_split=self._better_split(probe, split_min, split_max))
                     if rebalance is not None:
                         queued.append(rebalance)
                 else:
@@ -496,7 +499,13 @@ class FinetuneV2Runner:
         if total_layers is None:
             raise ValueError("finetune v2 requires total_layers for the selected runtime")
         active_context = resolve_runtime_config_value(dict(model_config), "context", self.runtime_mode)
-        max_context = model_config.get("benchmark_context_limit") or active_context or fixed_context
+        benchmark_context_limit = model_config.get("benchmark_context_limit")
+        if benchmark_context_limit is not None:
+            max_context = benchmark_context_limit
+        elif active_context is not None:
+            max_context = active_context
+        else:
+            max_context = fixed_context
         if active_context is None:
             active_context = max_context
         if max_context is None:

@@ -107,6 +107,7 @@ def test_v2_apply_writes_winner_once_to_runtime_specific_models_yaml_keys(tmp_pa
     assert 'vision_ngl: 38' in rendered
     assert 'vision_tensor_split: "0.60,0.40"' in rendered
     assert len(result.probes) == 1
+    # Applying writes the winner once and then verifies the persisted runtime reloads.
     assert len(fake_runner.calls) == 2
 
 
@@ -179,4 +180,3 @@ def test_guardian_v2_probe_runner_uses_admin_load_runtime_overrides():
             },
         }
     ]
-

@@ -67,7 +67,6 @@ def test_live_guardian_finetune_v2_fixed_shape_dry_run(tmp_path: Path):
         results_file=tmp_path / "model_finetune_v2_results.json",
         probe_runner=probe_runner,
         runtime_mode=os.environ.get("FINETUNE_V2_LIVE_RUNTIME_MODE", "auto"),
-        smoke_image_url=os.environ.get("FINETUNE_V2_LIVE_SMOKE_IMAGE_URL"),
     )
 
     try:

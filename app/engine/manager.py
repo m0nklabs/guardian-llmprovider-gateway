@@ -911,9 +911,9 @@ class ModelManager:
                 value = runtime_overrides[key]
                 if key in {"context", "ngl"}:
                     target_config[key] = int(value)
-                elif value in (None, ""):
+                elif key == "tensor_split" and value in (None, ""):
                     target_config.pop("tensor_split", None)
-                else:
+                elif key == "tensor_split":
                     target_config["tensor_split"] = str(value)
         logger.info(
             "Runtime config for %s [%s]: context=%s ngl=%s split=%s mmproj=%s",
