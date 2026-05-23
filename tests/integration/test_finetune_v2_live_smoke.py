@@ -58,6 +58,8 @@ def test_live_guardian_finetune_v2_fixed_shape_dry_run(tmp_path: Path):
         pytest.skip("set FINETUNE_V2_LIVE_MODEL, FINETUNE_V2_LIVE_CONTEXT, and FINETUNE_V2_LIVE_NGL")
     if runtime_mode == "vision" and not smoke_image_url:
         pytest.skip("set FINETUNE_V2_LIVE_SMOKE_IMAGE_URL for live vision finetune smoke checks")
+    if not models_config.exists():
+        pytest.skip(f"set FINETUNE_V2_LIVE_MODELS_CONFIG to an existing models.yaml (missing {models_config})")
     before = models_config.read_bytes()
     probe_runner = GuardianV2ProbeRunner(
         guardian_url=guardian_url,

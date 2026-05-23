@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import json
 import time
+from collections import deque
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -445,7 +446,7 @@ class FinetuneV2Runner:
         allowed_context = fixed_context or limits.max_context
         allowed_ngl = fixed_ngl if fixed_ngl is not None else limits.total_layers
         probes: list[Probe] = []
-        queued: list[PlanAction] = [
+        queued: deque[PlanAction] = deque(
             PlanAction(
                 "seed",
                 candidate,
@@ -460,7 +461,7 @@ class FinetuneV2Runner:
                 runtime_mode=self.runtime_mode,
                 has_mmproj=has_mmproj,
             )
-        ]
+        )
         queued.extend(
             PlanAction("candidate_grid", candidate, "fixed_or_followup_candidate")
             for candidate in self._candidate_grid(
@@ -497,7 +498,7 @@ class FinetuneV2Runner:
                     remaining_low_headroom_followups -= 1
                     low_headroom_followups_used += 1
 
-                action = queued.pop(0)
+                action = queued.popleft()
                 candidate = self._clamp_candidate(action.candidate, limits, fixed_context, fixed_ngl)
                 key = (
                     candidate.context,
@@ -531,7 +532,8 @@ class FinetuneV2Runner:
                     ):
                         remaining_low_headroom_followups = int(convergence["remaining_followups"])
                     if fixed_ngl is None:
-                        queued[:0] = upward_ngl_retry_actions(probe, limits, max_retries=1)
+                        retry_actions = upward_ngl_retry_actions(probe, limits, max_retries=1)
+                        queued.extendleft(reversed(retry_actions))
                     rebalance = split_rebalance_action(probes, better_split=self._better_split(probe, split_min, split_max))
                     if rebalance is not None:
                         queued.append(rebalance)

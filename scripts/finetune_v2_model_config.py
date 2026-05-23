@@ -78,6 +78,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--ngl must be >= 0")
     if args.ngl_step <= 0:
         raise SystemExit("--ngl-step must be > 0")
+    if not 0 < args.split_min <= args.split_max < 1:
+        raise SystemExit("--split-min/--split-max must satisfy 0 < split_min <= split_max < 1")
     if args.runtime_mode == "vision" and not args.smoke_image_url:
         raise SystemExit("--runtime-mode vision requires --smoke-image-url to exercise the multimodal path")
 

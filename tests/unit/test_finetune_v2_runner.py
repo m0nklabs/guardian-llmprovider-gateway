@@ -1,6 +1,8 @@
 """Tests for the Guardian-backed finetune v2 runner."""
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -286,6 +288,24 @@ def test_v2_vision_mode_requires_configured_vision_runtime(tmp_path: Path):
         with pytest.raises(ValueError, match="does not have a configured vision runtime"):
             runner.tune_model("TestModel", optimization="context", fixed_context=65536, fixed_ngl=40)
         mock_runtime_limits.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [("--split-min", "0"), ("--split-max", "1"), ("--split-min", "0.8 --split-max 0.7")],
+)
+def test_finetune_v2_cli_rejects_invalid_split_range(flag: str, value: str):
+    command = [
+        sys.executable,
+        "scripts/finetune_v2_model_config.py",
+        "TestModel",
+        *f"{flag} {value}".split(),
+    ]
+
+    result = subprocess.run(command, cwd=Path(__file__).parents[2], capture_output=True, text=True)
+
+    assert result.returncode != 0
+    assert "0 < split_min <= split_max < 1" in result.stderr
 
 
 def test_guardian_v2_probe_runner_uses_admin_load_runtime_overrides():

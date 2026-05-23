@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import logging
+import math
 import subprocess
 import yaml
 import time
@@ -959,6 +960,10 @@ class ModelManager:
                         parsed_split_parts = [float(part) for part in split_parts]
                     except ValueError as exc:
                         raise ValueError("runtime_overrides.tensor_split must contain numeric values") from exc
+                    if any(not math.isfinite(part) for part in parsed_split_parts):
+                        raise ValueError(
+                            "runtime_overrides.tensor_split values must be finite numbers"
+                        )
                     if any(part < 0 for part in parsed_split_parts):
                         raise ValueError(
                             "runtime_overrides.tensor_split values must be non-negative"

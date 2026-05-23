@@ -921,6 +921,14 @@ class TestRuntimeOverridesValidation:
             await mgr.load(runtime_overrides={"ngl": -1})
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("tensor_split", ["nan,0.5", "0.5,inf", "0.5,-inf"])
+    async def test_tensor_split_non_finite_values_raise(self, tmp_path: Path, tensor_split: str):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+        with pytest.raises(ValueError, match="finite"):
+            await mgr.load(runtime_overrides={"tensor_split": tensor_split})
+
+    @pytest.mark.asyncio
     async def test_valid_int_context_and_ngl_accepted(self, tmp_path: Path):
         mgr = _make_manager(tmp_path)
         mgr.current_model = "GLM-4.7-Flash"
