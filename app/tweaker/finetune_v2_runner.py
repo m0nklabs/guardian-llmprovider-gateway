@@ -307,8 +307,47 @@ class FinetuneV2Runner:
         if effective_smoke_image_url is None:
             effective_smoke_image_url = getattr(probe_runner, "smoke_image_url", None)
         self.runtime_mode = resolve_runtime_mode(runtime_mode, effective_smoke_image_url)
-        self.base_text = self.models_config_path.read_text()
-        self.base_config = yaml.safe_load(self.base_text) or {}
+        self._base_text = ""
+        self._base_config: Mapping[str, object] = {}
+        self._base_mtime_ns: int | None = None
+        self._reload_base_snapshot()
+
+    def _reload_base_snapshot(self) -> None:
+        self._base_text = self.models_config_path.read_text()
+        self._base_config = yaml.safe_load(self._base_text) or {}
+        self._base_mtime_ns = self.models_config_path.stat().st_mtime_ns
+
+    def _refresh_base_snapshot_if_changed(self) -> None:
+        current_mtime_ns = self.models_config_path.stat().st_mtime_ns
+        if self._base_mtime_ns != current_mtime_ns:
+            self._reload_base_snapshot()
+
+    @property
+    def base_text(self) -> str:
+        self._refresh_base_snapshot_if_changed()
+        return self._base_text
+
+    @base_text.setter
+    def base_text(self, value: str) -> None:
+        self._base_text = value
+        self._base_config = yaml.safe_load(value) or {}
+        try:
+            self._base_mtime_ns = self.models_config_path.stat().st_mtime_ns
+        except FileNotFoundError:
+            self._base_mtime_ns = None
+
+    @property
+    def base_config(self) -> Mapping[str, object]:
+        self._refresh_base_snapshot_if_changed()
+        return self._base_config
+
+    @base_config.setter
+    def base_config(self, value: Mapping[str, object]) -> None:
+        self._base_config = value
+        try:
+            self._base_mtime_ns = self.models_config_path.stat().st_mtime_ns
+        except FileNotFoundError:
+            self._base_mtime_ns = None
 
     def tune_model(
         self,
