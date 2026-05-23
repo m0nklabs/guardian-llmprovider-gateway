@@ -446,6 +446,7 @@ class FinetuneV2Runner:
         allowed_context = fixed_context or limits.max_context
         allowed_ngl = fixed_ngl if fixed_ngl is not None else limits.total_layers
         probes: list[Probe] = []
+        # Upward ngl retries are prepended so local follow-ups run before the wider candidate grid.
         queued: deque[PlanAction] = deque(
             PlanAction(
                 "seed",

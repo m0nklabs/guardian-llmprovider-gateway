@@ -291,15 +291,15 @@ def test_v2_vision_mode_requires_configured_vision_runtime(tmp_path: Path):
 
 
 @pytest.mark.parametrize(
-    ("flag", "value"),
-    [("--split-min", "0"), ("--split-max", "1"), ("--split-min", "0.8 --split-max 0.7")],
+    "split_args",
+    [("--split-min", "0"), ("--split-max", "1"), ("--split-min", "0.8", "--split-max", "0.7")],
 )
-def test_finetune_v2_cli_rejects_invalid_split_range(flag: str, value: str):
+def test_finetune_v2_cli_rejects_invalid_split_range(split_args: tuple[str, ...]):
     command = [
         sys.executable,
         "scripts/finetune_v2_model_config.py",
         "TestModel",
-        *f"{flag} {value}".split(),
+        *split_args,
     ]
 
     result = subprocess.run(command, cwd=Path(__file__).parents[2], capture_output=True, text=True)

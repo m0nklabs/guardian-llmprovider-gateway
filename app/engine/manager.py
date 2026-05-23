@@ -961,10 +961,12 @@ class ModelManager:
                         parsed_split_parts = [float(part) for part in split_parts]
                     except ValueError as exc:
                         raise ValueError("runtime_overrides.tensor_split must contain numeric values") from exc
-                    if any(not math.isfinite(part) for part in parsed_split_parts):
-                        raise ValueError(
-                            "runtime_overrides.tensor_split values must be finite numbers"
-                        )
+                    for raw_part, parsed_part in zip(split_parts, parsed_split_parts):
+                        if not math.isfinite(parsed_part):
+                            raise ValueError(
+                                "runtime_overrides.tensor_split values must be finite numbers, "
+                                f"got {raw_part!r}"
+                            )
                     if any(part < 0 for part in parsed_split_parts):
                         raise ValueError(
                             "runtime_overrides.tensor_split values must be non-negative"
