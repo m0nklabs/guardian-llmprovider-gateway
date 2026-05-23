@@ -202,6 +202,11 @@ def rank_successes(
             "tensor_split": winner.candidate.tensor_split,
         },
     }
+    if optimization == "balanced":
+        explanation["score_formula"] = {
+            "expression": "context + (ngl * 1024) + bottleneck_headroom_mib",
+            "ngl_multiplier": 1024,
+        }
     return winner, explanation
 
 
@@ -390,13 +395,20 @@ class FixtureProbeRunner:
 
 def dry_run_preserves_models_yaml(models_path: Path, operation: Callable[[], object]) -> None:
     before = models_path.read_bytes()
+
+    def _read_after_bytes() -> bytes | None:
+        try:
+            return models_path.read_bytes()
+        except FileNotFoundError:
+            return None
+
     try:
         operation()
     except BaseException as exc:
-        after = models_path.read_bytes()
+        after = _read_after_bytes()
         if before != after:
             raise AssertionError("dry-run operation changed models.yaml bytes") from exc
         raise
-    after = models_path.read_bytes()
+    after = _read_after_bytes()
     if before != after:
         raise AssertionError("dry-run operation changed models.yaml bytes")

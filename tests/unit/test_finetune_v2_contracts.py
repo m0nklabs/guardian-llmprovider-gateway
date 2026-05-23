@@ -154,6 +154,18 @@ def test_dry_run_partial_write_failure_is_reported(tmp_path: Path):
         dry_run_preserves_models_yaml(models_path, corrupting_dry_run)
 
 
+def test_dry_run_missing_models_yaml_during_failure_is_reported(tmp_path: Path):
+    models_path = tmp_path / "models.yaml"
+    models_path.write_bytes(b"models:\n  Test:\n    ngl: 41\n")
+
+    def deleting_dry_run() -> None:
+        models_path.unlink()
+        raise RuntimeError("probe failed after deleting models.yaml")
+
+    with pytest.raises(AssertionError, match="changed models.yaml bytes"):
+        dry_run_preserves_models_yaml(models_path, deleting_dry_run)
+
+
 def test_dry_run_success_without_writes_is_allowed(tmp_path: Path):
     models_path = tmp_path / "models.yaml"
     models_path.write_bytes(b"models:\n  Test:\n    ngl: 41\n")
@@ -536,6 +548,30 @@ def test_final_winner_explanation_is_machine_readable_and_recorded():
     assert explanation["runtime_mode"] == "text"
     assert explanation["winner"] == {"context": 65536, "ngl": 40, "tensor_split": "0.60,0.40"}
     assert explanation["losing_reasons"][0]["code"] == "lower_comparator_key"
+
+
+def test_balanced_explanation_includes_explicit_score_formula():
+    strong_context = Probe(
+        candidate=Candidate(context=131072, ngl=39, tensor_split="0.65,0.35"),
+        success=True,
+        free_vram_mib=(900, 100),
+        total_seconds=10.0,
+        order=0,
+    )
+    faster_higher_ngl = Probe(
+        candidate=Candidate(context=65536, ngl=41, tensor_split="0.50,0.50"),
+        success=True,
+        free_vram_mib=(500, 500),
+        total_seconds=1.0,
+        order=1,
+    )
+
+    _, explanation = rank_successes([strong_context, faster_higher_ngl], optimization="balanced")
+
+    assert explanation["score_formula"] == {
+        "expression": "context + (ngl * 1024) + bottleneck_headroom_mib",
+        "ngl_multiplier": 1024,
+    }
 
 
 def test_context_mode_starts_at_highest_allowed_ngl_and_max_context():
