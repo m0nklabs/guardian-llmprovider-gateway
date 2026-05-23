@@ -83,7 +83,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         results_file=args.results_file,
         probe_runner=probe_runner,
         runtime_mode=args.runtime_mode,
-        smoke_image_url=args.smoke_image_url,
     )
     try:
         result = runner.tune_model(
@@ -120,4 +119,3 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
