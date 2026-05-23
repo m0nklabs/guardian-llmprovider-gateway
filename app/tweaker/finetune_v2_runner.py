@@ -194,7 +194,29 @@ class FinetuneV2ResultsLog:
                     "probes": [],
                 }
             ]
-        return payload if isinstance(payload, list) else []
+        if isinstance(payload, list):
+            return payload
+        preserved_path: str | None = None
+        preservation_error: str | None = None
+        try:
+            preserved_path = str(self._preserve_unreadable_file())
+        except OSError as rename_exc:
+            preservation_error = str(rename_exc)
+        return [
+            {
+                "timestamp": datetime.now(UTC).isoformat(),
+                "status": "error",
+                "version": 2,
+                "error": (
+                    "Unreadable finetune v2 results log: expected top-level JSON "
+                    f"array, got {type(payload).__name__}"
+                ),
+                "corrupt_log_path": str(self.path),
+                "preserved_corrupt_log_path": preserved_path,
+                "preserve_error": preservation_error,
+                "probes": [],
+            }
+        ]
 
     def _persist(self) -> None:
         with self._write_lock:
