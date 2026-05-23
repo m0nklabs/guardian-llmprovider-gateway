@@ -149,13 +149,42 @@ class FinetuneV2ResultsLog:
             raise RuntimeError("finetune v2 result log active entry is invalid")
         return entry
 
+    def _preserve_unreadable_file(self) -> Path:
+        timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        backup_path = self.path.with_name(f"{self.path.name}.corrupt-{timestamp}")
+        suffix = 1
+        while backup_path.exists():
+            backup_path = self.path.with_name(
+                f"{self.path.name}.corrupt-{timestamp}-{suffix}"
+            )
+            suffix += 1
+        self.path.replace(backup_path)
+        return backup_path
+
     def _load(self) -> list[dict[str, object]]:
         if not self.path.exists():
             return []
         try:
             payload = json.loads(self.path.read_text())
-        except json.JSONDecodeError:
-            return []
+        except json.JSONDecodeError as exc:
+            preserved_path: str | None = None
+            preservation_error: str | None = None
+            try:
+                preserved_path = str(self._preserve_unreadable_file())
+            except OSError as rename_exc:
+                preservation_error = str(rename_exc)
+            return [
+                {
+                    "timestamp": datetime.now(UTC).isoformat(),
+                    "status": "error",
+                    "version": 2,
+                    "error": f"Unreadable finetune v2 results log: {exc}",
+                    "corrupt_log_path": str(self.path),
+                    "preserved_corrupt_log_path": preserved_path,
+                    "preserve_error": preservation_error,
+                    "probes": [],
+                }
+            ]
         return payload if isinstance(payload, list) else []
 
     def _persist(self) -> None:
