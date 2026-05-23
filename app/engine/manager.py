@@ -957,16 +957,18 @@ class ModelManager:
                         raise ValueError(
                             "runtime_overrides.tensor_split must contain two non-empty comma-separated values"
                         )
-                    try:
-                        parsed_split_parts = [float(part) for part in split_parts]
-                    except ValueError as exc:
-                        raise ValueError("runtime_overrides.tensor_split must contain numeric values") from exc
-                    for raw_part, parsed_part in zip(split_parts, parsed_split_parts):
+                    parsed_split_parts = []
+                    for raw_part in split_parts:
+                        try:
+                            parsed_part = float(raw_part)
+                        except ValueError as exc:
+                            raise ValueError("runtime_overrides.tensor_split must contain numeric values") from exc
                         if not math.isfinite(parsed_part):
                             raise ValueError(
                                 "runtime_overrides.tensor_split values must be finite numbers, "
                                 f"got {raw_part!r}"
                             )
+                        parsed_split_parts.append(parsed_part)
                     if any(part < 0 for part in parsed_split_parts):
                         raise ValueError(
                             "runtime_overrides.tensor_split values must be non-negative"

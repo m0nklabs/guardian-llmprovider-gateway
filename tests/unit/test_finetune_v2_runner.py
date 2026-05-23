@@ -302,7 +302,13 @@ def test_finetune_v2_cli_rejects_invalid_split_range(split_args: tuple[str, ...]
         *split_args,
     ]
 
-    result = subprocess.run(command, cwd=Path(__file__).parents[2], capture_output=True, text=True)
+    result = subprocess.run(
+        command,
+        cwd=Path(__file__).parents[2],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
 
     assert result.returncode != 0
     assert "0 < split_min <= split_max < 1" in result.stderr

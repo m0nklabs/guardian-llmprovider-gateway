@@ -447,21 +447,22 @@ class FinetuneV2Runner:
         allowed_ngl = fixed_ngl if fixed_ngl is not None else limits.total_layers
         probes: list[Probe] = []
         # Upward ngl retries are prepended so local follow-ups run before the wider candidate grid.
+        seed_candidates = initial_seed_candidates(
+            limits,
+            optimization=optimization,
+            seed_split=seed_split,
+            fixed_context=fixed_context,
+            fixed_ngl=fixed_ngl,
+            runtime_mode=self.runtime_mode,
+            has_mmproj=has_mmproj,
+        )
         queued: deque[PlanAction] = deque(
             PlanAction(
                 "seed",
                 candidate,
                 "initial_seed",
             )
-            for candidate in initial_seed_candidates(
-                limits,
-                optimization=optimization,
-                seed_split=seed_split,
-                fixed_context=fixed_context,
-                fixed_ngl=fixed_ngl,
-                runtime_mode=self.runtime_mode,
-                has_mmproj=has_mmproj,
-            )
+            for candidate in seed_candidates
         )
         queued.extend(
             PlanAction("candidate_grid", candidate, "fixed_or_followup_candidate")
