@@ -400,13 +400,17 @@ class FixtureProbeRunner:
         if not isinstance(total_seconds, (int, float)) or isinstance(total_seconds, bool):
             raise ValueError(f"fixture total_seconds must be a number for {key}")
 
+        telemetry_source = row.get("telemetry_source", "post_smoke")
+        if not isinstance(telemetry_source, str):
+            raise ValueError(f"fixture telemetry_source must be a string for {key}")
+
         probe = Probe(
             candidate=candidate,
             success=success,
             free_vram_mib=(float(free_vram_mib[0]), float(free_vram_mib[1])),
             total_seconds=float(total_seconds),
             order=len(self.probes),
-            telemetry_source=str(row.get("telemetry_source", "post_smoke")),
+            telemetry_source=telemetry_source,
             cache_backed=cache_backed,
             error=error,
         )
