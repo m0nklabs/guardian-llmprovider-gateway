@@ -429,39 +429,39 @@ def test_guardian_v2_probe_runner_uses_admin_load_runtime_overrides():
             return httpx.Response(200, json={"choices": [{"message": {"content": "FIT OK"}}]})
         return httpx.Response(404)
 
-    client = httpx.Client(transport=httpx.MockTransport(handler))
-    runner = GuardianV2ProbeRunner(
-        guardian_url="http://guardian.test",
-        api_key="test-key",
-        smoke_prompt="FIT?",
-        smoke_max_tokens=4,
-        smoke_image_url=None,
-        client=client,
-    )
-    candidate = Candidate(context=65536, ngl=40, tensor_split="0.55,0.45")
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        runner = GuardianV2ProbeRunner(
+            guardian_url="http://guardian.test",
+            api_key="test-key",
+            smoke_prompt="FIT?",
+            smoke_max_tokens=4,
+            smoke_image_url=None,
+            client=client,
+        )
+        candidate = Candidate(context=65536, ngl=40, tensor_split="0.55,0.45")
 
-    with patch(
-        "app.tweaker.finetune_v2_runner.read_gpu_vram_snapshot",
-        return_value={
-            "0": {"free": 300.0, "total": 12000.0, "free_pct": 2.5},
-            "1": {"free": 280.0, "total": 16000.0, "free_pct": 1.75},
-        },
-    ):
-        probe = runner.probe("TestModel", candidate)
-
-    assert probe.success is True
-    assert probe.free_vram_mib == (300.0, 280.0)
-    assert load_payloads == [
-        {
-            "model": "TestModel",
-            "enable_vision": False,
-            "runtime_overrides": {
-                "context": 65536,
-                "ngl": 40,
-                "tensor_split": "0.55,0.45",
+        with patch(
+            "app.tweaker.finetune_v2_runner.read_gpu_vram_snapshot",
+            return_value={
+                "0": {"free": 300.0, "total": 12000.0, "free_pct": 2.5},
+                "1": {"free": 280.0, "total": 16000.0, "free_pct": 1.75},
             },
-        }
-    ]
+        ):
+            probe = runner.probe("TestModel", candidate)
+
+        assert probe.success is True
+        assert probe.free_vram_mib == (300.0, 280.0)
+        assert load_payloads == [
+            {
+                "model": "TestModel",
+                "enable_vision": False,
+                "runtime_overrides": {
+                    "context": 65536,
+                    "ngl": 40,
+                    "tensor_split": "0.55,0.45",
+                },
+            }
+        ]
 
 
 def test_guardian_v2_probe_runner_verify_disk_load_sends_no_overrides():
