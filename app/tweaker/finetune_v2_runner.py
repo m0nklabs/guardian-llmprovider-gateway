@@ -599,7 +599,7 @@ class FinetuneV2Runner:
         if optimization == "context" and fixed_context is None:
             contexts = [limits.max_context, limits.active_context]
         ngl_stride = max(1, ngl_step)
-        # Use -1 as the stop value so ngl=0 is included as a valid last fallback.
+        # Use -1 as the stop value, then append ngl=0 if stride alignment missed it.
         ngls = [fixed_ngl] if fixed_ngl is not None else list(range(limits.total_layers, -1, -ngl_stride))
         if fixed_ngl is None and 0 not in ngls:
             ngls.append(0)

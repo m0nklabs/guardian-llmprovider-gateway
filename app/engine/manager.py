@@ -261,7 +261,7 @@ class ModelManager:
         try:
             args = CURRENT_MODEL_ARGS_FILE.read_text()
         except Exception:
-            return getattr(self, "current_vision_enabled", False) if target == self.current_model else False
+            return self.current_vision_enabled if target == self.current_model else False
 
         return any(candidate and candidate in args for candidate in mmproj_candidates)
 

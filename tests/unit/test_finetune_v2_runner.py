@@ -429,12 +429,16 @@ def test_guardian_v2_probe_runner_probe_closes_load_and_smoke_responses():
 
 def test_guardian_v2_probe_runner_requires_image_for_vision_smoke():
     load_payloads = []
+    chat_payloads = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/admin/load":
             load_payloads.append(json.loads(request.content.decode()))
             return httpx.Response(200, json={"status": "loaded"})
-        pytest.fail("vision probe without smoke_image_url should not call chat completions")
+        if request.url.path == "/v1/chat/completions":
+            chat_payloads.append(json.loads(request.content.decode()))
+            return httpx.Response(200, json={"choices": [{"message": {"content": "FIT OK"}}]})
+        return httpx.Response(404)
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
     runner = GuardianV2ProbeRunner(
@@ -465,6 +469,7 @@ def test_guardian_v2_probe_runner_requires_image_for_vision_smoke():
     assert probe.success is False
     assert probe.telemetry_source == "post_load"
     assert probe.error == "vision finetune requires smoke_image_url to exercise the multimodal path"
+    assert chat_payloads == []
     assert load_payloads == [
         {
             "model": "TestModel",
