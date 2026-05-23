@@ -865,6 +865,20 @@ class TestPreferredModelRecommendations:
 
 class TestRuntimeOverridesValidation:
     @pytest.mark.asyncio
+    async def test_non_dict_runtime_overrides_raises(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+        with pytest.raises(ValueError, match="must be an object/dict"):
+            await mgr.load(runtime_overrides=["context", 65536])
+
+    @pytest.mark.asyncio
+    async def test_unknown_runtime_override_key_raises(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+        with pytest.raises(ValueError, match="unsupported keys"):
+            await mgr.load(runtime_overrides={"contex": 65536})
+
+    @pytest.mark.asyncio
     async def test_context_bool_raises(self, tmp_path: Path):
         mgr = _make_manager(tmp_path)
         mgr.current_model = "GLM-4.7-Flash"

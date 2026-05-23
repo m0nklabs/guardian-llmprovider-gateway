@@ -904,7 +904,19 @@ class ModelManager:
         desired_vision = self._resolve_runtime_vision_flag(target, enable_vision)
         logger.info(f"🔄 Loading model '{target}' in {'vision' if desired_vision else 'text'} mode...")
         target_config = self.build_runtime_config(target, enable_vision=desired_vision)
-        if runtime_overrides:
+        if runtime_overrides is not None:
+            if not isinstance(runtime_overrides, dict):
+                raise ValueError(
+                    f"runtime_overrides must be an object/dict, got {type(runtime_overrides).__name__!r}"
+                )
+            allowed_keys = {"context", "ngl", "tensor_split"}
+            unknown_keys = set(runtime_overrides) - allowed_keys
+            if unknown_keys:
+                unknown_keys_list = ", ".join(sorted(repr(key) for key in unknown_keys))
+                raise ValueError(
+                    "runtime_overrides contains unsupported keys: "
+                    f"{unknown_keys_list}. Allowed keys: context, ngl, tensor_split"
+                )
             for key in ("context", "ngl", "tensor_split"):
                 if key not in runtime_overrides:
                     continue

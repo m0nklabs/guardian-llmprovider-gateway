@@ -2,7 +2,7 @@
 
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
@@ -248,3 +248,51 @@ def test_guardian_v2_probe_runner_verify_disk_load_sends_no_overrides():
 
     assert result is True
     assert load_payloads == [{"model": "TestModel", "enable_vision": True}]
+
+
+def test_guardian_v2_probe_runner_verify_disk_load_closes_response():
+    response = MagicMock(status_code=200)
+    client = MagicMock()
+    client.post.return_value = response
+    runner = GuardianV2ProbeRunner(
+        guardian_url="http://guardian.test",
+        api_key="test-key",
+        smoke_prompt="FIT?",
+        smoke_max_tokens=4,
+        smoke_image_url=None,
+        client=client,
+    )
+
+    result = runner.verify_disk_load("TestModel", enable_vision=False)
+
+    assert result is True
+    response.close.assert_called_once()
+
+
+def test_guardian_v2_probe_runner_probe_closes_load_and_smoke_responses():
+    load_response = MagicMock(status_code=200)
+    smoke_response = MagicMock(status_code=200)
+    client = MagicMock()
+    client.post.side_effect = [load_response, smoke_response]
+    runner = GuardianV2ProbeRunner(
+        guardian_url="http://guardian.test",
+        api_key="test-key",
+        smoke_prompt="FIT?",
+        smoke_max_tokens=4,
+        smoke_image_url=None,
+        client=client,
+    )
+    candidate = Candidate(context=65536, ngl=40, tensor_split="0.55,0.45")
+
+    with patch(
+        "app.tweaker.finetune_v2_runner.read_gpu_vram_snapshot",
+        return_value={
+            "0": {"free": 300.0, "total": 12000.0, "free_pct": 2.5},
+            "1": {"free": 280.0, "total": 16000.0, "free_pct": 1.75},
+        },
+    ):
+        probe = runner.probe("TestModel", candidate)
+
+    assert probe.success is True
+    load_response.close.assert_called_once()
+    smoke_response.close.assert_called_once()

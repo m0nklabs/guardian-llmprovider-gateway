@@ -233,11 +233,18 @@ class GuardianV2ProbeRunner:
     def verify_disk_load(self, model: str, *, enable_vision: bool = False) -> bool:
         """Load the model from disk without runtime overrides to verify the on-disk config."""
         load_payload: dict[str, object] = {"model": model, "enable_vision": enable_vision}
+        response: httpx.Response | None = None
         try:
-            response = self.client.post(f"{self.guardian_url}/admin/load", json=load_payload)
+            response = self.client.post(
+                f"{self.guardian_url}/admin/load",
+                json=load_payload,
+            )
             return response.status_code == 200
         except httpx.RequestError:
             return False
+        finally:
+            if response is not None:
+                response.close()
 
     def probe(self, model: str, candidate: Candidate) -> Probe:
         started = time.perf_counter()
@@ -251,6 +258,7 @@ class GuardianV2ProbeRunner:
             },
         }
         pre_load_vram = read_gpu_vram_snapshot()
+        load_response: httpx.Response | None = None
         try:
             load_response = self.client.post(f"{self.guardian_url}/admin/load", json=load_payload)
         except httpx.RequestError as exc:
@@ -275,8 +283,11 @@ class GuardianV2ProbeRunner:
                 error=load_response.text,
             )
             self.probes.append(probe)
+            load_response.close()
             return probe
 
+        load_response.close()
+        smoke_response: httpx.Response | None = None
         try:
             smoke_response = self.client.post(
                 f"{self.guardian_url}/v1/chat/completions",
@@ -300,18 +311,21 @@ class GuardianV2ProbeRunner:
             )
             self.probes.append(probe)
             return probe
-
-        gpu_vram = read_gpu_vram_snapshot()
-        probe = self._build_probe(
-            candidate,
-            success=smoke_response.status_code == 200,
-            started=started,
-            free_vram_mib=two_gpu_free_mib(gpu_vram),
-            telemetry_source="post_smoke",
-            error=None if smoke_response.status_code == 200 else smoke_response.text,
-        )
-        self.probes.append(probe)
-        return probe
+        try:
+            gpu_vram = read_gpu_vram_snapshot()
+            probe = self._build_probe(
+                candidate,
+                success=smoke_response.status_code == 200,
+                started=started,
+                free_vram_mib=two_gpu_free_mib(gpu_vram),
+                telemetry_source="post_smoke",
+                error=None if smoke_response.status_code == 200 else smoke_response.text,
+            )
+            self.probes.append(probe)
+            return probe
+        finally:
+            if smoke_response is not None:
+                smoke_response.close()
 
     def _build_probe(
         self,
