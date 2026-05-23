@@ -528,7 +528,9 @@ class FinetuneV2Runner:
         if optimization == "speed":
             speed_context_floor = fixed_context if fixed_context is not None else limits.active_context
         allowed_context = speed_context_floor if speed_context_floor is not None else (fixed_context or limits.max_context)
+        allowed_context = min(allowed_context, limits.max_context)
         allowed_ngl = fixed_ngl if fixed_ngl is not None else limits.total_layers
+        allowed_ngl = min(allowed_ngl, limits.total_layers)
         probes: list[Probe] = []
         # Upward ngl retries are prepended so local follow-ups run before the wider candidate grid.
         seed_candidates = initial_seed_candidates(
