@@ -474,6 +474,8 @@ class FinetuneV2Runner:
         ngl_stride = max(1, ngl_step)
         # Use -1 as the stop value so ngl=0 is included as a valid last fallback.
         ngls = [fixed_ngl] if fixed_ngl is not None else list(range(limits.total_layers, -1, -ngl_stride))
+        if fixed_ngl is None and 0 not in ngls:
+            ngls.append(0)
         ngls = unique_explicit_ngls([ngl for ngl in ngls if ngl is not None], limits)
         splits = list(split_candidates or build_split_candidates(seed_split, 0.05, split_min, split_max))
         candidates: list[Candidate] = []

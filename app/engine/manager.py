@@ -917,7 +917,10 @@ class ModelManager:
                     tensor_split = str(value)
                     split_parts = [part.strip() for part in tensor_split.split(",") if part.strip()]
                     if len(split_parts) != 2:
-                        raise ValueError("runtime_overrides.tensor_split must contain two comma-separated values")
+                        raise ValueError(
+                            "runtime_overrides.tensor_split must contain two comma-separated values, "
+                            f"got {len(split_parts)} parts: {tensor_split}"
+                        )
                     try:
                         split_total = sum(float(part) for part in split_parts)
                     except ValueError as exc:

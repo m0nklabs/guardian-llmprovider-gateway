@@ -23,7 +23,8 @@ def resolve_api_key(explicit_key: Optional[str]) -> str:
         keys = json.loads(api_keys_path.read_text())
         if keys:
             return next(iter(keys))
-    raise SystemExit("No Guardian API key found. Use --api-key or populate config/api_keys.json.")
+        raise SystemExit("config/api_keys.json exists but contains no Guardian API keys. Use --api-key or add one.")
+    raise SystemExit("No Guardian API key found. Use --api-key or create config/api_keys.json.")
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
