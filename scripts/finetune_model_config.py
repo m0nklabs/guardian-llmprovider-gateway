@@ -10,11 +10,10 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Optional, Sequence
 
 from _paths import CONFIG_DIR, DATA_DIR
-from app.tweaker.model_finetune import GuardianModelFinetuner
+from app.tweaker.legacy.model_finetune_v1 import GuardianModelFinetuner
 
 
 def resolve_api_key(explicit_key: Optional[str]) -> str:

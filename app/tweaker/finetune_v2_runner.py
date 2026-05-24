@@ -18,7 +18,7 @@ from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
-from typing import Protocol, Sequence
+from typing import Protocol, Sequence, cast
 
 import httpx
 import yaml
@@ -28,6 +28,7 @@ from app.tweaker.finetune_v2_contracts import (
     PlanAction,
     Probe,
     RuntimeLimits,
+    clamp_ngl,
     convergence_status_from_history,
     initial_seed_candidates,
     next_after_seed_failure,
@@ -36,25 +37,38 @@ from app.tweaker.finetune_v2_contracts import (
     unique_explicit_ngls,
     upward_ngl_retry_actions,
 )
-from app.tweaker.model_finetune import (
+from app.tweaker.finetune_v2_telemetry import (
+    free_vram_delta_pct,
+    next_split_from_vram_balance,
+    read_backend_gpu_vram_snapshot,
+    read_current_tensor_split_arg,
+    read_gpu_vram_snapshot,
+    should_skip_coarse_split_shift,
+    two_gpu_free_mib,
+)
+from app.tweaker.finetune_v2_support import (
     apply_runtime_search_values,
     build_smoke_messages,
     build_split_candidates,
+    detect_oom_gpu,
     format_two_gpu_split,
     has_vision_runtime,
     parse_two_gpu_split,
-    read_gpu_vram_snapshot,
     render_model_block,
     replace_model_block,
     resolve_runtime_config_value,
     resolve_runtime_mode,
     resolve_runtime_total_layers,
     runtime_mode_uses_vision,
-    two_gpu_free_mib,
+    smaller_split_step,
 )
 
 
 DEFAULT_V2_RESULTS_FILE = "data/model_finetune_v2_results.json"
+CRITICAL_FINE_SPLIT_HEADROOM_MIB = 100.0
+FINE_SPLIT_STEP = 0.01
+BALANCED_FREE_VRAM_THRESHOLD_PCT = 5.0
+BALANCE_WORSE_EPSILON_PCT = 0.05
 
 
 @dataclass(frozen=True)
@@ -70,6 +84,7 @@ class FinetuneV2Result:
     probes: list[Probe] = field(default_factory=list)
     applied: bool = False
     results_file: str | None = None
+    start_ngl: int | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -82,6 +97,7 @@ class FinetuneV2Result:
             "probes": [_probe_to_dict(probe) for probe in self.probes],
             "applied": self.applied,
             "results_file": self.results_file,
+            "start_ngl": self.start_ngl,
         }
 
 
@@ -93,6 +109,29 @@ def _probe_to_dict(probe: Probe) -> dict[str, object]:
     payload = asdict(probe)
     payload["candidate"] = _candidate_to_dict(probe.candidate)
     return payload
+
+
+def _coerce_int(value: object, field_name: str) -> int:
+    try:
+        return int(cast(int | float | str, value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"finetune v2 requires numeric {field_name}") from exc
+
+
+def _no_successful_probe_error(model_name: str, probes: Sequence[Probe]) -> RuntimeError:
+    """Build an operator-facing failure when every attempted probe failed."""
+    if not probes:
+        return RuntimeError(f"Finetune v2 found no successful probes for '{model_name}' because no probes ran")
+    last_probe = probes[-1]
+    candidate = last_probe.candidate
+    last_error = last_probe.error or "probe failed without a detailed error"
+    return RuntimeError(
+        "Finetune v2 found no successful probes for "
+        f"'{model_name}' after {len(probes)} attempt(s). "
+        "Last candidate: "
+        f"context={candidate.context}, ngl={candidate.ngl}, tensor_split={candidate.tensor_split}, "
+        f"runtime_mode={candidate.runtime_mode}. Last error: {last_error}"
+    )
 
 
 class FinetuneV2ResultsLog:
@@ -125,6 +164,7 @@ class FinetuneV2ResultsLog:
             probes = []
             entry["probes"] = probes
         probes.append(_probe_to_dict(probe))
+        self._persist()
         self._persist_active_entry()
 
     def complete_run(self, **fields: object) -> None:
@@ -316,6 +356,9 @@ class GuardianV2ProbeRunner:
                 success=False,
                 started=started,
                 free_vram_mib=two_gpu_free_mib(pre_load_vram),
+                gpu_vram=pre_load_vram,
+                backend_gpu_vram=None,
+                effective_tensor_split=None,
                 telemetry_source="pre_load",
                 error=str(exc),
             )
@@ -328,6 +371,9 @@ class GuardianV2ProbeRunner:
                 success=False,
                 started=started,
                 free_vram_mib=two_gpu_free_mib(pre_load_vram),
+                gpu_vram=pre_load_vram,
+                backend_gpu_vram=None,
+                effective_tensor_split=None,
                 telemetry_source="pre_load",
                 error=load_response.text,
             )
@@ -338,11 +384,16 @@ class GuardianV2ProbeRunner:
         load_response.close()
         if runtime_mode_uses_vision(getattr(candidate, "runtime_mode", "text")) and not self.smoke_image_url:
             gpu_vram = read_gpu_vram_snapshot()
+            backend_gpu_vram = read_backend_gpu_vram_snapshot()
+            effective_tensor_split = read_current_tensor_split_arg()
             probe = self._build_probe(
                 candidate,
                 success=False,
                 started=started,
                 free_vram_mib=two_gpu_free_mib(gpu_vram),
+                gpu_vram=gpu_vram,
+                backend_gpu_vram=backend_gpu_vram,
+                effective_tensor_split=effective_tensor_split,
                 telemetry_source="post_load",
                 error="vision finetune requires smoke_image_url to exercise the multimodal path",
             )
@@ -363,11 +414,16 @@ class GuardianV2ProbeRunner:
             )
         except httpx.RequestError as exc:
             gpu_vram = read_gpu_vram_snapshot()
+            backend_gpu_vram = read_backend_gpu_vram_snapshot()
+            effective_tensor_split = read_current_tensor_split_arg()
             probe = self._build_probe(
                 candidate,
                 success=False,
                 started=started,
                 free_vram_mib=two_gpu_free_mib(gpu_vram),
+                gpu_vram=gpu_vram,
+                backend_gpu_vram=backend_gpu_vram,
+                effective_tensor_split=effective_tensor_split,
                 telemetry_source="post_load",
                 error=str(exc),
             )
@@ -375,11 +431,16 @@ class GuardianV2ProbeRunner:
             return probe
         try:
             gpu_vram = read_gpu_vram_snapshot()
+            backend_gpu_vram = read_backend_gpu_vram_snapshot()
+            effective_tensor_split = read_current_tensor_split_arg()
             probe = self._build_probe(
                 candidate,
                 success=smoke_response.status_code == 200,
                 started=started,
                 free_vram_mib=two_gpu_free_mib(gpu_vram),
+                gpu_vram=gpu_vram,
+                backend_gpu_vram=backend_gpu_vram,
+                effective_tensor_split=effective_tensor_split,
                 telemetry_source="post_smoke",
                 error=None if smoke_response.status_code == 200 else smoke_response.text,
             )
@@ -396,6 +457,9 @@ class GuardianV2ProbeRunner:
         success: bool,
         started: float,
         free_vram_mib: tuple[float, float] | None,
+        gpu_vram: Mapping[str, Mapping[str, float]] | None,
+        backend_gpu_vram: Mapping[str, Mapping[str, float]] | None,
+        effective_tensor_split: str | None,
         telemetry_source: str,
         error: str | None,
     ) -> Probe:
@@ -403,6 +467,9 @@ class GuardianV2ProbeRunner:
             candidate=candidate,
             success=success,
             free_vram_mib=free_vram_mib,
+            gpu_vram=gpu_vram,
+            backend_gpu_vram=backend_gpu_vram,
+            effective_tensor_split=effective_tensor_split,
             total_seconds=time.perf_counter() - started,
             order=len(self.probes),
             telemetry_source=telemetry_source,
@@ -511,6 +578,20 @@ class FinetuneV2Runner:
         except FileNotFoundError:
             self._base_mtime_ns = None
 
+    def _models_mapping(self) -> Mapping[str, object]:
+        models = self.base_config.get("models", {})
+        return cast(Mapping[str, object], models) if isinstance(models, Mapping) else {}
+
+    def _aliases_mapping(self) -> Mapping[str, object]:
+        aliases = self.base_config.get("aliases", {})
+        return cast(Mapping[str, object], aliases) if isinstance(aliases, Mapping) else {}
+
+    def _model_config(self, model_name: str) -> Mapping[str, object]:
+        model_config = self._models_mapping().get(model_name, {})
+        if not isinstance(model_config, Mapping):
+            raise ValueError(f"models.yaml entry for '{model_name}' must be a mapping/object")
+        return cast(Mapping[str, object], model_config)
+
     def tune_model(
         self,
         model_name: str,
@@ -518,20 +599,29 @@ class FinetuneV2Runner:
         optimization: str,
         fixed_context: int | None = None,
         fixed_ngl: int | None = None,
+        start_ngl: int | None = None,
         split_candidates: Sequence[str] | None = None,
         ngl_step: int = 1,
         split_min: float = 0.30,
         split_max: float = 0.70,
         apply: bool = False,
     ) -> FinetuneV2Result:
+        if fixed_ngl is not None and start_ngl is not None:
+            raise ValueError("start_ngl cannot be combined with fixed_ngl")
         canonical_model = self._resolve_model(model_name)
         split_candidates = self._normalize_split_candidates(split_candidates)
-        model_config = copy.deepcopy(self.base_config.get("models", {}).get(canonical_model, {}))
+        model_config = copy.deepcopy(dict(self._model_config(canonical_model)))
         if self.runtime_mode == "vision" and not has_vision_runtime(model_config):
             raise ValueError(f"Model '{canonical_model}' does not have a configured vision runtime")
         limits = self._runtime_limits(model_config, fixed_context=fixed_context)
-        seed_split = self._seed_split(model_config, split_min=split_min, split_max=split_max)
+        normalized_start_ngl = clamp_ngl(start_ngl, limits) if start_ngl is not None else None
+        seed_split = (
+            split_candidates[0]
+            if split_candidates is not None
+            else self._seed_split(model_config, split_min=split_min, split_max=split_max)
+        )
         has_mmproj = self.runtime_mode == "vision"
+        ladder_mode = normalized_start_ngl is not None and fixed_ngl is None
         speed_context_floor = None
         if optimization == "speed":
             speed_context_floor = fixed_context if fixed_context is not None else limits.active_context
@@ -547,6 +637,7 @@ class FinetuneV2Runner:
             seed_split=seed_split,
             fixed_context=fixed_context,
             fixed_ngl=fixed_ngl,
+            start_ngl=normalized_start_ngl,
             runtime_mode=self.runtime_mode,
             has_mmproj=has_mmproj,
         )
@@ -558,21 +649,22 @@ class FinetuneV2Runner:
             )
             for candidate in seed_candidates
         )
-        queued.extend(
-            PlanAction("candidate_grid", candidate, "fixed_or_followup_candidate")
-            for candidate in self._candidate_grid(
-                limits=limits,
-                optimization=optimization,
-                seed_split=seed_split,
-                has_mmproj=has_mmproj,
-                fixed_context=fixed_context,
-                fixed_ngl=fixed_ngl,
-                split_candidates=split_candidates,
-                ngl_step=ngl_step,
-                split_min=split_min,
-                split_max=split_max,
+        if not ladder_mode:
+            queued.extend(
+                PlanAction("candidate_grid", candidate, "fixed_or_followup_candidate")
+                for candidate in self._candidate_grid(
+                    limits=limits,
+                    optimization=optimization,
+                    seed_split=seed_split,
+                    has_mmproj=has_mmproj,
+                    fixed_context=fixed_context,
+                    fixed_ngl=fixed_ngl,
+                    split_candidates=split_candidates,
+                    ngl_step=ngl_step,
+                    split_min=split_min,
+                    split_max=split_max,
+                )
             )
-        )
         seen_candidates: set[tuple[int, int, str, str, bool]] = set()
         low_headroom_followups_used = 0
         remaining_low_headroom_followups: int | None = None
@@ -584,13 +676,15 @@ class FinetuneV2Runner:
             optimization=optimization,
             fixed_context=fixed_context,
             fixed_ngl=fixed_ngl,
+            start_ngl=normalized_start_ngl,
             applied=False,
         )
         restored_disk_runtime = False
+        restore_attempted = False
         try:
             while queued:
                 if remaining_low_headroom_followups is not None:
-                    if remaining_low_headroom_followups <= 0:
+                    if remaining_low_headroom_followups <= 0 and queued[0].kind != "upward_ngl_retry":
                         break
 
                 action = queued.popleft()
@@ -613,18 +707,52 @@ class FinetuneV2Runner:
                     low_headroom_followups_used += 1
 
                 if probe.success:
-                    queued_followups = False
-                    rebalance = split_rebalance_action(
+                    unchanged_split_followup = self._handle_unchanged_split_free_vram(
+                        probe,
                         probes,
-                        better_split=self._better_split(probe, split_min, split_max),
+                        split_min,
+                        split_max,
                     )
-                    if rebalance is not None:
-                        queued.append(rebalance)
+                    if unchanged_split_followup is not None:
+                        queued.appendleft(unchanged_split_followup)
+                        continue
+                    queued_followups = False
+                    balance_ready = self._is_balanced_enough(probe)
+                    fine_refinements = self._fine_split_refinement_actions(
+                        action,
+                        probe,
+                        split_min,
+                        split_max,
+                    )
+                    if fine_refinements:
                         queued_followups = True
-                    if fixed_ngl is None:
+                        for refinement in reversed(fine_refinements):
+                            queued.appendleft(refinement)
+                    elif action.kind != "split_refine" and (probe.gpu_vram is None or not balance_ready):
+                        rebalance = self._rebalance_followup_action(
+                            probe,
+                            probes,
+                            split_min,
+                            split_max,
+                        )
+                        if rebalance is not None and rebalance.candidate.tensor_split != probe.candidate.tensor_split:
+                            queued.appendleft(rebalance)
+                            queued_followups = True
+                    if normalized_start_ngl is not None and not balance_ready and not queued_followups:
+                        rung_split_fallback = self._next_untried_rung_split_action(
+                            probe,
+                            probes,
+                            split_min,
+                            split_max,
+                        )
+                        if rung_split_fallback is not None:
+                            queued.appendleft(rung_split_fallback)
+                            queued_followups = True
+                    if fixed_ngl is None and balance_ready and not queued_followups:
                         retry_actions = upward_ngl_retry_actions(probe, limits, max_retries=1)
                         if retry_actions:
                             queued_followups = True
+                            self._drop_stale_lower_rung_split_followups(queued, probe.candidate)
                         for retry_action in reversed(retry_actions):
                             queued.appendleft(retry_action)
 
@@ -638,17 +766,43 @@ class FinetuneV2Runner:
                         allowed_ngl=allowed_ngl,
                     )
                     if convergence["should_continue"] is False:
-                        if queued_followups and convergence["reason"] == "max_context_and_ngl":
+                        if convergence["reason"] == "max_context_and_ngl" and (
+                            queued_followups
+                            or (queued and queued[0].kind in {"split_refine", "split_rebalance", "upward_ngl_retry"})
+                        ):
                             continue
                         break
                     if (
                         convergence["reason"] == "low_headroom_followup"
                         and remaining_low_headroom_followups is None
                     ):
-                        remaining_low_headroom_followups = int(convergence["remaining_followups"])
+                        remaining_low_headroom_followups = _coerce_int(
+                            convergence["remaining_followups"], "remaining_followups"
+                        )
                     elif remaining_low_headroom_followups is not None and convergence["reason"] != "low_headroom_followup":
-                        break
+                        remaining_low_headroom_followups = None
                 else:
+                    same_ngl_seed_retry = self._same_ngl_seed_split_retry_action(
+                        action,
+                        probe,
+                        probes,
+                        split_min,
+                        split_max,
+                        start_ngl=normalized_start_ngl,
+                    )
+                    if same_ngl_seed_retry is not None:
+                        queued.appendleft(same_ngl_seed_retry)
+                        continue
+                    smaller_rebalance_retry = self._smaller_rebalance_retry_action(
+                        action,
+                        probe,
+                        probes,
+                        split_min,
+                        split_max,
+                    )
+                    if smaller_rebalance_retry is not None:
+                        queued.appendleft(smaller_rebalance_retry)
+                        continue
                     if remaining_low_headroom_followups is not None:
                         convergence = convergence_status_from_history(
                             probes,
@@ -663,9 +817,12 @@ class FinetuneV2Runner:
                             break
                         if convergence["reason"] != "low_headroom_followup":
                             break
-                    seed_retry = next_after_seed_failure(probes, limits)
+                    seed_retry = next_after_seed_failure(probes, limits, ngl_floor=normalized_start_ngl)
                     if seed_retry is not None and fixed_ngl is None:
-                        queued.append(seed_retry)
+                        queued.appendleft(seed_retry)
+
+            if not any(probe.success for probe in probes):
+                raise _no_successful_probe_error(canonical_model, probes)
 
             winner, explanation = rank_successes(
                 probes,
@@ -681,9 +838,16 @@ class FinetuneV2Runner:
                 allowed_context=allowed_context,
                 allowed_ngl=allowed_ngl,
             )
+            if normalized_start_ngl is not None and convergence.get("should_continue") is True:
+                convergence = {
+                    **convergence,
+                    "should_continue": False,
+                    "reason": "candidate_queue_exhausted",
+                }
             if apply:
                 self._apply_winner(canonical_model, model_config, winner)
             else:
+                restore_attempted = True
                 self._restore_disk_runtime(canonical_model)
                 restored_disk_runtime = True
             result = FinetuneV2Result(
@@ -696,6 +860,7 @@ class FinetuneV2Runner:
                 probes=probes,
                 applied=apply,
                 results_file=str(self.results.path),
+                start_ngl=normalized_start_ngl,
             )
             self.results.complete_run(
                 winner=_probe_to_dict(winner),
@@ -705,12 +870,15 @@ class FinetuneV2Runner:
             )
             return result
         except BaseException as exc:
-            if not apply and not restored_disk_runtime:
+            if not apply and not restored_disk_runtime and not restore_attempted:
                 try:
                     self._restore_disk_runtime(canonical_model)
                 except BaseException as restore_exc:
-                    self.results.fail_run(restore_exc)
-                    raise restore_exc from exc
+                    combined_exc = RuntimeError(
+                        f"{exc}; dry-run restore also failed: {restore_exc}"
+                    )
+                    self.results.fail_run(combined_exc)
+                    raise combined_exc from exc
             self.results.fail_run(exc)
             raise
 
@@ -775,19 +943,530 @@ class FinetuneV2Runner:
             active_context = max_context
         if max_context is None:
             raise ValueError("finetune v2 requires a configured context or benchmark_context_limit")
-        return RuntimeLimits(total_layers=total_layers, max_context=int(max_context), active_context=int(active_context))
+        return RuntimeLimits(
+            total_layers=total_layers,
+            max_context=_coerce_int(max_context, "max_context"),
+            active_context=_coerce_int(active_context, "active_context"),
+        )
 
     def _seed_split(self, model_config: Mapping[str, object], *, split_min: float, split_max: float) -> str:
         split = resolve_runtime_config_value(dict(model_config), "tensor_split", self.runtime_mode)
         return str(split or format_two_gpu_split(min(max(0.5, split_min), split_max)))
 
     def _better_split(self, probe: Probe, split_min: float, split_max: float) -> str:
+        if probe.gpu_vram is not None:
+            delta_pct = free_vram_delta_pct(probe.gpu_vram)
+            if delta_pct is not None and delta_pct > BALANCED_FREE_VRAM_THRESHOLD_PCT:
+                if delta_pct > 15.0:
+                    step = 0.05
+                elif delta_pct > 8.0:
+                    step = 0.02
+                else:
+                    step = 0.01
+                if should_skip_coarse_split_shift(probe.gpu_vram, step=step):
+                    step = smaller_split_step(step) or step
+                balanced_split = next_split_from_vram_balance(
+                    probe.candidate.tensor_split,
+                    gpu_vram=probe.gpu_vram,
+                    step=step,
+                    split_min=split_min,
+                    split_max=split_max,
+                )
+                if balanced_split is not None:
+                    return balanced_split
         values = probe.free_vram_mib
         if values is None or values[0] == values[1]:
             return probe.candidate.tensor_split
         primary = float(probe.candidate.tensor_split.split(",", 1)[0])
         direction = 0.05 if values[0] > values[1] else -0.05
         return format_two_gpu_split(min(max(primary + direction, split_min), split_max))
+
+    def _is_balanced_enough(self, probe: Probe) -> bool:
+        if probe.gpu_vram is None:
+            return True
+        delta_pct = free_vram_delta_pct(probe.gpu_vram)
+        if delta_pct is None:
+            return True
+        return delta_pct <= BALANCED_FREE_VRAM_THRESHOLD_PCT
+
+    def _rebalance_followup_action(
+        self,
+        probe: Probe,
+        probes: Sequence[Probe],
+        split_min: float,
+        split_max: float,
+    ) -> PlanAction | None:
+        attempted_splits = {
+            existing.candidate.tensor_split
+            for existing in probes
+            if existing.candidate.context == probe.candidate.context
+            and existing.candidate.ngl == probe.candidate.ngl
+            and existing.candidate.runtime_mode == probe.candidate.runtime_mode
+            and existing.candidate.has_mmproj == probe.candidate.has_mmproj
+        }
+
+        gradient_reversal = self._worse_balance_gradient_reversal_action(
+            probe,
+            probes,
+            attempted_splits,
+            split_min,
+            split_max,
+        )
+        if gradient_reversal is not None:
+            return gradient_reversal
+
+        preferred_split = self._better_split(probe, split_min, split_max)
+        if preferred_split != probe.candidate.tensor_split and preferred_split not in attempted_splits:
+            return split_rebalance_action(probes, better_split=preferred_split)
+
+        fallback_split = self._smaller_untried_balance_split(
+            probe,
+            attempted_splits,
+            preferred_split,
+            split_min,
+            split_max,
+        )
+        if fallback_split is None or fallback_split == probe.candidate.tensor_split:
+            return None
+        return split_rebalance_action(probes, better_split=fallback_split)
+
+    def _smaller_untried_balance_split(
+        self,
+        probe: Probe,
+        attempted_splits: set[str],
+        preferred_split: str,
+        split_min: float,
+        split_max: float,
+    ) -> str | None:
+        current_primary = parse_two_gpu_split(probe.candidate.tensor_split)
+        preferred_primary = parse_two_gpu_split(preferred_split)
+        if current_primary is None or preferred_primary is None:
+            return None
+
+        step = abs(preferred_primary - current_primary)
+        if step <= 0.0:
+            return None
+
+        retry_step = smaller_split_step(step)
+        while retry_step is not None:
+            retry_split = next_split_from_vram_balance(
+                probe.candidate.tensor_split,
+                gpu_vram=probe.gpu_vram,
+                step=retry_step,
+                split_min=split_min,
+                split_max=split_max,
+            )
+            if retry_split is None:
+                retry_split = self._fallback_rebalance_split_from_free_vram(
+                    probe,
+                    retry_step,
+                    split_min,
+                    split_max,
+                )
+            if retry_split is not None and retry_split not in attempted_splits:
+                return retry_split
+            retry_step = smaller_split_step(retry_step)
+        return None
+
+    def _fallback_rebalance_split_from_free_vram(
+        self,
+        probe: Probe,
+        step: float,
+        split_min: float,
+        split_max: float,
+    ) -> str | None:
+        values = probe.free_vram_mib
+        current_primary = parse_two_gpu_split(probe.candidate.tensor_split)
+        if values is None or current_primary is None or values[0] == values[1]:
+            return None
+        direction = step if values[0] > values[1] else -step
+        candidate_primary = round(current_primary + direction, 2)
+        if not split_min <= candidate_primary <= split_max:
+            return None
+        candidate_split = format_two_gpu_split(candidate_primary)
+        if candidate_split == probe.candidate.tensor_split:
+            return None
+        return candidate_split
+
+    def _worse_balance_gradient_reversal_action(
+        self,
+        probe: Probe,
+        probes: Sequence[Probe],
+        attempted_splits: set[str],
+        split_min: float,
+        split_max: float,
+    ) -> PlanAction | None:
+        previous_probe = self._previous_probe_with_same_shape_different_split(probe, probes)
+        if previous_probe is None:
+            return None
+        previous_delta = self._balance_delta(previous_probe)
+        current_delta = self._balance_delta(probe)
+        if previous_delta is None or current_delta is None:
+            return None
+        if current_delta <= previous_delta + BALANCE_WORSE_EPSILON_PCT:
+            return None
+
+        previous_primary = parse_two_gpu_split(previous_probe.candidate.tensor_split)
+        current_primary = parse_two_gpu_split(probe.candidate.tensor_split)
+        if previous_primary is None or current_primary is None:
+            return None
+        step = round(current_primary - previous_primary, 2)
+        if math.isclose(step, 0.0, abs_tol=0.001):
+            return None
+
+        candidate_primary = round(previous_primary - step, 2)
+        if not split_min <= candidate_primary <= split_max:
+            return None
+        candidate_split = format_two_gpu_split(candidate_primary)
+        if candidate_split in attempted_splits or candidate_split == probe.candidate.tensor_split:
+            return None
+        return PlanAction(
+            kind="split_rebalance",
+            candidate=replace(probe.candidate, tensor_split=candidate_split),
+            reason="worse_balance_gradient_reversal",
+        )
+
+    def _balance_delta(self, probe: Probe) -> float | None:
+        delta_pct = free_vram_delta_pct(probe.gpu_vram)
+        if delta_pct is not None:
+            return delta_pct
+        values = probe.free_vram_mib
+        if values is None:
+            return None
+        return abs(values[0] - values[1])
+
+    def _handle_unchanged_split_free_vram(
+        self,
+        probe: Probe,
+        probes: Sequence[Probe],
+        split_min: float,
+        split_max: float,
+    ) -> PlanAction | None:
+        previous_probe = self._previous_probe_with_same_shape_different_split(probe, probes)
+        if previous_probe is None:
+            return None
+        previous_effective_split = previous_probe.effective_tensor_split or previous_probe.candidate.tensor_split
+        current_effective_split = probe.effective_tensor_split or probe.candidate.tensor_split
+        if previous_effective_split == current_effective_split:
+            raise RuntimeError(
+                "effective tensor split did NOT change with a different requested split. runtime override may be ignored. "
+                f"context={probe.candidate.context} ngl={probe.candidate.ngl} "
+                f"previous_requested_split={previous_probe.candidate.tensor_split} "
+                f"current_requested_split={probe.candidate.tensor_split} "
+                f"effective_split={current_effective_split}"
+            )
+        current_signature = self._free_vram_signature(probe)
+        if current_signature is None:
+            return None
+        previous_signature = self._free_vram_signature(previous_probe)
+        if previous_signature is None or previous_signature != current_signature:
+            return None
+        return self._next_same_bucket_directional_split_action(
+            probe,
+            previous_probe,
+            probes,
+            split_min,
+            split_max,
+        )
+
+    def _previous_probe_with_same_shape_different_split(
+        self,
+        probe: Probe,
+        probes: Sequence[Probe],
+    ) -> Probe | None:
+        if len(probes) < 2:
+            return None
+        previous = probes[-2]
+        if not previous.success or not probe.success:
+            return None
+        if previous.candidate.context != probe.candidate.context:
+            return None
+        if previous.candidate.ngl != probe.candidate.ngl:
+            return None
+        if previous.candidate.runtime_mode != probe.candidate.runtime_mode:
+            return None
+        if previous.candidate.has_mmproj != probe.candidate.has_mmproj:
+            return None
+        if previous.candidate.tensor_split == probe.candidate.tensor_split:
+            return None
+        return previous
+
+    def _free_vram_signature(self, probe: Probe) -> tuple[float, ...] | None:
+        if probe.backend_gpu_vram:
+            return tuple(
+                float(details.get("used", 0.0))
+                for _, details in sorted(probe.backend_gpu_vram.items(), key=lambda item: item[0])
+            )
+        if not probe.gpu_vram:
+            return None
+        return tuple(
+            float(details.get("free", 0.0))
+            for _, details in sorted(probe.gpu_vram.items(), key=lambda item: item[0])
+        )
+
+    def _next_same_bucket_directional_split_action(
+        self,
+        probe: Probe,
+        previous_probe: Probe,
+        probes: Sequence[Probe],
+        split_min: float,
+        split_max: float,
+    ) -> PlanAction | None:
+        previous_primary = parse_two_gpu_split(previous_probe.candidate.tensor_split)
+        current_primary = parse_two_gpu_split(probe.candidate.tensor_split)
+        if previous_primary is None or current_primary is None:
+            return None
+        step = round(current_primary - previous_primary, 2)
+        if math.isclose(step, 0.0, abs_tol=0.001):
+            return None
+
+        attempted_splits = {
+            existing.candidate.tensor_split
+            for existing in probes
+            if existing.candidate.context == probe.candidate.context
+            and existing.candidate.ngl == probe.candidate.ngl
+            and existing.candidate.runtime_mode == probe.candidate.runtime_mode
+            and existing.candidate.has_mmproj == probe.candidate.has_mmproj
+        }
+        candidate_primary = round(current_primary + step, 2)
+        while split_min <= candidate_primary <= split_max:
+            candidate_split = format_two_gpu_split(candidate_primary)
+            if candidate_split not in attempted_splits and candidate_split != probe.candidate.tensor_split:
+                return PlanAction(
+                    kind="split_rebalance",
+                    candidate=replace(probe.candidate, tensor_split=candidate_split),
+                    reason="same_backend_bucket_directional_step",
+                )
+            candidate_primary = round(candidate_primary + step, 2)
+        return None
+
+    def _next_untried_rung_split_action(
+        self,
+        probe: Probe,
+        probes: Sequence[Probe],
+        split_min: float,
+        split_max: float,
+    ) -> PlanAction | None:
+        attempted_splits = {
+            existing.candidate.tensor_split
+            for existing in probes
+            if existing.candidate.context == probe.candidate.context
+            and existing.candidate.ngl == probe.candidate.ngl
+            and existing.candidate.runtime_mode == probe.candidate.runtime_mode
+            and existing.candidate.has_mmproj == probe.candidate.has_mmproj
+        }
+        for candidate_split in build_split_candidates(probe.candidate.tensor_split, 0.01, split_min, split_max):
+            if candidate_split is None:
+                continue
+            if candidate_split in attempted_splits or candidate_split == probe.candidate.tensor_split:
+                continue
+            return PlanAction(
+                kind="split_rebalance",
+                candidate=replace(probe.candidate, tensor_split=candidate_split),
+                reason="same_rung_untried_split_fallback",
+            )
+        return None
+
+    def _smaller_rebalance_retry_action(
+        self,
+        action: PlanAction,
+        probe: Probe,
+        probes: Sequence[Probe],
+        split_min: float,
+        split_max: float,
+    ) -> PlanAction | None:
+        if action.kind != "split_rebalance":
+            return None
+        source = self._latest_same_shape_success(action.candidate, probes[:-1])
+        if source is None:
+            return None
+        source_primary = parse_two_gpu_split(source.candidate.tensor_split)
+        failed_primary = parse_two_gpu_split(action.candidate.tensor_split)
+        if source_primary is None or failed_primary is None:
+            return None
+        retry_step = smaller_split_step(abs(failed_primary - source_primary))
+        if retry_step is None:
+            return None
+
+        attempted_splits = {
+            existing.candidate.tensor_split
+            for existing in probes
+            if existing.candidate.context == action.candidate.context
+            and existing.candidate.ngl == action.candidate.ngl
+            and existing.candidate.runtime_mode == action.candidate.runtime_mode
+            and existing.candidate.has_mmproj == action.candidate.has_mmproj
+        }
+        telemetry = source.gpu_vram or probe.gpu_vram
+        while retry_step is not None:
+            retry_split = next_split_from_vram_balance(
+                source.candidate.tensor_split,
+                gpu_vram=telemetry,
+                step=retry_step,
+                split_min=split_min,
+                split_max=split_max,
+            )
+            if retry_split is not None and retry_split not in attempted_splits:
+                return PlanAction(
+                    kind="split_rebalance",
+                    candidate=replace(action.candidate, tensor_split=retry_split),
+                    reason=f"{action.reason}; smaller_step_retry",
+                )
+            retry_step = smaller_split_step(retry_step)
+        return None
+
+    def _same_ngl_seed_split_retry_action(
+        self,
+        action: PlanAction,
+        probe: Probe,
+        probes: Sequence[Probe],
+        split_min: float,
+        split_max: float,
+        start_ngl: int | None,
+    ) -> PlanAction | None:
+        ladder_mode = start_ngl is not None
+        allowed_action_kinds = {"seed_ngl_step_down", "same_ngl_failure_split_retry", "upward_ngl_retry"}
+        if ladder_mode:
+            allowed_action_kinds.add("seed")
+        if action.kind not in allowed_action_kinds:
+            return None
+
+        attempted_splits = {
+            existing.candidate.tensor_split
+            for existing in probes
+            if existing.candidate.context == probe.candidate.context
+            and existing.candidate.ngl == probe.candidate.ngl
+            and existing.candidate.runtime_mode == probe.candidate.runtime_mode
+            and existing.candidate.has_mmproj == probe.candidate.has_mmproj
+        }
+        for retry_split in self._same_ngl_seed_retry_splits(
+            probe.candidate.tensor_split,
+            probe.error,
+            split_min,
+            split_max,
+        ):
+            if retry_split in attempted_splits:
+                continue
+            return PlanAction(
+                kind="same_ngl_failure_split_retry",
+                candidate=replace(probe.candidate, tensor_split=retry_split),
+                reason="failed_same_ngl_split_retry",
+            )
+        return None
+
+    def _same_ngl_seed_retry_splits(
+        self,
+        tensor_split: str,
+        error: str | None,
+        split_min: float,
+        split_max: float,
+    ) -> list[str]:
+        current_primary = parse_two_gpu_split(tensor_split)
+        if current_primary is None:
+            return []
+
+        failed_gpu = detect_oom_gpu(error)
+        if failed_gpu == 1:
+            preferred_direction = 1
+        elif failed_gpu == 0:
+            preferred_direction = -1
+        else:
+            preferred_direction = 1 if current_primary >= 0.5 else -1
+        fallback_direction = -preferred_direction
+
+        steps: list[float] = []
+        step = 0.05
+        while True:
+            steps.append(step)
+            next_step = smaller_split_step(step)
+            if next_step is None:
+                break
+            step = next_step
+
+        candidates: list[str] = []
+        for direction in (preferred_direction, fallback_direction):
+            for candidate_step in steps:
+                candidate_primary = round(current_primary + (direction * candidate_step), 2)
+                if not split_min <= candidate_primary <= split_max:
+                    continue
+                candidate_split = format_two_gpu_split(candidate_primary)
+                if candidate_split == tensor_split or candidate_split in candidates:
+                    continue
+                candidates.append(candidate_split)
+        return candidates
+
+    def _latest_same_shape_success(self, candidate: Candidate, probes: Sequence[Probe]) -> Probe | None:
+        for existing in reversed(probes):
+            if not existing.success:
+                continue
+            if existing.candidate.context != candidate.context:
+                continue
+            if existing.candidate.ngl != candidate.ngl:
+                continue
+            if existing.candidate.runtime_mode != candidate.runtime_mode:
+                continue
+            if existing.candidate.has_mmproj != candidate.has_mmproj:
+                continue
+            return existing
+        return None
+
+    def _drop_stale_lower_rung_split_followups(
+        self,
+        queued: deque[PlanAction],
+        balanced_candidate: Candidate,
+    ) -> None:
+        kept = deque(
+            action
+            for action in queued
+            if not (
+                action.kind in {"split_refine", "split_rebalance"}
+                and action.candidate.context == balanced_candidate.context
+                and action.candidate.ngl <= balanced_candidate.ngl
+                and action.candidate.runtime_mode == balanced_candidate.runtime_mode
+                and action.candidate.has_mmproj == balanced_candidate.has_mmproj
+            )
+        )
+        queued.clear()
+        queued.extend(kept)
+
+    def _fine_split_refinement_actions(
+        self,
+        action: PlanAction,
+        probe: Probe,
+        split_min: float,
+        split_max: float,
+    ) -> list[PlanAction]:
+        if action.kind not in {"seed", "candidate_grid", "split_rebalance"}:
+            return []
+        values = probe.free_vram_mib
+        if values is None or min(values) >= CRITICAL_FINE_SPLIT_HEADROOM_MIB:
+            return []
+        primary = parse_two_gpu_split(probe.candidate.tensor_split)
+        if primary is None:
+            return []
+
+        if values[0] < values[1]:
+            deltas = (-FINE_SPLIT_STEP, FINE_SPLIT_STEP)
+        elif values[0] > values[1]:
+            deltas = (FINE_SPLIT_STEP, -FINE_SPLIT_STEP)
+        else:
+            deltas = (-FINE_SPLIT_STEP, FINE_SPLIT_STEP)
+
+        candidate_splits: list[str] = []
+        for delta in deltas:
+            candidate_primary = min(max(primary + delta, split_min), split_max)
+            candidate_split = format_two_gpu_split(candidate_primary)
+            if candidate_split == probe.candidate.tensor_split or candidate_split in candidate_splits:
+                continue
+            candidate_splits.append(candidate_split)
+
+        return [
+            PlanAction(
+                "split_refine",
+                replace(probe.candidate, tensor_split=split),
+                "critical_headroom_neighbor_refinement",
+            )
+            for split in candidate_splits
+        ]
 
     def _clamp_candidate(
         self,
@@ -855,10 +1534,10 @@ class FinetuneV2Runner:
             )
 
     def _resolve_model(self, requested_name: str) -> str:
-        models = self.base_config.get("models", {})
+        models = self._models_mapping()
         if requested_name in models:
             return requested_name
-        aliases = self.base_config.get("aliases", {})
+        aliases = self._aliases_mapping()
         target = aliases.get(requested_name)
         if target in models:
             return str(target)

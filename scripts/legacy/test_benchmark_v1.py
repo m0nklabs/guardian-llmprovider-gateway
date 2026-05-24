@@ -4,9 +4,9 @@ import sys
 import os
 
 # Add project root to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
 
-from app.tweaker.benchmark import BenchmarkSuite
+from app.tweaker.legacy.benchmark_suite_v1 import BenchmarkSuite
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

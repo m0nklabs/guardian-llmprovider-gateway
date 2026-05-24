@@ -19,6 +19,11 @@ if [ -f "$ENV_FILE" ]; then
     set +a
 fi
 
+# Keep llama CUDA ordinals stable across reboots; v2 telemetry maps nvidia-smi
+# readings into this same PCI-bus order.
+export CUDA_DEVICE_ORDER="${CUDA_DEVICE_ORDER:-PCI_BUS_ID}"
+echo "CUDA_DEVICE_ORDER=$CUDA_DEVICE_ORDER"
+
 # Default binary: official llama.cpp
 DEFAULT_BINARY="$OFFICIAL_ROOT/build/bin/llama-server"
 

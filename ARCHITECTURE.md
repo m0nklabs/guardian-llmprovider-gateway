@@ -1,6 +1,6 @@
 # Guardian Architecture
 
-> Last Updated: 2026-04-17
+> Last Updated: 2026-05-24
 
 ## Overview
 
@@ -32,9 +32,7 @@ Clients / Apps / Tools
   llama-server (:11440)
         │
         ▼
-  Backend binary (per-model selection)
-    └─ official llama.cpp (default)
-        (extensible — register additional backends in BACKEND_BINARIES)
+  Official llama.cpp backend binary
 
   Dashboard UI (:11437)
     └─ Chart.js + Tailwind dark mode
@@ -138,15 +136,22 @@ All endpoints require Bearer token authentication:
 - Injects best `num_ctx` and `num_batch` for the current model
 - Respects user overrides — only injects if the user didn't set the value
 
-### 7. Benchmarking
+### 7. Runtime Tuning
 
-`BenchmarkSuite` tests models across context sizes and batch configurations:
+The active tuning path is Guardian-native finetune v2:
 
-- **Test matrix**: models × `[2048, 4096, 8192, 16384, 24576, 28672, 32768]` × `[128, 256, 512, 1024]`
-- **Metrics**: TPS, total duration, eval count, VRAM delta, peak VRAM
-- Runs via `asyncio.to_thread()` to avoid blocking the event loop
-- Resumable: state persisted to `data/benchmark_state.json`
-- Records new TPS records per model with 🏆 logging
+- Operator entrypoint: `./finetune_v2.py` prints help plus model/alias options when run without arguments
+- Probes model runtime shapes through `/admin/load` plus smoke requests
+- Tunes `context`, `ngl`, and two-GPU `tensor_split` for the current host
+- Uses stable llama/CUDA GPU identity mapping for VRAM telemetry
+- Writes append-only probe history under `data/model_finetune_v2_results.json`
+- `start_ngl` ladder runs seed from the operator-provided split when present,
+  then rebalance that rung before climbing to higher `ngl` values
+- Adjacent effective tensor splits that land in the same llama.cpp per-layer
+  backend bucket are treated as real bucket plateaus; the planner keeps stepping
+  in the measured direction until backend allocation changes, a probe fails, or
+  bounds are exhausted
+- Keeps the old broad-sweep `BenchmarkSuite` under `app/tweaker/legacy/` only for historical reference
 
 ### 8. Scheduler / Maintenance Windows
 
@@ -166,7 +171,8 @@ All endpoints require Bearer token authentication:
 
 ## Backend Selection
 
-Per-model backend selection via the `backend:` field in `models.yaml`:
+Guardian launches the official llama.cpp backend binary only. Historical
+per-model backend selection has been removed from the runtime contract:
 
 ```python
 from app.paths import OFFICIAL_LLAMA_SERVER_BIN
@@ -275,7 +281,9 @@ app/
 ├── scheduler/
 │   └── manager.py       # SchedulerManager: maintenance windows
 ├── tweaker/
-│   └── benchmark.py     # BenchmarkSuite: model × ctx × batch testing
+│   ├── finetune_v2_runner.py    # Guardian-backed runtime tuning
+│   ├── finetune_v2_telemetry.py # v2 GPU identity/VRAM telemetry
+│   └── legacy/                 # Deprecated v1 finetune + benchmark sweep code
 ├── ui/
 │   └── index.html       # Dashboard (Tailwind dark, Chart.js)
 └── main.py              # GuardianService: startup orchestration

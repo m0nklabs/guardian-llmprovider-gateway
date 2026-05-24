@@ -1,11 +1,20 @@
 # Guardian TODO List
 
+## 2026-05-24 Hauhau Finetune V2 Live Proof
+
+- [x] Add and validate the root `./finetune_v2.py` operator entrypoint with no-argument help plus model and alias listing.
+- [x] Live-test `Qwen3.6-35B-A3B-HauhauCS-Aggressive` in vision mode through Guardian with full `262144` context and `start_ngl=37`.
+- [x] Prove the GPU-order-aware split direction on the real dual-GPU host; `0.46,0.54` correctly applies to the effective runtime but overloads GPU0, while shifting toward GPU1 reaches stable splits.
+- [x] Make finetune v2 continue through llama.cpp same-backend-bucket plateaus directionally, including the live `0.39 -> 0.38 -> 0.37` proof.
+- [x] Apply the final Hauhau vision winner: `vision_context: 262144`, `vision_ngl: 40`, `vision_tensor_split: "0.36,0.64"`.
+
 ## 2026-05-21 Finetune V2 Rewrite
 
 - [x] Write a requirements doc for finetune v2 before touching the implementation.
 - [x] Rebuild finetune winner selection so `context` and `speed` use explicit mode-aware comparators instead of a hidden balance-first override.
 - [x] Move v2 search state to in-memory working configs and only write `models.yaml` once on final `--apply`.
 - [x] Split the finetune engine into smaller planner, probe, ranking, and persistence units.
+- [x] Add a root-level `./finetune_v2.py` operator entrypoint that lists options, models, and aliases when run without arguments.
 
 ## 2026-05-21 Layer Ceiling Metadata
 

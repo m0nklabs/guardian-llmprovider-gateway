@@ -101,6 +101,15 @@ class TestGenerateApiKey:
         finally:
             auth.API_KEYS_FILE = orig
 
+    def test_custom_prefix_is_normalized(self, api_keys_file: Path):
+        auth, orig = _load_auth_with_path(api_keys_file)
+        try:
+            key = auth.generate_api_key("hermes-client", prefix="hermes")
+            assert key.startswith("hermes_")
+            assert len(key) == len("hermes_") + 32
+        finally:
+            auth.API_KEYS_FILE = orig
+
     def test_key_persisted(self, api_keys_file: Path):
         auth, orig = _load_auth_with_path(api_keys_file)
         try:

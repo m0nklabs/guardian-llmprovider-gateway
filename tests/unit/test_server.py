@@ -226,6 +226,32 @@ async def test_list_models_includes_vision_metadata():
 
 
 @pytest.mark.asyncio
+async def test_list_models_treats_configured_unverified_vision_as_image_capable():
+    with (
+        patch.object(server.model_manager, "get_current_model", return_value="Vision-Model"),
+        patch.object(server.model_manager, "get_public_model_map", return_value={"vision-alias": "Vision-Model"}),
+        patch.object(server.model_manager, "get_benchmark_context_limit", return_value=262144),
+        patch.object(server.model_manager, "get_runtime_context_window", return_value=262144),
+        patch.object(server.model_manager, "get_advertised_context_window", return_value=258048),
+        patch.object(
+            server.model_manager,
+            "get_vision_capability",
+            return_value={
+                "configured": True,
+                "status": "unverified",
+                "validated": False,
+            },
+        ),
+    ):
+        payload = await server.list_models(client_id="test-user")
+
+    model_entry = payload["data"][0]
+    assert model_entry["input_modalities"] == ["text", "image"]
+    assert model_entry["configured_input_modalities"] == ["text", "image"]
+    assert model_entry["vision"]["status"] == "unverified"
+
+
+@pytest.mark.asyncio
 async def test_wait_for_proxy_listener_release_returns_true_once_listener_disappears():
     """Restart hardening should stop waiting once the old listener releases the port."""
     with patch.object(

@@ -11,7 +11,16 @@ from starlette.status import HTTP_401_UNAUTHORIZED
 logger = logging.getLogger("Auth")
 
 API_KEYS_FILE = Path(__file__).parent.parent.parent / "config" / "api_keys.json"
+DEFAULT_API_KEY_PREFIX = "flip"
 security_scheme = HTTPBearer(auto_error=False)
+
+
+def _normalize_api_key_prefix(prefix: Optional[str]) -> str:
+    """Return a safe API key prefix with exactly one trailing underscore."""
+    normalized = (prefix or DEFAULT_API_KEY_PREFIX).strip().strip("_")
+    if not normalized:
+        normalized = DEFAULT_API_KEY_PREFIX
+    return f"{normalized}_"
 
 
 def _extract_api_key(request: Request, creds: Optional[HTTPAuthorizationCredentials]) -> Optional[str]:
@@ -41,9 +50,9 @@ def save_api_keys(keys: Dict[str, dict]):
     with open(API_KEYS_FILE, "w") as f:
         json.dump(keys, f, indent=2)
 
-def generate_api_key(name: str, metadata: dict = None) -> str:
-    """Generate a new API key with 'flip_' prefix."""
-    prefix = "flip_"
+def generate_api_key(name: str, metadata: dict = None, prefix: Optional[str] = None) -> str:
+    """Generate a new API key with a normalized prefix."""
+    prefix = _normalize_api_key_prefix(prefix)
     random_part = secrets.token_hex(16)
     api_key = f"{prefix}{random_part}"
     

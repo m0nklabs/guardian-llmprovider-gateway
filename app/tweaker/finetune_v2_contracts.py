@@ -40,6 +40,9 @@ class Probe:
     candidate: Candidate
     success: bool
     free_vram_mib: tuple[float, float] | None = None
+    gpu_vram: Mapping[str, Mapping[str, float]] | None = None
+    backend_gpu_vram: Mapping[str, Mapping[str, float]] | None = None
+    effective_tensor_split: str | None = None
     total_seconds: float | None = None
     order: int = 0
     telemetry_source: str = "post_smoke"
@@ -101,6 +104,7 @@ def initial_seed_candidates(
     seed_split: str,
     fixed_context: int | None = None,
     fixed_ngl: int | None = None,
+    start_ngl: int | None = None,
     runtime_mode: str = "text",
     has_mmproj: bool = False,
 ) -> list[Candidate]:
@@ -109,7 +113,10 @@ def initial_seed_candidates(
     context = fixed_context if fixed_context is not None else limits.active_context
     if optimization == "context" and fixed_context is None:
         context = limits.max_context
-    ngls = [fixed_ngl] if fixed_ngl is not None else [limits.total_layers]
+    seed_ngl = fixed_ngl if fixed_ngl is not None else start_ngl
+    if seed_ngl is None:
+        seed_ngl = limits.total_layers
+    ngls = [seed_ngl]
     return [
         Candidate(
             context=context,
@@ -227,12 +234,18 @@ def split_rebalance_action(probes: Sequence[Probe], *, better_split: str) -> Pla
     return PlanAction("split_rebalance", candidate, "latest_successful_runtime_state")
 
 
-def next_after_seed_failure(probes: Sequence[Probe], limits: RuntimeLimits) -> PlanAction | None:
+def next_after_seed_failure(
+    probes: Sequence[Probe],
+    limits: RuntimeLimits,
+    *,
+    ngl_floor: int | None = None,
+) -> PlanAction | None:
     if latest_successful_state(probes) is not None or not probes:
         return None
     last = max(probes, key=lambda probe: probe.order)
+    floor = clamp_ngl(ngl_floor, limits) if ngl_floor is not None else 0
     next_ngl = last.candidate.ngl - 1
-    if next_ngl < 0:
+    if next_ngl < floor:
         return None
     candidate = replace(last.candidate, ngl=clamp_ngl(next_ngl, limits))
     return PlanAction("seed_ngl_step_down", candidate, "seed_failed_before_any_rebalance")

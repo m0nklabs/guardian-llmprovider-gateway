@@ -14,7 +14,6 @@ import uvicorn
 
 from app.proxy.server import app as proxy_app, state as proxy_state, get_gpu_metrics, get_model_size
 from app.scheduler.manager import SchedulerManager
-from app.tweaker.benchmark import BenchmarkSuite
 
 # Configure logging
 logging.basicConfig(
@@ -55,25 +54,13 @@ async def get_stats():
         })
     cached_models.sort(key=lambda x: x["last_used"], reverse=True)
     
-    # Records
-    benchmark = getattr(app.state, "benchmark", None)
-    records = []
-    if benchmark:
-        for model, tps in benchmark.best_tps_cache.items():
-             records.append({
-                 "model": model,
-                 "config": "Best Config", 
-                 "tps": tps,
-                 "improvement": 0 
-             })
-             
     return {
         "vram": vram,
         "active_models": active_models,
         "queue_size": 0,
         "optimized_count": 0,
         "cached_models": cached_models,
-        "records": records
+        "records": []
     }
 
 
@@ -104,8 +91,7 @@ def _read_benchmark_state(data_dir: str = "data") -> dict:
 
 @app.get("/api/benchmark")
 async def get_benchmark_summary():
-    benchmark = getattr(app.state, "benchmark", None)
-    state = _read_benchmark_state(benchmark.data_dir if benchmark else "data")
+    state = _read_benchmark_state("data")
     completed = state.get("completed", [])
     queue = state.get("queue", [])
 
@@ -147,7 +133,7 @@ async def get_benchmark_summary():
     best_list = sorted(best_by_model.values(), key=lambda x: _safe_float(x.get("best_tps"), 0.0), reverse=True)
 
     return {
-        "is_running": bool(getattr(benchmark, "is_running", False)) if benchmark else False,
+        "is_running": False,
         "state_file": state.get("state_file"),
         "state_mtime": state.get("state_mtime"),
         "state_mtime_iso": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(state["state_mtime"])) if state.get("state_mtime") else None,
@@ -169,31 +155,16 @@ async def get_benchmark_summary():
 
 @app.post("/api/benchmark/start")
 async def start_benchmark():
-    benchmark = getattr(app.state, "benchmark", None)
-    if not benchmark:
-        raise HTTPException(status_code=503, detail="Benchmark suite not initialized")
-
-    if getattr(benchmark, "is_running", False):
-        return {"started": False, "reason": "already_running"}
-
-    # Run in the background so the API stays responsive
-    asyncio.create_task(benchmark.run_suite())
-    return {"started": True}
+    raise HTTPException(status_code=410, detail="Legacy BenchmarkSuite is disabled")
 
 
 @app.post("/api/benchmark/stop")
 async def stop_benchmark():
-    benchmark = getattr(app.state, "benchmark", None)
-    if not benchmark:
-        raise HTTPException(status_code=503, detail="Benchmark suite not initialized")
-
-    benchmark.stop()
-    return {"stopped": True}
+    raise HTTPException(status_code=410, detail="Legacy BenchmarkSuite is disabled")
 
 class GuardianService:
     def __init__(self):
         self.scheduler = SchedulerManager()
-        self.benchmark = BenchmarkSuite()
         # Proxy listens on 11434 (Direct Entry, Nginx disabled)
         self.proxy_config = uvicorn.Config(proxy_app, host="0.0.0.0", port=11434, log_level="info")
         self.proxy_server = uvicorn.Server(self.proxy_config)
@@ -205,13 +176,12 @@ class GuardianService:
         
         # Expose internals to UI app
         app.state.scheduler = self.scheduler
-        app.state.benchmark = self.benchmark
         
         # Start Proxy Server
         self.proxy_task = asyncio.create_task(self.proxy_server.serve())
         
         # Start Scheduler
-        self.scheduler_task = asyncio.create_task(self.scheduler.run_loop(self.benchmark))
+        self.scheduler_task = asyncio.create_task(self.scheduler.run_loop())
         
         # Start UI Server (on port 11437)
         ui_config = uvicorn.Config(app, host="0.0.0.0", port=11437, log_level="info")

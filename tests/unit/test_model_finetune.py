@@ -1,4 +1,4 @@
-"""Tests for app.tweaker.model_finetune."""
+"""Tests for legacy finetune v1 helpers."""
 
 import json
 from pathlib import Path
@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import httpx
 
-from app.tweaker.model_finetune import (
+from app.tweaker.legacy.model_finetune_v1 import (
     balance_metric,
     balanced_tradeoff_score,
     free_vram_delta_pct,
@@ -157,7 +157,7 @@ class TestProbeCapture:
 
         with (
             patch.object(finetuner, "_request_with_retry", return_value=load_failure),
-            patch("app.tweaker.model_finetune.read_gpu_vram_snapshot", return_value=gpu_vram),
+            patch("app.tweaker.legacy.model_finetune_v1.read_gpu_vram_snapshot", return_value=gpu_vram),
         ):
             result = finetuner._probe_candidate(
                 model_name="TestModel",

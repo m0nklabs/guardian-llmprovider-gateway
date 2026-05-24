@@ -1545,7 +1545,12 @@ async def list_models(client_id: str = Depends(verify_api_key)):
 
             vision = model_manager.get_vision_capability(canonical_name)
             model_entry["input_modalities"] = ["text"]
-            if vision["status"] == "supported":
+            if vision["configured"] and vision["status"] not in {
+                "misconfigured",
+                "text_only",
+                "unknown",
+                "unsupported",
+            }:
                 model_entry["input_modalities"].append("image")
             model_entry["configured_input_modalities"] = ["text"]
             if vision["configured"]:

@@ -41,23 +41,15 @@ class SchedulerManager:
         
         return self.start_hour <= now.hour < self.end_hour
 
-    async def run_loop(self, benchmark_suite):
+    async def run_loop(self):
         logger.info("Scheduler loop started.")
         while True:
             if self.is_idle_window():
                 if not self.active_mode:
                     await self.enter_maintenance_mode()
-                
-                # Trigger benchmark if not running
-                if not benchmark_suite.is_running:
-                    logger.info("Idle window active. Triggering benchmark suite.")
-                    await benchmark_suite.run_suite()
             else:
                 if self.active_mode:
                     await self.exit_maintenance_mode()
-                    if benchmark_suite.is_running:
-                        logger.info("Idle window ended. Stopping benchmark suite.")
-                        benchmark_suite.stop()
 
             await asyncio.sleep(60) # Check every minute
 

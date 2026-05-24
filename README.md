@@ -84,26 +84,30 @@ Guardian operates on shared GPU hardware alongside other processes. Instead of k
 - **Model pinning** prevents unauthorized model switches
 - **Switch allowlist** restricts which clients can trigger model changes
 
-### Benchmarking & Optimization
+### Tuning & Optimization
 
-- Automated benchmark suite: models × context sizes × batch sizes
-- Resumable state persisted to `data/benchmark_state.json`
 - Guardian-native model finetune CLI: fast binary search for max stable `context` plus coarse-to-fine two-GPU `tensor_split` tuning against `/admin/load`
-- `RequestOptimizer` injects best-known context/batch settings into requests
-- Scheduled maintenance windows for unattended benchmark runs
-- Dashboard visualization of results
+- `RequestOptimizer` can still read historical benchmark artifacts from `data/benchmark_state.json` and `docs/benchmark_results.json`
+- Legacy broad-sweep benchmarking has been moved out of the active runtime path under `app/tweaker/legacy/`
+- Dashboard visualization of historical results
 
-For focused per-model tuning, use the finetune CLI instead of broad sweep benchmarks. Example:
+For focused per-model tuning, use the root finetune v2 CLI instead of broad sweep benchmarks. Run it without arguments first to list the available options, configured models, and aliases:
 
 ```bash
-python scripts/finetune_model_config.py qwen3-35b-heretic-mtp \
+./finetune_v2.py
+```
+
+Then run a specific model or alias:
+
+```bash
+./finetune_v2.py qwen3-35b-heretic-mtp \
   --optimization context \
   --runtime-mode vision \
-  --granularity 2048 \
+  --smoke-image-url data:image/png;base64,... \
   --apply
 ```
 
-The finetune CLI now exposes one high-level goal selector instead of manual context and `ngl` bounds: `--optimization speed`, `--optimization context`, or `--optimization balanced`. `speed` prioritizes the highest stable GPU offload (`ngl`) first and then maximizes context for that offload level. In speed mode, a failed high-context probe now drops straight to the lower half of the search range before doing more split work, and once a narrow success/fail frontier is found Guardian switches to local 1% split refinement near that frontier instead of restarting broad far-away context probes for every alternate split. When that refined state is already running on fumes, Guardian also tightens the local context bisection itself: if both GPUs are below 500 MiB free or any single GPU is below 100 MiB free, it stops making broad post-frontier context jumps and falls back to smaller local context steps instead. If a rebalance move itself fails, Guardian immediately retries the 1% midpoint before giving up, so cases like `0.55 -> 0.53` now still probe `0.54`. `context` keeps walking balanced `ngl` candidates until it finds the highest stable runtime window, stopping early if a candidate already reaches the benchmark ceiling. `balanced` evaluates the full balanced search space and picks the strongest equilibrium between normalized context and `ngl`. In every mode, Guardian keeps `tensor_split` automatically balanced from live per-GPU free-VRAM measurements rather than blindly preferring 50/50. Omit `--split` to let the CLI calibrate and rebalance the split dynamically from live Guardian VRAM measurements. Omit `--ngl` to let the CLI explore the full `0..99` offload range on its own. `--runtime-mode auto` resolves to `text` unless `--smoke-image-url` is present; set `--runtime-mode vision` when you want the tuner to populate `vision_context` / `vision_ngl` / `vision_tensor_split` instead of the text runtime fields. Each individual load/smoke probe is flushed immediately to `data/model_finetune_results.json` so live runs can be inspected test-by-test while they are still in progress, and reruns reuse compatible historical probes even if the short success-marker text in the smoke prompt changed. When identical cached combinations appear multiple times in history, Guardian now keeps the richest saved probe data instead of letting a later replay with empty VRAM telemetry overwrite an older live measurement. Add `--apply` only when you want the winning runtime fields written back to `config/models.yaml`.
+The finetune CLI now exposes one high-level goal selector instead of manual context and `ngl` bounds: `--optimization speed`, `--optimization context`, or `--optimization balanced`. `speed` prioritizes the highest stable GPU offload (`ngl`) first and then maximizes context for that offload level. In speed mode, a failed high-context probe now drops straight to the lower half of the search range before doing more split work, and once a narrow success/fail frontier is found Guardian switches to local 1% split refinement near that frontier instead of restarting broad far-away context probes for every alternate split. When that refined state is already running on fumes, Guardian also tightens the local context bisection itself: if both GPUs are below 500 MiB free or any single GPU is below 100 MiB free, it stops making broad post-frontier context jumps and falls back to smaller local context steps instead. If a rebalance move itself fails, Guardian immediately retries the 1% midpoint before giving up, so cases like `0.55 -> 0.53` now still probe `0.54`. `context` keeps walking balanced `ngl` candidates until it finds the highest stable runtime window, stopping early if a candidate already reaches the benchmark ceiling. `balanced` evaluates the full balanced search space and picks the strongest equilibrium between normalized context and `ngl`. In every mode, Guardian keeps `tensor_split` automatically balanced from live per-GPU free-VRAM measurements rather than blindly preferring 50/50. Omit `--split` to let the CLI calibrate and rebalance the split dynamically from live Guardian VRAM measurements. Omit `--ngl` to let the CLI explore the full `0..99` offload range on its own. `--runtime-mode auto` resolves to `text` unless `--smoke-image-url` is present; set `--runtime-mode vision` when you want the tuner to populate `vision_context` / `vision_ngl` / `vision_tensor_split` instead of the text runtime fields. Each individual load/smoke probe is flushed immediately to the configured `--results-file` path, with a `.active` sidecar for the current run, so live runs can be inspected test-by-test while they are still in progress. Reruns reuse compatible historical probes even if the short success-marker text in the smoke prompt changed. When identical cached combinations appear multiple times in history, Guardian now keeps the richest saved probe data instead of letting a later replay with empty VRAM telemetry overwrite an older live measurement. Add `--apply` only when you want the winning runtime fields written back to `config/models.yaml`.
 
 ## Running Guardian
 
@@ -124,10 +128,15 @@ Defines per-model runtime behavior:
 models:
   Qwen3.6-35B-A3B-HauhauCS-Aggressive:
     path: /home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf
+    total_layers: 40
     benchmark_context_limit: 262144
     context: 262144
     ngl: 99
     kv_type: q4_0
+    mmproj: /home/flip/models/Qwen3.6-35B-A3B-mmproj-BF16.gguf
+    vision_context: 262144
+    vision_ngl: 40
+    vision_tensor_split: "0.36,0.64"
     extra_args: "--temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
 
   Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved:
@@ -295,7 +304,9 @@ app/
 ├── scheduler/
 │   └── manager.py       # SchedulerManager: maintenance windows, service control
 ├── tweaker/
-│   └── benchmark.py     # BenchmarkSuite: model × ctx × batch testing
+│   ├── finetune_v2_runner.py    # Guardian-backed runtime tuning
+│   ├── finetune_v2_telemetry.py # v2 GPU identity/VRAM telemetry
+│   └── legacy/                 # Deprecated v1 finetune + benchmark sweep code
 ├── ui/
 │   └── index.html       # Dashboard (Tailwind dark mode, Chart.js)
 └── main.py              # GuardianService: startup orchestration
@@ -307,12 +318,15 @@ config/
 ├── current_model.args   # Runtime: active llama-server CLI args
 └── current_model.env    # Runtime: per-model env vars (optional)
 
+finetune_v2.py          # Operator entrypoint for Guardian finetune v2
+
 scripts/
 ├── start_llama.sh       # Backend startup wrapper (reads current_model.args)
 ├── generate_key.py      # CLI key generation
 ├── test_system.py       # End-to-end system test
 ├── benchmark_context.py # Context size benchmarking
-├── finetune_model_config.py # Fast Guardian-native context/tensor_split tuning
+├── finetune_v2_model_config.py # Compatibility wrapper for finetune_v2.py
+├── finetune_model_config.py # Legacy v1 tuning wrapper
 ├── stress_test.py       # Load testing
 └── ...                  # Analysis, vision tests, model sync
 

@@ -4,6 +4,7 @@ Simple script to generate API keys for Llama Guardian.
 Does not require full app context.
 """
 
+import argparse
 import sys
 import json
 import secrets
@@ -13,6 +14,7 @@ from pathlib import Path
 # Path to the shared api_keys.json
 CONFIG_DIR = Path(__file__).parent.parent / "config"
 API_KEYS_FILE = CONFIG_DIR / "api_keys.json"
+DEFAULT_API_KEY_PREFIX = "flip"
 
 def load_keys():
     if not API_KEYS_FILE.exists():
@@ -25,12 +27,20 @@ def save_keys(keys):
     with open(API_KEYS_FILE, 'w') as f:
         json.dump(keys, f, indent=2)
 
-def generate_key(name, metadata=None):
+
+def normalize_prefix(prefix):
+    normalized = (prefix or DEFAULT_API_KEY_PREFIX).strip().strip("_")
+    if not normalized:
+        normalized = DEFAULT_API_KEY_PREFIX
+    return f"{normalized}_"
+
+
+def generate_key(name, metadata=None, prefix=None):
     if not name:
         print("Error: Name required")
         sys.exit(1)
-        
-    prefix = "flip_"
+
+    prefix = normalize_prefix(prefix)
     token = secrets.token_hex(16)
     api_key = f"{prefix}{token}"
     
@@ -50,6 +60,7 @@ def generate_key(name, metadata=None):
     save_keys(keys)
     print(f"\n✅ Generated successfully!")
     print(f"Name: {name}")
+    print(f"Prefix: {prefix}")
     print(f"Key:  {api_key}")
     print(f"File: {API_KEYS_FILE}")
     return api_key
@@ -68,22 +79,25 @@ def list_keys():
         print(f"{name:<20} {k:<40} {created}")
 
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python3 generate_key.py <name> [metadata_json]")
-        print("       python3 generate_key.py --list")
-        sys.exit(1)
-        
-    cmd = sys.argv[1]
-    
-    if cmd == "--list":
+    parser = argparse.ArgumentParser(description="Generate or list Guardian API keys.")
+    parser.add_argument("name", nargs="?", help="Key name to persist")
+    parser.add_argument("metadata_json", nargs="?", help="Optional metadata JSON")
+    parser.add_argument("--prefix", default=DEFAULT_API_KEY_PREFIX, help="Key prefix without trailing underscore")
+    parser.add_argument("--list", action="store_true", help="List existing keys")
+    args = parser.parse_args()
+
+    if args.list:
         list_keys()
     else:
-        name = cmd
+        if not args.name:
+            parser.error("name is required unless --list is used")
+
+        name = args.name
         meta = {}
-        if len(sys.argv) > 2:
+        if args.metadata_json:
             try:
-                meta = json.loads(sys.argv[2])
-            except:
+                meta = json.loads(args.metadata_json)
+            except json.JSONDecodeError:
                 print("Warning: Metadata is not valid JSON, ignoring")
-        
-        generate_key(name, meta)
+
+        generate_key(name, meta, prefix=args.prefix)

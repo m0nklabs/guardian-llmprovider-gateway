@@ -103,6 +103,18 @@ explicit reason string and see why every other successful candidate lost.
 - After a successful rebalance, v2 must be allowed to retry higher `ngl` values
    against the improved split instead of assuming earlier failed splits are the
    final word.
+- Runtime verification must distinguish the requested tensor split, the
+   effective split written to `current_model.args`, and the backend VRAM
+   allocation bucket measured from the live `llama-server` process.
+- If a requested split changes the effective split but lands in the same backend
+   allocation bucket as the previous successful probe, the planner must keep
+   stepping in the same measured direction until the bucket changes, a probe
+   fails, or split bounds are exhausted. For example, `0.39,0.61 -> 0.38,0.62`
+   in the same bucket must queue `0.37,0.63`, not jump back to `0.50,0.50` or
+   any unrelated fallback.
+- If a requested split does not change the effective split, the probe is invalid
+   because the runtime override may have been ignored; that case must fail
+   explicitly instead of being treated as a llama.cpp bucket plateau.
 
 ### Run completion rule
 
@@ -149,11 +161,15 @@ searching.
 
 ## Migration and Deprecation Plan
 
-- `scripts/finetune_model_config.py` remains the legacy v1 operator CLI while
-   v2 is being validated against each production host.
-- `scripts/finetune_v2_model_config.py` is the explicit v2 CLI. It uses
-   Guardian `/admin/load` runtime overrides for every dry-run probe and writes
-   only `data/model_finetune_v2_results.json` unless `--apply` is provided.
+- `scripts/finetune_model_config.py` remains the legacy v1 operator CLI only
+   for historical fallback.
+- `./finetune_v2.py` is the operator entrypoint. Running it without arguments
+   prints the available options, configured models, and aliases; with a model
+   name or alias it uses Guardian `/admin/load` runtime overrides for every
+   dry-run probe and writes only `data/model_finetune_v2_results.json` unless
+   `--apply` is provided.
+- `scripts/finetune_v2_model_config.py` remains as a compatibility wrapper for
+   the root entrypoint.
 - Operators should run v2 first with fixed `--context` or fixed `--ngl` when
    validating parity against a known v1 result, then use
    `--optimization speed|context` for exploratory tuning.
