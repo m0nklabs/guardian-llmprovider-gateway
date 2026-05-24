@@ -17,6 +17,7 @@ Clients / Apps / Tools
 │  ├─ OpenAI /v1 + Ollama /api bridges │
 │  ├─ Model selection / switching      │
 │  ├─ Request optimization             │
+│  ├─ Persistent API usage monitoring  │
 │  ├─ Idle unload & auto-reload        │
 │  ├─ VRAM budget enforcement          │
 │  └─ 3rd-party GPU process awareness  │
@@ -83,6 +84,13 @@ Guardian operates on shared GPU hardware alongside other processes. Instead of k
 - Token format: `{prefix}_{32-char-hex}` (e.g., `flip_abc123...`, `hydro_def456...`)
 - **Model pinning** prevents unauthorized model switches
 - **Switch allowlist** restricts which clients can trigger model changes
+
+### Dashboard Monitoring
+
+- `http://<host>:11437/` serves the built-in operator dashboard
+- `/api/stats` includes live VRAM, active model/cache data, benchmark summaries, and persisted API usage snapshots
+- API usage is stored in `data/api_usage_state.json`, so request counts, token totals, top clients, and recent activity survive Guardian restarts
+- Key visibility is non-secret: the dashboard shows prefixes and short SHA-256 fingerprints, never full API keys
 
 ### Tuning & Optimization
 
@@ -174,9 +182,9 @@ models:
     path: /home/flip/models/gemma-4-31B-it-uncensored-heretic-Q4_K_M.gguf
     benchmark_context_limit: 262144
     context: 262144
-    ngl: 99
+    ngl: 60
     kv_type: q4_0
-    tensor_split: "0.55,0.45"
+    tensor_split: "0.42,0.58"
     mmproj: /home/flip/models/gemma-4-31B-it-mmproj-BF16.gguf
     extra_args: "--repeat-penalty 1.3 --repeat-last-n 128 --dry-multiplier 1.0 --dry-base 1.75 --dry-penalty-last-n 256 --temp 0.6 --top-k 40"
 

@@ -21,6 +21,7 @@ Clients / Apps / Tools
 │  ├─ Protocol bridges (Ollama + OpenAI)     │
 │  ├─ Model routing + switch lock            │
 │  ├─ RequestOptimizer (benchmark-driven)    │
+│  ├─ ApiUsageTracker (persistent dashboard) │
 │  ├─ VramScheduler (budget enforcement)     │
 │  ├─ Idle unload watcher (background)       │
 │  └─ 3rd-party GPU process coordination     │
@@ -126,8 +127,22 @@ All endpoints require Bearer token authentication:
 - Format: `{prefix}_{32-char-hex}` (e.g., `flip_`, `oelala_`, `hydro_`)
 - FastAPI dependency injection via `@Depends(verify_api_key)`
 - Returns client name for allowlist checking and queue tracking
+- Builds non-secret request attribution for dashboard usage monitoring: key prefix, short SHA-256 fingerprint, source headers, and user agent
 
-### 6. Request Optimization
+### 6. Persistent Dashboard Monitoring
+
+`ApiUsageTracker` records API traffic in memory and persists a bounded snapshot to `data/api_usage_state.json` after every tracked request or token update.
+
+| Aspect | Implementation |
+|--------|----------------|
+| **Scope** | Tracks `/v1/*`, `/api/*`, and `/admin/*` proxy requests except liveness/metrics noise |
+| **Counters** | Total requests, errors, unauthenticated requests, prompt/completion tokens, request rates |
+| **Client view** | Top authenticated clients, last model/endpoint, token totals, source metadata |
+| **Recent activity** | Bounded recent request table for the served `:11437` dashboard |
+| **Persistence** | Atomic JSON writes to `data/api_usage_state.json`, restored on Guardian restart |
+| **Secret handling** | Stores only key prefix plus a short fingerprint; full API keys are never exposed |
+
+### 7. Request Optimization
 
 `RequestOptimizer` injects benchmark-derived settings into requests:
 
@@ -136,7 +151,7 @@ All endpoints require Bearer token authentication:
 - Injects best `num_ctx` and `num_batch` for the current model
 - Respects user overrides — only injects if the user didn't set the value
 
-### 7. Runtime Tuning
+### 8. Runtime Tuning
 
 The active tuning path is Guardian-native finetune v2:
 
@@ -153,7 +168,7 @@ The active tuning path is Guardian-native finetune v2:
   bounds are exhausted
 - Keeps the old broad-sweep `BenchmarkSuite` under `app/tweaker/legacy/` only for historical reference
 
-### 8. Scheduler / Maintenance Windows
+### 9. Scheduler / Maintenance Windows
 
 `SchedulerManager` handles unattended maintenance:
 
@@ -162,12 +177,12 @@ The active tuning path is Guardian-native finetune v2:
 - On maintenance exit: stops benchmark, restarts services
 - Service management via `sudo systemctl {action} {service_name}`
 
-### 9. Session Management
+### 10. Session Management
 
 - **Session save/load/list**: Persist and restore conversation contexts via llama-server's slot API
 - **Crash history**: Inspect crash events via `/api/crashes`
 - **Status**: Current model, backend health, VRAM usage, idle state, security info
-- **Dashboard stats**: VRAM, active models, cached models, benchmark records
+- **Dashboard stats**: VRAM, active models, cached models, benchmark records, persisted API usage
 
 ## Backend Selection
 

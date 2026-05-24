@@ -53,6 +53,27 @@ async def get_stats():
             "last_used": timestamp
         })
     cached_models.sort(key=lambda x: x["last_used"], reverse=True)
+
+    api_usage = proxy_state.api_usage.snapshot() if hasattr(proxy_state, "api_usage") else {
+        "summary": {
+            "started_at": None,
+            "uptime_seconds": 0,
+            "total_requests": 0,
+            "total_errors": 0,
+            "error_rate_pct": 0.0,
+            "unauthenticated_requests": 0,
+            "unique_clients": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "requests_last_5m": 0,
+            "requests_last_hour": 0,
+            "requests_per_minute": 0.0,
+        },
+        "top_clients": [],
+        "top_endpoints": [],
+        "recent_requests": [],
+    }
     
     return {
         "vram": vram,
@@ -60,7 +81,8 @@ async def get_stats():
         "queue_size": 0,
         "optimized_count": 0,
         "cached_models": cached_models,
-        "records": []
+        "records": [],
+        "api_usage": api_usage,
     }
 
 

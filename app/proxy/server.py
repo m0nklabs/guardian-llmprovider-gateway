@@ -26,6 +26,7 @@ from app.proxy.scaler import DynamicScaler
 from app.engine.manager import ModelManager, ModelLoadError
 from app.proxy.auth import verify_api_key
 from app.proxy.queue import InferenceQueue
+from app.proxy.usage import ApiUsageTracker
 from app.proxy.metrics import (
     track_request,
     update_queue_metrics,
@@ -986,6 +987,7 @@ class State:
         self.active_generations: Dict[str, int] = {} # request_id -> vram_usage
         self.model_stats: Dict[str, int] = {}
         self.last_used: Dict[str, float] = defaultdict(float)
+        self.api_usage = ApiUsageTracker()
         # VRAM Scheduler
         self.scheduler = VramScheduler(SAFE_VRAM_LIMIT_MB)
         # Optimizer
@@ -994,6 +996,131 @@ class State:
         self.scaler = DynamicScaler()
 
 state = State()
+
+
+def _coerce_usage_int(value: object) -> int:
+    """Convert token usage values to non-negative integers."""
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _should_track_api_usage(path: str) -> bool:
+    """Return whether the request path should count toward API usage."""
+    if path in {"/healthz", "/metrics"}:
+        return False
+    return path.startswith("/api/") or path.startswith("/v1/") or path.startswith("/admin/")
+
+
+def _get_usage_client_id(request: Request) -> Optional[str]:
+    """Extract the authenticated client name attached by auth."""
+    user = getattr(request.state, "user", None)
+    if isinstance(user, dict):
+        name = user.get("name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    auth_context = getattr(request.state, "auth_context", None)
+    if isinstance(auth_context, dict):
+        name = auth_context.get("client_name")
+        if isinstance(name, str) and name.strip():
+            return name.strip()
+    return None
+
+
+def _get_usage_attribution(request: Request) -> Optional[Dict[str, Any]]:
+    """Return request attribution details collected during auth."""
+    auth_context = getattr(request.state, "auth_context", None)
+    if isinstance(auth_context, dict):
+        return auth_context
+    return None
+
+
+def _set_request_usage_metadata(
+    request: Request,
+    *,
+    model: Optional[str] = None,
+    streamed: Optional[bool] = None,
+) -> None:
+    """Attach request metadata for dashboard usage snapshots."""
+    if model is not None:
+        request.state.guardian_usage_model = model
+    if streamed is not None:
+        request.state.guardian_usage_streamed = streamed
+
+
+def _record_request_token_usage(
+    client_id: Optional[str],
+    endpoint: str,
+    model: Optional[str],
+    prompt_tokens: object = 0,
+    completion_tokens: object = 0,
+) -> None:
+    """Store token usage for a completed request when available."""
+    state.api_usage.record_tokens(
+        client_id=client_id,
+        endpoint=endpoint,
+        model=model,
+        prompt_tokens=_coerce_usage_int(prompt_tokens),
+        completion_tokens=_coerce_usage_int(completion_tokens),
+    )
+
+
+def _record_usage_from_payload(
+    client_id: Optional[str],
+    endpoint: str,
+    model: Optional[str],
+    payload: Optional[Dict[str, Any]],
+) -> None:
+    """Extract OpenAI-style usage fields from a JSON payload."""
+    if not isinstance(payload, dict):
+        return
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        return
+    _record_request_token_usage(
+        client_id,
+        endpoint,
+        model,
+        prompt_tokens=usage.get("prompt_tokens", usage.get("input_tokens", 0)),
+        completion_tokens=usage.get("completion_tokens", usage.get("output_tokens", 0)),
+    )
+
+
+@app.middleware("http")
+async def track_api_usage_middleware(request: Request, call_next):
+    """Track aggregate API usage for dashboard monitoring."""
+    path = request.url.path
+    if not _should_track_api_usage(path):
+        return await call_next(request)
+
+    started = time.monotonic()
+    try:
+        response = await call_next(request)
+    except Exception:
+        state.api_usage.record_request(
+            client_id=_get_usage_client_id(request),
+            endpoint=path,
+            method=request.method,
+            status_code=500,
+            model=getattr(request.state, "guardian_usage_model", None),
+            duration_ms=(time.monotonic() - started) * 1000.0,
+            streamed=bool(getattr(request.state, "guardian_usage_streamed", False)),
+            attribution=_get_usage_attribution(request),
+        )
+        raise
+
+    state.api_usage.record_request(
+        client_id=_get_usage_client_id(request),
+        endpoint=path,
+        method=request.method,
+        status_code=response.status_code,
+        model=getattr(request.state, "guardian_usage_model", None),
+        duration_ms=(time.monotonic() - started) * 1000.0,
+        streamed=bool(getattr(request.state, "guardian_usage_streamed", False)),
+        attribution=_get_usage_attribution(request),
+    )
+    return response
 
 
 # --- Inference queue: serializes access to single-slot backend ---
@@ -1160,6 +1287,7 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
         # Translate Ollama request to OpenAI format
         messages = body.get("messages", [])
         stream = body.get("stream", True)
+        _set_request_usage_metadata(request, model=model, streamed=stream)
         
         # Basic options mapping
         options = body.get("options", {})
@@ -1190,6 +1318,8 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
             raise e
 
         if stream:
+            usage_totals = {"prompt_tokens": 0, "completion_tokens": 0}
+
             async def stream_adapter():
                 try:
                     async for chunk in r.aiter_lines():
@@ -1198,6 +1328,16 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
                         if chunk.startswith("data: "):
                             try:
                                 data = json.loads(chunk[6:])
+                                usage = data.get("usage") or {}
+                                if isinstance(usage, dict):
+                                    usage_totals["prompt_tokens"] = max(
+                                        usage_totals["prompt_tokens"],
+                                        _coerce_usage_int(usage.get("prompt_tokens", 0)),
+                                    )
+                                    usage_totals["completion_tokens"] = max(
+                                        usage_totals["completion_tokens"],
+                                        _coerce_usage_int(usage.get("completion_tokens", 0)),
+                                    )
                                 # Translate OpenAI chunk back to Ollama chunk
                                 if "choices" in data and len(data["choices"]) > 0:
                                     delta = data["choices"][0].get("delta", {})
@@ -1225,6 +1365,13 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
                 finally:
                     await r.aclose()
                     await client.aclose()
+                    _record_request_token_usage(
+                        client_id,
+                        "/api/chat",
+                        model,
+                        prompt_tokens=usage_totals["prompt_tokens"],
+                        completion_tokens=usage_totals["completion_tokens"],
+                    )
                     model_manager.active_requests = max(0, model_manager.active_requests - 1)
                     model_manager.last_request_time = time.time()
                     inference_queue.release(request_id)
@@ -1242,6 +1389,7 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
             try:
                 data = r.json()
                 content = _extract_assistant_message_text(data["choices"][0]["message"])
+                _record_usage_from_payload(client_id, "/api/chat", model, data)
                 ollama_resp = {
                     "model": model,
                     "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
@@ -1364,6 +1512,7 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
         # Translate to OpenAI
         messages = body.get("messages", [{"role": "user", "content": prompt}])
         stream = body.get("stream", True)
+        _set_request_usage_metadata(request, model=model, streamed=stream)
         options = body.get("options", {})
         temperature = options.get("temperature", 0.7)
         
@@ -1391,6 +1540,8 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
             raise e
 
         if stream:
+            usage_totals = {"prompt_tokens": 0, "completion_tokens": 0}
+
             async def stream_adapter_generate():
                 try:
                     async for chunk in r.aiter_lines():
@@ -1399,6 +1550,16 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
                         if chunk.startswith("data: "):
                             try:
                                 data = json.loads(chunk[6:])
+                                usage = data.get("usage") or {}
+                                if isinstance(usage, dict):
+                                    usage_totals["prompt_tokens"] = max(
+                                        usage_totals["prompt_tokens"],
+                                        _coerce_usage_int(usage.get("prompt_tokens", 0)),
+                                    )
+                                    usage_totals["completion_tokens"] = max(
+                                        usage_totals["completion_tokens"],
+                                        _coerce_usage_int(usage.get("completion_tokens", 0)),
+                                    )
                                 if "choices" in data and len(data["choices"]) > 0:
                                     delta = data["choices"][0].get("delta", {})
                                     content = _extract_assistant_delta_text(delta)
@@ -1426,6 +1587,13 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
                 finally:
                     await r.aclose()
                     await client.aclose()
+                    _record_request_token_usage(
+                        client_id,
+                        "/api/generate",
+                        model,
+                        prompt_tokens=usage_totals["prompt_tokens"],
+                        completion_tokens=usage_totals["completion_tokens"],
+                    )
                     model_manager.active_requests = max(0, model_manager.active_requests - 1)
                     model_manager.last_request_time = time.time()
                     inference_queue.release(request_id)
@@ -1442,6 +1610,7 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
             try:
                 data = r.json()
                 content = _extract_assistant_message_text(data["choices"][0]["message"])
+                _record_usage_from_payload(client_id, "/api/generate", model, data)
                 ollama_resp = {
                     "model": model,
                     "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
@@ -1832,6 +2001,7 @@ async def proxy_v1_get(path: str, request: Request, client_id: str = Depends(ver
 @app.post("/v1/{path:path}")
 async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(verify_api_key)):
     body = await request.body()
+    _set_request_usage_metadata(request, streamed=False)
 
     # Only queue inference endpoints; everything else passes through directly
     is_inference = path in ("chat/completions", "completions", "embeddings", "messages")
@@ -2007,6 +2177,7 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                 logger.error(f"Error checking model switch: {e}")
 
         active_model_for_request = requested_model or await model_manager.get_current_model()
+        _set_request_usage_metadata(request, model=active_model_for_request)
         if path in ("chat/completions", "messages") and has_image_inputs:
             queue_wait_ms = inference_queue.get_queue_wait_ms(request_id)
             preflight_error = await _preflight_multimodal_request(
@@ -2059,6 +2230,7 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                 pass
 
         if is_stream:
+            _set_request_usage_metadata(request, streamed=True)
             # Stream SSE chunks in real-time instead of buffering entire response
             client = httpx.AsyncClient(timeout=timeout)
             req = client.build_request(
@@ -2117,13 +2289,39 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                         headers=headers | _queue_headers(request_id, queue_wait_ms),
                     )
 
+            usage_totals = {"prompt_tokens": 0, "completion_tokens": 0}
+
             async def stream_passthrough():
                 try:
-                    async for chunk in resp.aiter_bytes():
-                        yield chunk
+                    async for line in resp.aiter_lines():
+                        if line.startswith("data: "):
+                            try:
+                                data = json.loads(line[6:])
+                                usage = data.get("usage") or {}
+                                if isinstance(usage, dict):
+                                    usage_totals["prompt_tokens"] = max(
+                                        usage_totals["prompt_tokens"],
+                                        _coerce_usage_int(usage.get("prompt_tokens", usage.get("input_tokens", 0))),
+                                    )
+                                    usage_totals["completion_tokens"] = max(
+                                        usage_totals["completion_tokens"],
+                                        _coerce_usage_int(
+                                            usage.get("completion_tokens", usage.get("output_tokens", 0))
+                                        ),
+                                    )
+                            except (TypeError, ValueError, json.JSONDecodeError):
+                                pass
+                        yield (line + "\n").encode("utf-8")
                 finally:
                     await resp.aclose()
                     await client.aclose()
+                    _record_request_token_usage(
+                        client_id,
+                        f"/v1/{path}",
+                        active_model_for_request,
+                        prompt_tokens=usage_totals["prompt_tokens"],
+                        completion_tokens=usage_totals["completion_tokens"],
+                    )
                     model_manager.active_requests = max(0, model_manager.active_requests - 1)
                     model_manager.last_request_time = time.time()
                     inference_queue.release(request_id)
@@ -2161,6 +2359,12 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                 model_manager.active_requests = max(0, model_manager.active_requests - 1)
                 model_manager.last_request_time = time.time()
                 queue_wait_ms = inference_queue.get_queue_wait_ms(request_id)
+                if path in ("chat/completions", "completions", "embeddings", "messages"):
+                    try:
+                        payload = resp.json()
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        payload = None
+                    _record_usage_from_payload(client_id, f"/v1/{path}", active_model_for_request, payload)
                 if has_image_inputs:
                     if 200 <= resp.status_code < 400:
                         model_manager.mark_vision_validation(active_model_for_request, "supported")

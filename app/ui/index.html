@@ -30,7 +30,7 @@
         </header>
 
         <!-- Stats Grid -->
-        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-6 mb-8">
             <div class="card">
                 <div class="stat-label">VRAM Usage</div>
                 <div class="stat-value" id="vram-usage">--%</div>
@@ -48,6 +48,16 @@
             <div class="card">
                 <div class="stat-label">Optimized Requests</div>
                 <div class="stat-value" id="optimized-count">0</div>
+            </div>
+            <div class="card">
+                <div class="stat-label">API Requests</div>
+                <div class="stat-value" id="api-request-count">0</div>
+                <div class="text-sm text-slate-500 mt-1" id="api-request-detail">0 / 5m</div>
+            </div>
+            <div class="card">
+                <div class="stat-label">API Tokens</div>
+                <div class="stat-value" id="api-token-count">0</div>
+                <div class="text-sm text-slate-500 mt-1" id="api-token-detail">0 prompt / 0 completion</div>
             </div>
         </div>
 
@@ -78,6 +88,80 @@
                 <h2 class="text-xl font-bold mb-4 text-white">🏆 Optimization Records</h2>
                 <div class="space-y-4" id="records-list">
                     <!-- Populated by JS -->
+                </div>
+            </div>
+        </div>
+
+        <!-- API Usage -->
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
+            <div class="card lg:col-span-1">
+                <h2 class="text-xl font-bold mb-4 text-white">📡 API Usage</h2>
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <div class="stat-label">Req/Min</div>
+                        <div class="text-2xl font-bold text-cyan-300" id="api-rpm">0</div>
+                    </div>
+                    <div>
+                        <div class="stat-label">Clients</div>
+                        <div class="text-2xl font-bold text-cyan-300" id="api-client-count">0</div>
+                    </div>
+                    <div>
+                        <div class="stat-label">Error Rate</div>
+                        <div class="text-2xl font-bold text-cyan-300" id="api-error-rate">0%</div>
+                    </div>
+                    <div>
+                        <div class="stat-label">Unauth</div>
+                        <div class="text-2xl font-bold text-cyan-300" id="api-unauth-count">0</div>
+                    </div>
+                </div>
+                <div class="mt-4 pt-4 border-t border-slate-800 text-sm text-slate-400" id="api-usage-footnote">
+                    No API traffic yet.
+                </div>
+            </div>
+
+            <div class="card lg:col-span-2">
+                <h2 class="text-xl font-bold mb-4 text-white">🔑 Top API Clients</h2>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-sm">
+                        <thead class="text-slate-400 border-b border-slate-700">
+                            <tr>
+                                <th class="pb-2">Client</th>
+                                <th class="pb-2">Requests</th>
+                                <th class="pb-2">Tokens</th>
+                                <th class="pb-2">Key</th>
+                                <th class="pb-2">Source</th>
+                                <th class="pb-2">Last Seen</th>
+                            </tr>
+                        </thead>
+                        <tbody id="api-clients-table" class="text-slate-300">
+                            <tr><td colspan="6" class="py-3 text-center text-slate-500">No API traffic yet</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
+            <div class="card lg:col-span-3">
+                <h2 class="text-xl font-bold mb-4 text-white">🕒 Recent API Activity</h2>
+                <div class="overflow-x-auto">
+                    <table class="w-full text-left text-sm">
+                        <thead class="text-slate-400 border-b border-slate-700">
+                            <tr>
+                                <th class="pb-2">Time</th>
+                                <th class="pb-2">Client</th>
+                                <th class="pb-2">Endpoint</th>
+                                <th class="pb-2">Model</th>
+                                <th class="pb-2">Key</th>
+                                <th class="pb-2">Source</th>
+                                <th class="pb-2">Agent</th>
+                                <th class="pb-2">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="api-recent-table" class="text-slate-300">
+                            <tr><td colspan="8" class="py-3 text-center text-slate-500">No API traffic yet</td></tr>
+                        </tbody>
+                    </table>
                 </div>
             </div>
         </div>
@@ -125,9 +209,49 @@
 
         function formatIso(ts) {
             if (!ts) return '—';
-            const d = new Date(ts);
+            const normalized = typeof ts === 'number' && ts < 1000000000000 ? ts * 1000 : ts;
+            const d = new Date(normalized);
             if (isNaN(d.getTime())) return String(ts);
             return d.toLocaleString();
+        }
+
+        function formatNumber(value) {
+            return new Intl.NumberFormat().format(Number(value || 0));
+        }
+
+        function formatRate(value) {
+            const numeric = Number(value || 0);
+            return Number.isFinite(numeric) ? numeric.toFixed(2) : '0.00';
+        }
+
+        function escapeHtml(value) {
+            return String(value ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function shortenText(value, limit = 56) {
+            const text = String(value ?? '');
+            if (text.length <= limit) return text;
+            return `${text.slice(0, limit - 1)}…`;
+        }
+
+        function keySummary(entry) {
+            const prefix = entry.project_prefix || entry.key_prefix || entry.last_key_prefix || '—';
+            const fingerprint = entry.key_fingerprint || entry.last_key_fingerprint || '—';
+            return { prefix, fingerprint };
+        }
+
+        function sourceSummary(entry) {
+            const sourceIp = entry.source_ip || entry.last_source_ip || '—';
+            const location = entry.metadata_client || entry.last_host || entry.host || entry.origin || entry.last_origin || entry.referer || entry.last_referer || '—';
+            return {
+                sourceIp,
+                location,
+            };
         }
 
         function upsertBenchmarkChart(models, tpsValues) {
@@ -182,6 +306,19 @@
 
                 // Update Optimized Count (Mock for now if not in API)
                 document.getElementById('optimized-count').textContent = data.optimized_count || 0;
+
+                const apiUsage = data.api_usage || {};
+                const apiSummary = apiUsage.summary || {};
+
+                document.getElementById('api-request-count').textContent = formatNumber(apiSummary.total_requests || 0);
+                document.getElementById('api-request-detail').textContent = `${formatNumber(apiSummary.requests_last_5m || 0)} / 5m • ${formatNumber(apiSummary.requests_last_hour || 0)} / hour`;
+                document.getElementById('api-token-count').textContent = formatNumber(apiSummary.total_tokens || 0);
+                document.getElementById('api-token-detail').textContent = `${formatNumber(apiSummary.prompt_tokens || 0)} prompt / ${formatNumber(apiSummary.completion_tokens || 0)} completion`;
+                document.getElementById('api-rpm').textContent = formatRate(apiSummary.requests_per_minute || 0);
+                document.getElementById('api-client-count').textContent = formatNumber(apiSummary.unique_clients || 0);
+                document.getElementById('api-error-rate').textContent = `${Number(apiSummary.error_rate_pct || 0).toFixed(1)}%`;
+                document.getElementById('api-unauth-count').textContent = formatNumber(apiSummary.unauthenticated_requests || 0);
+                document.getElementById('api-usage-footnote').textContent = `Tracking since ${formatIso(apiSummary.started_at)} • uptime ${formatRate((apiSummary.uptime_seconds || 0) / 60)} min`;
                 
                 // Update Combo Table
                 const tbody = document.getElementById('combo-table');
@@ -223,6 +360,64 @@
                     });
                 } else {
                     recordsList.innerHTML = '<div class="text-center text-slate-500">No records yet</div>';
+                }
+
+                const topClients = Array.isArray(apiUsage.top_clients) ? apiUsage.top_clients : [];
+                const clientsTable = document.getElementById('api-clients-table');
+                clientsTable.innerHTML = '';
+                if (topClients.length > 0) {
+                    topClients.forEach(client => {
+                        const key = keySummary(client);
+                        const source = sourceSummary(client);
+                        const agentText = client.last_user_agent || '—';
+                        const row = `
+                            <tr class="border-b border-slate-800 last:border-0">
+                                <td class="py-3 font-medium text-white">${escapeHtml(client.client_id)}</td>
+                                <td class="py-3">${formatNumber(client.requests)}<div class="text-xs text-slate-500">${formatNumber(client.errors)} errors</div></td>
+                                <td class="py-3">${formatNumber(client.total_tokens)}</td>
+                                <td class="py-3">
+                                    <div class="font-medium text-white">${escapeHtml(key.prefix)}</div>
+                                    <div class="text-xs text-slate-500">${escapeHtml(key.fingerprint)}</div>
+                                </td>
+                                <td class="py-3">
+                                    <div>${escapeHtml(source.sourceIp)}</div>
+                                    <div class="text-xs text-slate-500">${escapeHtml(shortenText(source.location, 36))}</div>
+                                    <div class="text-xs text-slate-600" title="${escapeHtml(agentText)}">${escapeHtml(shortenText(agentText, 44))}</div>
+                                </td>
+                                <td class="py-3">${formatIso(client.last_seen)}</td>
+                            </tr>
+                        `;
+                        clientsTable.innerHTML += row;
+                    });
+                } else {
+                    clientsTable.innerHTML = '<tr><td colspan="6" class="py-3 text-center text-slate-500">No API traffic yet</td></tr>';
+                }
+
+                const recentRequests = Array.isArray(apiUsage.recent_requests) ? apiUsage.recent_requests : [];
+                const recentTable = document.getElementById('api-recent-table');
+                recentTable.innerHTML = '';
+                if (recentRequests.length > 0) {
+                    recentRequests.forEach(entry => {
+                        const statusTone = entry.status_code >= 400 ? 'text-rose-300' : 'text-emerald-300';
+                        const key = keySummary(entry);
+                        const source = sourceSummary(entry);
+                        const agentText = entry.user_agent || '—';
+                        const row = `
+                            <tr class="border-b border-slate-800 last:border-0">
+                                <td class="py-3">${formatIso(entry.timestamp)}</td>
+                                <td class="py-3 font-medium text-white">${escapeHtml(entry.client_id)}</td>
+                                <td class="py-3">${escapeHtml(entry.endpoint)}</td>
+                                <td class="py-3">${escapeHtml(entry.model || '—')}</td>
+                                <td class="py-3"><div class="font-medium text-white">${escapeHtml(key.prefix)}</div><div class="text-xs text-slate-500">${escapeHtml(key.fingerprint)}</div></td>
+                                <td class="py-3"><div>${escapeHtml(source.sourceIp)}</div><div class="text-xs text-slate-500">${escapeHtml(shortenText(source.location, 32))}</div></td>
+                                <td class="py-3" title="${escapeHtml(agentText)}">${escapeHtml(shortenText(agentText, 42))}</td>
+                                <td class="py-3 ${statusTone}">${entry.status_code}</td>
+                            </tr>
+                        `;
+                        recentTable.innerHTML += row;
+                    });
+                } else {
+                    recentTable.innerHTML = '<tr><td colspan="8" class="py-3 text-center text-slate-500">No API traffic yet</td></tr>';
                 }
 
             } catch (e) {

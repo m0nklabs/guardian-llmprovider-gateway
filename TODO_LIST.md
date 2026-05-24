@@ -1,5 +1,19 @@
 # Guardian TODO List
 
+## 2026-05-24 Dashboard Usage Monitoring Restore
+
+- [x] Recover the missing `:11437` monitoring work from the stashed index without re-enabling the old broad-sweep benchmark runtime.
+- [x] Persist API usage counters and recent request history in `data/api_usage_state.json` so dashboard data survives Guardian restarts.
+- [x] Expose API usage snapshots through `/api/stats` and render request/token totals, top clients, and recent activity in the served static dashboard.
+- [x] Validate the restored monitoring path with focused tests and the full unit suite.
+
+## 2026-05-24 Gemma4 31B Text Finetune
+
+- [x] Live-test `gemma-4-31B-it-uncensored-heretic` through Guardian finetune v2 in text mode.
+- [x] Apply the winning text runtime: `context: 262144`, `ngl: 60`, `tensor_split: "0.42,0.58"`.
+- [x] Apply the companion `gemma-4-E4B-it-uncensored` text runtime: `context: 131072`, `ngl: 42`, `tensor_split: "0.32,0.68"`.
+- [x] Confirm the full unit suite still passes after the applied runtime update and dashboard restore.
+
 ## 2026-05-24 Hauhau Finetune V2 Live Proof
 
 - [x] Add and validate the root `./finetune_v2.py` operator entrypoint with no-argument help plus model and alias listing.
