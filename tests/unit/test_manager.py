@@ -172,6 +172,31 @@ models:
         assert mgr.current_model == "Qwen-Agent"
 
 
+# ── resolve_reload_target ─────────────────────────────────────────────
+
+
+class TestResolveReloadTarget:
+    def test_skips_mismatch_sentinel(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "__MISMATCH__"
+        mgr._last_backend_model = "Qwen3-30B-A3B"
+
+        assert mgr.resolve_reload_target() == "Qwen3-30B-A3B"
+
+    def test_requested_configured_model_wins_over_stale_current(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "__MISMATCH__"
+        mgr._last_backend_model = "Qwen3-30B-A3B"
+
+        assert mgr.resolve_reload_target("GLM-4.7-Flash") == "GLM-4.7-Flash"
+
+    def test_pin_wins_over_requested_model(self, tmp_path: Path):
+        yaml_with_pin = SAMPLE_MODELS_YAML + "\nguardian:\n  pinned_model: GLM-4.7-Flash\n"
+        mgr = _make_manager(tmp_path, models_yaml=yaml_with_pin)
+
+        assert mgr.resolve_reload_target("Qwen3-30B-A3B") == "GLM-4.7-Flash"
+
+
 # ── _write_server_args ─────────────────────────────────────────────────
 
 
@@ -550,6 +575,21 @@ class TestStartupCheck:
             await mgr.startup_check()
 
         mock_switch.assert_awaited_once_with("GLM-4.7-Flash")
+
+    @pytest.mark.asyncio
+    async def test_adopts_known_live_backend_without_pin(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+
+        with (
+            patch.object(mgr, "verify_backend_model", new_callable=AsyncMock, side_effect=[False, True]),
+            patch.object(mgr, "_get_backend_model_path", return_value="/models/Qwen3-30B.gguf"),
+            patch.object(mgr, "switch_model", new_callable=AsyncMock) as mock_switch,
+        ):
+            await mgr.startup_check()
+
+        assert mgr.current_model == "Qwen3-30B-A3B"
+        mock_switch.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_switch_when_backend_already_verified(self, tmp_path: Path):

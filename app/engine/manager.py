@@ -23,6 +23,7 @@ from app.paths import (
 logger = logging.getLogger("model-manager")
 
 MAX_CRASH_HISTORY = 50  # Keep last N crash records
+MISMATCH_MODEL_NAME = "__MISMATCH__"
 
 
 @dataclass
@@ -179,6 +180,36 @@ class ModelManager:
                 return model_name
 
         raise ValueError(f"Model '{name}' not found in configuration (no alias match)")
+
+    def resolve_reload_target(self, requested_model: Optional[str] = None) -> str:
+        """Return a configured model that is safe to use for backend reloads."""
+        self._refresh_model_registry()
+
+        candidates: List[Optional[str]] = []
+        if self._pinned_model:
+            candidates.append(self._pinned_model)
+        if requested_model and requested_model not in {"auto", MISMATCH_MODEL_NAME}:
+            try:
+                candidates.append(self.resolve_model(requested_model))
+            except ValueError:
+                pass
+        candidates.extend(
+            [
+                self.current_model,
+                self._last_verified_model,
+                self._last_backend_model,
+            ]
+        )
+
+        for candidate in candidates:
+            if candidate and candidate != MISMATCH_MODEL_NAME and candidate in self.models:
+                return candidate
+
+        for candidate in self.models:
+            if candidate != MISMATCH_MODEL_NAME:
+                return candidate
+
+        raise ValueError("No configured model is available for backend reload")
 
     def _uses_reasoning(self, config: Dict) -> bool:
         extra_args = str(config.get("extra_args", ""))
@@ -664,7 +695,7 @@ class ModelManager:
         Called from server.py lifespan. If the backend runs the wrong model,
         this triggers a forced switch to the pinned/default model.
         """
-        target = self._pinned_model or self.current_model
+        target = self.resolve_reload_target(self._pinned_model or self.current_model)
         logger.info(f"🔍 Startup check: expecting model '{target}'")
 
         verified = await self.verify_backend_model()
@@ -679,12 +710,27 @@ class ModelManager:
             f"🔄 Startup mismatch: forcing switch from actual '{actual_name}' to target '{target}'"
         )
 
-        self.current_model = "__MISMATCH__"  # Force switch_model to not skip
+        if not self._pinned_model and actual_name in self.models:
+            logger.warning(
+                "🔄 Startup mismatch has a known live backend and no model pin; "
+                "adopting '%s' instead of replacing it with stale args state",
+                actual_name,
+            )
+            self.current_model = actual_name
+            self.current_vision_enabled = self.current_runtime_uses_mmproj(actual_name)
+            if await self.verify_backend_model():
+                logger.info(f"✅ Startup adopted live backend '{actual_name}'")
+                return
+
+        self.current_model = MISMATCH_MODEL_NAME  # Force switch_model to not skip
 
         try:
             await self.switch_model(target)
             logger.info(f"✅ Startup forced switch to '{target}' succeeded")
         except Exception as e:
+            self.current_model = target
+            self.current_vision_enabled = self.current_runtime_uses_mmproj(target)
+            self.is_unloaded = True
             logger.error(f"❌ Startup forced switch FAILED: {e}")
 
     def _load_config(self) -> Dict:
@@ -901,6 +947,11 @@ class ModelManager:
         # Re-read models.yaml so config edits take effect without Guardian restart
         self._refresh_model_registry()
         target = model_name or self.current_model
+        if target not in self.models:
+            if model_name is None:
+                target = self.resolve_reload_target()
+            else:
+                raise ValueError(f"Model '{target}' not found in configuration")
         if target not in self.models:
             raise ValueError(f"Model '{target}' not found in configuration")
         desired_vision = self._resolve_runtime_vision_flag(target, enable_vision)

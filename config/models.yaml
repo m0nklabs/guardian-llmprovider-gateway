@@ -112,6 +112,7 @@ models:
     context: 262144
     ngl: 99
     kv_type: "q4_0"
+    tensor_split: "0.36,0.64"
     mmproj: "/home/flip/models/Qwen3.6-35B-A3B-mmproj-BF16.gguf"
     vision_context: 262144
     vision_ngl: 40

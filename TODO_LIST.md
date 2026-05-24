@@ -1,5 +1,13 @@
 # Guardian TODO List
 
+## 2026-05-24 Backend Reload Recovery
+
+- [x] Restore live inference after the Step3 startup OOM left Guardian in the internal `__MISMATCH__` state.
+- [x] Prove the active backend commandline contains the expected Hauhau text `--tensor-split 0.36,0.64` after a live reload.
+- [x] Prevent startup and proxy auto-reload paths from using `__MISMATCH__` as a model name.
+- [x] Persist the live-validated Hauhau text split in `config/models.yaml`.
+- [x] Add regression coverage for safe reload-target resolution and startup adoption of a known live backend.
+
 ## 2026-05-24 Dashboard Usage Monitoring Restore
 
 - [x] Recover the missing `:11437` monitoring work from the stashed index without re-enabling the old broad-sweep benchmark runtime.

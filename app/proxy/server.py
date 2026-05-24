@@ -458,11 +458,18 @@ def _resolve_inference_model(raw_model: Optional[str], current_model: str) -> Op
         return raw_model
     if raw_model == "auto":
         preferred = model_manager.get_preferred_tool_model(current_model)
-        return preferred or current_model
+        if preferred and preferred != "__MISMATCH__":
+            return preferred
+        return model_manager.resolve_reload_target(current_model)
     try:
         return model_manager.resolve_model(raw_model)
     except ValueError:
         return raw_model
+
+
+def _resolve_auto_reload_model(requested_model: Optional[str] = None) -> str:
+    """Resolve the model Guardian should load when the backend is absent."""
+    return model_manager.resolve_reload_target(requested_model)
 
 
 def _queue_headers(request_id: str, queue_wait_ms: float) -> Dict[str, str]:
@@ -1145,9 +1152,10 @@ inference_queue = InferenceQueue(
 async def _reload_backend_after_connect_error(path: str, error: Exception) -> None:
     """Reload llama-server once after Guardian detects stale backend state."""
     current_model = await model_manager.get_current_model()
+    reload_model = _resolve_auto_reload_model(current_model)
     logger.warning(
         f"⚠️ Backend unreachable while proxying /v1/{path}; "
-        f"reloading '{current_model}' once before retry: {error}"
+        f"reloading '{reload_model}' once before retry: {error}"
     )
 
     async with _model_switch_lock:
@@ -1161,23 +1169,23 @@ async def _reload_backend_after_connect_error(path: str, error: Exception) -> No
             generation = _reset_startup_check_status(
                 source="proxy",
                 phase="backend_reload",
-                target_model=current_model,
+                target_model=reload_model,
                 requested_model=current_model,
                 owner="backend_recovery",
             )
             await _run_guardian_operation(
                 source="proxy",
                 phase="backend_reload",
-                target_model=current_model,
+                target_model=reload_model,
                 requested_model=current_model,
                 owner="backend_recovery",
-                operation=lambda: model_manager.load(current_model),
+                operation=lambda: model_manager.load(reload_model),
                 generation=generation,
             )
         except ModelLoadError as e:
             crash = e.crash_record
             detail = {
-                "error": f"Backend reload failed for '{current_model}'",
+                "error": f"Backend reload failed for '{reload_model}'",
                 "message": str(e),
                 "crash_details": crash.to_dict() if crash else None,
             }
@@ -1218,12 +1226,13 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
     try:
         # Auto-reload if unloaded
         if model_manager.is_unloaded:
-            logger.info(f"🔄 Auto-reloading '{model_manager.current_model}'...")
+            reload_model = _resolve_auto_reload_model(model)
+            logger.info(f"🔄 Auto-reloading '{reload_model}'...")
             generation = _reset_startup_check_status(
                 source="proxy",
                 phase="auto_reload",
-                target_model=model_manager.current_model,
-                requested_model=model_manager.current_model,
+                target_model=reload_model,
+                requested_model=model,
                 owner=client_id,
             )
             async with _model_switch_lock:
@@ -1231,10 +1240,10 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
                     await _run_guardian_operation(
                         source="proxy",
                         phase="auto_reload",
-                        target_model=model_manager.current_model,
-                        requested_model=model_manager.current_model,
+                        target_model=reload_model,
+                        requested_model=model,
                         owner=client_id,
-                        operation=model_manager.load,
+                        operation=lambda: model_manager.load(reload_model),
                         generation=generation,
                     )
 
@@ -1448,12 +1457,13 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
     try:
         # Auto-reload if unloaded
         if model_manager.is_unloaded:
-            logger.info(f"🔄 Auto-reloading '{model_manager.current_model}'...")
+            reload_model = _resolve_auto_reload_model(model)
+            logger.info(f"🔄 Auto-reloading '{reload_model}'...")
             generation = _reset_startup_check_status(
                 source="proxy",
                 phase="auto_reload",
-                target_model=model_manager.current_model,
-                requested_model=model_manager.current_model,
+                target_model=reload_model,
+                requested_model=model,
                 owner=client_id,
             )
             async with _model_switch_lock:
@@ -1461,10 +1471,10 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
                     await _run_guardian_operation(
                         source="proxy",
                         phase="auto_reload",
-                        target_model=model_manager.current_model,
-                        requested_model=model_manager.current_model,
+                        target_model=reload_model,
+                        requested_model=model,
                         owner=client_id,
-                        operation=model_manager.load,
+                        operation=lambda: model_manager.load(reload_model),
                         generation=generation,
                     )
 
@@ -2040,6 +2050,7 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
         requested_model: Optional[str] = None
         try:
             json_body = json.loads(body)
+            requested_model = json_body.get("model")
             if path in ("chat/completions", "messages"):
                 has_image_inputs = _messages_contain_image_input(json_body.get("messages", []))
         except (json.JSONDecodeError, Exception):
@@ -2047,13 +2058,16 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
 
         # If llama-server was unloaded, auto-reload before forwarding
         if model_manager.is_unloaded:
-            logger.info(f"🔄 Incoming request while unloaded — auto-reloading '{model_manager.current_model}'...")
+            current_model = await model_manager.get_current_model()
+            reload_candidate = _resolve_inference_model(requested_model, current_model) if requested_model else current_model
+            reload_model = _resolve_auto_reload_model(reload_candidate)
+            logger.info(f"🔄 Incoming request while unloaded — auto-reloading '{reload_model}'...")
             try:
                 generation = _reset_startup_check_status(
                     source="proxy",
                     phase="auto_reload",
-                    target_model=model_manager.current_model,
-                    requested_model=model_manager.current_model,
+                    target_model=reload_model,
+                    requested_model=requested_model or current_model,
                     owner=client_id,
                 )
                 async with _model_switch_lock:
@@ -2061,13 +2075,13 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                         await _run_guardian_operation(
                             source="proxy",
                             phase="auto_reload",
-                            target_model=model_manager.current_model,
-                            requested_model=model_manager.current_model,
+                            target_model=reload_model,
+                            requested_model=requested_model or current_model,
                             owner=client_id,
                             operation=lambda: model_manager.load(
-                                model_manager.current_model,
+                                reload_model,
                                 enable_vision=_desired_runtime_vision_enabled(
-                                    model_manager.current_model,
+                                    reload_model,
                                     has_image_inputs,
                                 ),
                             ),

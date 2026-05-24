@@ -21,6 +21,7 @@
 - Added `docs/SERVER_UPGRADE_PLAN.md`, a normalized English planning document for the next Guardian host hardware upgrade based on the decoded server-upgrade note.
 
 ### Changed
+- The Hauhau Qwen3.6 text runtime now also uses the live-validated `tensor_split: "0.36,0.64"`, so text-mode Guardian launches write an explicit `--tensor-split` instead of relying on llama.cpp auto placement.
 - Live Gemma text finetuning now applies the proven `262144 / ngl 60 / 0.42,0.58` runtime for `gemma-4-31B-it-uncensored-heretic`, replacing the old overloaded `0.62,0.38` split that failed on GPU0; the smaller `gemma-4-E4B-it-uncensored` profile was also applied at `131072 / ngl 42 / 0.32,0.68`.
 - `scripts/finetune_v2_model_config.py` is now a compatibility wrapper around the shared v2 CLI module so the root entrypoint and legacy script path cannot drift.
 - Finetune v2 now flushes every appended probe to the configured main `--results-file` as well as the `.active` sidecar, and CLI runtime errors print the results-file path so operators can watch the right log during live runs.
@@ -64,6 +65,7 @@
 - The finetune results log now writes an in-progress run entry immediately and flushes every individual probe to `data/model_finetune_results.json`, so long live searches can be monitored while they are still running or interrupted mid-run.
 
 ### Fixed
+- Guardian startup and proxy recovery now treat `__MISMATCH__` as an internal sentinel only: startup adopts a known live backend when no model pin is active, failed forced switches restore a real target model, and auto-reload/connect-error recovery resolves to a configured model instead of trying to load `__MISMATCH__` and returning persistent 503s.
 - Restored the missing served dashboard monitoring panels on `:11437`; the static UI now consumes `/api/stats` API usage snapshots instead of only showing the older VRAM/cache/benchmark cards.
 - `/v1/models` now advertises `input_modalities: ["text", "image"]` for configured multimodal runtimes that are still `unverified`, so OpenCode and other clients do not incorrectly reject image attachments before the first live vision probe has marked the model `supported`.
 - Finetune v2 same-bucket handling now follows llama.cpp's per-layer allocation behavior: when adjacent effective tensor splits land in the same backend VRAM bucket, the planner keeps stepping in the same measured direction (`0.39 -> 0.38 -> 0.37 -> ...`) until the bucket changes, a probe fails, or bounds are exhausted, instead of falling back to unrelated centered splits.
