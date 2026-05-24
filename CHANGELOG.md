@@ -18,6 +18,7 @@
 - Added `docs/SERVER_UPGRADE_PLAN.md`, a normalized English planning document for the next Guardian host hardware upgrade based on the decoded server-upgrade note.
 
 ### Changed
+- `.gitignore` now ignores `.scratch/` so temporary synced-main worktrees and local probe scratch space stop polluting repo status during live finetune validation.
 - The finetune v2 contract helper now rejects malformed fixture booleans and non-string `error` payloads instead of silently coercing them, and the wrapper smoke test now has an explicit timeout so CI cannot hang indefinitely in the subprocess path.
 - `docs/FINETUNE_V2_REQUIREMENTS.md` now explicitly defines Guardian finetune as
 	host-specific runtime tuning (`context` / `ngl` / `tensor_split` and vision
@@ -49,6 +50,9 @@
 - The finetune results log now writes an in-progress run entry immediately and flushes every individual probe to `data/model_finetune_results.json`, so long live searches can be monitored while they are still running or interrupted mid-run.
 
 ### Fixed
+- Finetune v2 no longer stops immediately on a fixed-shape `max_context_and_ngl` success when that same success queued a split-rebalance follow-up; the runner now executes the queued probe first so worse asymmetric splits can be disqualified before convergence ends the run.
+- Non-applying finetune v2 runs now restore the requested model's disk runtime after probing, including failure paths, so a late OOM candidate cannot leave `current_model.args` and the live `llama-server` stranded on the last attempted override.
+- A post-restart live vision rerun for `Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved` confirmed that `0.50,0.50` remains the correct `262144 / 32` split on this host; `0.45,0.55` drops GPU0 headroom to `19 MiB`, and `0.40,0.60` fails to load with CUDA OOM.
 - Fixed a merge-conflict regression in `app/tweaker/finetune_v2_runner.py` where a duplicated `start_run()` block made the merged finetune v2 path fail at import time with `SyntaxError: positional argument follows keyword argument`.
 - Context-mode finetuning no longer keeps chasing alternate split candidates after a failed seed probe during either baseline calibration or later context evaluation; failed context-mode probes now hand control back to the broader ngl/context search, and split balancing only resumes after a successful probe.
 - Restored the proven interim multimodal recovery baseline for `Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved` in `models.yaml` after drift had pushed the vision path back to `vision_ngl: 99` with `vision_tensor_split: "0.50,0.50"`, which caused Guardian 503 auto-reload failures and llama-server segfaults on image requests. That recovery baseline put the vision path back on a known-good `262144 / 36 / 0.55,0.45` shape before the final context rerun.

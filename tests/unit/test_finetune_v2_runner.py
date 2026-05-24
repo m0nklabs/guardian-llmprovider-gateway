@@ -101,6 +101,38 @@ class SequencedProbeRunner:
         )
 
 
+class CandidateMapProbeRunner:
+    def __init__(self, outcomes: dict[tuple[int, int, str, str, bool], Probe]) -> None:
+        self.outcomes = outcomes
+        self.calls: list[tuple[str, Candidate]] = []
+        self.disk_load_calls: list[tuple[str, bool]] = []
+
+    def verify_disk_load(self, model: str, *, enable_vision: bool = False) -> bool:
+        self.disk_load_calls.append((model, enable_vision))
+        return True
+
+    def probe(self, model: str, candidate: Candidate) -> Probe:
+        self.calls.append((model, candidate))
+        key = (
+            candidate.context,
+            candidate.ngl,
+            candidate.tensor_split,
+            candidate.runtime_mode,
+            candidate.has_mmproj,
+        )
+        template = self.outcomes[key]
+        return Probe(
+            candidate=candidate,
+            success=template.success,
+            free_vram_mib=template.free_vram_mib,
+            total_seconds=template.total_seconds,
+            order=len(self.calls) - 1,
+            telemetry_source=template.telemetry_source,
+            cache_backed=template.cache_backed,
+            error=template.error,
+        )
+
+
 def test_v2_dry_run_keeps_models_yaml_unchanged_and_logs_probe_history(tmp_path: Path):
     models_path = tmp_path / "models.yaml"
     results_path = tmp_path / "v2_results.json"
@@ -126,6 +158,7 @@ def test_v2_dry_run_keeps_models_yaml_unchanged_and_logs_probe_history(tmp_path:
     assert result.applied is False
     assert result.winner.candidate.context == 65536
     assert result.winner_explanation["comparator_mode"] == "context"
+    assert fake_runner.disk_load_calls == [("TestModel", False)]
     history = json.loads(results_path.read_text())
     assert history[-1]["status"] == "completed"
     assert history[-1]["version"] == 2
@@ -369,6 +402,124 @@ def test_v2_speed_mode_uses_active_context_as_default_floor(tmp_path: Path):
     assert len(result.probes) == 1
     assert result.winner.candidate.context == 65536
     assert result.convergence["reason"] == "max_context_and_ngl"
+
+
+def test_v2_fixed_shape_runs_split_rebalance_before_stopping_at_max_shape(tmp_path: Path):
+    models_path = tmp_path / "models.yaml"
+    results_path = tmp_path / "v2_results.json"
+    _write_models(models_path)
+    probe_runner = CandidateMapProbeRunner(
+        {
+            (32768, 38, "0.60,0.40", "vision", True): Probe(
+                candidate=Candidate(
+                    context=32768,
+                    ngl=38,
+                    tensor_split="0.60,0.40",
+                    runtime_mode="vision",
+                    has_mmproj=True,
+                ),
+                success=True,
+                free_vram_mib=(579.0, 4917.0),
+                total_seconds=33.0,
+                order=0,
+            ),
+            (32768, 38, "0.55,0.45", "vision", True): Probe(
+                candidate=Candidate(
+                    context=32768,
+                    ngl=38,
+                    tensor_split="0.55,0.45",
+                    runtime_mode="vision",
+                    has_mmproj=True,
+                ),
+                success=True,
+                free_vram_mib=(940.0, 3600.0),
+                total_seconds=34.0,
+                order=1,
+            ),
+        }
+    )
+
+    runner = FinetuneV2Runner(
+        models_config_path=models_path,
+        results_file=results_path,
+        probe_runner=probe_runner,
+        runtime_mode="vision",
+    )
+    with patch.object(runner, "_better_split", side_effect=["0.55,0.45", "0.55,0.45"]):
+        result = runner.tune_model(
+            "TestModel",
+            optimization="speed",
+            fixed_context=32768,
+            fixed_ngl=38,
+            split_candidates=["0.60,0.40"],
+            split_min=0.30,
+            split_max=0.70,
+        )
+
+    assert [call[1].tensor_split for call in probe_runner.calls] == ["0.60,0.40", "0.55,0.45"]
+    assert result.winner.candidate.tensor_split == "0.60,0.40"
+    assert result.convergence["reason"] == "max_context_and_ngl"
+    assert probe_runner.disk_load_calls == [("TestModel", True)]
+
+
+def test_v2_dry_run_restores_disk_runtime_after_failed_followup_probe(tmp_path: Path):
+    models_path = tmp_path / "models.yaml"
+    results_path = tmp_path / "v2_results.json"
+    _write_models(models_path)
+    probe_runner = CandidateMapProbeRunner(
+        {
+            (32768, 38, "0.60,0.40", "vision", True): Probe(
+                candidate=Candidate(
+                    context=32768,
+                    ngl=38,
+                    tensor_split="0.60,0.40",
+                    runtime_mode="vision",
+                    has_mmproj=True,
+                ),
+                success=True,
+                free_vram_mib=(579.0, 4917.0),
+                total_seconds=33.0,
+                order=0,
+            ),
+            (32768, 38, "0.40,0.60", "vision", True): Probe(
+                candidate=Candidate(
+                    context=32768,
+                    ngl=38,
+                    tensor_split="0.40,0.60",
+                    runtime_mode="vision",
+                    has_mmproj=True,
+                ),
+                success=False,
+                free_vram_mib=(19.0, 5477.0),
+                total_seconds=72.0,
+                order=1,
+                telemetry_source="pre_load",
+                error="cuda out of memory",
+            ),
+        }
+    )
+
+    runner = FinetuneV2Runner(
+        models_config_path=models_path,
+        results_file=results_path,
+        probe_runner=probe_runner,
+        runtime_mode="vision",
+    )
+    with patch.object(runner, "_better_split", side_effect=["0.40,0.60", "0.40,0.60"]):
+        result = runner.tune_model(
+            "TestModel",
+            optimization="speed",
+            fixed_context=32768,
+            fixed_ngl=38,
+            split_candidates=["0.60,0.40"],
+            split_min=0.30,
+            split_max=0.70,
+        )
+
+    assert [call[1].tensor_split for call in probe_runner.calls] == ["0.60,0.40", "0.40,0.60"]
+    assert result.winner.candidate.tensor_split == "0.60,0.40"
+    assert result.probes[-1].success is False
+    assert probe_runner.disk_load_calls == [("TestModel", True)]
 
 
 def test_v2_apply_failure_restores_yaml_and_reloads_previous_config(tmp_path: Path):

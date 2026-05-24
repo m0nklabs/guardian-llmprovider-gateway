@@ -586,6 +586,7 @@ class FinetuneV2Runner:
             fixed_ngl=fixed_ngl,
             applied=False,
         )
+        restored_disk_runtime = False
         try:
             while queued:
                 if remaining_low_headroom_followups is not None:
@@ -612,6 +613,21 @@ class FinetuneV2Runner:
                     low_headroom_followups_used += 1
 
                 if probe.success:
+                    queued_followups = False
+                    rebalance = split_rebalance_action(
+                        probes,
+                        better_split=self._better_split(probe, split_min, split_max),
+                    )
+                    if rebalance is not None:
+                        queued.append(rebalance)
+                        queued_followups = True
+                    if fixed_ngl is None:
+                        retry_actions = upward_ngl_retry_actions(probe, limits, max_retries=1)
+                        if retry_actions:
+                            queued_followups = True
+                        for retry_action in reversed(retry_actions):
+                            queued.appendleft(retry_action)
+
                     convergence = convergence_status_from_history(
                         probes,
                         limits,
@@ -622,6 +638,8 @@ class FinetuneV2Runner:
                         allowed_ngl=allowed_ngl,
                     )
                     if convergence["should_continue"] is False:
+                        if queued_followups and convergence["reason"] == "max_context_and_ngl":
+                            continue
                         break
                     if (
                         convergence["reason"] == "low_headroom_followup"
@@ -630,13 +648,6 @@ class FinetuneV2Runner:
                         remaining_low_headroom_followups = int(convergence["remaining_followups"])
                     elif remaining_low_headroom_followups is not None and convergence["reason"] != "low_headroom_followup":
                         break
-                    if fixed_ngl is None:
-                        retry_actions = upward_ngl_retry_actions(probe, limits, max_retries=1)
-                        for retry_action in reversed(retry_actions):
-                            queued.appendleft(retry_action)
-                    rebalance = split_rebalance_action(probes, better_split=self._better_split(probe, split_min, split_max))
-                    if rebalance is not None:
-                        queued.append(rebalance)
                 else:
                     if remaining_low_headroom_followups is not None:
                         convergence = convergence_status_from_history(
@@ -672,6 +683,9 @@ class FinetuneV2Runner:
             )
             if apply:
                 self._apply_winner(canonical_model, model_config, winner)
+            else:
+                self._restore_disk_runtime(canonical_model)
+                restored_disk_runtime = True
             result = FinetuneV2Result(
                 model=canonical_model,
                 runtime_mode=self.runtime_mode,
@@ -691,6 +705,12 @@ class FinetuneV2Runner:
             )
             return result
         except BaseException as exc:
+            if not apply and not restored_disk_runtime:
+                try:
+                    self._restore_disk_runtime(canonical_model)
+                except BaseException as restore_exc:
+                    self.results.fail_run(restore_exc)
+                    raise restore_exc from exc
             self.results.fail_run(exc)
             raise
 
@@ -825,6 +845,14 @@ class FinetuneV2Runner:
         except Exception:
             restore_previous_config()
             raise
+
+    def _restore_disk_runtime(self, model_name: str) -> None:
+        enable_vision = runtime_mode_uses_vision(self.runtime_mode)
+        disk_ok = self.probe_runner.verify_disk_load(model_name, enable_vision=enable_vision)
+        if not disk_ok:
+            raise RuntimeError(
+                f"Finetune v2 dry run failed to restore disk runtime for '{model_name}'"
+            )
 
     def _resolve_model(self, requested_name: str) -> str:
         models = self.base_config.get("models", {})
