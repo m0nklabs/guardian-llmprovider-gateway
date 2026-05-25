@@ -11,15 +11,16 @@ import os
 import sys
 import yaml
 
+from _auth import build_auth_headers, resolve_api_key
 from _paths import CONFIG_DIR
 
 # Configuration
 GUARDIAN_URL = "http://127.0.0.1:11434"
-API_KEY = "flip_bdb55f05935da66a9cec280a69464392"
+API_KEY = resolve_api_key()
 MODELS_CONFIG = CONFIG_DIR / "models.yaml"
 
 HEADERS = {
-    "Authorization": f"Bearer {API_KEY}",
+    **build_auth_headers(API_KEY),
     "Content-Type": "application/json"
 }
 

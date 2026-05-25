@@ -108,7 +108,7 @@ For focused per-model tuning, use the root finetune v2 CLI instead of broad swee
 Then run a specific model or alias:
 
 ```bash
-./finetune_v2.py qwen3-35b-heretic-mtp \
+./finetune_v2.py qwen3.6-35b-heretic-mtp \
   --optimization context \
   --runtime-mode vision \
   --smoke-image-url data:image/png;base64,... \
@@ -189,13 +189,20 @@ models:
     extra_args: "--repeat-penalty 1.3 --repeat-last-n 128 --dry-multiplier 1.0 --dry-base 1.75 --dry-penalty-last-n 256 --temp 0.6 --top-k 40"
 
 aliases:
-  qwen3.6-35b: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
-  qwen3-35b-uncensored: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
-  qwen3.6-35b-heretic-mtp: "Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved"
-  qwen3-35b-heretic-mtp: "Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved"
-  qwen3-35b-mtp: "Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved"
+  qwen3: "Qwen3-30B-A3B-Thinking-2507"
+  qwen3-30b: "Qwen3-30B-A3B-Thinking-2507"
+  qwen3-30b-thinking: "Qwen3-30B-A3B-Thinking-2507"
   qwen3-vl: "Qwen3-VL-30B-A3B-Thinking"
+  qwen3-vl-30b: "Qwen3-VL-30B-A3B-Thinking"
+  qwen3-vl-heretic: "Qwen3-VL-32B-Gemini-Heretic-Uncensored-Thinking"
+  qwen3-vl-32b-heretic: "Qwen3-VL-32B-Gemini-Heretic-Uncensored-Thinking"
   qwen3-32b-uncensored: "Qwen3-VL-32B-Gemini-Heretic-Uncensored-Thinking"
+  qwen3.6-35b: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
+  qwen3.6-35b-uncensored: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
+  qwen3.6-35b-hauhau: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
+  qwen3.6-35b-aggressive: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
+  qwen3.6-35b-heretic-mtp: "Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved"
+  qwen3.6-35b-mtp: "Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved"
   gemma4: "Huihui-gemma-4-26B-A4B-it-abliterated"
   gemma4-heretic: "gemma-4-31B-it-uncensored-heretic"
   gemma4-31b-uncensored: "gemma-4-31B-it-uncensored-heretic"

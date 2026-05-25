@@ -21,6 +21,17 @@
 - Added `docs/SERVER_UPGRADE_PLAN.md`, a normalized English planning document for the next Guardian host hardware upgrade based on the decoded server-upgrade note.
 
 ### Changed
+- Added a second operator-focused dashboard pass on `:11437`: p95 latency insight, endpoint-level recent error breakdown, and three live sparklines for request pace, latency trend, and error trend driven from the current filtered recent-activity view.
+- Gave the served `:11437` dashboard a broader operator pass: last-refresh state, manual refresh + pause controls, free-text traffic search, recent-status filtering, client/recent sort controls, traffic-mix insight cards, strongest endpoint/client callouts, progress bars for hot endpoints, sticky table headers, and stronger visual highlighting for error/slow/heavy recent requests.
+- Expanded the served `:11437` dashboard API usage panel with byte counters, average latency, streaming counts, top endpoints, and richer per-client / per-request usage rows; Guardian now tracks best-effort request and response byte totals from HTTP metadata alongside tokens.
+- Localhost unauthorized auth warnings now also try to resolve the offending process from the client source port, logging `local_pid` and `local_process` when Guardian can still see the live loopback connection.
+- Revoked the stray `name: "-h"` key entry from `config/api_keys.json` after an exact-key sweep showed no remaining references outside the key store.
+- Unauthorized auth failures now emit a single searchable warning from `app.proxy.auth`, including method/path/source details and the full presented token when a stale or invalid API key is supplied, so dead-key hunts can be traced from Guardian logs instead of masked prefixes.
+- Removed hardcoded `flip_` test keys from Guardian utility scripts by centralizing script auth resolution in `scripts/_auth.py`; `test_system.py`, `verify_prompts.py`, and `test_vision_models.py` now use `GUARDIAN_API_KEY` / `GUARDIAN_TEST_KEY` or fall back to the first configured key in `config/api_keys.json`.
+- Realigned `Qwen3-30B-A3B-Thinking-2507` with the official HF-native profile: Guardian now uses `context: 262144`, `ngl: 40`, and `kv_type: q4_0` instead of the old 1M `q8_0` full-offload runtime that no longer fits this dual-GPU host.
+- Swapped every configured `tensor_split` and `vision_tensor_split` where GPU0's value was larger than GPU1's, so Guardian's model configs now bias allocation toward the larger second GPU.
+- Removed stale broad-sweep benchmark download entries whose local GGUF files are no longer present, leaving `config/benchmark_models.json` empty until new benchmark targets are explicitly added.
+- Clarified public Qwen aliases: `qwen3` now resolves to the Qwen 3.0 30B Thinking runtime, while Qwen 3.6 routes use explicit `qwen3.6-*` aliases and the old misleading `qwen3-35b-*` aliases were removed.
 - The Hauhau Qwen3.6 text runtime now also uses the live-validated `tensor_split: "0.36,0.64"`, so text-mode Guardian launches write an explicit `--tensor-split` instead of relying on llama.cpp auto placement.
 - Live Gemma text finetuning now applies the proven `262144 / ngl 60 / 0.42,0.58` runtime for `gemma-4-31B-it-uncensored-heretic`, replacing the old overloaded `0.62,0.38` split that failed on GPU0; the smaller `gemma-4-E4B-it-uncensored` profile was also applied at `131072 / ngl 42 / 0.32,0.68`.
 - `scripts/finetune_v2_model_config.py` is now a compatibility wrapper around the shared v2 CLI module so the root entrypoint and legacy script path cannot drift.
@@ -65,6 +76,7 @@
 - The finetune results log now writes an in-progress run entry immediately and flushes every individual probe to `data/model_finetune_results.json`, so long live searches can be monitored while they are still running or interrupted mid-run.
 
 ### Fixed
+- `/v1/models/{model_id}` now resolves Guardian public aliases locally instead of forwarding alias lookups to llama-server, so renamed aliases such as `qwen3.6-35b-uncensored` return metadata instead of backend errors.
 - Guardian startup and proxy recovery now treat `__MISMATCH__` as an internal sentinel only: startup adopts a known live backend when no model pin is active, failed forced switches restore a real target model, and auto-reload/connect-error recovery resolves to a configured model instead of trying to load `__MISMATCH__` and returning persistent 503s.
 - Restored the missing served dashboard monitoring panels on `:11437`; the static UI now consumes `/api/stats` API usage snapshots instead of only showing the older VRAM/cache/benchmark cards.
 - `/v1/models` now advertises `input_modalities: ["text", "image"]` for configured multimodal runtimes that are still `unverified`, so OpenCode and other clients do not incorrectly reject image attachments before the first live vision probe has marked the model `supported`.

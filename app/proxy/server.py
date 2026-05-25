@@ -1013,6 +1013,30 @@ def _coerce_usage_int(value: object) -> int:
         return 0
 
 
+def _coerce_header_int(value: object) -> int:
+    """Convert a header-like byte count to a non-negative integer."""
+    try:
+        return max(int(str(value).strip()), 0)
+    except (AttributeError, TypeError, ValueError):
+        return 0
+
+
+def _request_size_bytes(request: Request) -> int:
+    """Best-effort byte count for the inbound request body."""
+    return _coerce_header_int(request.headers.get("content-length"))
+
+
+def _response_size_bytes(response: Response) -> int:
+    """Best-effort byte count for the outbound response body."""
+    header_value = response.headers.get("content-length")
+    if header_value not in (None, ""):
+        return _coerce_header_int(header_value)
+    body = getattr(response, "body", None)
+    if isinstance(body, (bytes, bytearray)):
+        return len(body)
+    return 0
+
+
 def _should_track_api_usage(path: str) -> bool:
     """Return whether the request path should count toward API usage."""
     if path in {"/healthz", "/metrics"}:
@@ -1112,6 +1136,8 @@ async def track_api_usage_middleware(request: Request, call_next):
             status_code=500,
             model=getattr(request.state, "guardian_usage_model", None),
             duration_ms=(time.monotonic() - started) * 1000.0,
+            request_bytes=_request_size_bytes(request),
+            response_bytes=0,
             streamed=bool(getattr(request.state, "guardian_usage_streamed", False)),
             attribution=_get_usage_attribution(request),
         )
@@ -1124,6 +1150,8 @@ async def track_api_usage_middleware(request: Request, call_next):
         status_code=response.status_code,
         model=getattr(request.state, "guardian_usage_model", None),
         duration_ms=(time.monotonic() - started) * 1000.0,
+        request_bytes=_request_size_bytes(request),
+        response_bytes=_response_size_bytes(response),
         streamed=bool(getattr(request.state, "guardian_usage_streamed", False)),
         attribution=_get_usage_attribution(request),
     )
@@ -1697,62 +1725,78 @@ async def healthz():
 
 
 # Model listing endpoint (Before catch-all)
+def _build_model_metadata_entry(public_name: str, canonical_name: str, client_id: str) -> Dict[str, Any]:
+    model_entry: Dict[str, Any] = {
+        "id": public_name,
+        "object": "model",
+        "created": int(time.time()),
+        "owned_by": "organization-owner",
+        "permission": [],
+    }
+    benchmark_context_limit = model_manager.get_benchmark_context_limit(canonical_name)
+    runtime_context = model_manager.get_runtime_context_window(canonical_name)
+    advertised_context = model_manager.get_advertised_context_window(canonical_name)
+    if benchmark_context_limit is not None:
+        model_entry["max_context"] = benchmark_context_limit
+        model_entry["benchmark_context_limit"] = benchmark_context_limit
+    if runtime_context is not None:
+        model_entry["context"] = runtime_context
+    if advertised_context is not None:
+        model_entry["advertised_context"] = advertised_context
+
+    vision = model_manager.get_vision_capability(canonical_name)
+    model_entry["input_modalities"] = ["text"]
+    if vision["configured"] and vision["status"] not in {
+        "misconfigured",
+        "text_only",
+        "unknown",
+        "unsupported",
+    }:
+        model_entry["input_modalities"].append("image")
+    model_entry["configured_input_modalities"] = ["text"]
+    if vision["configured"]:
+        model_entry["configured_input_modalities"].append("image")
+    model_entry["vision"] = {
+        "configured": vision["configured"],
+        "status": vision["status"],
+        "validated": vision["validated"],
+    }
+
+    # Claude Code currently compacts against the OpenAI-compatible max_context
+    # field only. Preserve benchmark-cap semantics for normal clients, but
+    # return the safer advertised window for Claude so it compacts before hard
+    # overflow.
+    if client_id == "claudecode" and advertised_context is not None:
+        if benchmark_context_limit is not None:
+            model_entry["benchmark_context_limit"] = benchmark_context_limit
+        model_entry["max_context"] = advertised_context
+    return model_entry
+
+
 @app.get("/v1/models")
 async def list_models(client_id: str = Depends(verify_api_key)):
     """List available models from config."""
     models_list = []
     try:
-        current = await model_manager.get_current_model()
         for public_name, canonical_name in model_manager.get_public_model_map().items():
-            model_entry = {
-                "id": public_name,
-                "object": "model",
-                "created": int(time.time()),
-                "owned_by": "organization-owner",
-                "permission": [],
-            }
-            benchmark_context_limit = model_manager.get_benchmark_context_limit(canonical_name)
-            runtime_context = model_manager.get_runtime_context_window(canonical_name)
-            advertised_context = model_manager.get_advertised_context_window(canonical_name)
-            if benchmark_context_limit is not None:
-                model_entry["max_context"] = benchmark_context_limit
-                model_entry["benchmark_context_limit"] = benchmark_context_limit
-            if runtime_context is not None:
-                model_entry["context"] = runtime_context
-            if advertised_context is not None:
-                model_entry["advertised_context"] = advertised_context
-
-            vision = model_manager.get_vision_capability(canonical_name)
-            model_entry["input_modalities"] = ["text"]
-            if vision["configured"] and vision["status"] not in {
-                "misconfigured",
-                "text_only",
-                "unknown",
-                "unsupported",
-            }:
-                model_entry["input_modalities"].append("image")
-            model_entry["configured_input_modalities"] = ["text"]
-            if vision["configured"]:
-                model_entry["configured_input_modalities"].append("image")
-            model_entry["vision"] = {
-                "configured": vision["configured"],
-                "status": vision["status"],
-                "validated": vision["validated"],
-            }
-
-            # Claude Code currently compacts against the OpenAI-compatible
-            # max_context field only. Preserve benchmark-cap semantics for
-            # normal clients, but return the safer advertised window for Claude
-            # so it compacts before hard overflow.
-            if client_id == "claudecode" and advertised_context is not None:
-                if benchmark_context_limit is not None:
-                    model_entry["benchmark_context_limit"] = benchmark_context_limit
-                model_entry["max_context"] = advertised_context
-            models_list.append(model_entry)
+            models_list.append(_build_model_metadata_entry(public_name, canonical_name, client_id))
     except Exception as e:
         logger.error(f"Failed to list models: {e}")
         
     return {"object": "list", "data": models_list}
+
+
+@app.get("/v1/models/{model_id:path}")
+async def get_model_metadata(model_id: str, client_id: str = Depends(verify_api_key)):
+    """Return metadata for a configured canonical model or public alias."""
+    public_models = model_manager.get_public_model_map()
+    canonical_name = public_models.get(model_id)
+    if canonical_name is None:
+        try:
+            canonical_name = model_manager.resolve_model(model_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return _build_model_metadata_entry(model_id, canonical_name, client_id)
 
 
 # --- Crash history & status endpoints ---

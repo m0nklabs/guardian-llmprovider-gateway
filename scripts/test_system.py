@@ -4,7 +4,9 @@ import json
 import sys
 import time
 
-API_KEY = "flip_d73d65ca4780b9f17f9c3cc10c1bb218"
+from _auth import build_auth_headers, resolve_api_key
+
+API_KEY = resolve_api_key()
 BASE_URL = "http://127.0.0.1:11434"
 
 def test_endpoint(name, method, url, data=None, headers=None, expect_status=200):
@@ -43,7 +45,7 @@ test_endpoint(
 )
 
 # 2. Test Tags (With Key)
-headers = {"Authorization": f"Bearer {API_KEY}"}
+headers = build_auth_headers(API_KEY)
 models_ok = test_endpoint(
     "Ollama API Tags (/api/tags)", 
     "GET", 

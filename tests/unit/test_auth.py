@@ -1,6 +1,7 @@
 """Tests for app.proxy.auth — Bearer token authentication."""
 
 import json
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -167,6 +168,30 @@ class TestVerifyApiKey:
             auth.API_KEYS_FILE = orig
 
     @pytest.mark.asyncio
+    async def test_invalid_key_logs_full_token(self, api_keys_file: Path, caplog: pytest.LogCaptureFixture):
+        from fastapi import HTTPException
+
+        auth, orig = _load_auth_with_path(api_keys_file)
+        try:
+            request = MagicMock()
+            request.state = MagicMock()
+            request.method = "GET"
+            request.url = MagicMock(path="/v1/models")
+            request.client = MagicMock(host="127.0.0.1", port=4321)
+            request.headers = {}
+            creds = MagicMock()
+            creds.credentials = "flip_0000000000000000000000000000dead"
+
+            with caplog.at_level(logging.WARNING, logger="Auth"):
+                with pytest.raises(HTTPException):
+                    await auth.verify_api_key(request, creds)
+
+            assert "token=flip_0000000000000000000000000000dead" in caplog.text
+            assert "reason=invalid_api_key" in caplog.text
+        finally:
+            auth.API_KEYS_FILE = orig
+
+    @pytest.mark.asyncio
     async def test_no_credentials_raises_401(self, api_keys_file: Path):
         from fastapi import HTTPException
 
@@ -176,6 +201,32 @@ class TestVerifyApiKey:
             with pytest.raises(HTTPException) as exc_info:
                 await auth.verify_api_key(request, None)
             assert exc_info.value.status_code == 401
+        finally:
+            auth.API_KEYS_FILE = orig
+
+    @pytest.mark.asyncio
+    async def test_missing_credentials_logs_unauthorized_attempt(
+        self,
+        api_keys_file: Path,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        from fastapi import HTTPException
+
+        auth, orig = _load_auth_with_path(api_keys_file)
+        try:
+            request = MagicMock()
+            request.method = "POST"
+            request.url = MagicMock(path="/api/chat")
+            request.client = MagicMock(host="10.0.0.8", port=5555)
+            request.headers = {}
+
+            with caplog.at_level(logging.WARNING, logger="Auth"):
+                with pytest.raises(HTTPException):
+                    await auth.verify_api_key(request, None)
+
+            assert "reason=missing_api_key" in caplog.text
+            assert "path=/api/chat" in caplog.text
+            assert "token=-" in caplog.text
         finally:
             auth.API_KEYS_FILE = orig
 

@@ -7,7 +7,9 @@ import urllib.request
 import urllib.error
 import sys
 
-API_KEY = "flip_bdb55f05935da66a9cec280a69464392"
+from _auth import resolve_api_key
+
+API_KEY = resolve_api_key()
 BASE_URL = "http://localhost:11434"
 
 MODELS = [

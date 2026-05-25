@@ -3,6 +3,8 @@ import hashlib
 import secrets
 import time
 import logging
+import re
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, Optional
 from fastapi import HTTPException, Security, Request
@@ -49,6 +51,54 @@ def _request_client_address(request: Request) -> tuple[Optional[str], Optional[i
     if not isinstance(port, int):
         port = None
     return host, port
+
+
+def _request_method(request: Request) -> Optional[str]:
+    """Extract the HTTP method when the request object exposes it."""
+    method = getattr(request, "method", None)
+    if not isinstance(method, str) or not method.strip():
+        return None
+    return method
+
+
+def _request_path(request: Request) -> Optional[str]:
+    """Extract the request path without assuming a concrete FastAPI request type."""
+    url = getattr(request, "url", None)
+    path = getattr(url, "path", None)
+    if not isinstance(path, str) or not path.strip():
+        return None
+    return path
+
+
+def _resolve_local_process_for_port(source_port: Optional[int]) -> tuple[Optional[int], Optional[str]]:
+    """Best-effort mapping from a localhost client port to a live process."""
+    if source_port is None:
+        return None, None
+
+    try:
+        result = subprocess.run(
+            ["ss", "-tnp"],
+            capture_output=True,
+            text=True,
+            timeout=1,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return None, None
+
+    peer_suffix = f":{source_port}"
+    for line in result.stdout.splitlines():
+        if ":11434" not in line or peer_suffix not in line:
+            continue
+
+        pid_match = re.search(r"pid=(\d+)", line)
+        process_match = re.search(r'users:\(\("([^\"]+)"', line)
+        pid = int(pid_match.group(1)) if pid_match else None
+        process_name = process_match.group(1) if process_match else None
+        if pid is not None or process_name is not None:
+            return pid, process_name
+
+    return None, None
 
 
 def _token_prefix(token: str) -> str:
@@ -114,6 +164,33 @@ def _extract_api_key(
 
     return None, None
 
+
+def _log_unauthorized_attempt(
+    request: Request,
+    reason: str,
+    token: Optional[str],
+    header_name: Optional[str],
+) -> None:
+    """Emit a searchable warning for every unauthorized auth failure."""
+    source_ip, source_port = _request_client_address(request)
+    local_pid = None
+    local_process = None
+    if source_ip in {"127.0.0.1", "::1"}:
+        local_pid, local_process = _resolve_local_process_for_port(source_port)
+
+    logger.warning(
+        "❌ Unauthorized API activity: reason=%s method=%s path=%s header=%s source_ip=%s source_port=%s token=%s local_pid=%s local_process=%s",
+        reason,
+        _request_method(request) or "-",
+        _request_path(request) or "-",
+        header_name or "-",
+        source_ip or "-",
+        source_port if source_port is not None else "-",
+        token or "-",
+        local_pid if local_pid is not None else "-",
+        local_process or "-",
+    )
+
 def load_api_keys() -> Dict[str, dict]:
     if not API_KEYS_FILE.exists():
         return {}
@@ -152,7 +229,13 @@ async def verify_api_key(request: Request, creds: Optional[HTTPAuthorizationCred
     """
     token, header_name = _extract_api_key(request, creds)
     if not token:
-         raise HTTPException(
+        _log_unauthorized_attempt(
+            request,
+            reason="missing_api_key",
+            token=None,
+            header_name=header_name,
+        )
+        raise HTTPException(
             status_code=HTTP_401_UNAUTHORIZED,
             detail="API Key required",
             headers={"WWW-Authenticate": "Bearer"},
@@ -171,7 +254,12 @@ async def verify_api_key(request: Request, creds: Optional[HTTPAuthorizationCred
         logger.info(f"🔑 Auth success: {user_data.get('name', 'Unknown')}")
         return user_data["name"]  # Return client_id/name as expected by endpoints
 
-    logger.warning(f"❌ Invalid API key attempt: {token[:10]}...")
+    _log_unauthorized_attempt(
+        request,
+        reason="invalid_api_key",
+        token=token,
+        header_name=header_name,
+    )
     raise HTTPException(
         status_code=HTTP_401_UNAUTHORIZED,
         detail="Invalid API Key",

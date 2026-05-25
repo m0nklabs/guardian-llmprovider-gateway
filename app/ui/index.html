@@ -12,6 +12,13 @@
         .stat-value { font-size: 2rem; font-weight: bold; color: #38bdf8; }
         .stat-label { color: #94a3b8; font-size: 0.875rem; }
         .record-badge { background-color: #f59e0b; color: #000; font-weight: bold; padding: 0.1rem 0.4rem; border-radius: 0.25rem; font-size: 0.75rem; }
+        .control-input { background-color: #0f172a; border: 1px solid #334155; color: #e2e8f0; border-radius: 0.5rem; padding: 0.6rem 0.85rem; min-height: 2.75rem; }
+        .control-button { background-color: #0f172a; border: 1px solid #334155; color: #e2e8f0; border-radius: 0.5rem; padding: 0.6rem 0.95rem; min-height: 2.75rem; font-size: 0.875rem; font-weight: 600; }
+        .control-button:hover { background-color: #172033; }
+        .control-button.active { background-color: #0f3b4b; border-color: #0891b2; color: #67e8f9; }
+        .pill { border-radius: 9999px; padding: 0.2rem 0.55rem; font-size: 0.75rem; font-weight: 600; }
+        .progress-track { background-color: #0f172a; border-radius: 9999px; height: 0.45rem; overflow: hidden; }
+        .progress-bar { background: linear-gradient(90deg, #06b6d4, #38bdf8); height: 100%; border-radius: 9999px; }
     </style>
 </head>
 <body class="p-6">
@@ -26,11 +33,19 @@
                     <div class="text-sm text-slate-400">Status</div>
                     <div class="text-green-400 font-bold">ACTIVE</div>
                 </div>
+                <div class="text-right">
+                    <div class="text-sm text-slate-400">Last UI Refresh</div>
+                    <div class="text-cyan-300 font-bold" id="last-refresh-label">Never</div>
+                </div>
+                <div class="text-right">
+                    <div class="text-sm text-slate-400">Refresh Mode</div>
+                    <div class="text-cyan-300 font-bold" id="auto-refresh-state">LIVE</div>
+                </div>
             </div>
         </header>
 
         <!-- Stats Grid -->
-        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-6 mb-8">
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-8 gap-6 mb-8">
             <div class="card">
                 <div class="stat-label">VRAM Usage</div>
                 <div class="stat-value" id="vram-usage">--%</div>
@@ -58,6 +73,16 @@
                 <div class="stat-label">API Tokens</div>
                 <div class="stat-value" id="api-token-count">0</div>
                 <div class="text-sm text-slate-500 mt-1" id="api-token-detail">0 prompt / 0 completion</div>
+            </div>
+            <div class="card">
+                <div class="stat-label">Bytes In</div>
+                <div class="stat-value" id="api-bytes-in">0 B</div>
+                <div class="text-sm text-slate-500 mt-1">Request payload volume</div>
+            </div>
+            <div class="card">
+                <div class="stat-label">Bytes Out</div>
+                <div class="stat-value" id="api-bytes-out">0 B</div>
+                <div class="text-sm text-slate-500 mt-1">Response payload volume</div>
             </div>
         </div>
 
@@ -92,6 +117,108 @@
             </div>
         </div>
 
+        <div class="card mt-6">
+            <div class="flex flex-col xl:flex-row xl:items-center xl:justify-between gap-4">
+                <div>
+                    <h2 class="text-xl font-bold text-white">🧭 Usage Console</h2>
+                    <div class="text-sm text-slate-400" id="api-control-hint">Filter and sort live traffic without touching the backend.</div>
+                </div>
+                <div class="flex flex-wrap gap-3">
+                    <input class="control-input min-w-[16rem]" id="api-search-input" type="search" placeholder="Search client, endpoint, model, IP, key...">
+                    <select class="control-input" id="api-status-filter">
+                        <option value="all">All activity</option>
+                        <option value="errors">Errors only</option>
+                        <option value="unauth">Unauth only</option>
+                        <option value="streamed">Streamed only</option>
+                        <option value="slow">Slow only</option>
+                    </select>
+                    <select class="control-input" id="api-client-sort">
+                        <option value="requests">Clients: requests</option>
+                        <option value="tokens">Clients: tokens</option>
+                        <option value="bytes">Clients: bytes</option>
+                        <option value="latency">Clients: latency</option>
+                        <option value="errors">Clients: errors</option>
+                        <option value="recent">Clients: last seen</option>
+                    </select>
+                    <select class="control-input" id="api-recent-sort">
+                        <option value="latest">Recent: newest</option>
+                        <option value="errors">Recent: errors first</option>
+                        <option value="slowest">Recent: slowest</option>
+                        <option value="largest">Recent: largest response</option>
+                        <option value="endpoint">Recent: endpoint</option>
+                    </select>
+                    <button class="control-button" id="manual-refresh-button" type="button">Refresh now</button>
+                    <button class="control-button active" id="auto-refresh-toggle" type="button">Auto refresh on</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-6 mt-6">
+            <div class="card">
+                <div class="stat-label">Traffic Mix</div>
+                <div class="mt-3 space-y-3" id="api-category-breakdown">
+                    <div class="text-slate-500 text-sm">No recent activity yet.</div>
+                </div>
+            </div>
+            <div class="card">
+                <div class="stat-label">Busiest Client</div>
+                <div class="text-xl font-bold text-cyan-300 mt-2" id="api-busiest-client">-</div>
+                <div class="text-sm text-slate-500 mt-2" id="api-busiest-client-detail">No API traffic yet.</div>
+            </div>
+            <div class="card">
+                <div class="stat-label">Hottest Endpoint</div>
+                <div class="text-xl font-bold text-cyan-300 mt-2 break-all" id="api-top-endpoint-insight">-</div>
+                <div class="text-sm text-slate-500 mt-2" id="api-top-endpoint-detail">No endpoint traffic yet.</div>
+            </div>
+            <div class="card">
+                <div class="stat-label">Slowest Recent</div>
+                <div class="text-xl font-bold text-cyan-300 mt-2" id="api-slowest-request">-</div>
+                <div class="text-sm text-slate-500 mt-2" id="api-slowest-request-detail">No measured requests yet.</div>
+            </div>
+            <div class="card">
+                <div class="stat-label">Largest Response</div>
+                <div class="text-xl font-bold text-cyan-300 mt-2" id="api-largest-response">-</div>
+                <div class="text-sm text-slate-500 mt-2" id="api-largest-response-detail">No response payloads yet.</div>
+            </div>
+            <div class="card">
+                <div class="stat-label">P95 Latency</div>
+                <div class="text-xl font-bold text-cyan-300 mt-2" id="api-p95-latency">-</div>
+                <div class="text-sm text-slate-500 mt-2" id="api-p95-latency-detail">Not enough recent timings yet.</div>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-6 mt-6">
+            <div class="card xl:col-span-2">
+                <div class="flex items-center justify-between gap-3 mb-3">
+                    <div>
+                        <h2 class="text-xl font-bold text-white">🚨 Endpoint Error Breakdown</h2>
+                        <div class="text-sm text-slate-400" id="endpoint-error-footnote">Recent endpoint failure rates in the current view.</div>
+                    </div>
+                </div>
+                <div class="space-y-3" id="endpoint-error-breakdown">
+                    <div class="text-slate-500 text-sm">No endpoint traffic yet.</div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="stat-label">Request Pace</div>
+                <div class="text-sm text-slate-500 mt-1 mb-3" id="request-sparkline-caption">Recent request density</div>
+                <canvas id="requests-sparkline" height="110"></canvas>
+            </div>
+
+            <div class="card">
+                <div class="stat-label">Latency Trend</div>
+                <div class="text-sm text-slate-500 mt-1 mb-3" id="latency-sparkline-caption">Recent average latency</div>
+                <canvas id="latency-sparkline" height="110"></canvas>
+            </div>
+
+            <div class="card">
+                <div class="stat-label">Error Trend</div>
+                <div class="text-sm text-slate-500 mt-1 mb-3" id="error-sparkline-caption">Recent error counts</div>
+                <canvas id="errors-sparkline" height="110"></canvas>
+            </div>
+        </div>
+
         <!-- API Usage -->
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
             <div class="card lg:col-span-1">
@@ -113,9 +240,23 @@
                         <div class="stat-label">Unauth</div>
                         <div class="text-2xl font-bold text-cyan-300" id="api-unauth-count">0</div>
                     </div>
+                    <div>
+                        <div class="stat-label">Avg Latency</div>
+                        <div class="text-2xl font-bold text-cyan-300" id="api-avg-latency">0 ms</div>
+                    </div>
+                    <div>
+                        <div class="stat-label">Streaming</div>
+                        <div class="text-2xl font-bold text-cyan-300" id="api-stream-count">0</div>
+                    </div>
                 </div>
                 <div class="mt-4 pt-4 border-t border-slate-800 text-sm text-slate-400" id="api-usage-footnote">
                     No API traffic yet.
+                </div>
+                <div class="mt-4 pt-4 border-t border-slate-800">
+                    <div class="text-sm text-slate-400 mb-2">Top Endpoints</div>
+                    <div class="space-y-2 text-sm" id="api-endpoints-list">
+                        <div class="text-slate-500">No API traffic yet.</div>
+                    </div>
                 </div>
             </div>
 
@@ -123,18 +264,20 @@
                 <h2 class="text-xl font-bold mb-4 text-white">🔑 Top API Clients</h2>
                 <div class="overflow-x-auto">
                     <table class="w-full text-left text-sm">
-                        <thead class="text-slate-400 border-b border-slate-700">
+                        <thead class="text-slate-400 border-b border-slate-700 sticky top-0 bg-slate-900/95 backdrop-blur">
                             <tr>
                                 <th class="pb-2">Client</th>
                                 <th class="pb-2">Requests</th>
                                 <th class="pb-2">Tokens</th>
+                                <th class="pb-2">Bytes</th>
+                                <th class="pb-2">Avg ms</th>
                                 <th class="pb-2">Key</th>
                                 <th class="pb-2">Source</th>
                                 <th class="pb-2">Last Seen</th>
                             </tr>
                         </thead>
                         <tbody id="api-clients-table" class="text-slate-300">
-                            <tr><td colspan="6" class="py-3 text-center text-slate-500">No API traffic yet</td></tr>
+                            <tr><td colspan="8" class="py-3 text-center text-slate-500">No API traffic yet</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -146,13 +289,13 @@
                 <h2 class="text-xl font-bold mb-4 text-white">🕒 Recent API Activity</h2>
                 <div class="overflow-x-auto">
                     <table class="w-full text-left text-sm">
-                        <thead class="text-slate-400 border-b border-slate-700">
+                        <thead class="text-slate-400 border-b border-slate-700 sticky top-0 bg-slate-900/95 backdrop-blur">
                             <tr>
                                 <th class="pb-2">Time</th>
                                 <th class="pb-2">Client</th>
-                                <th class="pb-2">Endpoint</th>
+                                <th class="pb-2">Request</th>
                                 <th class="pb-2">Model</th>
-                                <th class="pb-2">Key</th>
+                                <th class="pb-2">Usage</th>
                                 <th class="pb-2">Source</th>
                                 <th class="pb-2">Agent</th>
                                 <th class="pb-2">Status</th>
@@ -206,6 +349,17 @@
 
     <script>
         let benchmarkChart = null;
+        const sparklineCharts = {};
+        const STATS_REFRESH_MS = 2000;
+        const BENCHMARK_REFRESH_MS = 10000;
+        const dashboardState = {
+            autoRefresh: true,
+            searchText: '',
+            statusFilter: 'all',
+            clientSort: 'requests',
+            recentSort: 'latest',
+            lastUpdated: null,
+        };
 
         function formatIso(ts) {
             if (!ts) return '—';
@@ -222,6 +376,43 @@
         function formatRate(value) {
             const numeric = Number(value || 0);
             return Number.isFinite(numeric) ? numeric.toFixed(2) : '0.00';
+        }
+
+        function formatBytes(value) {
+            const bytes = Number(value || 0);
+            if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+            const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+            const scaled = bytes / (1024 ** exponent);
+            const decimals = scaled >= 100 || exponent === 0 ? 0 : 1;
+            return `${scaled.toFixed(decimals)} ${units[exponent]}`;
+        }
+
+        function formatDuration(value) {
+            const numeric = Number(value || 0);
+            if (!Number.isFinite(numeric) || numeric <= 0) return '0 ms';
+            if (numeric >= 1000) {
+                return `${(numeric / 1000).toFixed(numeric >= 10000 ? 0 : 1)} s`;
+            }
+            return `${numeric.toFixed(numeric >= 100 ? 0 : 1)} ms`;
+        }
+
+        function toSearchText(value) {
+            return String(value ?? '').trim().toLowerCase();
+        }
+
+        function quantile(values, percentile) {
+            const cleaned = values
+                .map(value => Number(value || 0))
+                .filter(value => Number.isFinite(value) && value >= 0)
+                .sort((a, b) => a - b);
+            if (!cleaned.length) return 0;
+            const position = Math.max(0, Math.min(cleaned.length - 1, (cleaned.length - 1) * percentile));
+            const lower = Math.floor(position);
+            const upper = Math.ceil(position);
+            if (lower === upper) return cleaned[lower];
+            const weight = position - lower;
+            return cleaned[lower] * (1 - weight) + cleaned[upper] * weight;
         }
 
         function escapeHtml(value) {
@@ -252,6 +443,311 @@
                 sourceIp,
                 location,
             };
+        }
+
+        function matchesSearch(entry, searchText) {
+            if (!searchText) return true;
+            const haystack = [
+                entry.client_id,
+                entry.endpoint,
+                entry.model,
+                entry.method,
+                entry.key_prefix,
+                entry.key_fingerprint,
+                entry.last_key_prefix,
+                entry.last_key_fingerprint,
+                entry.source_ip,
+                entry.last_source_ip,
+                entry.user_agent,
+                entry.last_user_agent,
+                entry.category,
+                entry.metadata_client,
+                entry.project_prefix,
+            ].map(toSearchText).join(' ');
+            return haystack.includes(searchText);
+        }
+
+        function isUnauthenticatedEntry(entry) {
+            const clientId = String(entry.client_id || '').toLowerCase();
+            const statusCode = Number(entry.status_code || 0);
+            return clientId === 'unauthenticated' || statusCode === 401 || statusCode === 403;
+        }
+
+        function matchesStatus(entry, filterValue) {
+            if (filterValue === 'all') return true;
+            if (filterValue === 'errors') return Number(entry.status_code || 0) >= 400;
+            if (filterValue === 'unauth') return isUnauthenticatedEntry(entry);
+            if (filterValue === 'streamed') return Boolean(entry.streamed);
+            if (filterValue === 'slow') return Number(entry.duration_ms || 0) >= 1000;
+            return true;
+        }
+
+        function sortClients(clients) {
+            const sorted = [...clients];
+            const sortKey = dashboardState.clientSort;
+            sorted.sort((a, b) => {
+                if (sortKey === 'tokens') return Number(b.total_tokens || 0) - Number(a.total_tokens || 0);
+                if (sortKey === 'bytes') {
+                    return Number((b.request_bytes || 0) + (b.response_bytes || 0)) - Number((a.request_bytes || 0) + (a.response_bytes || 0));
+                }
+                if (sortKey === 'latency') return Number(b.avg_duration_ms || 0) - Number(a.avg_duration_ms || 0);
+                if (sortKey === 'errors') return Number(b.errors || 0) - Number(a.errors || 0);
+                if (sortKey === 'recent') return Number(b.last_seen || 0) - Number(a.last_seen || 0);
+                return Number(b.requests || 0) - Number(a.requests || 0);
+            });
+            return sorted;
+        }
+
+        function sortRecent(entries) {
+            const sorted = [...entries];
+            const sortKey = dashboardState.recentSort;
+            sorted.sort((a, b) => {
+                if (sortKey === 'errors') {
+                    const statusDiff = Number(b.status_code || 0) - Number(a.status_code || 0);
+                    if (statusDiff !== 0) return statusDiff;
+                }
+                if (sortKey === 'slowest') return Number(b.duration_ms || 0) - Number(a.duration_ms || 0);
+                if (sortKey === 'largest') return Number(b.response_bytes || 0) - Number(a.response_bytes || 0);
+                if (sortKey === 'endpoint') return String(a.endpoint || '').localeCompare(String(b.endpoint || ''));
+                return Number(b.timestamp || 0) - Number(a.timestamp || 0);
+            });
+            return sorted;
+        }
+
+        function updateRefreshUi() {
+            document.getElementById('last-refresh-label').textContent = dashboardState.lastUpdated ? formatIso(dashboardState.lastUpdated) : 'Never';
+            document.getElementById('auto-refresh-state').textContent = dashboardState.autoRefresh ? 'LIVE' : 'PAUSED';
+            const toggle = document.getElementById('auto-refresh-toggle');
+            toggle.textContent = dashboardState.autoRefresh ? 'Auto refresh on' : 'Auto refresh paused';
+            toggle.classList.toggle('active', dashboardState.autoRefresh);
+        }
+
+        function renderCategoryBreakdown(recentRequests) {
+            const container = document.getElementById('api-category-breakdown');
+            container.innerHTML = '';
+            if (!recentRequests.length) {
+                container.innerHTML = '<div class="text-slate-500 text-sm">No recent activity yet.</div>';
+                return;
+            }
+
+            const counts = {};
+            recentRequests.forEach(entry => {
+                const key = entry.category || 'other';
+                counts[key] = (counts[key] || 0) + 1;
+            });
+
+            const total = recentRequests.length;
+            ['inference', 'admin', 'session', 'other'].forEach(category => {
+                const count = counts[category] || 0;
+                if (!count) return;
+                const percentage = (count / total) * 100;
+                const row = `
+                    <div>
+                        <div class="flex items-center justify-between gap-3 text-sm mb-1">
+                            <div class="text-slate-200 capitalize">${escapeHtml(category)}</div>
+                            <div class="text-slate-400">${formatNumber(count)} • ${percentage.toFixed(0)}%</div>
+                        </div>
+                        <div class="progress-track"><div class="progress-bar" style="width: ${percentage.toFixed(1)}%"></div></div>
+                    </div>
+                `;
+                container.innerHTML += row;
+            });
+        }
+
+        function renderInsights(filteredClients, filteredEndpoints, filteredRecent) {
+            renderCategoryBreakdown(filteredRecent);
+
+            const busiestClient = filteredClients[0] || null;
+            document.getElementById('api-busiest-client').textContent = busiestClient ? busiestClient.client_id : '-';
+            document.getElementById('api-busiest-client-detail').textContent = busiestClient
+                ? `${formatNumber(busiestClient.requests)} req • ${formatNumber(busiestClient.total_tokens || 0)} tok • ${formatIso(busiestClient.last_seen)}`
+                : 'No API traffic yet.';
+
+            const topEndpoint = filteredEndpoints[0] || null;
+            document.getElementById('api-top-endpoint-insight').textContent = topEndpoint ? topEndpoint.endpoint : '-';
+            document.getElementById('api-top-endpoint-detail').textContent = topEndpoint
+                ? `${formatNumber(topEndpoint.requests)} requests in the current view`
+                : 'No endpoint traffic yet.';
+
+            const slowest = filteredRecent.reduce((max, entry) => {
+                if (!max) return entry;
+                return Number(entry.duration_ms || 0) > Number(max.duration_ms || 0) ? entry : max;
+            }, null);
+            document.getElementById('api-slowest-request').textContent = slowest ? formatDuration(slowest.duration_ms) : '-';
+            document.getElementById('api-slowest-request-detail').textContent = slowest
+                ? `${slowest.client_id || 'unknown'} • ${slowest.method || '—'} ${slowest.endpoint || '—'}`
+                : 'No measured requests yet.';
+
+            const largest = filteredRecent.reduce((max, entry) => {
+                if (!max) return entry;
+                return Number(entry.response_bytes || 0) > Number(max.response_bytes || 0) ? entry : max;
+            }, null);
+            document.getElementById('api-largest-response').textContent = largest ? formatBytes(largest.response_bytes) : '-';
+            document.getElementById('api-largest-response-detail').textContent = largest
+                ? `${largest.client_id || 'unknown'} • ${largest.method || '—'} ${largest.endpoint || '—'}`
+                : 'No response payloads yet.';
+
+            const p95 = quantile(filteredRecent.map(entry => entry.duration_ms), 0.95);
+            document.getElementById('api-p95-latency').textContent = filteredRecent.length ? formatDuration(p95) : '-';
+            document.getElementById('api-p95-latency-detail').textContent = filteredRecent.length
+                ? `Computed from ${formatNumber(filteredRecent.length)} recent requests in the current view`
+                : 'Not enough recent timings yet.';
+        }
+
+        function renderEndpointErrorBreakdown(filteredRecent) {
+            const container = document.getElementById('endpoint-error-breakdown');
+            const footnote = document.getElementById('endpoint-error-footnote');
+            container.innerHTML = '';
+
+            if (!filteredRecent.length) {
+                container.innerHTML = '<div class="text-slate-500 text-sm">No endpoint traffic yet.</div>';
+                footnote.textContent = 'Recent endpoint failure rates in the current view.';
+                return;
+            }
+
+            const endpointMap = new Map();
+            filteredRecent.forEach(entry => {
+                const endpoint = entry.endpoint || '—';
+                if (!endpointMap.has(endpoint)) {
+                    endpointMap.set(endpoint, { endpoint, requests: 0, errors: 0, latencyValues: [] });
+                }
+                const bucket = endpointMap.get(endpoint);
+                bucket.requests += 1;
+                bucket.errors += Number(entry.status_code || 0) >= 400 ? 1 : 0;
+                if (Number.isFinite(Number(entry.duration_ms))) {
+                    bucket.latencyValues.push(Number(entry.duration_ms || 0));
+                }
+            });
+
+            const rows = [...endpointMap.values()]
+                .map(row => ({
+                    ...row,
+                    errorRate: row.requests ? (row.errors / row.requests) * 100 : 0,
+                    avgLatency: row.latencyValues.length
+                        ? row.latencyValues.reduce((sum, value) => sum + value, 0) / row.latencyValues.length
+                        : 0,
+                }))
+                .sort((a, b) => {
+                    const errorDiff = b.errors - a.errors;
+                    if (errorDiff !== 0) return errorDiff;
+                    return b.errorRate - a.errorRate;
+                });
+
+            const maxErrorRate = Math.max(...rows.map(row => row.errorRate), 1);
+            rows.slice(0, 6).forEach(row => {
+                const width = Math.max((row.errorRate / maxErrorRate) * 100, row.errorRate > 0 ? 4 : 0);
+                const tone = row.errors > 0 ? 'text-rose-300' : 'text-emerald-300';
+                const markup = `
+                    <div>
+                        <div class="flex items-start justify-between gap-3 mb-1">
+                            <div class="min-w-0">
+                                <div class="text-slate-200 break-all">${escapeHtml(row.endpoint)}</div>
+                                <div class="text-xs text-slate-500">${formatNumber(row.requests)} req • ${formatDuration(row.avgLatency)}</div>
+                            </div>
+                            <div class="text-right shrink-0">
+                                <div class="${tone} font-semibold">${formatNumber(row.errors)} err</div>
+                                <div class="text-xs text-slate-500">${row.errorRate.toFixed(1)}%</div>
+                            </div>
+                        </div>
+                        <div class="progress-track"><div class="progress-bar" style="width: ${width.toFixed(1)}%"></div></div>
+                    </div>
+                `;
+                container.innerHTML += markup;
+            });
+
+            const totalErrors = rows.reduce((sum, row) => sum + row.errors, 0);
+            footnote.textContent = `${formatNumber(totalErrors)} recent errors across ${formatNumber(rows.length)} endpoints in the current view.`;
+        }
+
+        function upsertSparkline(chartKey, canvasId, labels, values, color) {
+            const canvas = document.getElementById(canvasId);
+            const ctx = canvas.getContext('2d');
+            const data = {
+                labels,
+                datasets: [{
+                    data: values,
+                    borderColor: color,
+                    backgroundColor: `${color}22`,
+                    fill: true,
+                    tension: 0.35,
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    pointHoverRadius: 3,
+                }],
+            };
+
+            if (sparklineCharts[chartKey]) {
+                sparklineCharts[chartKey].data = data;
+                sparklineCharts[chartKey].update();
+                return;
+            }
+
+            sparklineCharts[chartKey] = new Chart(ctx, {
+                type: 'line',
+                data,
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false }, tooltip: { enabled: true } },
+                    scales: {
+                        x: { display: false },
+                        y: { display: false, beginAtZero: true },
+                    },
+                    elements: { line: { capBezierPoints: true } },
+                },
+            });
+        }
+
+        function renderSparklines(filteredRecent) {
+            const bucketCount = 12;
+            const labels = Array.from({ length: bucketCount }, (_, index) => `${index + 1}`);
+            const requestBuckets = Array(bucketCount).fill(0);
+            const latencyBuckets = Array(bucketCount).fill(0);
+            const latencyCounts = Array(bucketCount).fill(0);
+            const errorBuckets = Array(bucketCount).fill(0);
+
+            if (filteredRecent.length) {
+                const timestamps = filteredRecent
+                    .map(entry => Number(entry.timestamp || 0))
+                    .filter(value => Number.isFinite(value) && value > 0);
+                const minTs = Math.min(...timestamps);
+                const maxTs = Math.max(...timestamps);
+                const span = Math.max(maxTs - minTs, 1);
+
+                filteredRecent.forEach(entry => {
+                    const timestamp = Number(entry.timestamp || minTs);
+                    const bucketIndex = Math.min(bucketCount - 1, Math.max(0, Math.floor(((timestamp - minTs) / span) * (bucketCount - 1))));
+                    requestBuckets[bucketIndex] += 1;
+                    latencyBuckets[bucketIndex] += Number(entry.duration_ms || 0);
+                    latencyCounts[bucketIndex] += 1;
+                    if (Number(entry.status_code || 0) >= 400) {
+                        errorBuckets[bucketIndex] += 1;
+                    }
+                });
+            }
+
+            const avgLatencyBuckets = latencyBuckets.map((value, index) => latencyCounts[index] ? value / latencyCounts[index] : 0);
+            upsertSparkline('requests', 'requests-sparkline', labels, requestBuckets, '#22c55e');
+            upsertSparkline('latency', 'latency-sparkline', labels, avgLatencyBuckets, '#38bdf8');
+            upsertSparkline('errors', 'errors-sparkline', labels, errorBuckets, '#f43f5e');
+
+            document.getElementById('request-sparkline-caption').textContent = filteredRecent.length
+                ? `${formatNumber(filteredRecent.length)} recent requests bucketed into ${bucketCount} slices`
+                : 'Recent request density';
+            document.getElementById('latency-sparkline-caption').textContent = filteredRecent.length
+                ? `Average latency trend • peak ${formatDuration(Math.max(...avgLatencyBuckets, 0))}`
+                : 'Recent average latency';
+            document.getElementById('error-sparkline-caption').textContent = filteredRecent.length
+                ? `Recent errors • peak ${formatNumber(Math.max(...errorBuckets, 0))} in one slice`
+                : 'Recent error counts';
+        }
+
+        function updateControlHint(totalClients, shownClients, totalRecent, shownRecent) {
+            const filters = [];
+            if (dashboardState.searchText) filters.push(`search: ${dashboardState.searchText}`);
+            if (dashboardState.statusFilter !== 'all') filters.push(`status: ${dashboardState.statusFilter}`);
+            const filterText = filters.length ? ` • ${filters.join(' • ')}` : '';
+            document.getElementById('api-control-hint').textContent = `Showing ${shownClients}/${totalClients} clients and ${shownRecent}/${totalRecent} recent requests${filterText}`;
         }
 
         function upsertBenchmarkChart(models, tpsValues) {
@@ -291,6 +787,8 @@
             try {
                 const response = await fetch('/api/stats'); 
                 const data = await response.json();
+                dashboardState.lastUpdated = Date.now();
+                updateRefreshUi();
                 
                 // Update VRAM
                 const vramPercent = Math.round((data.vram.used / data.vram.total) * 100);
@@ -314,11 +812,15 @@
                 document.getElementById('api-request-detail').textContent = `${formatNumber(apiSummary.requests_last_5m || 0)} / 5m • ${formatNumber(apiSummary.requests_last_hour || 0)} / hour`;
                 document.getElementById('api-token-count').textContent = formatNumber(apiSummary.total_tokens || 0);
                 document.getElementById('api-token-detail').textContent = `${formatNumber(apiSummary.prompt_tokens || 0)} prompt / ${formatNumber(apiSummary.completion_tokens || 0)} completion`;
+                document.getElementById('api-bytes-in').textContent = formatBytes(apiSummary.total_request_bytes || 0);
+                document.getElementById('api-bytes-out').textContent = formatBytes(apiSummary.total_response_bytes || 0);
                 document.getElementById('api-rpm').textContent = formatRate(apiSummary.requests_per_minute || 0);
                 document.getElementById('api-client-count').textContent = formatNumber(apiSummary.unique_clients || 0);
                 document.getElementById('api-error-rate').textContent = `${Number(apiSummary.error_rate_pct || 0).toFixed(1)}%`;
                 document.getElementById('api-unauth-count').textContent = formatNumber(apiSummary.unauthenticated_requests || 0);
-                document.getElementById('api-usage-footnote').textContent = `Tracking since ${formatIso(apiSummary.started_at)} • uptime ${formatRate((apiSummary.uptime_seconds || 0) / 60)} min`;
+                document.getElementById('api-avg-latency').textContent = `${Number(apiSummary.average_duration_ms || 0).toFixed(1)} ms`;
+                document.getElementById('api-stream-count').textContent = formatNumber(apiSummary.streaming_requests || 0);
+                document.getElementById('api-usage-footnote').textContent = `Tracking since ${formatIso(apiSummary.started_at)} • uptime ${formatRate((apiSummary.uptime_seconds || 0) / 60)} min • ${formatBytes(apiSummary.total_request_bytes || 0)} in / ${formatBytes(apiSummary.total_response_bytes || 0)} out`;
                 
                 // Update Combo Table
                 const tbody = document.getElementById('combo-table');
@@ -363,18 +865,24 @@
                 }
 
                 const topClients = Array.isArray(apiUsage.top_clients) ? apiUsage.top_clients : [];
+                const filteredClients = sortClients(
+                    topClients.filter(client => matchesSearch(client, dashboardState.searchText))
+                );
                 const clientsTable = document.getElementById('api-clients-table');
                 clientsTable.innerHTML = '';
-                if (topClients.length > 0) {
-                    topClients.forEach(client => {
+                if (filteredClients.length > 0) {
+                    filteredClients.forEach(client => {
                         const key = keySummary(client);
                         const source = sourceSummary(client);
                         const agentText = client.last_user_agent || '—';
+                        const errorTone = Number(client.errors || 0) > 0 ? 'text-rose-300' : 'text-slate-500';
                         const row = `
                             <tr class="border-b border-slate-800 last:border-0">
                                 <td class="py-3 font-medium text-white">${escapeHtml(client.client_id)}</td>
-                                <td class="py-3">${formatNumber(client.requests)}<div class="text-xs text-slate-500">${formatNumber(client.errors)} errors</div></td>
-                                <td class="py-3">${formatNumber(client.total_tokens)}</td>
+                                <td class="py-3">${formatNumber(client.requests)}<div class="text-xs ${errorTone}">${formatNumber(client.errors)} errors</div></td>
+                                <td class="py-3">${formatNumber(client.total_tokens)}<div class="text-xs text-slate-500">${formatNumber(client.prompt_tokens || 0)} in / ${formatNumber(client.completion_tokens || 0)} out</div></td>
+                                <td class="py-3">${formatBytes(client.request_bytes || 0)}<div class="text-xs text-slate-500">${formatBytes(client.response_bytes || 0)} out</div></td>
+                                <td class="py-3">${Number(client.avg_duration_ms || 0).toFixed(1)}<div class="text-xs text-slate-500">${formatNumber(client.streaming_requests || 0)} streamed</div></td>
                                 <td class="py-3">
                                     <div class="font-medium text-white">${escapeHtml(key.prefix)}</div>
                                     <div class="text-xs text-slate-500">${escapeHtml(key.fingerprint)}</div>
@@ -390,34 +898,81 @@
                         clientsTable.innerHTML += row;
                     });
                 } else {
-                    clientsTable.innerHTML = '<tr><td colspan="6" class="py-3 text-center text-slate-500">No API traffic yet</td></tr>';
+                    clientsTable.innerHTML = '<tr><td colspan="8" class="py-3 text-center text-slate-500">No API traffic yet</td></tr>';
+                }
+
+                const topEndpoints = Array.isArray(apiUsage.top_endpoints) ? apiUsage.top_endpoints : [];
+                const filteredEndpoints = topEndpoints.filter(entry => matchesSearch(entry, dashboardState.searchText));
+                const endpointList = document.getElementById('api-endpoints-list');
+                endpointList.innerHTML = '';
+                if (filteredEndpoints.length > 0) {
+                    const endpointPeak = Number(filteredEndpoints[0].requests || 1);
+                    filteredEndpoints.slice(0, 5).forEach(entry => {
+                        const pct = Math.max((Number(entry.requests || 0) / endpointPeak) * 100, 4);
+                        const item = `
+                            <div>
+                                <div class="flex items-start justify-between gap-3 mb-1">
+                                    <div class="min-w-0">
+                                        <div class="text-slate-200 break-all">${escapeHtml(entry.endpoint)}</div>
+                                    </div>
+                                    <div class="text-cyan-300 font-semibold whitespace-nowrap">${formatNumber(entry.requests)}</div>
+                                </div>
+                                <div class="progress-track"><div class="progress-bar" style="width: ${pct.toFixed(1)}%"></div></div>
+                            </div>
+                        `;
+                        endpointList.innerHTML += item;
+                    });
+                } else {
+                    endpointList.innerHTML = '<div class="text-slate-500">No API traffic yet.</div>';
                 }
 
                 const recentRequests = Array.isArray(apiUsage.recent_requests) ? apiUsage.recent_requests : [];
+                const filteredRecent = sortRecent(
+                    recentRequests.filter(entry => matchesSearch(entry, dashboardState.searchText) && matchesStatus(entry, dashboardState.statusFilter))
+                );
+                updateControlHint(topClients.length, filteredClients.length, recentRequests.length, filteredRecent.length);
+                renderInsights(filteredClients, filteredEndpoints, filteredRecent);
+                renderEndpointErrorBreakdown(filteredRecent);
+                renderSparklines(filteredRecent);
                 const recentTable = document.getElementById('api-recent-table');
                 recentTable.innerHTML = '';
-                if (recentRequests.length > 0) {
-                    recentRequests.forEach(entry => {
+                if (filteredRecent.length > 0) {
+                    filteredRecent.forEach(entry => {
                         const statusTone = entry.status_code >= 400 ? 'text-rose-300' : 'text-emerald-300';
+                        const rowTone = entry.status_code >= 400
+                            ? 'bg-rose-950/25'
+                            : Number(entry.duration_ms || 0) >= 1000
+                                ? 'bg-amber-950/20'
+                                : Number(entry.response_bytes || 0) >= 1048576
+                                    ? 'bg-cyan-950/15'
+                                    : '';
                         const key = keySummary(entry);
                         const source = sourceSummary(entry);
                         const agentText = entry.user_agent || '—';
+                        const requestLabel = `${entry.method || '—'} ${entry.endpoint || '—'}`;
+                        const usageLabel = `${formatBytes(entry.request_bytes || 0)} in / ${formatBytes(entry.response_bytes || 0)} out`;
+                        const usageDetail = `${formatDuration(entry.duration_ms)} • ${entry.streamed ? 'streamed' : (entry.category || 'request')}`;
+                        const statusBadgeClass = entry.status_code >= 400
+                            ? 'bg-rose-900/70 text-rose-200'
+                            : entry.streamed
+                                ? 'bg-cyan-900/70 text-cyan-200'
+                                : 'bg-emerald-900/70 text-emerald-200';
                         const row = `
-                            <tr class="border-b border-slate-800 last:border-0">
+                            <tr class="border-b border-slate-800 last:border-0 ${rowTone}">
                                 <td class="py-3">${formatIso(entry.timestamp)}</td>
-                                <td class="py-3 font-medium text-white">${escapeHtml(entry.client_id)}</td>
-                                <td class="py-3">${escapeHtml(entry.endpoint)}</td>
+                                <td class="py-3 font-medium text-white">${escapeHtml(entry.client_id)}<div class="text-xs text-slate-500">${escapeHtml(key.prefix)} · ${escapeHtml(key.fingerprint)}</div></td>
+                                <td class="py-3">${escapeHtml(requestLabel)}<div class="text-xs text-slate-500">${entry.streamed ? 'streamed' : escapeHtml(entry.category || 'request')}</div></td>
                                 <td class="py-3">${escapeHtml(entry.model || '—')}</td>
-                                <td class="py-3"><div class="font-medium text-white">${escapeHtml(key.prefix)}</div><div class="text-xs text-slate-500">${escapeHtml(key.fingerprint)}</div></td>
+                                <td class="py-3">${usageLabel}<div class="text-xs text-slate-500">${usageDetail}</div></td>
                                 <td class="py-3"><div>${escapeHtml(source.sourceIp)}</div><div class="text-xs text-slate-500">${escapeHtml(shortenText(source.location, 32))}</div></td>
                                 <td class="py-3" title="${escapeHtml(agentText)}">${escapeHtml(shortenText(agentText, 42))}</td>
-                                <td class="py-3 ${statusTone}">${entry.status_code}</td>
+                                <td class="py-3 ${statusTone}"><span class="pill ${statusBadgeClass}">${entry.status_code}</span></td>
                             </tr>
                         `;
                         recentTable.innerHTML += row;
                     });
                 } else {
-                    recentTable.innerHTML = '<tr><td colspan="8" class="py-3 text-center text-slate-500">No API traffic yet</td></tr>';
+                    recentTable.innerHTML = '<tr><td colspan="8" class="py-3 text-center text-slate-500">No recent API activity matches the current filters</td></tr>';
                 }
 
             } catch (e) {
@@ -478,12 +1033,54 @@
             }
         }
 
-        // Poll every 2 seconds
-        setInterval(updateStats, 2000);
-        updateStats(); // Initial call
+        function wireControls() {
+            document.getElementById('api-search-input').addEventListener('input', (event) => {
+                dashboardState.searchText = toSearchText(event.target.value);
+                updateStats();
+            });
 
-        // Benchmarks change slower; refresh every 10 seconds
-        setInterval(updateBenchmarks, 10000);
+            document.getElementById('api-status-filter').addEventListener('change', (event) => {
+                dashboardState.statusFilter = event.target.value;
+                updateStats();
+            });
+
+            document.getElementById('api-client-sort').addEventListener('change', (event) => {
+                dashboardState.clientSort = event.target.value;
+                updateStats();
+            });
+
+            document.getElementById('api-recent-sort').addEventListener('change', (event) => {
+                dashboardState.recentSort = event.target.value;
+                updateStats();
+            });
+
+            document.getElementById('manual-refresh-button').addEventListener('click', () => {
+                updateStats();
+                updateBenchmarks();
+            });
+
+            document.getElementById('auto-refresh-toggle').addEventListener('click', () => {
+                dashboardState.autoRefresh = !dashboardState.autoRefresh;
+                updateRefreshUi();
+            });
+
+            updateRefreshUi();
+        }
+
+        wireControls();
+
+        setInterval(() => {
+            if (dashboardState.autoRefresh) {
+                updateStats();
+            }
+        }, STATS_REFRESH_MS);
+        updateStats();
+
+        setInterval(() => {
+            if (dashboardState.autoRefresh) {
+                updateBenchmarks();
+            }
+        }, BENCHMARK_REFRESH_MS);
         updateBenchmarks();
     </script>
 </body>

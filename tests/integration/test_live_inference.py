@@ -207,11 +207,11 @@ class TestRestartRace:
         if result.returncode != 0:
             pytest.skip(f"Could not restart Guardian for live restart test: {result.stderr.strip()}")
 
-        load_response = _admin_load_with_retry("qwen3-35b-uncensored")
+        load_response = _admin_load_with_retry("qwen3.6-35b-uncensored")
         assert load_response.status_code == 200
 
         status = _wait_for_guardian_status()
-        assert status["startup"]["requested_model"] == "qwen3-35b-uncensored"
+        assert status["startup"]["requested_model"] == "qwen3.6-35b-uncensored"
         assert status["routing"]["tool_model"]
         assert status["proxy"]["listener"]["systemd_unit"]
 

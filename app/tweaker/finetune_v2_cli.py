@@ -72,9 +72,9 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         description="Run Guardian finetune v2 against live /admin/load runtime overrides.",
         epilog=(
             "Examples:\n"
-            "  ./finetune_v2.py qwen3-35b-uncensored --context 262144 --start-ngl 37\n"
+            "  ./finetune_v2.py qwen3.6-35b-uncensored --context 262144 --start-ngl 37\n"
             "  ./finetune_v2.py Qwen3.6-35B-A3B-HauhauCS-Aggressive --runtime-mode vision --smoke-image-url data:image/png;base64,...\n"
-            "  ./finetune_v2.py qwen3-35b-uncensored --apply"
+            "  ./finetune_v2.py qwen3.6-35b-uncensored --apply"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

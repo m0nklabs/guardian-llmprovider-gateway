@@ -252,6 +252,34 @@ async def test_list_models_treats_configured_unverified_vision_as_image_capable(
 
 
 @pytest.mark.asyncio
+async def test_get_model_metadata_resolves_public_alias():
+    with (
+        patch.object(
+            server.model_manager,
+            "get_public_model_map",
+            return_value={"qwen3.6-35b-uncensored": "Qwen3.6-35B-A3B-HauhauCS-Aggressive"},
+        ),
+        patch.object(server.model_manager, "get_benchmark_context_limit", return_value=262144),
+        patch.object(server.model_manager, "get_runtime_context_window", return_value=262144),
+        patch.object(server.model_manager, "get_advertised_context_window", return_value=258048),
+        patch.object(
+            server.model_manager,
+            "get_vision_capability",
+            return_value={
+                "configured": True,
+                "status": "unverified",
+                "validated": False,
+            },
+        ),
+    ):
+        payload = await server.get_model_metadata("qwen3.6-35b-uncensored", client_id="test-user")
+
+    assert payload["id"] == "qwen3.6-35b-uncensored"
+    assert payload["context"] == 262144
+    assert payload["input_modalities"] == ["text", "image"]
+
+
+@pytest.mark.asyncio
 async def test_wait_for_proxy_listener_release_returns_true_once_listener_disappears():
     """Restart hardening should stop waiting once the old listener releases the port."""
     with patch.object(

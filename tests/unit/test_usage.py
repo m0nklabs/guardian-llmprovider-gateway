@@ -17,6 +17,8 @@ class TestApiUsageTracker:
             status_code=200,
             model="GLM-4.7-Flash",
             duration_ms=125.0,
+            request_bytes=512,
+            response_bytes=2048,
             streamed=True,
         )
         tracker.record_tokens(
@@ -36,7 +38,16 @@ class TestApiUsageTracker:
         assert snapshot["top_clients"][0]["client_id"] == "m0nk111"
         assert snapshot["top_clients"][0]["streaming_requests"] == 1
         assert snapshot["top_clients"][0]["total_tokens"] == 46
+        assert snapshot["summary"]["streaming_requests"] == 1
+        assert snapshot["summary"]["total_request_bytes"] == 512
+        assert snapshot["summary"]["total_response_bytes"] == 2048
+        assert snapshot["summary"]["average_duration_ms"] == 125.0
+        assert snapshot["top_clients"][0]["request_bytes"] == 512
+        assert snapshot["top_clients"][0]["response_bytes"] == 2048
+        assert snapshot["top_clients"][0]["avg_duration_ms"] == 125.0
         assert snapshot["recent_requests"][0]["model"] == "GLM-4.7-Flash"
+        assert snapshot["recent_requests"][0]["request_bytes"] == 512
+        assert snapshot["recent_requests"][0]["response_bytes"] == 2048
 
     def test_preserves_request_attribution_details(self, tmp_path):
         """Non-secret key and source metadata are retained for dashboard rows."""
@@ -48,6 +59,9 @@ class TestApiUsageTracker:
             method="POST",
             status_code=200,
             model="GLM-4.7-Flash",
+            request_bytes=128,
+            response_bytes=4096,
+            duration_ms=88.4,
             attribution={
                 "project_prefix": "openclaw",
                 "key_prefix": "openclaw",
@@ -67,6 +81,9 @@ class TestApiUsageTracker:
         assert top_client["project_prefix"] == "openclaw"
         assert top_client["last_key_fingerprint"] == "f1e2d3c4b5a6"
         assert top_client["last_source_ip"] == "192.168.1.F"
+        assert top_client["request_bytes"] == 128
+        assert top_client["response_bytes"] == 4096
+        assert top_client["avg_duration_ms"] == 88.4
         assert recent["metadata_client"] == "openclaw-ui"
         assert recent["user_agent"] == "OpenClaw/1.0"
 
@@ -80,6 +97,9 @@ class TestApiUsageTracker:
             endpoint="/v1/models",
             method="GET",
             status_code=200,
+            request_bytes=64,
+            response_bytes=1024,
+            duration_ms=12.5,
             attribution={"project_prefix": "openclaw", "source_ip": "127.0.0.1"},
         )
         tracker.record_tokens(
@@ -95,6 +115,8 @@ class TestApiUsageTracker:
 
         assert snapshot["summary"]["total_requests"] == 1
         assert snapshot["summary"]["total_tokens"] == 13
+        assert snapshot["summary"]["total_request_bytes"] == 64
+        assert snapshot["summary"]["total_response_bytes"] == 1024
         assert snapshot["top_clients"][0]["client_id"] == "openclaw"
         assert snapshot["top_clients"][0]["project_prefix"] == "openclaw"
         assert snapshot["recent_requests"][0]["source_ip"] == "127.0.0.1"

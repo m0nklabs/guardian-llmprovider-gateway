@@ -6,7 +6,7 @@ models:
     context: 262144
     ngl: 99
     kv_type: q4_0
-    tensor_split: "0.55,0.45"
+    tensor_split: "0.45,0.55"
     mmproj: /home/flip/models/mmproj-Step3-VL-10B-F16.gguf
   Ministral-3-14B-Reasoning-2512:
     path: /home/flip/models/Ministral-3-14B-Reasoning-2512-Q8_0.gguf
@@ -15,7 +15,7 @@ models:
     context: 262144
     ngl: 99
     kv_type: f16
-    tensor_split: "0.55,0.45"
+    tensor_split: "0.45,0.55"
 
   nomic-embed-text-v2-moe.f16:
     path: /home/flip/models/nomic-embed-text-v2-moe.f16.gguf
@@ -30,7 +30,7 @@ models:
     context: 32768
     ngl: 99
     kv_type: f16
-    tensor_split: "0.55,0.45"
+    tensor_split: "0.45,0.55"
   Qwen3-VL-30B-A3B-Thinking:
     path: /home/flip/models/Qwen3-VL-30B-A3B-Thinking-Q4_K_M.gguf
     total_layers: 48
@@ -38,7 +38,7 @@ models:
     context: 524288
     ngl: 99
     kv_type: f16
-    tensor_split: "0.55,0.45"
+    tensor_split: "0.45,0.55"
     mmproj: /home/flip/models/mmproj-Qwen3-VL-30B-A3B-F16.gguf
   llama3.2-3b:
     path: /home/flip/models/llama3.2-3b.gguf
@@ -56,11 +56,11 @@ models:
   Qwen3-30B-A3B-Thinking-2507:
     path: /home/flip/models/Qwen3-30B-A3B-Thinking-2507-Q4_K_M.gguf
     total_layers: 48
-    benchmark_context_limit: 1048576
-    context: 1048576
-    ngl: 99
-    kv_type: q8_0
-    tensor_split: "0.55,0.45"
+    benchmark_context_limit: 262144
+    context: 262144
+    ngl: 40
+    kv_type: q4_0
+    tensor_split: "0.45,0.55"
   Nemotron-3-Nano-30B-A3B:
     path: /home/flip/models/Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf
     total_layers: 52
@@ -68,7 +68,7 @@ models:
     context: 262144
     ngl: 99
     kv_type: q4_0
-    tensor_split: "0.58,0.42"
+    tensor_split: "0.42,0.58"
   Qwen3-VL-32B-Gemini-Heretic-Uncensored-Thinking:
     path: /home/flip/models/Qwen3-VL-32B-Gemini-Heretic-Uncensored-Thinking.Q4_K_M.gguf
     total_layers: 64
@@ -76,7 +76,7 @@ models:
     context: 32768
     ngl: 99
     kv_type: q4_0
-    tensor_split: "0.57,0.43"
+    tensor_split: "0.43,0.57"
     mmproj: /home/flip/models/mmproj-Qwen3-VL-32B-F16.gguf
   Huihui-gemma-4-26B-A4B-it-abliterated:
     path: /home/flip/models/gemma-4-26B-A4B.unsloth-imatrix-UD-Q4_K_XL.gguf
@@ -85,7 +85,7 @@ models:
     context: 262144
     ngl: 99
     kv_type: q4_0
-    tensor_split: "0.55,0.45"
+    tensor_split: "0.45,0.55"
     mmproj: /home/flip/models/gemma-4-26b-a4b-mmproj-BF16.gguf
   gemma-4-31B-it-uncensored-heretic:
     path: "/home/flip/models/gemma-4-31B-it-uncensored-heretic-Q4_K_M.gguf"
@@ -125,25 +125,30 @@ models:
     context: 262144
     ngl: 99
     kv_type: "q4_0"
-    tensor_split: "0.61,0.39"
+    tensor_split: "0.39,0.61"
     mmproj: "/home/flip/models/Qwen3.6-35B-A3B-mmproj-BF16.gguf"
     vision_context: 262144
     vision_ngl: 39
-    vision_tensor_split: "0.54,0.46"
+    vision_tensor_split: "0.46,0.54"
     extra_args: "--spec-type draft-mtp --spec-draft-n-max 3 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
 # === Model Aliases ===
 # Short names that resolve to full model names above.
-# Use in API requests: {"model": "qwen3-35b-uncensored"}
+# Use in API requests: {"model": "qwen3.6-35b-uncensored"}
 aliases:
-  qwen3.6-35b: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
-  qwen3-35b-uncensored: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
-  qwen3.6-35b-heretic-mtp: "Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved"
-  qwen3-35b-heretic-mtp: "Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved"
-  qwen3-35b-mtp: "Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved"
+  qwen3: "Qwen3-30B-A3B-Thinking-2507"
   qwen3-30b: "Qwen3-30B-A3B-Thinking-2507"
+  qwen3-30b-thinking: "Qwen3-30B-A3B-Thinking-2507"
   qwen3-vl: "Qwen3-VL-30B-A3B-Thinking"
-  qwen3-32b-uncensored: "Qwen3-VL-32B-Gemini-Heretic-Uncensored-Thinking"
+  qwen3-vl-30b: "Qwen3-VL-30B-A3B-Thinking"
   qwen3-vl-heretic: "Qwen3-VL-32B-Gemini-Heretic-Uncensored-Thinking"
+  qwen3-vl-32b-heretic: "Qwen3-VL-32B-Gemini-Heretic-Uncensored-Thinking"
+  qwen3-32b-uncensored: "Qwen3-VL-32B-Gemini-Heretic-Uncensored-Thinking"
+  qwen3.6-35b: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
+  qwen3.6-35b-uncensored: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
+  qwen3.6-35b-hauhau: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
+  qwen3.6-35b-aggressive: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
+  qwen3.6-35b-heretic-mtp: "Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved"
+  qwen3.6-35b-mtp: "Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved"
   nemotron: "Nemotron-3-Nano-30B-A3B"
   phi4: "Phi-4-reasoning-plus"
   ministral: "Ministral-3-14B-Reasoning-2512"

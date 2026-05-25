@@ -52,9 +52,14 @@ class ApiUsageTracker:
         self.total_requests = 0
         self.total_errors = 0
         self.unauthenticated_requests = 0
+        self.streaming_requests = 0
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.total_tokens = 0
+        self.total_request_bytes = 0
+        self.total_response_bytes = 0
+        self.total_duration_ms = 0.0
+        self.requests_with_duration = 0
         self._endpoint_counts: Counter[str] = Counter()
         self._recent_requests: deque[dict[str, Any]] = deque(maxlen=self._recent_limit)
         self._clients: dict[str, dict[str, Any]] = defaultdict(self._new_client_bucket)
@@ -68,6 +73,10 @@ class ApiUsageTracker:
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "total_tokens": 0,
+            "request_bytes": 0,
+            "response_bytes": 0,
+            "duration_total_ms": 0.0,
+            "requests_with_duration": 0,
             "last_seen": None,
             "last_model": None,
             "last_endpoint": None,
@@ -99,6 +108,10 @@ class ApiUsageTracker:
                 "prompt_tokens": int(bucket["prompt_tokens"]),
                 "completion_tokens": int(bucket["completion_tokens"]),
                 "total_tokens": int(bucket["total_tokens"]),
+                "request_bytes": int(bucket["request_bytes"]),
+                "response_bytes": int(bucket["response_bytes"]),
+                "duration_total_ms": round(float(bucket["duration_total_ms"]), 3),
+                "requests_with_duration": int(bucket["requests_with_duration"]),
                 "last_seen": bucket["last_seen"],
                 "last_model": bucket["last_model"],
                 "last_endpoint": bucket["last_endpoint"],
@@ -120,14 +133,19 @@ class ApiUsageTracker:
             }
 
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "started_at": self.started_at,
             "total_requests": int(self.total_requests),
             "total_errors": int(self.total_errors),
             "unauthenticated_requests": int(self.unauthenticated_requests),
+            "streaming_requests": int(self.streaming_requests),
             "prompt_tokens": int(self.prompt_tokens),
             "completion_tokens": int(self.completion_tokens),
             "total_tokens": int(self.total_tokens),
+            "total_request_bytes": int(self.total_request_bytes),
+            "total_response_bytes": int(self.total_response_bytes),
+            "total_duration_ms": round(float(self.total_duration_ms), 3),
+            "requests_with_duration": int(self.requests_with_duration),
             "endpoint_counts": dict(self._endpoint_counts),
             "recent_requests": list(self._recent_requests),
             "clients": clients,
@@ -162,9 +180,14 @@ class ApiUsageTracker:
         self.total_requests = _safe_int(raw.get("total_requests", 0))
         self.total_errors = _safe_int(raw.get("total_errors", 0))
         self.unauthenticated_requests = _safe_int(raw.get("unauthenticated_requests", 0))
+        self.streaming_requests = _safe_int(raw.get("streaming_requests", 0))
         self.prompt_tokens = _safe_int(raw.get("prompt_tokens", 0))
         self.completion_tokens = _safe_int(raw.get("completion_tokens", 0))
         self.total_tokens = _safe_int(raw.get("total_tokens", 0))
+        self.total_request_bytes = _safe_int(raw.get("total_request_bytes", 0))
+        self.total_response_bytes = _safe_int(raw.get("total_response_bytes", 0))
+        self.total_duration_ms = max(float(raw.get("total_duration_ms", 0.0) or 0.0), 0.0)
+        self.requests_with_duration = _safe_int(raw.get("requests_with_duration", 0))
         self._endpoint_counts = Counter(raw.get("endpoint_counts", {}))
         recent = raw.get("recent_requests", [])
         self._recent_requests = deque(recent[-self._recent_limit :], maxlen=self._recent_limit)
@@ -181,6 +204,10 @@ class ApiUsageTracker:
             "prompt_tokens",
             "completion_tokens",
             "total_tokens",
+            "request_bytes",
+            "response_bytes",
+            "duration_total_ms",
+            "requests_with_duration",
             "last_seen",
             "last_model",
             "last_endpoint",
@@ -248,6 +275,8 @@ class ApiUsageTracker:
         status_code: int,
         model: Optional[str] = None,
         duration_ms: Optional[float] = None,
+        request_bytes: object = 0,
+        response_bytes: object = 0,
         streamed: bool = False,
         attribution: Optional[dict[str, Any]] = None,
     ) -> None:
@@ -255,6 +284,9 @@ class ApiUsageTracker:
         now = time.time()
         normalized_client = client_id.strip() if isinstance(client_id, str) and client_id.strip() else None
         category = _category_for_endpoint(endpoint)
+        request_byte_count = _safe_int(request_bytes)
+        response_byte_count = _safe_int(response_bytes)
+        duration_value = round(float(duration_ms), 1) if duration_ms is not None else None
         request_row: dict[str, Any] = {
             "timestamp": now,
             "client_id": normalized_client or "unauthenticated",
@@ -263,7 +295,9 @@ class ApiUsageTracker:
             "status_code": int(status_code),
             "model": model,
             "streamed": bool(streamed),
-            "duration_ms": round(float(duration_ms), 1) if duration_ms is not None else None,
+            "duration_ms": duration_value,
+            "request_bytes": request_byte_count,
+            "response_bytes": response_byte_count,
             "category": category,
         }
         if isinstance(attribution, dict):
@@ -290,8 +324,15 @@ class ApiUsageTracker:
             self._endpoint_counts[endpoint] += 1
             if status_code >= 400:
                 self.total_errors += 1
+            if streamed:
+                self.streaming_requests += 1
             if normalized_client is None:
                 self.unauthenticated_requests += 1
+            self.total_request_bytes += request_byte_count
+            self.total_response_bytes += response_byte_count
+            if duration_value is not None:
+                self.total_duration_ms += duration_value
+                self.requests_with_duration += 1
             self._recent_requests.append(request_row)
 
             if normalized_client is None:
@@ -302,6 +343,11 @@ class ApiUsageTracker:
             bucket["requests"] += 1
             bucket["errors"] += int(status_code >= 400)
             bucket["streaming_requests"] += int(streamed)
+            bucket["request_bytes"] += request_byte_count
+            bucket["response_bytes"] += response_byte_count
+            if duration_value is not None:
+                bucket["duration_total_ms"] += duration_value
+                bucket["requests_with_duration"] += 1
             bucket["last_seen"] = now
             bucket["last_endpoint"] = endpoint
             bucket["last_model"] = model or bucket["last_model"]
@@ -360,6 +406,12 @@ class ApiUsageTracker:
                 top_endpoint = None
                 if bucket["endpoints"]:
                     top_endpoint = bucket["endpoints"].most_common(1)[0][0]
+                avg_duration_ms = 0.0
+                if int(bucket["requests_with_duration"]):
+                    avg_duration_ms = round(
+                        float(bucket["duration_total_ms"]) / int(bucket["requests_with_duration"]),
+                        1,
+                    )
                 top_clients.append(
                     {
                         "client_id": client_id,
@@ -370,6 +422,9 @@ class ApiUsageTracker:
                         "prompt_tokens": int(bucket["prompt_tokens"]),
                         "completion_tokens": int(bucket["completion_tokens"]),
                         "total_tokens": int(bucket["total_tokens"]),
+                        "request_bytes": int(bucket["request_bytes"]),
+                        "response_bytes": int(bucket["response_bytes"]),
+                        "avg_duration_ms": avg_duration_ms,
                         "last_seen": bucket["last_seen"],
                         "last_model": bucket["last_model"],
                         "last_endpoint": bucket["last_endpoint"],
@@ -397,6 +452,9 @@ class ApiUsageTracker:
             ]
             requests_last_5m = sum(1 for row in recent_rows if now - float(row["timestamp"]) <= 300)
             requests_last_hour = sum(1 for row in recent_rows if now - float(row["timestamp"]) <= 3600)
+            average_duration_ms = 0.0
+            if self.requests_with_duration:
+                average_duration_ms = round(self.total_duration_ms / self.requests_with_duration, 1)
 
             return {
                 "summary": {
@@ -408,10 +466,14 @@ class ApiUsageTracker:
                     if self.total_requests
                     else 0.0,
                     "unauthenticated_requests": int(self.unauthenticated_requests),
+                    "streaming_requests": int(self.streaming_requests),
                     "unique_clients": len(self._clients),
                     "prompt_tokens": int(self.prompt_tokens),
                     "completion_tokens": int(self.completion_tokens),
                     "total_tokens": int(self.total_tokens),
+                    "total_request_bytes": int(self.total_request_bytes),
+                    "total_response_bytes": int(self.total_response_bytes),
+                    "average_duration_ms": average_duration_ms,
                     "requests_last_5m": requests_last_5m,
                     "requests_last_hour": requests_last_hour,
                     "requests_per_minute": round(self.total_requests / max(uptime_seconds / 60.0, 1 / 60.0), 2)
