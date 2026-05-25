@@ -163,6 +163,35 @@ def test_reasoning_falls_back_for_ollama_clients():
     assert server._extract_assistant_message_text({"reasoning_content": "answer"}) == "answer"
 
 
+def test_stream_watchdog_extends_timeout_for_healthy_progress():
+    watchdog = server.StreamProgressWatchdog(base_timeout_s=300)
+
+    for index in range(16):
+        line = f'data: {json.dumps({"choices": [{"delta": {"content": f"token-{index}"}}]})}'
+        watchdog.observe_sse_line(line)
+
+    assert watchdog.loop_detected is False
+    assert watchdog.healthy_chunk_count == 16
+    assert watchdog.current_timeout_s == 450.0
+
+
+def test_stream_watchdog_refuses_to_extend_repeated_chunks():
+    watchdog = server.StreamProgressWatchdog(base_timeout_s=300)
+    repeated_line = f'data: {json.dumps({"choices": [{"delta": {"content": "loop"}}]})}'
+
+    for _ in range(server.STREAM_LOOP_REPEAT_THRESHOLD + 2):
+        watchdog.observe_sse_line(repeated_line)
+
+    assert watchdog.loop_detected is True
+    assert watchdog.healthy_chunk_count == 1
+    assert watchdog.current_timeout_s == 300.0
+
+
+def test_get_model_size_recognizes_large_35b_and_31b_models():
+    assert server.get_model_size("Qwen3.6-35B-A3B-HauhauCS-Aggressive") == 22000
+    assert server.get_model_size("gemma-4-31B-it-uncensored-heretic") == 20000
+
+
 def test_messages_contain_image_input_detects_openai_parts():
     messages = [
         {

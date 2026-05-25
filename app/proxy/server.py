@@ -10,9 +10,10 @@ import time
 import errno
 import struct
 import zlib
+from dataclasses import dataclass, field
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 import yaml
 import httpx
@@ -249,6 +250,128 @@ def _extract_assistant_delta_text(delta: Dict[str, object]) -> str:
     if content:
         return content
     return str(delta.get("reasoning_content") or "")
+
+
+STREAM_TIMEOUT_EXTENSION_STEPS = (
+    (64, 2.0),
+    (16, 1.5),
+)
+STREAM_LOOP_REPEAT_THRESHOLD = 12
+
+
+def _normalize_stream_progress_text(text: object) -> str:
+    """Normalize streamed content for lightweight loop detection."""
+    if not isinstance(text, str):
+        return ""
+    normalized = re.sub(r"\s+", " ", text).strip().lower()
+    if len(normalized) < 2:
+        return ""
+    return normalized[:120]
+
+
+def _extract_stream_progress_text(line: str) -> str:
+    """Extract the assistant delta text from an OpenAI-compatible SSE line."""
+    if not isinstance(line, str) or not line.startswith("data: "):
+        return ""
+
+    payload = line[6:].strip()
+    if not payload or payload == "[DONE]":
+        return ""
+
+    try:
+        data = json.loads(payload)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return ""
+
+    if not isinstance(data, dict):
+        return ""
+
+    choices = data.get("choices")
+    if isinstance(choices, list) and choices:
+        first_choice = choices[0] if isinstance(choices[0], dict) else {}
+        delta = first_choice.get("delta")
+        if isinstance(delta, dict):
+            text = _extract_assistant_delta_text(delta)
+            if text:
+                return text
+        message = first_choice.get("message")
+        if isinstance(message, dict):
+            text = _extract_assistant_message_text(message)
+            if text:
+                return text
+
+    response_text = data.get("response")
+    return response_text if isinstance(response_text, str) else ""
+
+
+@dataclass
+class StreamProgressWatchdog:
+    """Bound streaming stall time while rewarding healthy non-looping output."""
+
+    base_timeout_s: float
+    current_timeout_s: float = field(init=False)
+    healthy_chunk_count: int = 0
+    repeated_chunk_count: int = 0
+    last_chunk: str = ""
+    loop_detected: bool = False
+
+    def __post_init__(self) -> None:
+        self.base_timeout_s = max(float(self.base_timeout_s), 1.0)
+        self.current_timeout_s = self.base_timeout_s
+
+    def observe_sse_line(self, line: str) -> None:
+        """Grow the stall timeout only when the stream keeps making novel progress."""
+        normalized = _normalize_stream_progress_text(_extract_stream_progress_text(line))
+        if not normalized:
+            return
+
+        if normalized == self.last_chunk:
+            self.repeated_chunk_count += 1
+            if self.repeated_chunk_count >= STREAM_LOOP_REPEAT_THRESHOLD:
+                self.loop_detected = True
+            return
+
+        self.last_chunk = normalized
+        self.repeated_chunk_count = 1
+        self.loop_detected = False
+        self.healthy_chunk_count += 1
+
+        multiplier = 1.0
+        for minimum_chunks, candidate_multiplier in STREAM_TIMEOUT_EXTENSION_STEPS:
+            if self.healthy_chunk_count >= minimum_chunks:
+                multiplier = candidate_multiplier
+                break
+
+        self.current_timeout_s = self.base_timeout_s * multiplier
+
+
+def _build_stream_timeout(base_timeout_s: float) -> httpx.Timeout:
+    """Allow streaming reads to run under Guardian's own watchdog instead of a fixed read timeout."""
+    base_timeout_s = max(float(base_timeout_s), 1.0)
+    return httpx.Timeout(connect=10.0, read=None, write=base_timeout_s, pool=base_timeout_s)
+
+
+async def _iter_sse_lines_with_watchdog(
+    response: httpx.Response,
+    watchdog: StreamProgressWatchdog,
+) -> AsyncIterator[str]:
+    """Yield SSE lines while enforcing a dynamic stall timeout."""
+    iterator = response.aiter_lines().__aiter__()
+    while True:
+        try:
+            line = await asyncio.wait_for(iterator.__anext__(), timeout=watchdog.current_timeout_s)
+        except StopAsyncIteration:
+            return
+        except asyncio.TimeoutError as exc:
+            message = (
+                f"Guardian stream stalled after {watchdog.current_timeout_s:.0f}s without new SSE data "
+                f"(healthy_chunks={watchdog.healthy_chunk_count}, loop_detected={watchdog.loop_detected})"
+            )
+            logger.warning(message)
+            raise httpx.ReadTimeout(message, request=response.request) from exc
+
+        watchdog.observe_sse_line(line)
+        yield line
 
 
 def _is_guardian_uvicorn_listener(listener: Optional[Dict[str, Optional[object]]]) -> bool:
@@ -891,6 +1014,8 @@ def get_model_size(model_name: str) -> int:
     model_lower = model_name.lower()
     # Specific overrides for new models
     if "glm-4" in model_lower: return 26000  # ~24GB
+    if "35b" in model_lower: return 22000
+    if "31b" in model_lower: return 20000
     if "qwen3" in model_lower and "30b" in model_lower: return 20000 # ~18GB
     if "deepseek-r1" in model_lower and "32b" in model_lower: return 22000 # ~19GB
     
@@ -1339,13 +1464,14 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
 
         # Forward to Llama Server (OpenAI Endpoint)
         timeout_sec = get_model_timeout(model)
-        client = httpx.AsyncClient(timeout=timeout_sec)
+        request_timeout = _build_stream_timeout(timeout_sec) if stream else timeout_sec
+        client = httpx.AsyncClient(timeout=request_timeout)
         
         req = client.build_request(
             "POST",
             f"{LLAMA_SERVER_URL}/v1/chat/completions",
             json=openai_body,
-            timeout=timeout_sec
+            timeout=request_timeout
         )
         
         try:
@@ -1359,7 +1485,8 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
 
             async def stream_adapter():
                 try:
-                    async for chunk in r.aiter_lines():
+                    watchdog = StreamProgressWatchdog(timeout_sec)
+                    async for chunk in _iter_sse_lines_with_watchdog(r, watchdog):
                         if not chunk or chunk.strip() == "data: [DONE]": 
                             continue
                         if chunk.startswith("data: "):
@@ -1562,13 +1689,14 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
         }
 
         timeout_sec = get_model_timeout(model)
-        client = httpx.AsyncClient(timeout=timeout_sec)
+        request_timeout = _build_stream_timeout(timeout_sec) if stream else timeout_sec
+        client = httpx.AsyncClient(timeout=request_timeout)
         
         req = client.build_request(
             "POST",
             f"{LLAMA_SERVER_URL}/v1/chat/completions",
             json=openai_body,
-            timeout=timeout_sec
+            timeout=request_timeout
         )
 
         try:
@@ -1582,7 +1710,8 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
 
             async def stream_adapter_generate():
                 try:
-                    async for chunk in r.aiter_lines():
+                    watchdog = StreamProgressWatchdog(timeout_sec)
+                    async for chunk in _iter_sse_lines_with_watchdog(r, watchdog):
                         if not chunk or chunk.strip() == "data: [DONE]": 
                             continue
                         if chunk.startswith("data: "):
@@ -2247,7 +2376,8 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                 model_manager.active_requests = max(0, model_manager.active_requests - 1)
                 return preflight_error
 
-        timeout = httpx.Timeout(600.0, connect=10.0)
+        timeout_sec = float(get_model_timeout(active_model_for_request))
+        timeout = httpx.Timeout(timeout_sec, connect=10.0)
         logger.info(f"OpenAI-compat request from client '{client_id}': POST /v1/{path}")
 
         # Detect streaming requests for chat/completions and messages — must proxy SSE in real-time
@@ -2290,7 +2420,8 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
         if is_stream:
             _set_request_usage_metadata(request, streamed=True)
             # Stream SSE chunks in real-time instead of buffering entire response
-            client = httpx.AsyncClient(timeout=timeout)
+            stream_timeout = _build_stream_timeout(timeout_sec)
+            client = httpx.AsyncClient(timeout=stream_timeout)
             req = client.build_request(
                 "POST",
                 f"{LLAMA_SERVER_URL}/v1/{path}",
@@ -2303,7 +2434,7 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                 await client.aclose()
                 await _reload_backend_after_connect_error(path, e)
 
-                client = httpx.AsyncClient(timeout=timeout)
+                client = httpx.AsyncClient(timeout=stream_timeout)
                 req = client.build_request(
                     "POST",
                     f"{LLAMA_SERVER_URL}/v1/{path}",
@@ -2351,7 +2482,8 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
 
             async def stream_passthrough():
                 try:
-                    async for line in resp.aiter_lines():
+                    watchdog = StreamProgressWatchdog(timeout_sec)
+                    async for line in _iter_sse_lines_with_watchdog(resp, watchdog):
                         if line.startswith("data: "):
                             try:
                                 data = json.loads(line[6:])

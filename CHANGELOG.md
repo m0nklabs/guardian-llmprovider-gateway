@@ -21,6 +21,7 @@
 - Added `docs/SERVER_UPGRADE_PLAN.md`, a normalized English planning document for the next Guardian host hardware upgrade based on the decoded server-upgrade note.
 
 ### Changed
+- Streaming proxy routes now use a dynamic Guardian-side stall watchdog instead of a flat read timeout: once a stream proves healthy with non-repeating token chunks, the allowed stall window expands in bounded steps, while obviously repeating chunk loops do not earn more time.
 - `.gitignore` now also ignores repo-local `scratch/` alongside `.scratch/`, and a live open-file sweep confirmed nothing currently has handles open under the tracked repo scratch tree.
 - Added a second operator-focused dashboard pass on `:11437`: p95 latency insight, endpoint-level recent error breakdown, and three live sparklines for request pace, latency trend, and error trend driven from the current filtered recent-activity view.
 - Gave the served `:11437` dashboard a broader operator pass: last-refresh state, manual refresh + pause controls, free-text traffic search, recent-status filtering, client/recent sort controls, traffic-mix insight cards, strongest endpoint/client callouts, progress bars for hot endpoints, sticky table headers, and stronger visual highlighting for error/slow/heavy recent requests.
@@ -78,6 +79,7 @@
 
 ### Fixed
 - `/v1/models/{model_id}` now resolves Guardian public aliases locally instead of forwarding alias lookups to llama-server, so renamed aliases such as `qwen3.6-35b-uncensored` return metadata instead of backend errors.
+- Timeout tiering now recognizes `35B` and `31B` model names as large runtimes instead of falling back to the tiny-model heuristic, so those streams start from a saner base timeout before the new dynamic watchdog expands it.
 - Guardian startup and proxy recovery now treat `__MISMATCH__` as an internal sentinel only: startup adopts a known live backend when no model pin is active, failed forced switches restore a real target model, and auto-reload/connect-error recovery resolves to a configured model instead of trying to load `__MISMATCH__` and returning persistent 503s.
 - Restored the missing served dashboard monitoring panels on `:11437`; the static UI now consumes `/api/stats` API usage snapshots instead of only showing the older VRAM/cache/benchmark cards.
 - `/v1/models` now advertises `input_modalities: ["text", "image"]` for configured multimodal runtimes that are still `unverified`, so OpenCode and other clients do not incorrectly reject image attachments before the first live vision probe has marked the model `supported`.
