@@ -7,6 +7,7 @@
 
 ### Changed
 - Replaced stale documentation claims that implied always-on benchmark/request optimization or broader runtime fencing than the current code actually enforces. The docs now distinguish the active queue and model-manager path from secondary or advisory surfaces such as the scaler, historical benchmark artifacts, and proxy-state VRAM scaffolding.
+- Reorganized the new Guardian documentation under the top-level `docs/` directory so the repo root stays focused on the standard front-door files without introducing unnecessary nested documentation paths.
 
 ### Added
 - Persistent dashboard API usage monitoring backed by `data/api_usage_state.json`, with request totals, token totals, top clients, recent activity, non-secret key fingerprints, source metadata, and restart-safe state restore on the served `:11437` UI.

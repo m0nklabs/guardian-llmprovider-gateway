@@ -59,8 +59,8 @@ Non-inference routes stay outside the queue, including `GET /v1/models`,
 ### Queue behavior
 
 - Queue depth is tracked with a FIFO waiting list plus an `asyncio.Semaphore`.
-- Default concurrency is `1`, from `config/settings.yaml -> queue.max_concurrent`.
-- Default queue timeout is `300s`, from `config/settings.yaml -> queue.queue_timeout_seconds`.
+- Default concurrency is `1`, from `../config/settings.yaml`.
+- Default queue timeout is `300s`, from `../config/settings.yaml`.
 - Timeout returns `HTTP 429` with `{"error": "queue_timeout", ...}`.
 - Every queued response carries `X-Request-Id` and `X-Queue-Wait-Ms`.
 - `GET /v1/queue/status` is intentionally not queued, so waiting clients can
@@ -95,7 +95,7 @@ translated back to Ollama-style responses.
 
 ### Model resolution
 
-`ModelManager.resolve_model()` hot-reloads `config/models.yaml` and resolves:
+`ModelManager.resolve_model()` hot-reloads `../config/models.yaml` and resolves:
 
 - exact model names
 - configured aliases
@@ -126,10 +126,11 @@ tool-oriented variants.
 ### Backend contract
 
 - Guardian writes the active backend command line to
-  [config/current_model.args](config/current_model.args).
-- [scripts/start_llama.sh](scripts/start_llama.sh) reads that file, sources the
-  optional `config/current_model.env`, forces `CUDA_DEVICE_ORDER=PCI_BUS_ID`,
-  and launches the official `llama-server` binary.
+  [../config/current_model.args](../config/current_model.args).
+- [../scripts/start_llama.sh](../scripts/start_llama.sh) reads that file,
+  sources the optional `config/current_model.env`, forces
+  `CUDA_DEVICE_ORDER=PCI_BUS_ID`, and launches the official `llama-server`
+  binary.
 - Guardian starts and stops the backend with `sudo systemctl start llama-server`
   and `sudo systemctl stop llama-server`.
 
@@ -170,7 +171,7 @@ Proxy startup does not block on model verification.
 
 ### Pinning and switch policy
 
-`config/models.yaml -> guardian` provides:
+`../config/models.yaml -> guardian` provides:
 
 - `pinned_model`: force a single model family
 - `switch_allowlist`: limit who may trigger model changes
@@ -332,8 +333,8 @@ Guardian splits operator visibility across the proxy port and the UI port.
 - `/api/benchmark`: read-only summary of historical benchmark state
 
 `ApiUsageTracker` persists dashboard usage data to
-[data/api_usage_state.json](data/api_usage_state.json), so request counters and
-top-client summaries survive Guardian restarts.
+[../data/api_usage_state.json](../data/api_usage_state.json), so request
+counters and top-client summaries survive Guardian restarts.
 
 ## 8. Advisory and Secondary Components
 
@@ -365,7 +366,7 @@ the current inference hot path. Benchmark start and stop on the UI port return
 `SchedulerManager` is separate from inference queueing.
 
 - It reads `benchmark.schedule` and `services_to_stop` from
-  [config/settings.yaml](config/settings.yaml).
+  [../config/settings.yaml](../config/settings.yaml).
 - During the configured window, it stops the listed services.
 - Outside that window, it starts them again.
 

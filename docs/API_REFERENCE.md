@@ -16,7 +16,7 @@ Guardian accepts any of these request styles on `:11434`:
 - `x-api-key: <token>`
 - `api-key: <token>`
 
-Keys live in [config/api_keys.json](config/api_keys.json).
+Keys live in [../config/api_keys.json](../config/api_keys.json).
 
 Missing or invalid keys return `401 Unauthorized`.
 
@@ -30,9 +30,9 @@ Queued inference responses include:
 If the request waits longer than `queue.queue_timeout_seconds`, Guardian
 returns `429` with a `queue_timeout` error payload.
 
-There is no token-bucket or per-client rate limiter in current code. Backpressure
-is enforced by the FIFO inference queue and model-size-dependent backend
-timeouts.
+There is no token-bucket or per-client rate limiter in current code.
+Backpressure is enforced by the FIFO inference queue and model-size-dependent
+backend timeouts.
 
 ## Error Model
 
@@ -541,8 +541,8 @@ Representative top-level fields:
 ```
 
 Important note: `api_usage` is backed by
-[data/api_usage_state.json](data/api_usage_state.json), so request totals and
-top-client summaries survive Guardian restarts.
+[../data/api_usage_state.json](../data/api_usage_state.json), so request
+totals and top-client summaries survive Guardian restarts.
 
 ### `GET /api/benchmark`
 

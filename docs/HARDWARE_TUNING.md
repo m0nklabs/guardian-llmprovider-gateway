@@ -17,9 +17,9 @@ same queue, reload, VRAM fencing, and backend lifecycle that production uses.
 
 ## Current Runtime Assumptions
 
-- `proxy.vram_limit_mb: 27000` in [config/settings.yaml](config/settings.yaml)
-- official `llama-server` launched by [scripts/start_llama.sh](scripts/start_llama.sh)
-- generated runtime args written to [config/current_model.args](config/current_model.args)
+- `proxy.vram_limit_mb: 27000` in [../config/settings.yaml](../config/settings.yaml)
+- official `llama-server` launched by [../scripts/start_llama.sh](../scripts/start_llama.sh)
+- generated runtime args written to [../config/current_model.args](../config/current_model.args)
 - GPU telemetry normalized to llama/CUDA order by PCI bus ID
 - optional ComfyUI cooperation through `services.comfyui_url`
 
@@ -27,26 +27,26 @@ same queue, reload, VRAM fencing, and backend lifecycle that production uses.
 
 | Surface | Role | Active today |
 | --- | --- | --- |
-| [finetune_v2.py](finetune_v2.py) | Operator entrypoint | Yes |
-| [scripts/finetune_v2_model_config.py](scripts/finetune_v2_model_config.py) | Compatibility wrapper around the same CLI | Yes |
-| [app/tweaker/finetune_v2_cli.py](app/tweaker/finetune_v2_cli.py) | CLI parsing and validation | Yes |
-| [app/tweaker/finetune_v2_runner.py](app/tweaker/finetune_v2_runner.py) | Planner, probe loop, dry-run/apply behavior | Yes |
-| [app/tweaker/finetune_v2_telemetry.py](app/tweaker/finetune_v2_telemetry.py) | GPU telemetry, split verification, backend VRAM snapshot | Yes |
-| [app/tweaker/finetune_v2_support.py](app/tweaker/finetune_v2_support.py) | Split helpers, runtime mode helpers, YAML block replacement | Yes |
-| [scripts/start_llama.sh](scripts/start_llama.sh) | Loads `current_model.args`, sources `current_model.env`, starts official backend | Yes |
-| [data/model_finetune_v2_results.json](data/model_finetune_v2_results.json) | Canonical append-only result log | Yes |
+| [../finetune_v2.py](../finetune_v2.py) | Operator entrypoint | Yes |
+| [../scripts/finetune_v2_model_config.py](../scripts/finetune_v2_model_config.py) | Compatibility wrapper around the same CLI | Yes |
+| [../app/tweaker/finetune_v2_cli.py](../app/tweaker/finetune_v2_cli.py) | CLI parsing and validation | Yes |
+| [../app/tweaker/finetune_v2_runner.py](../app/tweaker/finetune_v2_runner.py) | Planner, probe loop, dry-run/apply behavior | Yes |
+| [../app/tweaker/finetune_v2_telemetry.py](../app/tweaker/finetune_v2_telemetry.py) | GPU telemetry, split verification, backend VRAM snapshot | Yes |
+| [../app/tweaker/finetune_v2_support.py](../app/tweaker/finetune_v2_support.py) | Split helpers, runtime mode helpers, YAML block replacement | Yes |
+| [../scripts/start_llama.sh](../scripts/start_llama.sh) | Loads `current_model.args`, sources `current_model.env`, starts official backend | Yes |
+| [../data/model_finetune_v2_results.json](../data/model_finetune_v2_results.json) | Canonical append-only result log | Yes |
 | `data/model_finetune_v2_results.json.active` | In-progress run snapshot sidecar created during live runs | Ephemeral |
-| [scripts/benchmark_context.py](scripts/benchmark_context.py) | Historical benchmark helper | Legacy |
-| [scripts/analyze_benchmark.py](scripts/analyze_benchmark.py) | Historical benchmark analysis | Legacy |
-| [scripts/recommend_context.py](scripts/recommend_context.py) | Historical benchmark recommendation helper | Legacy |
-| [scripts/update_guardian_config.py](scripts/update_guardian_config.py) | Config editing helper | Secondary |
+| [../scripts/benchmark_context.py](../scripts/benchmark_context.py) | Historical benchmark helper | Legacy |
+| [../scripts/analyze_benchmark.py](../scripts/analyze_benchmark.py) | Historical benchmark analysis | Legacy |
+| [../scripts/recommend_context.py](../scripts/recommend_context.py) | Historical benchmark recommendation helper | Legacy |
+| [../scripts/update_guardian_config.py](../scripts/update_guardian_config.py) | Config editing helper | Secondary |
 
 ## Backend Control Files
 
 Guardian tuning changes runtime state through generated files and live API
 calls, not by hand-editing `llama-server` commands.
 
-### [config/current_model.args](config/current_model.args)
+### [../config/current_model.args](../config/current_model.args)
 
 This is the effective backend contract. `ModelManager._write_server_args()`
 writes:
@@ -59,7 +59,7 @@ writes:
 - `--mmproj <path>` when vision mode is enabled
 - any model-specific `extra_args`
 
-### [scripts/start_llama.sh](scripts/start_llama.sh)
+### [../scripts/start_llama.sh](../scripts/start_llama.sh)
 
 This script:
 
