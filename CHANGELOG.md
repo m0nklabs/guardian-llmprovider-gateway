@@ -3,6 +3,12 @@
 ## [Unreleased]
 
 ### Added
+- Ground-up documentation suite for the live Guardian runtime: rewritten `README.md` and `ARCHITECTURE.md`, plus new `HARDWARE_TUNING.md` and `API_REFERENCE.md`, all aligned to the current queue, model lifecycle, systemd-backed backend control, ComfyUI `/free` integration, and finetune v2 behavior.
+
+### Changed
+- Replaced stale documentation claims that implied always-on benchmark/request optimization or broader runtime fencing than the current code actually enforces. The docs now distinguish the active queue and model-manager path from secondary or advisory surfaces such as the scaler, historical benchmark artifacts, and proxy-state VRAM scaffolding.
+
+### Added
 - Persistent dashboard API usage monitoring backed by `data/api_usage_state.json`, with request totals, token totals, top clients, recent activity, non-secret key fingerprints, source metadata, and restart-safe state restore on the served `:11437` UI.
 - Root-level `./finetune_v2.py` operator entrypoint for Guardian finetune v2; running it without arguments now prints the usable options plus configured models and aliases before any Guardian API calls.
 - Guardian API key generators now accept a custom normalized prefix, so service-specific keys like `hermes_...` can be minted without hand-editing `api_keys.json`.

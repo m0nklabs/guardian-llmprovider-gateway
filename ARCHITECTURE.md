@@ -1,318 +1,385 @@
-# Guardian Architecture
-
-> Last Updated: 2026-05-24
+# Llama-CPP Guardian Architecture
 
 ## Overview
 
-Guardian is middleware that sits between clients and `llama-server`, turning a raw inference process into a managed service with request queuing, lifecycle control, cooperative GPU memory management, and benchmark-driven optimization.
+Guardian is not a thin API proxy. It is the control plane for a single shared
+`llama-server` backend on a host where multiple GPU-heavy tenants compete for
+the same VRAM budget.
 
-It is **not** a simple proxy — Guardian actively manages the backend process, serializes access through a queue, coordinates GPU memory with 3rd-party processes, and optimizes request parameters based on empirical benchmarks.
+The current runtime is built around three distinct scheduling layers:
 
-## Topology
+1. `InferenceQueue` is the real hot-path admission gate for inference.
+2. `ModelManager` owns backend start, stop, switch, unload, crash detection,
+   and runtime argument generation.
+3. `SchedulerManager` handles wall-clock maintenance windows for stopping or
+   starting other systemd services.
 
-```
-Clients / Apps / Tools
-        │
-        ▼
-┌────────────────────────────────────────────┐
-│ Guardian Middleware (:11434)                │
-│  ├─ Bearer token auth (api_keys.json)      │
-│  ├─ FIFO inference queue (semaphore-based) │
-│  ├─ Protocol bridges (Ollama + OpenAI)     │
-│  ├─ Model routing + switch lock            │
-│  ├─ RequestOptimizer (benchmark-driven)    │
-│  ├─ ApiUsageTracker (persistent dashboard) │
-│  ├─ VramScheduler (budget enforcement)     │
-│  ├─ Idle unload watcher (background)       │
-│  └─ 3rd-party GPU process coordination     │
-│       ├─ ComfyUI /free API integration     │
-│       └─ VRAM budgeting for Frigate, etc.  │
-└────────────────────────────────────────────┘
-        │
-        ▼
-  llama-server (:11440)
-        │
-        ▼
-  Official llama.cpp backend binary
+Guardian also instantiates a `VramScheduler` object in proxy state, but the
+current request hot path does not call `state.scheduler.acquire()`.
+Operationally, the primary fence today is the single-slot inference queue plus
+backend lifecycle control.
 
-  Dashboard UI (:11437)
-    └─ Chart.js + Tailwind dark mode
-```
+## Runtime Topology
 
-## Core Responsibilities
+| Surface | Port | Responsibility |
+| --- | --- | --- |
+| Guardian proxy | `11434` | Auth, queueing, protocol bridging, model switching, status, sessions |
+| llama-server | `11440` | Actual inference engine, managed by Guardian |
+| Guardian UI | `11437` | Dashboard, `/api/stats`, benchmark summary |
 
-### 1. Request Queue
-
-Guardian serializes all inference requests through a FIFO queue backed by `asyncio.Semaphore(1)`. Only one inference runs at a time; others wait.
-
-| Aspect | Implementation |
-|--------|---------------|
-| **Serialization** | `asyncio.Semaphore(max_concurrent)` — FIFO ordering in CPython |
-| **Tracking** | `QueueEntry` dataclass with `request_id`, `client_id`, `enqueued_at`, `started_at` |
-| **Response headers** | `X-Request-Id` (UUID) and `X-Queue-Wait-Ms` (integer) on every inference response |
-| **Status endpoint** | `GET /v1/queue/status` — always responds immediately (not queued) |
-| **Timeout** | `queue_timeout_seconds` (default 300s) → HTTP 429 on timeout |
-| **Client disconnect** | `asyncio.CancelledError` removes request from queue |
-| **Lifetime counters** | `total_queued`, `total_completed`, `total_timeouts` |
-| **Scope** | Only inference endpoints queued (`chat/completions`, `completions`, `embeddings`, `/api/chat`, `/api/generate`) |
-
-Model switching happens **inside** the queue slot, preventing concurrent inference from interfering with switches.
-
-### 2. Protocol Compatibility
-
-Guardian exposes both API styles so clients with different assumptions can talk to the same backend:
-
-- **OpenAI**: `/v1/chat/completions`, `/v1/models`, generic `/v1/{path}` passthrough
-- **Ollama**: `/api/chat`, `/api/generate`, `/api/tags`, `/api/version`
-
-Ollama requests are translated to OpenAI format internally, forwarded to llama-server, and translated back.
-
-### 3. Model Lifecycle Management
-
-Guardian owns the `llama-server` process and manages its full lifecycle:
-
-| Capability | Implementation |
-|------------|---------------|
-| **Model switching** | Concurrency-safe via `asyncio.Lock()`. Stops server → writes args/binary → frees GPU memory → starts server → health check → verifies backend model. |
-| **Model pinning** | `guardian.pinned_model` in models.yaml locks the system to one model. Only `force=True` or allowlisted clients can override. |
-| **Client allowlist** | `guardian.switch_allowlist` restricts which API key holders can trigger model switches. |
-| **Idle unload** | Background task checks every 60s. If `idle_unload_minutes` exceeded and no active/queued requests, stops llama-server. Auto-reloads on next request. |
-| **Crash detection** | Records up to 50 `CrashRecord` events with timestamps, error messages, exit codes, and config snapshots. |
-| **Backend verification** | Post-switch check confirms the actual running model matches Guardian's config. Prevents silent desync. |
-| **Config hot-reload** | Re-reads `models.yaml` on every `load()`/`switch_model()` call — config edits take effect without restarting Guardian. |
-
-#### Switch flow:
-
-```
-switch_model(model_name, client_id, force)
-  │
-  ├─ Verify model exists in config
-  ├─ Check pinned_model + allowlist
-  ├─ Auto-save current context
-  ├─ Stop llama-server
-  ├─ Write model args + binary selection
-  ├─ Free GPU memory (3rd-party coordination)
-  │   └─ Request ComfyUI to release VRAM
-  ├─ Start llama-server
-  ├─ Wait for health check
-  ├─ Detect crash if startup fails
-  ├─ Verify backend model matches
-  └─ Restore context if exists
+```mermaid
+flowchart TD
+    C[Clients] --> P[Guardian proxy :11434]
+    P --> Q[InferenceQueue]
+    Q --> M[ModelManager]
+    M --> L[llama-server :11440]
+    M --> CF[ComfyUI /free]
+    P --> S[Status and metrics]
+    UI[Guardian UI :11437] --> S
 ```
 
-### 4. 3rd-Party GPU Process Awareness
+## 1. Request Admission and Queue Ownership
 
-Guardian operates on a shared GPU host alongside other GPU consumers. Instead of killing competing processes, it cooperates:
+`app.proxy.queue.InferenceQueue` is Guardian's primary runtime lock.
 
-**Cooperative VRAM Release**:
-- Before loading a model, `_free_gpu_memory()` orchestrates VRAM cleanup
-- ComfyUI: `POST http://127.0.0.1:8188/free` with `{"unload_models": true, "free_memory": true}`
-- ComfyUI gracefully releases VRAM (e.g., 6768MB → 174MB) while staying alive
-- ComfyUI auto-reloads its models on the next workflow execution
-- Timeout: 15s with graceful fallback on connection errors
+### What enters the queue
 
-**VRAM Budgeting**:
-- 3rd-party processes (Frigate NVR ~440MB, etc.) are accounted for in the VRAM budget but never killed
-- Configurable hard limit (`proxy.vram_limit_mb`, default 27000MB) prevents OOM crashes
-- `VramScheduler` tracks active model VRAM usage per request and waits on `asyncio.Condition` if budget would be exceeded
+Queued inference endpoints:
 
-**GPU Process Visibility**:
-- After VRAM cleanup, Guardian runs `nvidia-smi` to log remaining GPU consumers for observability
+- `POST /v1/chat/completions`
+- `POST /v1/completions`
+- `POST /v1/embeddings`
+- `POST /v1/messages`
+- `POST /api/chat`
+- `POST /api/generate`
 
-### 5. Auth and Access Control
+Non-inference routes stay outside the queue, including `GET /v1/models`,
+`GET /v1/queue/status`, `/admin/*`, `/api/status`, `/healthz`, and `/metrics`.
 
-All endpoints require Bearer token authentication:
+### Queue behavior
 
-- Tokens stored in `config/api_keys.json`
-- Format: `{prefix}_{32-char-hex}` (e.g., `flip_`, `oelala_`, `hydro_`)
-- FastAPI dependency injection via `@Depends(verify_api_key)`
-- Returns client name for allowlist checking and queue tracking
-- Builds non-secret request attribution for dashboard usage monitoring: key prefix, short SHA-256 fingerprint, source headers, and user agent
+- Queue depth is tracked with a FIFO waiting list plus an `asyncio.Semaphore`.
+- Default concurrency is `1`, from `config/settings.yaml -> queue.max_concurrent`.
+- Default queue timeout is `300s`, from `config/settings.yaml -> queue.queue_timeout_seconds`.
+- Timeout returns `HTTP 429` with `{"error": "queue_timeout", ...}`.
+- Every queued response carries `X-Request-Id` and `X-Queue-Wait-Ms`.
+- `GET /v1/queue/status` is intentionally not queued, so waiting clients can
+  poll their position without making the congestion worse.
 
-### 6. Persistent Dashboard Monitoring
+### Why the queue matters
 
-`ApiUsageTracker` records API traffic in memory and persists a bounded snapshot to `data/api_usage_state.json` after every tracked request or token update.
+Guardian switches models inside the queue slot. That is the key correctness
+property: model reloads and runtime mode flips cannot race an active inference
+request because one request owns the backend at a time.
 
-| Aspect | Implementation |
-|--------|----------------|
-| **Scope** | Tracks `/v1/*`, `/api/*`, and `/admin/*` proxy requests except liveness/metrics noise |
-| **Counters** | Total requests, errors, unauthenticated requests, prompt/completion tokens, request rates |
-| **Client view** | Top authenticated clients, last model/endpoint, token totals, source metadata |
-| **Recent activity** | Bounded recent request table for the served `:11437` dashboard |
-| **Persistence** | Atomic JSON writes to `data/api_usage_state.json`, restored on Guardian restart |
-| **Secret handling** | Stores only key prefix plus a short fingerprint; full API keys are never exposed |
+For streaming responses, the slot is held until the upstream SSE stream closes.
+Release happens in the streaming finalizer, not when the first chunk is sent.
 
-### 7. Request Optimization
+## 2. Routing and Runtime Selection
 
-`RequestOptimizer` injects benchmark-derived settings into requests:
+Guardian supports three routing dimensions:
 
-- Reads from `data/benchmark_state.json` and `docs/benchmark_results.json`
-- Lazy-reloads when file mtime changes
-- Injects best `num_ctx` and `num_batch` for the current model
-- Respects user overrides — only injects if the user didn't set the value
+1. protocol compatibility
+2. model selection
+3. runtime mode selection
 
-### 8. Runtime Tuning
+### Protocol compatibility
 
-The active tuning path is Guardian-native finetune v2:
+Guardian exposes both:
 
-- Operator entrypoint: `./finetune_v2.py` prints help plus model/alias options when run without arguments
-- Probes model runtime shapes through `/admin/load` plus smoke requests
-- Tunes `context`, `ngl`, and two-GPU `tensor_split` for the current host
-- Uses stable llama/CUDA GPU identity mapping for VRAM telemetry
-- Writes append-only probe history under `data/model_finetune_v2_results.json`
-- `start_ngl` ladder runs seed from the operator-provided split when present,
-  then rebalance that rung before climbing to higher `ngl` values
-- Adjacent effective tensor splits that land in the same llama.cpp per-layer
-  backend bucket are treated as real bucket plateaus; the planner keeps stepping
-  in the measured direction until backend allocation changes, a probe fails, or
-  bounds are exhausted
-- Keeps the old broad-sweep `BenchmarkSuite` under `app/tweaker/legacy/` only for historical reference
+- OpenAI-compatible `/v1/*`
+- Ollama-compatible `/api/chat`, `/api/generate`, `/api/tags`, `/api/version`
 
-### 9. Scheduler / Maintenance Windows
+Ollama requests are translated into OpenAI-style backend requests and then
+translated back to Ollama-style responses.
 
-`SchedulerManager` handles unattended maintenance:
+### Model resolution
 
-- Configurable idle windows (hours + days of week) from `settings.yaml`
-- On maintenance entry: stops configured services, triggers benchmark suite
-- On maintenance exit: stops benchmark, restarts services
-- Service management via `sudo systemctl {action} {service_name}`
+`ModelManager.resolve_model()` hot-reloads `config/models.yaml` and resolves:
 
-### 10. Session Management
+- exact model names
+- configured aliases
+- case-insensitive matches
 
-- **Session save/load/list**: Persist and restore conversation contexts via llama-server's slot API
-- **Crash history**: Inspect crash events via `/api/crashes`
-- **Status**: Current model, backend health, VRAM usage, idle state, security info
-- **Dashboard stats**: VRAM, active models, cached models, benchmark records, persisted API usage
+That makes `/admin/load` and `/v1/models` reflect config edits without a
+Guardian restart.
 
-## Backend Selection
+### Runtime mode selection
 
-Guardian launches the official llama.cpp backend binary only. Historical
-per-model backend selection has been removed from the runtime contract:
+Guardian treats text and vision as separate runtime shapes.
 
-```python
-from app.paths import OFFICIAL_LLAMA_SERVER_BIN
+- If a request carries image input and the target model has an `mmproj`,
+  Guardian can reload that same model into vision mode.
+- If the model name stays the same but the requested runtime flips from text to
+  vision, Guardian does a runtime reload instead of a logical model switch.
+- Vision metadata is surfaced in `/v1/models` through `input_modalities`,
+  `configured_input_modalities`, and the nested `vision` object.
 
+Guardian also has an internal `model: auto` path that can prefer a
+tool-friendly sibling profile when a model family ships both deep reasoning and
+tool-oriented variants.
 
-BACKEND_BINARIES = {
-  "official": str(OFFICIAL_LLAMA_SERVER_BIN),
-  # Add custom backends here, e.g.:
-  # "my_fork": "/path/to/custom/llama-server",
+## 3. Backend Ownership and Model Lifecycle
+
+`app.engine.manager.ModelManager` owns every backend transition.
+
+### Backend contract
+
+- Guardian writes the active backend command line to
+  [config/current_model.args](config/current_model.args).
+- [scripts/start_llama.sh](scripts/start_llama.sh) reads that file, sources the
+  optional `config/current_model.env`, forces `CUDA_DEVICE_ORDER=PCI_BUS_ID`,
+  and launches the official `llama-server` binary.
+- Guardian starts and stops the backend with `sudo systemctl start llama-server`
+  and `sudo systemctl stop llama-server`.
+
+### Switch/load flow
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Guardian
+    participant MM as ModelManager
+    participant C as ComfyUI
+    participant LS as llama-server
+
+    Client->>Guardian: queued inference or /admin/load
+    Guardian->>Guardian: queue.acquire()
+    Guardian->>MM: load() / switch_model()
+    MM->>LS: stop
+    MM->>MM: write current_model.args
+    MM->>C: POST /free
+    MM->>LS: start
+    MM->>LS: poll /health
+    MM->>Guardian: backend ready or crash
+    Guardian->>LS: proxy request
+    LS-->>Guardian: response
+    Guardian->>Guardian: queue.release()
+    Guardian-->>Client: response + queue headers
+```
+
+### Startup and verification
+
+Proxy startup does not block on model verification.
+
+- `lifespan()` writes `guardian.pid`, cleans up stale listeners when possible,
+  and binds `:11434` immediately.
+- Backend verification runs in the background.
+- `/api/status` exposes the live startup state, generation counter, owner,
+  requested target, and effective model.
+
+### Pinning and switch policy
+
+`config/models.yaml -> guardian` provides:
+
+- `pinned_model`: force a single model family
+- `switch_allowlist`: limit who may trigger model changes
+- `idle_unload_minutes`: free VRAM after inactivity
+
+These checks are enforced inside `switch_model()` before the backend is touched.
+
+## 4. Dynamic Resource Fencing
+
+Guardian's active resource fence is a combination of:
+
+- the single-slot inference queue
+- backend stop/start sequencing
+- ComfyUI VRAM release requests
+- idle unload
+- crash-aware load recovery
+
+### Cooperative ComfyUI integration
+
+Before every load or switch, `ModelManager._free_gpu_memory()` calls:
+
+```json
+POST http://127.0.0.1:8188/free
+{
+  "unload_models": true,
+  "free_memory": true
 }
 ```
 
-- **official** (ggml-org/llama.cpp): The only runtime binary Guardian launches.
-- Official binary path resolves from the current checkout or `LLAMA_CPP_OFFICIAL_ROOT`; Guardian no longer assumes a fixed local repo folder name.
-- `start_llama.sh` always launches that official binary and only reads `config/current_model.args` for per-model runtime flags.
+This is a narrow but important integration contract:
 
-## GPU Strategy
+- ComfyUI is asked to unload its models and free memory
+- Guardian waits briefly for CUDA memory to drop
+- ComfyUI stays alive and can rehydrate itself on the next workflow
+- Frigate is never touched
 
-| GPU | VRAM | Typical Use |
-|-----|------|-------------|
-| RTX 3060 (cuda:0) | 12GB | Model weight storage via tensor split |
-| RTX 5060 Ti (cuda:1) | 16GB | Primary compute + activations |
-| **Total budget** | **27GB** | 28GB minus ~1GB reserved for 3rd-party GPU processes |
+What Guardian does not currently do:
 
-**3rd-party GPU processes** (always running, never killed):
-- Frigate NVR: ~440MB (ffmpeg hardware decoding)
-- ComfyUI: Variable — releases VRAM cooperatively on request
+- it does not subscribe to ComfyUI job state
+- it does not automatically pause a ComfyUI render queue
+- it does not implement a cross-service scheduler that times LLM work against
+  image jobs
 
-**Tensor splits** in `models.yaml`: Small models offload 100% to one GPU. Large models (>12GB) use splits like `"0.57,0.43"` or `"0.55,0.45"`.
+The implemented behavior is still valuable: Guardian fences the LLM side before
+starting a heavyweight backend runtime instead of blindly assuming VRAM is free.
 
-**VRAM scheduling flow**:
-1. Request arrives → queue slot acquired
-2. Guardian estimates VRAM needed for requested model
-3. If (current + needed) > limit: wait on condition
-4. Request cooperative VRAM release from 3rd-party processes
-5. Load model across GPUs with configured tensor split
+### Idle unload and auto-reload
 
-## Timeout System
+The idle watcher runs every 60 seconds and unloads `llama-server` only when:
 
-Model-tier-based timeouts prevent runaway requests:
+- `idle_unload_minutes` is configured
+- the backend is still loaded
+- `active_requests == 0`
+- `InferenceQueue` has no active or waiting work
 
-| Tier | Min Size | Timeout |
-|------|----------|---------|
-| tier_70b | 40GB | 30 min |
-| tier_32b | 20GB | 20 min |
-| tier_13b | 10GB | 10 min |
-| tier_8b | 5GB | 6 min |
-| tier_small | 0 | 10 min |
+The next queued inference request can auto-reload the model before proxying the
+user request.
 
-Configured in `settings.yaml` under `timeouts.tiers`.
+## 5. Asymmetric Tensor Splitting on Mixed GPUs
 
-## API Surface
+Guardian treats tensor split as a host-specific calibration problem.
 
-### Inference (queued, serialized)
+### Static runtime configuration
 
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/v1/chat/completions` | POST | OpenAI chat (streaming + non-streaming) |
-| `/v1/completions` | POST | OpenAI text completion |
-| `/v1/embeddings` | POST | OpenAI embeddings |
-| `/api/chat` | POST | Ollama chat (translates to/from OpenAI internally) |
-| `/api/generate` | POST | Ollama prompt generation |
+Every model entry can declare:
 
-### Queue & Status (not queued)
+- `context`
+- `ngl`
+- `tensor_split`
+- `mmproj`
+- optional `vision_context`, `vision_ngl`, `vision_tensor_split`
 
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/v1/queue/status` | GET | Queue position, wait time, active requests |
-| `/api/status` | GET | Model, health, VRAM, crashes, security |
-| `/api/crashes` | GET | Crash history |
+Those values are written directly into `current_model.args` as
+`--tensor-split a,b` and `--mmproj ...`.
 
-### Model Management
+### Why the split logic is host-specific
 
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/v1/models` | GET | OpenAI model list |
-| `/api/tags` | GET | Ollama model list |
-| `/api/version` | GET | Ollama version compat |
-| `/admin/load` | POST | Reload llama-server |
-| `/admin/unload` | POST | Stop llama-server (free VRAM) |
-| `/v1/{path}` | GET/POST | OpenAI-compatible passthrough (non-inference paths) |
+This host is not symmetric. One card has less headroom than the other, so a
+nice-looking `0.50,0.50` split is not automatically a good split.
 
-### Session & Benchmark
+Guardian's finetune v2 telemetry therefore measures three separate truths:
 
-| Endpoint | Method | Purpose |
-|----------|--------|---------|
-| `/api/session/save` | POST | Save conversation context |
-| `/api/session/load` | POST | Load conversation context |
-| `/api/session/list` | GET | List saved sessions |
-| `/api/stats` | GET | Dashboard metrics |
-| `/api/benchmark` | GET | Benchmark results |
-| `/api/benchmark/start` | POST | Run benchmark suite |
-| `/api/benchmark/stop` | POST | Stop running benchmark |
+1. the requested split from the candidate
+2. the effective split written to `current_model.args`
+3. the backend allocation bucket observed from live `llama-server` VRAM usage
 
-## Directory Structure
+`app.tweaker.finetune_v2_telemetry` re-keys `nvidia-smi` telemetry into the
+same llama/CUDA ordering enforced by `CUDA_DEVICE_ORDER=PCI_BUS_ID`. That keeps
+split decisions stable across reboots and `nvidia-smi` index drift.
 
-```text
-app/
-├── engine/
-│   └── manager.py       # ModelManager: lifecycle, switching, VRAM, crash detection
-├── proxy/
-│   ├── server.py        # FastAPI app: endpoints, VramScheduler, idle watcher
-│   ├── queue.py         # InferenceQueue: FIFO semaphore, status reporting
-│   ├── auth.py          # Bearer token auth (api_keys.json)
-│   └── optimizer.py     # RequestOptimizer: benchmark-driven tuning
-├── scheduler/
-│   └── manager.py       # SchedulerManager: maintenance windows
-├── tweaker/
-│   ├── finetune_v2_runner.py    # Guardian-backed runtime tuning
-│   ├── finetune_v2_telemetry.py # v2 GPU identity/VRAM telemetry
-│   └── legacy/                 # Deprecated v1 finetune + benchmark sweep code
-├── ui/
-│   └── index.html       # Dashboard (Tailwind dark, Chart.js)
-└── main.py              # GuardianService: startup orchestration
+### Directional split search
 
-config/
-├── models.yaml          # Model registry + guardian security config
-├── settings.yaml        # Ports, VRAM budget, timeouts, queue, scheduler
-├── api_keys.json        # API key store
-├── current_model.args   # Runtime: llama-server CLI args
-└── current_model.env    # Runtime: per-model env vars (optional)
+Finetune v2 does not stop at the first non-OOM split.
 
-data/
-└── benchmark_state.json # Persisted benchmark queue + results
+- If cross-GPU free VRAM delta is above 5%, the runner queues same-shape split
+  follow-ups.
+- Large imbalances step by 5%, medium by 2%, fine by 1%.
+- If the target GPU is already too tight, coarse shifts are skipped and the
+  runner falls back to smaller local steps.
+- If two adjacent effective splits land in the same backend allocation bucket,
+  the runner keeps stepping in the same direction instead of snapping back to
+  `0.50,0.50`.
 
-scripts/                 # Startup, key gen, tests, analysis, model sync
-docs/                    # Client integration, benchmarks, glossary
-```
+That behavior is what lets Guardian calibrate asymmetric splits such as the
+current Qwen 3.6 `0.36,0.64` and `0.46,0.54` profiles.
+
+## 6. Recovery Loops and Crash Handling
+
+Guardian includes several recovery layers beyond the normal queue.
+
+### Connect-error recovery
+
+If the proxy cannot reach `llama-server` while forwarding `/v1/*`, Guardian can
+attempt one backend reload and then retry the request once.
+
+### Health wait and crash-loop detection
+
+After a load or switch, `ModelManager._wait_for_health()` polls `/health` for up
+to 120 seconds and also checks:
+
+- `systemctl show llama-server --property=NRestarts`
+- `systemctl is-failed llama-server`
+
+If the backend keeps restarting or enters failed state, Guardian records a
+crash entry with:
+
+- timestamp
+- model name
+- summarized error message from `journalctl`
+- exit code
+- runtime config snapshot
+
+The last 50 crashes are kept in memory and surfaced through `/api/crashes`.
+
+### Post-switch verification
+
+After a successful load, Guardian verifies that the backend process is actually
+running the expected model path. That closes the loop between config intent and
+live backend state.
+
+## 7. Observability Surfaces
+
+Guardian splits operator visibility across the proxy port and the UI port.
+
+### On `:11434`
+
+- `/api/status`: backend health, current model, startup state, switch state,
+  queue state, proxy listener info, security policy, routing hints, scaler
+  config summary
+- `/v1/queue/status`: queue depth, active requests, client position
+- `/metrics`: Prometheus scrape target
+- `/api/crashes`: crash history
+- `/v1/models`: public model metadata, context fields, vision status
+
+### On `:11437`
+
+- `/`: static dashboard UI
+- `/api/stats`: aggregate GPU stats, cached model info, API usage snapshot
+- `/api/benchmark`: read-only summary of historical benchmark state
+
+`ApiUsageTracker` persists dashboard usage data to
+[data/api_usage_state.json](data/api_usage_state.json), so request counters and
+top-client summaries survive Guardian restarts.
+
+## 8. Advisory and Secondary Components
+
+Not every class in the repo currently sits on the hot path.
+
+### `VramScheduler`
+
+`state.scheduler` tracks model-size-based VRAM accounting and is surfaced in the
+UI path, but the active request path does not currently acquire or release it.
+Do not confuse it with the real admission lock; that is still
+`InferenceQueue`.
+
+### `DynamicScaler`
+
+The scaler is exposed through `/api/scaler`, `/api/scaler/reset`, and
+`/api/scaler/recommend`. In current code it acts as an advisory control surface
+and config store, not as a mandatory request-body mutator on every inference
+call.
+
+### `RequestOptimizer`
+
+The optimizer still reads historical benchmark artifacts, but it is not part of
+the current inference hot path. Benchmark start and stop on the UI port return
+`410 Gone`, and the old broad-sweep benchmark runtime lives under
+`app/tweaker/legacy/`.
+
+## 9. Maintenance Window Scheduler
+
+`SchedulerManager` is separate from inference queueing.
+
+- It reads `benchmark.schedule` and `services_to_stop` from
+  [config/settings.yaml](config/settings.yaml).
+- During the configured window, it stops the listed services.
+- Outside that window, it starts them again.
+
+Current code no longer launches a benchmark suite from this loop. The scheduler
+is strictly a service start/stop automation path.
+
+## 10. Current Boundaries
+
+These are intentional or current-state limits that docs should not overclaim:
+
+- Guardian runs one inference slot at a time by design.
+- There is no built-in token-bucket or per-client rate limiter.
+- The dashboard port is not auth-gated in current code.
+- ComfyUI integration is cooperative VRAM release, not full cross-service job
+  orchestration.
+- Historical benchmark helpers still exist, but they are not the live runtime
+  tuning path.
