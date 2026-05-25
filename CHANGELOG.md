@@ -21,6 +21,7 @@
 - Added `docs/SERVER_UPGRADE_PLAN.md`, a normalized English planning document for the next Guardian host hardware upgrade based on the decoded server-upgrade note.
 
 ### Changed
+- `.gitignore` now also ignores repo-local `scratch/` alongside `.scratch/`, and a live open-file sweep confirmed nothing currently has handles open under the tracked repo scratch tree.
 - Added a second operator-focused dashboard pass on `:11437`: p95 latency insight, endpoint-level recent error breakdown, and three live sparklines for request pace, latency trend, and error trend driven from the current filtered recent-activity view.
 - Gave the served `:11437` dashboard a broader operator pass: last-refresh state, manual refresh + pause controls, free-text traffic search, recent-status filtering, client/recent sort controls, traffic-mix insight cards, strongest endpoint/client callouts, progress bars for hot endpoints, sticky table headers, and stronger visual highlighting for error/slow/heavy recent requests.
 - Expanded the served `:11437` dashboard API usage panel with byte counters, average latency, streaming counts, top endpoints, and richer per-client / per-request usage rows; Guardian now tracks best-effort request and response byte totals from HTTP metadata alongside tokens.

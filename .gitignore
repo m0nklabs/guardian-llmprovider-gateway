@@ -41,6 +41,7 @@ guardian.pid
 *.bak
 *.bak_*
 .scratch/
+scratch/
 
 # Data
 data/
