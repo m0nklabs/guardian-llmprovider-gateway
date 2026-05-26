@@ -25,8 +25,9 @@ instead of hard-crashing into CUDA OOM loops or restart storms.
 
 ## What Guardian Actually Does
 
-- Single-slot FIFO inference queue with queue timeout, queue polling, and
-  `X-Request-Id` / `X-Queue-Wait-Ms` headers
+- Single-slot FIFO inference queue with explicit request lifecycle tracking,
+  disconnect-aware cleanup, queue polling, per-request status/cancel endpoints,
+  and `X-Request-Id` / `X-Queue-Wait-Ms` headers
 - Model lifecycle ownership through `sudo systemctl start|stop llama-server`
 - Hot-reloaded model registry from [config/models.yaml](config/models.yaml),
   including aliases, text and vision runtime fields, and switch policy
@@ -108,8 +109,8 @@ Edit these files before the first load:
 
 - [config/models.yaml](config/models.yaml): model paths, aliases, runtime
   fields, pinning, switch allowlist, idle unload
-- [config/settings.yaml](config/settings.yaml): queue timeout, VRAM budget,
-  timeout tiers, ComfyUI URL, maintenance window
+- [config/settings.yaml](config/settings.yaml): queue wait budget telemetry,
+  VRAM budget, timeout tiers, ComfyUI URL, maintenance window
 - [config/api_keys.json](config/api_keys.json): API keys used by clients
 
 Create the first key with the bundled helper:
@@ -172,6 +173,14 @@ curl -sS \
 curl -sS \
   -H "Authorization: Bearer $GUARDIAN_KEY" \
   http://127.0.0.1:11434/v1/queue/status
+
+curl -sS \
+  -H "Authorization: Bearer $GUARDIAN_KEY" \
+  http://127.0.0.1:11434/v1/queue/requests/<request-id>
+
+curl -sS -X DELETE \
+  -H "Authorization: Bearer $GUARDIAN_KEY" \
+  http://127.0.0.1:11434/v1/queue/requests/<request-id>
 ```
 
 ### Open the dashboard

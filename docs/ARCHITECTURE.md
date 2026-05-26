@@ -58,13 +58,22 @@ Non-inference routes stay outside the queue, including `GET /v1/models`,
 
 ### Queue behavior
 
-- Queue depth is tracked with a FIFO waiting list plus an `asyncio.Semaphore`.
+- Queue depth is tracked with explicit request entries and FIFO waiting/active lists.
 - Default concurrency is `1`, from `../config/settings.yaml`.
-- Default queue timeout is `300s`, from `../config/settings.yaml`.
-- Timeout returns `HTTP 429` with `{"error": "queue_timeout", ...}`.
+- Requests move through explicit states: `queued`, `running`, `cancelling`,
+  `cancelled`, `completed`, `failed`, or `expired`.
+- The configured `queue_timeout_seconds` is now advisory wait-budget telemetry
+  for clients and operators; Guardian does not internally drop a live waiter
+  just because it has been queued for 300 seconds.
 - Every queued response carries `X-Request-Id` and `X-Queue-Wait-Ms`.
 - `GET /v1/queue/status` is intentionally not queued, so waiting clients can
   poll their position without making the congestion worse.
+- `GET /v1/queue/requests/{request_id}` returns per-request lifecycle state,
+  and `DELETE /v1/queue/requests/{request_id}` lets a client cancel a queued
+  request or request cancellation of a running one.
+- Guardian watches downstream disconnects while a request is queued or running
+  and converts those into queue cancellation so a dead client cannot orphan the
+  single backend slot.
 
 ### Why the queue matters
 

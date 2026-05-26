@@ -171,21 +171,27 @@ class TestFIFOOrdering:
         assert order == ["first", "second", "third"]
 
 
-# ── Timeout ────────────────────────────────────────────────────────────
+# ── Waiting semantics ─────────────────────────────────────────────────
 
 
-class TestTimeout:
+class TestWaitingSemantics:
     @pytest.mark.asyncio
-    async def test_queue_timeout(self):
-        q = InferenceQueue(max_concurrent=1, queue_timeout=0.1)
+    async def test_waiting_request_is_not_dropped_by_queue_timeout(self):
+        q = InferenceQueue(max_concurrent=1, queue_timeout=0.01)
         rid1 = await q.acquire("blocker", "m")
 
-        with pytest.raises(asyncio.TimeoutError):
-            await q.acquire("waiter", "m")
+        waiter_task = asyncio.create_task(q.acquire("waiter", "m"))
+        await asyncio.sleep(0.05)
 
-        assert q._total_timeouts == 1
-        assert q.waiting_count == 0  # Cleaned up
+        assert not waiter_task.done()
+        status = q.get_status(client_id="waiter")
+        assert status["your_status"] == "queued"
+        assert status["queue_timeout_enforced"] is False
+        assert status["stats"]["total_timeouts"] == 0
+
         q.release(rid1)
+        rid2 = await waiter_task
+        q.release(rid2)
 
 
 # ── Cancellation ───────────────────────────────────────────────────────
@@ -210,6 +216,21 @@ class TestCancellation:
 
         assert q.waiting_count == 0
         q.release(rid1)
+
+    @pytest.mark.asyncio
+    async def test_cancel_marks_running_request_cancelling(self):
+        q = InferenceQueue(max_concurrent=1)
+        rid = await q.acquire("runner", "m")
+
+        status = q.cancel(rid, client_id="runner", reason="client_disconnect")
+
+        assert status is not None
+        assert status["status"] == "cancelling"
+        assert status["cancel_reason"] == "client_disconnect"
+        assert q.is_cancel_requested(rid) is True
+
+        q.finish(rid, outcome="cancelled")
+        assert q.get_request_status(rid, client_id="runner")["status"] == "cancelled"
 
 
 # ── get_status ─────────────────────────────────────────────────────────
@@ -241,7 +262,8 @@ class TestGetStatus:
         rid = await q.acquire("my-client", "m")
         status = q.get_status(client_id="my-client")
         assert status["your_position"] == 0
-        assert status["your_status"] == "processing"
+        assert status["your_status"] == "running"
+        assert status["your_request_id"] == rid
         q.release(rid)
 
     @pytest.mark.asyncio
@@ -268,6 +290,7 @@ class TestGetStatus:
         status = q.get_status(client_id="waiter-client")
         assert status["your_position"] == 1
         assert status["your_status"] == "queued"
+        assert status["your_requests"][0]["request_id"]
 
         q.release(rid1)
         rid2 = await task
@@ -279,9 +302,22 @@ class TestGetStatus:
         ra = await q.acquire("a", "m")
         rb = await q.acquire("b", "m")
         q.release(ra)
-        q.release(rb)
+        q.finish(rb, outcome="failed")
 
         status = q.get_status()
         assert status["stats"]["total_queued"] == 2
-        assert status["stats"]["total_completed"] == 2
+        assert status["stats"]["total_completed"] == 1
+        assert status["stats"]["total_failed"] == 1
         assert status["stats"]["total_timeouts"] == 0
+
+    @pytest.mark.asyncio
+    async def test_request_specific_status(self):
+        q = InferenceQueue(max_concurrent=1)
+        rid = q.submit("client-a", "model-x")
+
+        status = q.get_request_status(rid, client_id="client-a")
+
+        assert status is not None
+        assert status["request_id"] == rid
+        assert status["status"] == "queued"
+        assert status["position"] == 1

@@ -3,9 +3,11 @@
 ## [Unreleased]
 
 ### Added
+- Guardian queue lifecycle endpoints `GET /v1/queue/requests/{request_id}` and `DELETE /v1/queue/requests/{request_id}`, plus richer queue status payloads that expose request states, cancellation counts, and the current wait policy.
 - Ground-up documentation suite for the live Guardian runtime: rewritten `README.md` and `ARCHITECTURE.md`, plus new `HARDWARE_TUNING.md` and `API_REFERENCE.md`, all aligned to the current queue, model lifecycle, systemd-backed backend control, ComfyUI `/free` integration, and finetune v2 behavior.
 
 ### Changed
+- Reworked Guardian's inference queue from a timeout-driven semaphore gate into an explicit request lifecycle state machine. Queued requests now wait safely until they run, disconnect, or are cancelled; downstream disconnects and explicit cancels now clean up waiting/running slots instead of orphaning the backend.
 - Replaced stale documentation claims that implied always-on benchmark/request optimization or broader runtime fencing than the current code actually enforces. The docs now distinguish the active queue and model-manager path from secondary or advisory surfaces such as the scaler, historical benchmark artifacts, and proxy-state VRAM scaffolding.
 - Reorganized the new Guardian documentation under the top-level `docs/` directory so the repo root stays focused on the standard front-door files without introducing unnecessary nested documentation paths.
 
@@ -28,6 +30,8 @@
 - Added `docs/SERVER_UPGRADE_PLAN.md`, a normalized English planning document for the next Guardian host hardware upgrade based on the decoded server-upgrade note.
 
 ### Changed
+- Guardian OpenAI-compatible streams now emit lightweight SSE keepalive comments during long upstream quiet periods, so local stream clients like Hermes do not hit idle read timeouts while Guardian still enforces its own real stall watchdog.
+- Guardian stream-stall watchdog warnings now include request correlation context (`request_id`, route, client, and model) so Hermes-side stream drops can be matched back to the exact stalled proxy stream instead of relying on timestamp-only log correlation.
 - Streaming proxy routes now use a dynamic Guardian-side stall watchdog instead of a flat read timeout: once a stream proves healthy with non-repeating token chunks, the allowed stall window expands in bounded steps, while obviously repeating chunk loops do not earn more time.
 - `.gitignore` now also ignores repo-local `scratch/` alongside `.scratch/`, and a live open-file sweep confirmed nothing currently has handles open under the tracked repo scratch tree.
 - Added a second operator-focused dashboard pass on `:11437`: p95 latency insight, endpoint-level recent error breakdown, and three live sparklines for request pace, latency trend, and error trend driven from the current filtered recent-activity view.
@@ -85,6 +89,7 @@
 - The finetune results log now writes an in-progress run entry immediately and flushes every individual probe to `data/model_finetune_results.json`, so long live searches can be monitored while they are still running or interrupted mid-run.
 
 ### Fixed
+- The OpenAI-compatible and Ollama-compatible queued inference routes now share the same disconnect-aware request cleanup and request outcome tracking, preventing dead clients from leaving zombie queue entries or holding the single-slot backend hostage.
 - `/v1/models/{model_id}` now resolves Guardian public aliases locally instead of forwarding alias lookups to llama-server, so renamed aliases such as `qwen3.6-35b-uncensored` return metadata instead of backend errors.
 - Timeout tiering now recognizes `35B` and `31B` model names as large runtimes instead of falling back to the tiny-model heuristic, so those streams start from a saner base timeout before the new dynamic watchdog expands it.
 - Guardian startup and proxy recovery now treat `__MISMATCH__` as an internal sentinel only: startup adopts a known live backend when no model pin is active, failed forced switches restore a real target model, and auto-reload/connect-error recovery resolves to a configured model instead of trying to load `__MISMATCH__` and returning persistent 503s.

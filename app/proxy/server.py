@@ -13,7 +13,7 @@ import zlib
 from dataclasses import dataclass, field
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
 import yaml
 import httpx
@@ -26,7 +26,7 @@ from app.proxy.optimizer import RequestOptimizer
 from app.proxy.scaler import DynamicScaler
 from app.engine.manager import ModelManager, ModelLoadError
 from app.proxy.auth import verify_api_key
-from app.proxy.queue import InferenceQueue
+from app.proxy.queue import InferenceQueue, QueueRequestCancelled
 from app.proxy.usage import ApiUsageTracker
 from app.proxy.metrics import (
     track_request,
@@ -48,6 +48,9 @@ def load_config() -> dict:
     """Load configuration from settings.yaml with sensible defaults."""
     config_path = Path(__file__).parent.parent.parent / "config" / "settings.yaml"
     default_config = {
+        "proxy": {
+            "stream_heartbeat_seconds": 15,
+        },
         "timeouts": {
             "tiers": {
                 "tier_70b": {"min_size_mb": 40000, "timeout_seconds": 900},
@@ -65,6 +68,8 @@ def load_config() -> dict:
             with open(config_path, 'r') as f:
                 file_config = yaml.safe_load(f) or {}
             # Merge with defaults (file config takes precedence)
+            if "proxy" in file_config:
+                default_config["proxy"].update(file_config["proxy"])
             if "timeouts" in file_config:
                 default_config["timeouts"].update(file_config["timeouts"])
             return default_config
@@ -93,6 +98,18 @@ def _load_vram_limit() -> int:
     return 27000
 
 SAFE_VRAM_LIMIT_MB = _load_vram_limit()
+
+
+def _load_stream_heartbeat_interval_s() -> Optional[float]:
+    """Return the configured SSE heartbeat interval, or None when disabled."""
+    try:
+        interval = float(CONFIG.get("proxy", {}).get("stream_heartbeat_seconds", 15))
+    except (TypeError, ValueError):
+        interval = 15.0
+    return interval if interval > 0 else None
+
+
+STREAM_HEARTBEAT_INTERVAL_S = _load_stream_heartbeat_interval_s()
 
 # Logging
 logging.basicConfig(level=logging.INFO)
@@ -351,27 +368,102 @@ def _build_stream_timeout(base_timeout_s: float) -> httpx.Timeout:
     return httpx.Timeout(connect=10.0, read=None, write=base_timeout_s, pool=base_timeout_s)
 
 
+async def _pump_sse_lines(
+    iterator: AsyncIterator[str],
+    queue: "asyncio.Queue[tuple[str, Optional[Any]]]",
+) -> None:
+    """Read upstream SSE lines without cancelling the underlying iterator during keepalive gaps."""
+    try:
+        async for line in iterator:
+            await queue.put(("line", line))
+    except Exception as exc:
+        await queue.put(("error", exc))
+    else:
+        await queue.put(("eof", None))
+
+
+def _build_sse_keepalive_comment(request_id: Optional[str] = None) -> str:
+    """Emit a lightweight SSE comment to keep downstream clients from idling out."""
+    suffix = f" request_id={request_id}" if request_id else ""
+    return f": guardian-keepalive{suffix}"
+
+
 async def _iter_sse_lines_with_watchdog(
     response: httpx.Response,
     watchdog: StreamProgressWatchdog,
+    *,
+    request_id: Optional[str] = None,
+    route: Optional[str] = None,
+    client_id: Optional[str] = None,
+    model_name: Optional[str] = None,
+    heartbeat_interval_s: Optional[float] = None,
 ) -> AsyncIterator[str]:
-    """Yield SSE lines while enforcing a dynamic stall timeout."""
-    iterator = response.aiter_lines().__aiter__()
-    while True:
-        try:
-            line = await asyncio.wait_for(iterator.__anext__(), timeout=watchdog.current_timeout_s)
-        except StopAsyncIteration:
-            return
-        except asyncio.TimeoutError as exc:
+    """Yield SSE lines while enforcing a dynamic stall timeout and optional downstream keepalives."""
+    queue: "asyncio.Queue[tuple[str, Optional[Any]]]" = asyncio.Queue()
+    pump_task = asyncio.create_task(_pump_sse_lines(response.aiter_lines(), queue))
+    last_data_at = time.monotonic()
+
+    try:
+        while True:
+            timeout_exc: Optional[asyncio.TimeoutError] = None
+            elapsed_without_data_s = time.monotonic() - last_data_at
+            remaining_timeout_s = watchdog.current_timeout_s - elapsed_without_data_s
+            if remaining_timeout_s <= 0:
+                timeout_exc = asyncio.TimeoutError()
+                elapsed_without_data_s = max(elapsed_without_data_s, watchdog.current_timeout_s)
+            else:
+                wait_timeout_s = remaining_timeout_s
+                if heartbeat_interval_s is not None:
+                    wait_timeout_s = min(wait_timeout_s, heartbeat_interval_s)
+                try:
+                    event_type, payload = await asyncio.wait_for(queue.get(), timeout=wait_timeout_s)
+                except asyncio.TimeoutError as exc:
+                    timeout_exc = exc
+                    elapsed_without_data_s = time.monotonic() - last_data_at
+                    remaining_timeout_s = watchdog.current_timeout_s - elapsed_without_data_s
+                    if heartbeat_interval_s is not None and remaining_timeout_s > 0:
+                        yield _build_sse_keepalive_comment(request_id)
+                        yield ""
+                        continue
+                else:
+                    if event_type == "eof":
+                        return
+                    if event_type == "error":
+                        error = payload
+                        if isinstance(error, Exception):
+                            raise error
+                        raise RuntimeError(f"Unexpected SSE pump error payload: {error!r}")
+
+                    line = str(payload or "")
+                    last_data_at = time.monotonic()
+                    watchdog.observe_sse_line(line)
+                    yield line
+                    continue
+
+            context_parts = []
+            if request_id:
+                context_parts.append(f"request_id={request_id}")
+            if route:
+                context_parts.append(f"route={route}")
+            if client_id:
+                context_parts.append(f"client={client_id}")
+            if model_name:
+                context_parts.append(f"model={model_name}")
+            context_suffix = f" [{' '.join(context_parts)}]" if context_parts else ""
             message = (
                 f"Guardian stream stalled after {watchdog.current_timeout_s:.0f}s without new SSE data "
-                f"(healthy_chunks={watchdog.healthy_chunk_count}, loop_detected={watchdog.loop_detected})"
+                f"(healthy_chunks={watchdog.healthy_chunk_count}, loop_detected={watchdog.loop_detected}, "
+                f"silence_s={elapsed_without_data_s:.1f})"
+                f"{context_suffix}"
             )
             logger.warning(message)
-            raise httpx.ReadTimeout(message, request=response.request) from exc
-
-        watchdog.observe_sse_line(line)
-        yield line
+            if timeout_exc is None:
+                raise httpx.ReadTimeout(message, request=response.request)
+            raise httpx.ReadTimeout(message, request=response.request) from timeout_exc
+    finally:
+        pump_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await pump_task
 
 
 def _is_guardian_uvicorn_listener(listener: Optional[Dict[str, Optional[object]]]) -> bool:
@@ -600,6 +692,126 @@ def _queue_headers(request_id: str, queue_wait_ms: float) -> Dict[str, str]:
         "X-Request-Id": request_id,
         "X-Queue-Wait-Ms": str(int(queue_wait_ms)),
     }
+
+
+class _GuardianRequestCancelled(Exception):
+    """Raised when Guardian cancels or abandons a tracked request lifecycle."""
+
+    def __init__(self, request_id: str, reason: str = "cancelled"):
+        super().__init__(f"request {request_id} cancelled: {reason}")
+        self.request_id = request_id
+        self.reason = reason
+
+
+def _request_cancel_http_exception(request_id: str, reason: str) -> HTTPException:
+    """Translate internal request cancellation into a client-facing HTTP error."""
+    return HTTPException(
+        status_code=499,
+        detail={
+            "error": "request_cancelled",
+            "request_id": request_id,
+            "message": reason,
+        },
+    )
+
+
+async def _stop_background_task(task: Optional[asyncio.Task]) -> None:
+    """Cancel and await a background task without leaking cancellation noise."""
+    if task is None:
+        return
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
+
+
+async def _watch_request_disconnect(request: Request, request_id: str, client_id: str) -> None:
+    """Cancel the tracked queue request as soon as the downstream client disconnects."""
+    while True:
+        if await request.is_disconnected():
+            snapshot = inference_queue.cancel(
+                request_id,
+                client_id=client_id,
+                reason="client_disconnected",
+            )
+            logger.info(
+                "🔌 [%s] Client '%s' disconnected (%s)",
+                request_id[:8],
+                client_id,
+                (snapshot or {}).get("status", "unknown"),
+            )
+            return
+        await asyncio.sleep(0.25)
+
+
+async def _begin_queued_request(request: Request, client_id: str, model: str) -> tuple[str, asyncio.Task]:
+    """Register a queue request immediately and wait until Guardian grants a slot."""
+    request_id = inference_queue.submit(client_id, model)
+    disconnect_task = asyncio.create_task(_watch_request_disconnect(request, request_id, client_id))
+    try:
+        await inference_queue.wait_for_turn(request_id)
+    except QueueRequestCancelled as exc:
+        await _stop_background_task(disconnect_task)
+        raise _GuardianRequestCancelled(request_id, exc.reason) from exc
+    return request_id, disconnect_task
+
+
+async def _await_or_cancel_request(
+    operation_task: asyncio.Task,
+    request_id: str,
+    cleanup: Optional[Callable[[], Awaitable[None]]] = None,
+) -> Any:
+    """Wait for backend work to finish, but abort promptly if the tracked request is cancelled."""
+    cancel_event = inference_queue.get_cancel_event(request_id)
+    if cancel_event is None:
+        return await operation_task
+
+    cancel_task = asyncio.create_task(cancel_event.wait())
+    try:
+        done, pending = await asyncio.wait(
+            {operation_task, cancel_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if cancel_task in done and cancel_event.is_set():
+            if cleanup is not None:
+                with suppress(Exception):
+                    await cleanup()
+            if not operation_task.done():
+                operation_task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await operation_task
+            snapshot = inference_queue.get_request_status(request_id)
+            reason = (snapshot or {}).get("cancel_reason", "cancelled")
+            raise _GuardianRequestCancelled(request_id, reason)
+        return await operation_task
+    finally:
+        cancel_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await cancel_task
+
+
+async def _close_stream_resources(response: httpx.Response, client: httpx.AsyncClient) -> None:
+    """Close the upstream streaming response and client without surfacing cleanup noise."""
+    with suppress(Exception):
+        await response.aclose()
+    with suppress(Exception):
+        await client.aclose()
+
+
+async def _close_on_request_cancel(
+    request_id: str,
+    cleanup: Callable[[], Awaitable[None]],
+) -> None:
+    """Wait for request cancellation and then run the provided cleanup coroutine."""
+    cancel_event = inference_queue.get_cancel_event(request_id)
+    if cancel_event is None:
+        return
+    await cancel_event.wait()
+    await cleanup()
+
+
+def _request_outcome(request_id: str) -> str:
+    """Map the tracked request lifecycle to a final queue outcome."""
+    return "cancelled" if inference_queue.is_cancel_requested(request_id) else "completed"
 
 
 def _messages_contain_image_input(messages: List[Dict[str, Any]]) -> bool:
@@ -1366,14 +1578,10 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
 
     logger.info(f"bridge: Ollama chat request for '{model}' -> Translating to OpenAI format")
 
-    # Acquire inference slot (blocks if another request is active)
     try:
-        request_id = await inference_queue.acquire(client_id, model)
-    except asyncio.TimeoutError:
-        raise HTTPException(
-            status_code=429,
-            detail={"error": "queue_timeout", "message": f"Waited {inference_queue.queue_timeout}s in queue"},
-        )
+        request_id, disconnect_task = await _begin_queued_request(request, client_id, model)
+    except _GuardianRequestCancelled as exc:
+        raise _request_cancel_http_exception(exc.request_id, exc.reason)
 
     _release_in_finally = True
     try:
@@ -1475,7 +1683,15 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
         )
         
         try:
-            r = await client.send(req, stream=stream)
+            send_task = asyncio.create_task(client.send(req, stream=stream))
+            r = await _await_or_cancel_request(
+                send_task,
+                request_id,
+                cleanup=client.aclose,
+            )
+        except _GuardianRequestCancelled:
+            await client.aclose()
+            raise
         except Exception as e:
             await client.aclose()
             raise e
@@ -1484,9 +1700,22 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
             usage_totals = {"prompt_tokens": 0, "completion_tokens": 0}
 
             async def stream_adapter():
+                cancel_cleanup_task = asyncio.create_task(
+                    _close_on_request_cancel(
+                        request_id,
+                        lambda: _close_stream_resources(r, client),
+                    )
+                )
                 try:
                     watchdog = StreamProgressWatchdog(timeout_sec)
-                    async for chunk in _iter_sse_lines_with_watchdog(r, watchdog):
+                    async for chunk in _iter_sse_lines_with_watchdog(
+                        r,
+                        watchdog,
+                        request_id=request_id,
+                        route="/api/chat",
+                        client_id=client_id,
+                        model_name=model,
+                    ):
                         if not chunk or chunk.strip() == "data: [DONE]": 
                             continue
                         if chunk.startswith("data: "):
@@ -1516,17 +1745,22 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
                                         yield json.dumps(ollama_chunk) + "\n"
                             except:
                                 pass
-                    # Final done message
-                    yield json.dumps({
-                        "model": model, 
-                        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()), 
-                        "done": True,
-                        "total_duration": 0,
-                        "load_duration": 0,
-                        "prompt_eval_count": 0,
-                        "eval_count": 0
-                    }) + "\n"
+                    if not inference_queue.is_cancel_requested(request_id):
+                        yield json.dumps({
+                            "model": model, 
+                            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()), 
+                            "done": True,
+                            "total_duration": 0,
+                            "load_duration": 0,
+                            "prompt_eval_count": 0,
+                            "eval_count": 0
+                        }) + "\n"
+                except asyncio.CancelledError:
+                    pass
                 finally:
+                    cancel_cleanup_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await cancel_cleanup_task
                     await r.aclose()
                     await client.aclose()
                     _record_request_token_usage(
@@ -1538,7 +1772,8 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
                     )
                     model_manager.active_requests = max(0, model_manager.active_requests - 1)
                     model_manager.last_request_time = time.time()
-                    inference_queue.release(request_id)
+                    inference_queue.finish(request_id, outcome=_request_outcome(request_id))
+                    await _stop_background_task(disconnect_task)
 
             queue_wait_ms = inference_queue.get_queue_wait_ms(request_id)
             response = StreamingResponse(
@@ -1551,7 +1786,12 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
         else:
             # Handle non-streaming response
             try:
-                data = r.json()
+                data = await _await_or_cancel_request(
+                    asyncio.create_task(r.aread()),
+                    request_id,
+                    cleanup=lambda: _close_stream_resources(r, client),
+                )
+                data = json.loads(data)
                 content = _extract_assistant_message_text(data["choices"][0]["message"])
                 _record_usage_from_payload(client_id, "/api/chat", model, data)
                 ollama_resp = {
@@ -1569,15 +1809,18 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
                 model_manager.active_requests = max(0, model_manager.active_requests - 1)
                 model_manager.last_request_time = time.time()
                 return ollama_resp
+            except _GuardianRequestCancelled as exc:
+                raise _request_cancel_http_exception(exc.request_id, exc.reason)
             except Exception as e:
                 await r.aclose()
                 await client.aclose()
                 model_manager.active_requests = max(0, model_manager.active_requests - 1)
                 raise e
     finally:
+        await _stop_background_task(locals().get("disconnect_task"))
         if _release_in_finally:
             model_manager.active_requests = max(0, model_manager.active_requests - 1)
-            inference_queue.release(request_id)
+            inference_queue.finish(request_id, outcome=_request_outcome(request_id))
 
 # Legacy endpoint for Ollama generate
 @app.post("/api/generate")
@@ -1599,14 +1842,10 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
     current_model = await model_manager.get_current_model()
     model = _resolve_inference_model(model, current_model) or model
 
-    # Acquire inference slot
     try:
-        request_id = await inference_queue.acquire(client_id, model)
-    except asyncio.TimeoutError:
-        raise HTTPException(
-            status_code=429,
-            detail={"error": "queue_timeout", "message": f"Waited {inference_queue.queue_timeout}s in queue"},
-        )
+        request_id, disconnect_task = await _begin_queued_request(request, client_id, model)
+    except _GuardianRequestCancelled as exc:
+        raise _request_cancel_http_exception(exc.request_id, exc.reason)
 
     _release_in_finally = True
     try:
@@ -1700,7 +1939,15 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
         )
 
         try:
-            r = await client.send(req, stream=stream)
+            send_task = asyncio.create_task(client.send(req, stream=stream))
+            r = await _await_or_cancel_request(
+                send_task,
+                request_id,
+                cleanup=client.aclose,
+            )
+        except _GuardianRequestCancelled:
+            await client.aclose()
+            raise
         except Exception as e:
             await client.aclose()
             raise e
@@ -1709,9 +1956,22 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
             usage_totals = {"prompt_tokens": 0, "completion_tokens": 0}
 
             async def stream_adapter_generate():
+                cancel_cleanup_task = asyncio.create_task(
+                    _close_on_request_cancel(
+                        request_id,
+                        lambda: _close_stream_resources(r, client),
+                    )
+                )
                 try:
                     watchdog = StreamProgressWatchdog(timeout_sec)
-                    async for chunk in _iter_sse_lines_with_watchdog(r, watchdog):
+                    async for chunk in _iter_sse_lines_with_watchdog(
+                        r,
+                        watchdog,
+                        request_id=request_id,
+                        route="/api/generate",
+                        client_id=client_id,
+                        model_name=model,
+                    ):
                         if not chunk or chunk.strip() == "data: [DONE]": 
                             continue
                         if chunk.startswith("data: "):
@@ -1741,17 +2001,23 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
                                         yield json.dumps(ollama_chunk) + "\n"
                             except:
                                 pass
-                    yield json.dumps({
-                        "model": model, 
-                        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()), 
-                        "done": True,
-                        "response": "",
-                        "total_duration": 0,
-                        "load_duration": 0,
-                        "prompt_eval_count": 0,
-                        "eval_count": 0
-                    }) + "\n"
+                    if not inference_queue.is_cancel_requested(request_id):
+                        yield json.dumps({
+                            "model": model, 
+                            "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()), 
+                            "done": True,
+                            "response": "",
+                            "total_duration": 0,
+                            "load_duration": 0,
+                            "prompt_eval_count": 0,
+                            "eval_count": 0
+                        }) + "\n"
+                except asyncio.CancelledError:
+                    pass
                 finally:
+                    cancel_cleanup_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await cancel_cleanup_task
                     await r.aclose()
                     await client.aclose()
                     _record_request_token_usage(
@@ -1763,7 +2029,8 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
                     )
                     model_manager.active_requests = max(0, model_manager.active_requests - 1)
                     model_manager.last_request_time = time.time()
-                    inference_queue.release(request_id)
+                    inference_queue.finish(request_id, outcome=_request_outcome(request_id))
+                    await _stop_background_task(disconnect_task)
 
             queue_wait_ms = inference_queue.get_queue_wait_ms(request_id)
             response = StreamingResponse(
@@ -1775,7 +2042,12 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
             return response
         else:
             try:
-                data = r.json()
+                data = await _await_or_cancel_request(
+                    asyncio.create_task(r.aread()),
+                    request_id,
+                    cleanup=lambda: _close_stream_resources(r, client),
+                )
+                data = json.loads(data)
                 content = _extract_assistant_message_text(data["choices"][0]["message"])
                 _record_usage_from_payload(client_id, "/api/generate", model, data)
                 ollama_resp = {
@@ -1794,15 +2066,18 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
                 model_manager.active_requests = max(0, model_manager.active_requests - 1)
                 model_manager.last_request_time = time.time()
                 return ollama_resp
+            except _GuardianRequestCancelled as exc:
+                raise _request_cancel_http_exception(exc.request_id, exc.reason)
             except Exception as e:
                 await r.aclose()
                 await client.aclose()
                 model_manager.active_requests = max(0, model_manager.active_requests - 1)
                 raise e
     finally:
+        await _stop_background_task(locals().get("disconnect_task"))
         if _release_in_finally:
             model_manager.active_requests = max(0, model_manager.active_requests - 1)
-            inference_queue.release(request_id)
+            inference_queue.finish(request_id, outcome=_request_outcome(request_id))
 
 
 @app.get("/api/version")
@@ -2174,6 +2449,28 @@ async def queue_status(client_id: str = Depends(verify_api_key)):
     return inference_queue.get_status(client_id=client_id)
 
 
+@app.get("/v1/queue/requests/{request_id}")
+async def queue_request_status(request_id: str, client_id: str = Depends(verify_api_key)):
+    """Return the lifecycle state for one tracked queue request."""
+    snapshot = inference_queue.get_request_status(request_id, client_id=client_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="Queue request not found")
+    return snapshot
+
+
+@app.delete("/v1/queue/requests/{request_id}")
+async def cancel_queue_request(request_id: str, client_id: str = Depends(verify_api_key)):
+    """Cancel a waiting request or request cancellation of a running one."""
+    snapshot = inference_queue.cancel(
+        request_id,
+        client_id=client_id,
+        reason="client_requested_cancel",
+    )
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="Queue request not found")
+    return snapshot
+
+
 # OpenAI-compatible /v1/ routes (used by OpenClaw and other OpenAI-compatible clients)
 @app.get("/v1/{path:path}")
 async def proxy_v1_get(path: str, request: Request, client_id: str = Depends(verify_api_key)):
@@ -2209,12 +2506,9 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
         pass
 
     try:
-        request_id = await inference_queue.acquire(client_id, requested_model)
-    except asyncio.TimeoutError:
-        raise HTTPException(
-            status_code=429,
-            detail={"error": "queue_timeout", "message": f"Waited {inference_queue.queue_timeout}s in queue"},
-        )
+        request_id, disconnect_task = await _begin_queued_request(request, client_id, requested_model)
+    except _GuardianRequestCancelled as exc:
+        raise _request_cancel_http_exception(exc.request_id, exc.reason)
 
     _release_in_finally = True
     try:
@@ -2429,7 +2723,12 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                 headers={"Content-Type": request.headers.get("Content-Type", "application/json")},
             )
             try:
-                resp = await client.send(req, stream=True)
+                send_task = asyncio.create_task(client.send(req, stream=True))
+                resp = await _await_or_cancel_request(
+                    send_task,
+                    request_id,
+                    cleanup=client.aclose,
+                )
             except httpx.ConnectError as e:
                 await client.aclose()
                 await _reload_backend_after_connect_error(path, e)
@@ -2442,10 +2741,18 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                     headers={"Content-Type": request.headers.get("Content-Type", "application/json")},
                 )
                 try:
-                    resp = await client.send(req, stream=True)
+                    send_task = asyncio.create_task(client.send(req, stream=True))
+                    resp = await _await_or_cancel_request(
+                        send_task,
+                        request_id,
+                        cleanup=client.aclose,
+                    )
                 except Exception as retry_error:
                     await client.aclose()
                     raise HTTPException(status_code=502, detail=f"Backend request failed after reload: {retry_error}")
+            except _GuardianRequestCancelled:
+                await client.aclose()
+                raise
             except Exception as e:
                 await client.aclose()
                 raise HTTPException(status_code=502, detail=f"Backend request failed: {e}")
@@ -2481,9 +2788,23 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
             usage_totals = {"prompt_tokens": 0, "completion_tokens": 0}
 
             async def stream_passthrough():
+                cancel_cleanup_task = asyncio.create_task(
+                    _close_on_request_cancel(
+                        request_id,
+                        lambda: _close_stream_resources(resp, client),
+                    )
+                )
                 try:
                     watchdog = StreamProgressWatchdog(timeout_sec)
-                    async for line in _iter_sse_lines_with_watchdog(resp, watchdog):
+                    async for line in _iter_sse_lines_with_watchdog(
+                        resp,
+                        watchdog,
+                        request_id=request_id,
+                        route=f"/v1/{path}",
+                        client_id=client_id,
+                        model_name=active_model_for_request,
+                        heartbeat_interval_s=STREAM_HEARTBEAT_INTERVAL_S,
+                    ):
                         if line.startswith("data: "):
                             try:
                                 data = json.loads(line[6:])
@@ -2502,7 +2823,12 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                             except (TypeError, ValueError, json.JSONDecodeError):
                                 pass
                         yield (line + "\n").encode("utf-8")
+                except asyncio.CancelledError:
+                    pass
                 finally:
+                    cancel_cleanup_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await cancel_cleanup_task
                     await resp.aclose()
                     await client.aclose()
                     _record_request_token_usage(
@@ -2514,7 +2840,8 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                     )
                     model_manager.active_requests = max(0, model_manager.active_requests - 1)
                     model_manager.last_request_time = time.time()
-                    inference_queue.release(request_id)
+                    inference_queue.finish(request_id, outcome=_request_outcome(request_id))
+                    await _stop_background_task(disconnect_task)
 
             queue_wait_ms = inference_queue.get_queue_wait_ms(request_id)
             response = StreamingResponse(
@@ -2531,21 +2858,37 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
         else:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 try:
-                    resp = await client.post(
-                        f"{LLAMA_SERVER_URL}/v1/{path}",
-                        content=body,
-                        headers={"Content-Type": request.headers.get("Content-Type", "application/json")}
+                    post_task = asyncio.create_task(
+                        client.post(
+                            f"{LLAMA_SERVER_URL}/v1/{path}",
+                            content=body,
+                            headers={"Content-Type": request.headers.get("Content-Type", "application/json")},
+                        )
+                    )
+                    resp = await _await_or_cancel_request(
+                        post_task,
+                        request_id,
+                        cleanup=client.aclose,
                     )
                 except httpx.ConnectError as e:
                     await _reload_backend_after_connect_error(path, e)
                     try:
-                        resp = await client.post(
-                            f"{LLAMA_SERVER_URL}/v1/{path}",
-                            content=body,
-                            headers={"Content-Type": request.headers.get("Content-Type", "application/json")}
+                        post_task = asyncio.create_task(
+                            client.post(
+                                f"{LLAMA_SERVER_URL}/v1/{path}",
+                                content=body,
+                                headers={"Content-Type": request.headers.get("Content-Type", "application/json")},
+                            )
+                        )
+                        resp = await _await_or_cancel_request(
+                            post_task,
+                            request_id,
+                            cleanup=client.aclose,
                         )
                     except Exception as retry_error:
                         raise HTTPException(status_code=502, detail=f"Backend request failed after reload: {retry_error}")
+                except _GuardianRequestCancelled as exc:
+                    raise _request_cancel_http_exception(exc.request_id, exc.reason)
                 model_manager.active_requests = max(0, model_manager.active_requests - 1)
                 model_manager.last_request_time = time.time()
                 queue_wait_ms = inference_queue.get_queue_wait_ms(request_id)
@@ -2574,9 +2917,10 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                     headers=dict(resp.headers) | _queue_headers(request_id, queue_wait_ms),
                 )
     finally:
+        await _stop_background_task(locals().get("disconnect_task"))
         if _release_in_finally:
             model_manager.active_requests = max(0, model_manager.active_requests - 1)
-            inference_queue.release(request_id)
+            inference_queue.finish(request_id, outcome=_request_outcome(request_id))
 
 async def start_proxy():
     import uvicorn

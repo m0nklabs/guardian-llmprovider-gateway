@@ -187,6 +187,171 @@ def test_stream_watchdog_refuses_to_extend_repeated_chunks():
     assert watchdog.current_timeout_s == 300.0
 
 
+@pytest.mark.asyncio
+async def test_begin_queued_request_cleans_up_waiter_on_disconnect():
+    queue = server.InferenceQueue(max_concurrent=1)
+    blocker_id = await queue.acquire("blocker", "model-x")
+    disconnected = asyncio.Event()
+
+    class _FakeRequest:
+        async def is_disconnected(self) -> bool:
+            return disconnected.is_set()
+
+    with patch.object(server, "inference_queue", queue):
+        waiter_task = asyncio.create_task(
+            server._begin_queued_request(_FakeRequest(), "waiter-client", "model-x")
+        )
+        await asyncio.sleep(0.05)
+
+        assert queue.waiting_count == 1
+
+        disconnected.set()
+
+        with pytest.raises(server._GuardianRequestCancelled, match="client_disconnected"):
+            await asyncio.wait_for(waiter_task, timeout=1.0)
+
+        status = queue.get_status(client_id="waiter-client")
+        assert status["your_status"] == "cancelled"
+        assert status["your_cancel_reason"] == "client_disconnected"
+        assert queue.waiting_count == 0
+
+    queue.release(blocker_id)
+
+
+@pytest.mark.asyncio
+async def test_await_or_cancel_request_cleans_up_running_request():
+    queue = server.InferenceQueue(max_concurrent=1)
+    request_id = queue.submit("runner", "model-x")
+    await queue.wait_for_turn(request_id)
+    cleanup_called = asyncio.Event()
+
+    async def _cleanup() -> None:
+        cleanup_called.set()
+
+    operation_task = asyncio.create_task(asyncio.sleep(10))
+
+    with patch.object(server, "inference_queue", queue):
+        queue.cancel(request_id, client_id="runner", reason="client_requested_cancel")
+
+        with pytest.raises(server._GuardianRequestCancelled, match="client_requested_cancel"):
+            await server._await_or_cancel_request(operation_task, request_id, cleanup=_cleanup)
+
+        queue.finish(request_id, outcome=server._request_outcome(request_id))
+        assert queue.active_count == 0
+        assert queue.get_request_status(request_id, client_id="runner")["status"] == "cancelled"
+
+    assert cleanup_called.is_set()
+    assert operation_task.cancelled() is True
+
+
+@pytest.mark.asyncio
+async def test_queue_request_status_endpoint_returns_snapshot():
+    queue = server.InferenceQueue(max_concurrent=1)
+    request_id = queue.submit("observer", "model-x")
+
+    with patch.object(server, "inference_queue", queue):
+        snapshot = await server.queue_request_status(request_id, client_id="observer")
+
+    assert snapshot["request_id"] == request_id
+    assert snapshot["status"] == "queued"
+    assert snapshot["position"] == 1
+
+
+@pytest.mark.asyncio
+async def test_cancel_queue_request_endpoint_marks_running_request():
+    queue = server.InferenceQueue(max_concurrent=1)
+    request_id = await queue.acquire("observer", "model-x")
+
+    with patch.object(server, "inference_queue", queue):
+        snapshot = await server.cancel_queue_request(request_id, client_id="observer")
+
+    assert snapshot["request_id"] == request_id
+    assert snapshot["status"] == "cancelling"
+    assert snapshot["cancel_reason"] == "client_requested_cancel"
+
+
+@pytest.mark.asyncio
+async def test_stream_watchdog_emits_keepalive_before_timeout():
+    release_line = asyncio.Event()
+
+    class _FakeResponse:
+        def __init__(self):
+            self.request = server.httpx.Request("POST", "http://127.0.0.1:11440/v1/chat/completions")
+
+        async def aiter_lines(self):
+            await release_line.wait()
+            yield 'data: {"choices": [{"delta": {"content": "hello"}}]}'
+
+    response = _FakeResponse()
+    watchdog = server.StreamProgressWatchdog(base_timeout_s=0.2)
+    stream_iter = server._iter_sse_lines_with_watchdog(
+        response,
+        watchdog,
+        request_id="req-heartbeat",
+        route="/v1/chat/completions",
+        heartbeat_interval_s=0.01,
+    )
+
+    try:
+        first = await asyncio.wait_for(stream_iter.__anext__(), timeout=0.1)
+        second = await asyncio.wait_for(stream_iter.__anext__(), timeout=0.1)
+        release_line.set()
+        third = await asyncio.wait_for(stream_iter.__anext__(), timeout=0.1)
+    finally:
+        await stream_iter.aclose()
+
+    assert first == ": guardian-keepalive request_id=req-heartbeat"
+    assert second == ""
+    assert third.startswith("data: ")
+
+
+@pytest.mark.asyncio
+async def test_stream_watchdog_timeout_logs_request_context():
+    class _NeverYields:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise AssertionError("wait_for should time out before consuming the iterator")
+
+    class _FakeResponse:
+        def __init__(self):
+            self.request = server.httpx.Request("POST", "http://127.0.0.1:11440/v1/chat/completions")
+
+        def aiter_lines(self):
+            return _NeverYields()
+
+    async def _timeout(*args, **kwargs):
+        awaitable = args[0] if args else None
+        if hasattr(awaitable, "close"):
+            awaitable.close()
+        raise asyncio.TimeoutError()
+
+    response = _FakeResponse()
+    watchdog = server.StreamProgressWatchdog(base_timeout_s=300)
+
+    with (
+        patch.object(server.asyncio, "wait_for", side_effect=_timeout),
+        patch.object(server.logger, "warning") as warning_mock,
+    ):
+        stream_iter = server._iter_sse_lines_with_watchdog(
+            response,
+            watchdog,
+            request_id="req-123",
+            route="/v1/chat/completions",
+            client_id="hermes-ai-node",
+            model_name="Qwen3.6-35B-A3B-HauhauCS-Aggressive",
+        )
+
+        with pytest.raises(server.httpx.ReadTimeout, match="request_id=req-123"):
+            await stream_iter.__anext__()
+
+    warning_text = warning_mock.call_args[0][0]
+    assert "route=/v1/chat/completions" in warning_text
+    assert "client=hermes-ai-node" in warning_text
+    assert "model=Qwen3.6-35B-A3B-HauhauCS-Aggressive" in warning_text
+
+
 def test_get_model_size_recognizes_large_35b_and_31b_models():
     assert server.get_model_size("Qwen3.6-35B-A3B-HauhauCS-Aggressive") == 22000
     assert server.get_model_size("gemma-4-31B-it-uncensored-heretic") == 20000

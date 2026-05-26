@@ -137,19 +137,26 @@ This endpoint is **not queued** — it always responds immediately, even when in
   "active_count": 1,
   "max_concurrent": 1,
   "queue_timeout_s": 300,
+  "queue_timeout_enforced": false,
+  "wait_policy": "disconnect_or_cancel",
   "your_position": 2,
   "your_status": "queued",
   "your_wait_s": 12.5,
+  "your_request_id": "28b9fd72-8aed-4426-9645-156a43ec9074",
   "stats": {
     "total_queued": 47,
     "total_completed": 45,
-    "total_timeouts": 0
+    "total_timeouts": 0,
+    "total_cancelled": 2,
+    "total_failed": 0,
+    "total_expired": 0
   },
   "active_requests": [
     {
       "request_id": "28b9fd72",
       "client_id": "m0nk111",
       "model": "GLM-4.7-Flash",
+      "status": "running",
       "elapsed_s": 8.3
     }
   ],
@@ -171,7 +178,9 @@ This endpoint is **not queued** — it always responds immediately, even when in
 |-------|---------|
 | `"idle"` | You have no active or queued requests |
 | `"queued"` | Your request is waiting (check `your_position` and `your_wait_s`) |
-| `"processing"` | Your request is being processed (check `your_elapsed_s`) |
+| `"running"` | Your request is being processed (check `your_elapsed_s`) |
+| `"cancelling"` | Guardian has asked the running backend request to stop |
+| `"cancelled"` | The request will not run or has been stopped |
 
 **`your_position` values:**
 
@@ -181,25 +190,50 @@ This endpoint is **not queued** — it always responds immediately, even when in
 | `0` | Your request is currently being processed |
 | `1+` | Your position in the waiting queue |
 
-### Queue Timeout
+#### 3. Request-Specific Status and Cancel Endpoints (opt-in)
 
-If a request waits longer than the configured timeout (default: 300 seconds), Guardian returns:
+If you capture the `X-Request-Id` header from the inference response, you can
+inspect or control that exact queue entry directly:
 
 ```http
-HTTP/1.1 429 Too Many Requests
+GET /v1/queue/requests/{request_id}
+DELETE /v1/queue/requests/{request_id}
+Authorization: Bearer <api_key>
+```
+
+- `GET` returns the lifecycle snapshot for that request only
+- `DELETE` cancels a queued request immediately or marks a running request as `cancelling`
+- this is the clean server-side way to abort a long wait instead of dropping the HTTP socket and hoping cleanup happens later
+
+### Queue Wait Budget and Cancellation
+
+`queue_timeout_seconds` is now a **server-advertised wait budget**, not an
+internal drop timer. Guardian keeps a healthy queued request alive until it can
+run, unless one of these happens first:
+
+- the downstream client disconnects
+- the client explicitly cancels the request through `DELETE /v1/queue/requests/{request_id}`
+- a higher-level client policy aborts the request locally
+
+When Guardian cancels a request because the client disconnected or explicitly
+cancelled it, the request resolves as:
+
+```http
+HTTP/1.1 499 Client Closed Request
 Content-Type: application/json
 
 {
   "detail": {
-    "error": "queue_timeout",
-    "message": "Waited 300s in queue"
+    "error": "request_cancelled",
+    "request_id": "28b9fd72-8aed-4426-9645-156a43ec9074",
+    "message": "client_disconnected"
   }
 }
 ```
 
-Clients should handle HTTP 429 with a retry or user notification.
-
-> **⚠️ Client timeout warning:** Your HTTP client timeout must be **longer than** `queue_timeout_seconds` (default: 300s) **plus** your expected inference time. If it's shorter, your client will time out *before* Guardian can respond with a meaningful HTTP 429 queue timeout — you'll just see a generic connection timeout instead.
+> **⚠️ Client timeout warning:** Your HTTP client timeout must still be
+> **longer than** `queue_timeout_seconds` (default: 300s) **plus** your expected
+> inference time, because the same HTTP request remains open across both phases.
 >
 > **Rule of thumb:** `client_timeout = queue_timeout_seconds + max_inference_seconds + 30s buffer`
 >
@@ -253,7 +287,9 @@ Just send the request and wait. The queue is transparent — your request blocks
 
 Sufficient for **background tasks** and **batch jobs** where latency doesn't matter. This is the starting point — the other building blocks layer on top of this.
 
-**Timeout rule:** Set `timeout ≥ queue_timeout_seconds + max_inference_time`. Safe default: **600s**.
+**Timeout rule:** Set `timeout ≥ queue_timeout_seconds + max_inference_time`. The
+server no longer 429s healthy waiters, so this timeout is your transport safety
+net, not a mirror of Guardian's queue enforcement. Safe default: **600s**.
 
 ```python
 import httpx
@@ -273,7 +309,7 @@ No queue logic needed. The request blocks server-side until a slot is available.
 
 Run a background task that polls `/v1/queue/status` alongside your inference request. Adds **queue awareness** to any request (blocking or streaming). Benefits:
 
-1. **Progress feedback** — show "position 3 in queue" or "processing..." to users
+1. **Progress feedback** — show "position 3 in queue" or "running..." to users
 2. **Observability** — log queue wait times, detect bottlenecks, feed dashboards
 3. **Phase detection** — know whether you're waiting in queue or in inference (foundation for dynamic timeout)
 
@@ -301,9 +337,7 @@ async def chat_with_status(messages: list, model: str):
                 json={"model": model, "messages": messages, "stream": False},
                 headers=headers,
             )
-
-            if resp.status_code == 429:
-                raise TimeoutError(f"Queue timeout: {resp.json()}")
+          resp.raise_for_status()
 
             # Check how long we waited
             wait_ms = int(resp.headers.get("X-Queue-Wait-Ms", "0"))
@@ -324,8 +358,8 @@ async def _poll_status(client: httpx.AsyncClient, headers: dict, interval: float
             status = info.get("your_status", "idle")
             if status == "queued":
                 print(f"Queue position: {info['your_position']}, waiting: {info['your_wait_s']}s")
-            elif status == "processing":
-                print(f"Processing... elapsed: {info.get('your_elapsed_s', '?')}s")
+            elif status == "running":
+                print(f"Running... elapsed: {info.get('your_elapsed_s', '?')}s")
             await asyncio.sleep(interval)
     except asyncio.CancelledError:
         pass
@@ -357,8 +391,8 @@ async function chatWithStatus(
       body: JSON.stringify({ model, messages, stream: false }),
     });
 
-    if (resp.status === 429) {
-      throw new Error(`Queue timeout: ${await resp.text()}`);
+    if (!resp.ok) {
+      throw new Error(`Guardian request failed: ${resp.status} ${await resp.text()}`);
     }
 
     const waitMs = parseInt(resp.headers.get("X-Queue-Wait-Ms") || "0");
@@ -414,8 +448,7 @@ async def chat_streaming(messages: list, model: str):
             json={"model": model, "messages": messages, "stream": True},
             headers=headers,
         ) as resp:
-            if resp.status_code == 429:
-                raise TimeoutError("Queue timeout")
+            resp.raise_for_status()
 
             # Queue headers are available immediately
             wait_ms = int(resp.headers.get("X-Queue-Wait-Ms", "0"))
@@ -443,7 +476,7 @@ Dynamic timeout separates the request lifecycle into **two independent deadlines
      ↑ deadline 1       ↑ deadline 2    ← each phase has its own budget
 ```
 
-- **Queue deadline**: Match or derive from the server's `queue_timeout_s` (default 300s). No point setting it shorter — the server will 429 you anyway.
+- **Queue deadline**: Match or derive from the server's `queue_timeout_s` (default 300s) as a client-side wait budget. Guardian will keep waiting beyond that if the request is still healthy, but using the server-advertised budget gives your client and operators a shared expectation.
 - **Inference deadline**: Based on your expectations for the model and prompt size. A 50-token prompt on a 7B model finishes in seconds; a 4K-token prompt on a 30B model may need 2 minutes.
 
 **Why this beats static:**
@@ -453,7 +486,7 @@ Dynamic timeout separates the request lifecycle into **two independent deadlines
 | Queue 5s → inference 10s | Waits up to 600s on failure | Detects stuck inference at 90s |
 | Queue 280s → inference 10s | Works, but can't tell phases apart | Queue phase OK, inference starts fresh |
 | Queue 5s → inference stuck | Waits full 600s before giving up | Aborts after 90s of inference |
-| Queue 310s → timeout | Generic timeout, no info | Server 429 with clear "queue_timeout" error |
+| Queue 310s → still waiting | Generic timeout, no info | Client can decide whether to keep waiting or cancel explicitly |
 
 The trick: poll `/v1/queue/status` to know which phase you're in, and apply the
 matching deadline.
@@ -488,13 +521,13 @@ async def chat_with_dynamic_timeout(
     """
     Send an inference request with adaptive per-phase timeouts.
 
-    - Queue deadline is read from the server's queue_timeout_s.
+    - Queue deadline is read from the server's advertised `queue_timeout_s` wait budget.
     - Inference deadline is caller-defined (default: 120s).
     - The HTTP-level timeout is a safety net covering both phases.
     """
     headers = {"Authorization": f"Bearer {API_KEY}"}
 
-    # Step 1: Read the server's queue timeout to set our safety-net HTTP timeout
+    # Step 1: Read the server's advertised queue wait budget to size the safety-net HTTP timeout
     async with httpx.AsyncClient(timeout=10.0) as probe:
         status = (await probe.get(
             f"{GUARDIAN_URL}/v1/queue/status", headers=headers
@@ -522,8 +555,7 @@ async def chat_with_dynamic_timeout(
                 headers=headers,
             )
 
-            if resp.status_code == 429:
-                raise TimeoutError(f"Queue timeout: {resp.json()}")
+            resp.raise_for_status()
 
             wait_ms = int(resp.headers.get("X-Queue-Wait-Ms", "0"))
             return {
@@ -563,7 +595,7 @@ async def _dynamic_monitor(
                 print(f"⏳ Queue position {pos}, waiting {wait:.0f}s")
                 inference_started_at = None  # reset if re-queued
 
-            elif status == "processing":
+            elif status == "running":
                 if inference_started_at is None:
                     inference_started_at = time.monotonic()
                     print("🧠 Inference started")
@@ -638,7 +670,7 @@ async def streaming_chat_with_dynamic_timeout(
     on_token = on_token or (lambda t: print(t, end="", flush=True))
     on_status = on_status or (lambda phase, detail: None)
 
-    # Read server's queue timeout for safety-net HTTP timeout
+    # Read server's advertised queue wait budget for the safety-net HTTP timeout
     async with httpx.AsyncClient(timeout=10.0) as probe:
         status = (await probe.get(
             f"{GUARDIAN_URL}/v1/queue/status", headers=headers
@@ -664,8 +696,7 @@ async def streaming_chat_with_dynamic_timeout(
                 json={"model": model, "messages": messages, "stream": True},
                 headers=headers,
             ) as resp:
-                if resp.status_code == 429:
-                    raise TimeoutError(f"Queue timeout: {await resp.aread()}")
+              resp.raise_for_status()
 
                 wait_ms = int(resp.headers.get("X-Queue-Wait-Ms", "0"))
                 on_status("connected", f"queue wait: {wait_ms}ms")
@@ -712,7 +743,7 @@ async def _phase_monitor(
                 on_status("queued", f"position {pos}, {wait:.0f}s")
                 inference_started_at = None
 
-            elif phase == "processing":
+            elif phase == "running":
                 if inference_started_at is None:
                     inference_started_at = time.monotonic()
                     on_status("inference_start", "model is generating")
@@ -976,7 +1007,7 @@ curl -X POST -H "Authorization: Bearer $KEY" \
 |-------------|---------|---------------|
 | 200 | Success | Process response normally |
 | 401 | Invalid/missing API key | Check your Bearer token |
-| 429 | Queue timeout | Retry after delay, or notify user |
+| 499 | Request cancelled by Guardian after disconnect or explicit cancel | Treat as client-side cancellation / closed request |
 | 500 | Backend error | Log and retry; check `/api/status` for health |
 | 503 | Model not loaded / backend down | Wait and retry; Guardian auto-reloads on next request |
 
@@ -989,5 +1020,5 @@ Queue behavior is configured in `config/settings.yaml`:
 ```yaml
 queue:
   max_concurrent: 1              # Simultaneous inference slots (match llama-server --parallel)
-  queue_timeout_seconds: 300     # Max wait time before HTTP 429
+  queue_timeout_seconds: 300     # Advertised queue wait budget for clients and status polling
 ```

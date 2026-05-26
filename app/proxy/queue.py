@@ -1,57 +1,106 @@
 """Inference request queue for Guardian middleware.
 
-Serializes access to the single-slot llama-server backend.
-Only one inference request is processed at a time; others wait in FIFO order.
-Clients can poll GET /v1/queue/status for position info without polluting
-the OpenAI-compatible response stream.
+Serializes access to the single-slot llama-server backend while keeping a real
+request lifecycle: queued, running, cancelling, cancelled, completed, failed,
+or expired. Waiting clients are no longer dropped by Guardian's own queue
+timeout; they stay queued until they disconnect or the request is cancelled.
 """
 
 import asyncio
-import uuid
-import time
 import logging
-from typing import Optional, List
+import time
+import uuid
 from dataclasses import dataclass, field
+from typing import Dict, List, Optional
 
 logger = logging.getLogger("Queue")
+
+FINAL_STATES = {"completed", "cancelled", "failed", "expired"}
+ACTIVE_STATES = {"running", "cancelling"}
+
+
+class QueueRequestCancelled(Exception):
+    """Raised when a queued request is cancelled before it can run."""
+
+    def __init__(self, request_id: str, reason: str = "cancelled"):
+        super().__init__(f"request {request_id} was cancelled: {reason}")
+        self.request_id = request_id
+        self.reason = reason
 
 
 @dataclass
 class QueueEntry:
-    """Represents a request in the inference queue."""
+    """Represents a request tracked by Guardian's inference queue."""
+
     request_id: str
     client_id: str
     model: str
     enqueued_at: float
-    started_at: Optional[float] = None  # Set when inference begins
+    status: str = "queued"
+    started_at: Optional[float] = None
+    completed_at: Optional[float] = None
+    cancel_requested_at: Optional[float] = None
+    cancel_reason: Optional[str] = None
+    detail: Optional[str] = None
+    cancel_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False, compare=False)
+
+    def snapshot(self, now: Optional[float] = None, position: Optional[int] = None) -> dict:
+        """Return a client-facing status payload for this queue entry."""
+        now = now or time.time()
+        payload = {
+            "request_id": self.request_id,
+            "client_id": self.client_id,
+            "model": self.model,
+            "status": self.status,
+            "enqueued_at": self.enqueued_at,
+        }
+        if position is not None:
+            payload["position"] = position
+        if self.started_at is not None:
+            queue_wait_s = max(self.started_at - self.enqueued_at, 0.0)
+            payload["started_at"] = self.started_at
+            payload["queue_wait_s"] = round(queue_wait_s, 1)
+            payload["queue_wait_ms"] = round(queue_wait_s * 1000.0, 1)
+        if self.status == "queued":
+            payload["waiting_s"] = round(max(now - self.enqueued_at, 0.0), 1)
+        if self.status in ACTIVE_STATES:
+            payload["elapsed_s"] = round(max(now - (self.started_at or self.enqueued_at), 0.0), 1)
+        if self.cancel_requested_at is not None:
+            payload["cancel_requested_at"] = self.cancel_requested_at
+        if self.completed_at is not None:
+            payload["completed_at"] = self.completed_at
+            payload["total_s"] = round(max(self.completed_at - self.enqueued_at, 0.0), 1)
+        if self.cancel_reason:
+            payload["cancel_reason"] = self.cancel_reason
+        if self.detail:
+            payload["detail"] = self.detail
+        return payload
 
 
 class InferenceQueue:
-    """FIFO queue serializing access to llama-server.
+    """FIFO queue serializing access to llama-server with explicit request state."""
 
-    - ``max_concurrent`` slots (default 1) can run simultaneously.
-    - Waiters block on an ``asyncio.Semaphore``; CPython asyncio uses FIFO
-      ordering for semaphore waiters.
-    - A parallel tracking list allows the status endpoint to report positions.
-    - ``queue_timeout`` caps how long a request waits before getting a slot.
-    """
-
-    def __init__(self, max_concurrent: int = 1, queue_timeout: float = 300.0):
-        self._semaphore = asyncio.Semaphore(max_concurrent)
-        self._waiting: List[QueueEntry] = []
-        self._active: List[QueueEntry] = []
-        self._lock = asyncio.Lock()  # Protects _waiting / _active mutations
+    def __init__(
+        self,
+        max_concurrent: int = 1,
+        queue_timeout: float = 300.0,
+        history_ttl: float = 900.0,
+    ):
         self.max_concurrent = max_concurrent
         self.queue_timeout = queue_timeout
+        self.history_ttl = history_ttl
 
-        # Lifetime counters
+        self._waiting: List[str] = []
+        self._active: List[str] = []
+        self._entries: Dict[str, QueueEntry] = {}
+        self._change_event = asyncio.Event()
+
         self._total_queued = 0
         self._total_completed = 0
         self._total_timeouts = 0
-
-    # ------------------------------------------------------------------
-    # Public properties
-    # ------------------------------------------------------------------
+        self._total_cancelled = 0
+        self._total_failed = 0
+        self._total_expired = 0
 
     @property
     def active_count(self) -> int:
@@ -61,158 +110,297 @@ class InferenceQueue:
     def waiting_count(self) -> int:
         return len(self._waiting)
 
-    # ------------------------------------------------------------------
-    # Slot acquire / release
-    # ------------------------------------------------------------------
+    def _signal_change(self) -> None:
+        current = self._change_event
+        current.set()
+        self._change_event = asyncio.Event()
 
-    async def acquire(self, client_id: str, model: str) -> str:
-        """Enter the queue.  Blocks until a slot is available.
+    def _prune_history(self) -> None:
+        if self.history_ttl <= 0:
+            return
+        cutoff = time.time() - self.history_ttl
+        for request_id, entry in list(self._entries.items()):
+            if request_id in self._waiting or request_id in self._active:
+                continue
+            if entry.completed_at is None or entry.completed_at >= cutoff:
+                continue
+            self._entries.pop(request_id, None)
 
-        Returns a ``request_id`` (UUID) that the caller must pass to
-        ``release()`` when done.
+    def _get_entry(self, request_id: str) -> Optional[QueueEntry]:
+        self._prune_history()
+        return self._entries.get(request_id)
 
-        Raises ``asyncio.TimeoutError`` if *queue_timeout* is exceeded.
-        Raises ``asyncio.CancelledError`` if the client disconnects while
-        waiting.
-        """
-        request_id = str(uuid.uuid4())
+    def submit(self, client_id: str, model: str, request_id: Optional[str] = None) -> str:
+        """Register a new queued request and return its request id immediately."""
+        self._prune_history()
+        request_id = request_id or str(uuid.uuid4())
+        if request_id in self._entries:
+            raise ValueError(f"request_id '{request_id}' is already in use")
+
         entry = QueueEntry(
             request_id=request_id,
             client_id=client_id,
             model=model,
             enqueued_at=time.time(),
         )
+        self._entries[request_id] = entry
+        self._waiting.append(request_id)
+        self._total_queued += 1
 
-        async with self._lock:
-            self._waiting.append(entry)
-            self._total_queued += 1
-            position = len(self._waiting)
-
+        position = len(self._waiting)
         if position > 1:
             logger.info(
-                f"📋 [{request_id[:8]}] Queued at position {position} "
-                f"(client: {client_id}, model: {model})"
+                "📋 [%s] Queued at position %s (client: %s, model: %s)",
+                request_id[:8],
+                position,
+                client_id,
+                model,
             )
-
-        try:
-            await asyncio.wait_for(
-                self._semaphore.acquire(),
-                timeout=self.queue_timeout,
-            )
-        except asyncio.TimeoutError:
-            async with self._lock:
-                self._waiting = [e for e in self._waiting if e.request_id != request_id]
-                self._total_timeouts += 1
-            logger.warning(
-                f"⏰ [{request_id[:8]}] Queue timeout after {self.queue_timeout}s "
-                f"(client: {client_id})"
-            )
-            raise
-        except asyncio.CancelledError:
-            async with self._lock:
-                self._waiting = [e for e in self._waiting if e.request_id != request_id]
-            logger.info(f"🚫 [{request_id[:8]}] Cancelled while queued (client: {client_id})")
-            raise
-
-        # Got the slot — move from waiting → active
-        entry.started_at = time.time()
-        async with self._lock:
-            self._waiting = [e for e in self._waiting if e.request_id != request_id]
-            self._active.append(entry)
-
-        wait_time = entry.started_at - entry.enqueued_at
-        if wait_time > 0.1:
-            logger.info(f"🟢 [{request_id[:8]}] Slot acquired after {wait_time:.1f}s wait")
-
+        self._signal_change()
         return request_id
 
-    def release(self, request_id: str) -> float:
-        """Release a slot.  Returns total time (enqueue → now) in **ms**.
+    async def wait_for_turn(self, request_id: str) -> str:
+        """Block until the request reaches the front of the queue and can run."""
+        while True:
+            entry = self._get_entry(request_id)
+            if entry is None:
+                raise QueueRequestCancelled(request_id, "unknown_request")
 
-        Safe to call multiple times — subsequent calls are no-ops.
-        """
-        total_ms = 0.0
-        found = False
-        for i, entry in enumerate(self._active):
-            if entry.request_id == request_id:
-                total_ms = (time.time() - entry.enqueued_at) * 1000
-                self._active.pop(i)
-                self._total_completed += 1
-                found = True
-                break
+            if entry.status in FINAL_STATES:
+                raise QueueRequestCancelled(request_id, entry.cancel_reason or entry.status)
 
-        if found:
-            self._semaphore.release()
-            logger.debug(f"🔓 [{request_id[:8]}] Released slot ({total_ms:.0f}ms total)")
+            if entry.cancel_event.is_set():
+                self.cancel(request_id, reason=entry.cancel_reason or "cancelled")
+                raise QueueRequestCancelled(request_id, entry.cancel_reason or "cancelled")
+
+            if entry.status == "queued" and self._waiting and self._waiting[0] == request_id and len(self._active) < self.max_concurrent:
+                self._waiting.pop(0)
+                entry.status = "running"
+                entry.started_at = time.time()
+                self._active.append(request_id)
+                wait_time = entry.started_at - entry.enqueued_at
+                if wait_time > 0.1:
+                    logger.info("🟢 [%s] Slot acquired after %.1fs wait", request_id[:8], wait_time)
+                self._signal_change()
+                return request_id
+
+            wait_event = self._change_event
+            wait_task = asyncio.create_task(wait_event.wait())
+            cancel_task = asyncio.create_task(entry.cancel_event.wait())
+            try:
+                try:
+                    done, pending = await asyncio.wait(
+                        {wait_task, cancel_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                except asyncio.CancelledError:
+                    self.cancel(request_id, reason="wait_cancelled")
+                    raise
+                for task in pending:
+                    task.cancel()
+                for task in pending:
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                if cancel_task in done and entry.cancel_event.is_set():
+                    self.cancel(request_id, reason=entry.cancel_reason or "cancelled")
+            finally:
+                if not wait_task.done():
+                    wait_task.cancel()
+                if not cancel_task.done():
+                    cancel_task.cancel()
+
+    async def acquire(self, client_id: str, model: str) -> str:
+        """Legacy convenience wrapper: submit then wait for execution."""
+        request_id = self.submit(client_id, model)
+        await self.wait_for_turn(request_id)
+        return request_id
+
+    def cancel(
+        self,
+        request_id: str,
+        *,
+        client_id: Optional[str] = None,
+        reason: str = "cancelled",
+        detail: Optional[str] = None,
+    ) -> Optional[dict]:
+        """Cancel a queued request or request cancellation of a running one."""
+        entry = self._get_entry(request_id)
+        if entry is None:
+            return None
+        if client_id is not None and entry.client_id != client_id:
+            return None
+
+        now = time.time()
+        entry.cancel_reason = reason
+        if detail:
+            entry.detail = detail
+        entry.cancel_event.set()
+
+        if entry.status == "queued":
+            if request_id in self._waiting:
+                self._waiting.remove(request_id)
+            entry.status = "cancelled"
+            entry.cancel_requested_at = now
+            entry.completed_at = now
+            self._total_cancelled += 1
+            logger.info("🚫 [%s] Cancelled while queued (%s)", request_id[:8], reason)
+        elif entry.status in ACTIVE_STATES or entry.status == "running":
+            entry.status = "cancelling"
+            entry.cancel_requested_at = now
+            logger.info("🛑 [%s] Cancellation requested while running (%s)", request_id[:8], reason)
+
+        self._signal_change()
+        return self.get_request_status(request_id, client_id=client_id)
+
+    def finish(self, request_id: str, outcome: str = "completed", detail: Optional[str] = None) -> float:
+        """Finalize a request and free its slot if it was running."""
+        entry = self._get_entry(request_id)
+        if entry is None:
+            return 0.0
+
+        if entry.completed_at is not None and entry.status in FINAL_STATES:
+            return 0.0
+
+        if request_id in self._waiting:
+            self._waiting.remove(request_id)
+        if request_id in self._active:
+            self._active.remove(request_id)
+
+        now = time.time()
+        entry.completed_at = now
+        if detail:
+            entry.detail = detail
+
+        if outcome == "cancelled":
+            entry.status = "cancelled"
+            entry.cancel_requested_at = entry.cancel_requested_at or now
+            entry.cancel_reason = entry.cancel_reason or detail or "cancelled"
+            self._total_cancelled += 1
+        elif outcome == "failed":
+            entry.status = "failed"
+            self._total_failed += 1
+        elif outcome == "expired":
+            entry.status = "expired"
+            self._total_expired += 1
+        elif outcome == "timeout":
+            entry.status = "expired"
+            entry.cancel_reason = entry.cancel_reason or "queue_timeout"
+            self._total_timeouts += 1
+            self._total_expired += 1
+        else:
+            entry.status = "completed"
+            self._total_completed += 1
+
+        self._signal_change()
+        total_ms = max((now - entry.enqueued_at) * 1000.0, 0.0)
+        logger.debug("🔓 [%s] Finalized as %s (%.0fms total)", request_id[:8], entry.status, total_ms)
         return total_ms
 
-    def get_queue_wait_ms(self, request_id: str) -> float:
-        """Return how long the request waited in the queue (enqueue → start) in ms."""
-        for entry in self._active:
-            if entry.request_id == request_id and entry.started_at:
-                return (entry.started_at - entry.enqueued_at) * 1000
-        return 0.0
+    def release(self, request_id: str) -> float:
+        """Legacy alias for ``finish(..., outcome='completed')``."""
+        return self.finish(request_id, outcome="completed")
 
-    # ------------------------------------------------------------------
-    # Status reporting
-    # ------------------------------------------------------------------
+    def get_cancel_event(self, request_id: str) -> Optional[asyncio.Event]:
+        """Return the cancellation event for a tracked request, if present."""
+        entry = self._get_entry(request_id)
+        return entry.cancel_event if entry is not None else None
+
+    def is_cancel_requested(self, request_id: str) -> bool:
+        """Return whether the request has a pending cancellation signal."""
+        event = self.get_cancel_event(request_id)
+        return event.is_set() if event is not None else False
+
+    def get_queue_wait_ms(self, request_id: str) -> float:
+        """Return how long the request waited in the queue before it started, in ms."""
+        entry = self._get_entry(request_id)
+        if entry is None or entry.started_at is None:
+            return 0.0
+        return max((entry.started_at - entry.enqueued_at) * 1000.0, 0.0)
+
+    def get_request_status(self, request_id: str, client_id: Optional[str] = None) -> Optional[dict]:
+        """Return a request-specific status payload, if visible to the caller."""
+        entry = self._get_entry(request_id)
+        if entry is None:
+            return None
+        if client_id is not None and entry.client_id != client_id:
+            return None
+
+        position = None
+        if request_id in self._waiting:
+            position = self._waiting.index(request_id) + 1
+        elif request_id in self._active:
+            position = 0
+        else:
+            position = -1
+        return entry.snapshot(now=time.time(), position=position)
 
     def get_status(self, client_id: Optional[str] = None) -> dict:
         """Build a status dict for the ``GET /v1/queue/status`` endpoint."""
+        self._prune_history()
+        now = time.time()
         result: dict = {
             "queue_length": len(self._waiting),
             "active_count": len(self._active),
             "max_concurrent": self.max_concurrent,
             "queue_timeout_s": self.queue_timeout,
+            "queue_timeout_enforced": False,
+            "wait_policy": "disconnect_or_cancel",
             "stats": {
                 "total_queued": self._total_queued,
                 "total_completed": self._total_completed,
                 "total_timeouts": self._total_timeouts,
+                "total_cancelled": self._total_cancelled,
+                "total_failed": self._total_failed,
+                "total_expired": self._total_expired,
             },
         }
 
         if self._active:
             result["active_requests"] = [
-                {
-                    "request_id": e.request_id[:8],
-                    "client_id": e.client_id,
-                    "model": e.model,
-                    "elapsed_s": round(time.time() - (e.started_at or e.enqueued_at), 1),
-                }
-                for e in self._active
+                self._entries[request_id].snapshot(now=now, position=0)
+                for request_id in self._active
+                if request_id in self._entries
             ]
 
         if self._waiting:
             result["waiting"] = [
-                {
-                    "position": i + 1,
-                    "request_id": e.request_id[:8],
-                    "client_id": e.client_id,
-                    "model": e.model,
-                    "waiting_s": round(time.time() - e.enqueued_at, 1),
-                }
-                for i, e in enumerate(self._waiting)
+                self._entries[request_id].snapshot(now=now, position=index + 1)
+                for index, request_id in enumerate(self._waiting)
+                if request_id in self._entries
             ]
 
-        # Per-client view
         if client_id:
-            for i, e in enumerate(self._waiting):
-                if e.client_id == client_id:
-                    result["your_position"] = i + 1
-                    result["your_status"] = "queued"
-                    result["your_wait_s"] = round(time.time() - e.enqueued_at, 1)
-                    break
+            your_requests = [
+                entry.snapshot(
+                    now=now,
+                    position=(self._waiting.index(entry.request_id) + 1)
+                    if entry.request_id in self._waiting
+                    else (0 if entry.request_id in self._active else -1),
+                )
+                for entry in self._entries.values()
+                if entry.client_id == client_id
+            ]
+            your_requests.sort(key=lambda item: item["enqueued_at"], reverse=True)
+            result["your_requests"] = your_requests
+
+            active_match = next((item for item in your_requests if item["status"] in ACTIVE_STATES), None)
+            queued_match = next((item for item in your_requests if item["status"] == "queued"), None)
+            latest_match = active_match or queued_match or (your_requests[0] if your_requests else None)
+
+            if latest_match is None:
+                result["your_position"] = -1
+                result["your_status"] = "idle"
             else:
-                for e in self._active:
-                    if e.client_id == client_id:
-                        result["your_position"] = 0
-                        result["your_status"] = "processing"
-                        result["your_elapsed_s"] = round(
-                            time.time() - (e.started_at or e.enqueued_at), 1
-                        )
-                        break
-                else:
-                    result["your_position"] = -1
-                    result["your_status"] = "idle"
+                result["your_position"] = latest_match.get("position", -1)
+                result["your_status"] = latest_match["status"]
+                result["your_request_id"] = latest_match["request_id"]
+                if "waiting_s" in latest_match:
+                    result["your_wait_s"] = latest_match["waiting_s"]
+                if "elapsed_s" in latest_match:
+                    result["your_elapsed_s"] = latest_match["elapsed_s"]
+                if "cancel_reason" in latest_match:
+                    result["your_cancel_reason"] = latest_match["cancel_reason"]
 
         return result

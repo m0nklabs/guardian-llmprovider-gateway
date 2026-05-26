@@ -15,9 +15,10 @@ proxy:
   port: 11434
   target: http://localhost:11440
   vram_limit_mb: 27000
+  stream_heartbeat_seconds: 15
 queue:
   max_concurrent: 1
-  queue_timeout_seconds: 300
+  queue_timeout_seconds: 300  # advisory queue wait budget for clients/status, not an internal 429 drop timer
 services:
   comfyui_url: http://127.0.0.1:8188
 timeouts:

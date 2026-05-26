@@ -27,8 +27,15 @@ Queued inference responses include:
 - `X-Request-Id`: Guardian UUID for the queued request
 - `X-Queue-Wait-Ms`: time spent waiting before inference started
 
-If the request waits longer than `queue.queue_timeout_seconds`, Guardian
-returns `429` with a `queue_timeout` error payload.
+Guardian keeps a live queued request waiting until one of these things happens:
+
+- the request reaches the front of the queue and runs
+- the client disconnects and Guardian cancels it
+- the client explicitly cancels it through `DELETE /v1/queue/requests/{request_id}`
+
+The configured `queue.queue_timeout_seconds` is surfaced as queue-budget
+telemetry in status responses, but Guardian no longer drops a healthy waiter
+just because that budget has elapsed.
 
 There is no token-bucket or per-client rate limiter in current code.
 Backpressure is enforced by the FIFO inference queue and model-size-dependent
@@ -43,7 +50,8 @@ Common statuses:
 - `401`: missing or invalid API key
 - `404`: model metadata lookup failed
 - `422`: vision runtime unavailable or backend image path rejected
-- `429`: queue timeout
+- `499`: Guardian cancelled the request because the downstream client
+  disconnected or the client explicitly cancelled its queue entry
 - `500`: unexpected switch or proxy failure
 - `503`: model load, auto-reload, or backend recovery failure
 - `410`: legacy benchmark start/stop endpoints are disabled
@@ -258,6 +266,8 @@ Queue rule for generic `POST /v1/{path:path}`:
 | Method | Path | Queued | Purpose |
 | --- | --- | --- | --- |
 | `GET` | `/v1/queue/status` | No | Return queue depth, active requests, and per-client status |
+| `GET` | `/v1/queue/requests/{request_id}` | No | Return lifecycle state for one tracked queued request |
+| `DELETE` | `/v1/queue/requests/{request_id}` | No | Cancel a queued request or request cancellation of a running one |
 | `GET` | `/api/status` | No | Return backend, queue, startup, switch, proxy, and security state |
 | `GET` | `/api/crashes` | No | Return crash history and the last crash |
 
@@ -271,14 +281,51 @@ Representative response:
   "active_count": 1,
   "max_concurrent": 1,
   "queue_timeout_s": 300,
+  "queue_timeout_enforced": false,
+  "wait_policy": "disconnect_or_cancel",
   "stats": {
     "total_queued": 12,
     "total_completed": 11,
-    "total_timeouts": 0
+    "total_timeouts": 0,
+    "total_cancelled": 1,
+    "total_failed": 0,
+    "total_expired": 0
   },
   "your_position": 1,
   "your_status": "queued",
-  "your_wait_s": 3.2
+  "your_wait_s": 3.2,
+  "your_request_id": "28b9fd72-8aed-4426-9645-156a43ec9074"
+}
+```
+
+#### `GET /v1/queue/requests/{request_id}`
+
+Representative response:
+
+```json
+{
+  "request_id": "28b9fd72-8aed-4426-9645-156a43ec9074",
+  "client_id": "telegram-grow-bot",
+  "model": "qwen3.6-35b-uncensored",
+  "status": "queued",
+  "position": 1,
+  "enqueued_at": 1748262000.0,
+  "waiting_s": 14.2
+}
+```
+
+#### `DELETE /v1/queue/requests/{request_id}`
+
+Representative response for a running request:
+
+```json
+{
+  "request_id": "28b9fd72-8aed-4426-9645-156a43ec9074",
+  "client_id": "telegram-grow-bot",
+  "model": "qwen3.6-35b-uncensored",
+  "status": "cancelling",
+  "position": 0,
+  "cancel_reason": "client_requested_cancel"
 }
 ```
 
