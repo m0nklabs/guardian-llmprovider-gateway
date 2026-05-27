@@ -203,6 +203,50 @@ def test_stream_watchdog_refuses_to_extend_repeated_chunks():
     assert watchdog.current_timeout_s == 300.0
 
 
+def test_get_usage_attribution_falls_back_to_request_headers_without_auth_context():
+    request = SimpleNamespace(
+        state=SimpleNamespace(),
+        scope={},
+        client=SimpleNamespace(host="10.0.0.8", port=5555),
+        headers={
+            "authorization": "Bearer definitely-not-a-real-key",
+            "host": "guardian.local",
+            "user-agent": "guardian-debug-check/1.0",
+        },
+    )
+
+    attribution = server._get_usage_attribution(request)
+
+    assert attribution["source_ip"] == "10.0.0.8"
+    assert attribution["header_name"] == "authorization"
+    assert attribution["key_prefix"] == "legacy"
+    assert attribution["key_fingerprint"]
+    assert attribution["user_agent"] == "guardian-debug-check/1.0"
+    assert attribution["valid"] is False
+
+
+def test_start_live_request_usage_seeds_request_auth_context(tmp_path: Path):
+    tracker = server.ApiUsageTracker(state_file=tmp_path / "usage_state.json")
+    request = SimpleNamespace(
+        state=SimpleNamespace(),
+        scope={},
+        client=SimpleNamespace(host="10.0.0.8", port=5555),
+        headers={"user-agent": "guardian-missing-key/1.0"},
+        url=SimpleNamespace(path="/v1/models"),
+        method="GET",
+    )
+
+    with patch.object(server, "state", SimpleNamespace(api_usage=tracker)):
+        server._start_live_request_usage(request)
+
+    assert request.state.auth_context["source_ip"] == "10.0.0.8"
+    assert request.state.auth_context["user_agent"] == "guardian-missing-key/1.0"
+    assert request.scope["guardian_auth_context"]["source_ip"] == "10.0.0.8"
+    snapshot = tracker.snapshot()
+    assert snapshot["active_requests"][0]["source_ip"] == "10.0.0.8"
+    assert snapshot["active_requests"][0]["user_agent"] == "guardian-missing-key/1.0"
+
+
 @pytest.mark.asyncio
 async def test_begin_queued_request_cleans_up_waiter_on_disconnect():
     queue = server.InferenceQueue(max_concurrent=1)

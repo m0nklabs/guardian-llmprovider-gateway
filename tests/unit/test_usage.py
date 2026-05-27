@@ -333,6 +333,36 @@ class TestApiUsageTracker:
         assert snapshot["summary"]["total_errors"] == 1
         assert snapshot["summary"]["unauthenticated_requests"] == 1
 
+    def test_preserves_unauthenticated_request_attribution_details(self, tmp_path):
+        """Unauthenticated history rows should still retain non-secret source metadata."""
+        tracker = ApiUsageTracker(state_file=tmp_path / "usage_state.json")
+
+        tracker.record_request(
+            client_id=None,
+            endpoint="/v1/models",
+            method="GET",
+            status_code=401,
+            attribution={
+                "header_name": "authorization",
+                "key_prefix": "legacy",
+                "key_fingerprint": "deadbeefcafe",
+                "source_ip": "10.0.0.8",
+                "host": "guardian.local",
+                "user_agent": "guardian-debug-check/1.0",
+            },
+        )
+
+        snapshot = tracker.snapshot()
+        recent = snapshot["recent_requests"][0]
+
+        assert snapshot["summary"]["unauthenticated_requests"] == 1
+        assert recent["client_id"] == "unauthenticated"
+        assert recent["header_name"] == "authorization"
+        assert recent["key_prefix"] == "legacy"
+        assert recent["key_fingerprint"] == "deadbeefcafe"
+        assert recent["source_ip"] == "10.0.0.8"
+        assert recent["user_agent"] == "guardian-debug-check/1.0"
+
     def test_tracks_live_active_requests_until_finish(self, tmp_path):
         """In-flight requests expose live counters before being finalized."""
         tracker = ApiUsageTracker(state_file=tmp_path / "usage_state.json")

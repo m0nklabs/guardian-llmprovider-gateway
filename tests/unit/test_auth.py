@@ -4,6 +4,7 @@ import json
 import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
+from types import SimpleNamespace
 
 import pytest
 
@@ -227,6 +228,75 @@ class TestVerifyApiKey:
             assert "reason=missing_api_key" in caplog.text
             assert "path=/api/chat" in caplog.text
             assert "token=-" in caplog.text
+        finally:
+            auth.API_KEYS_FILE = orig
+
+    @pytest.mark.asyncio
+    async def test_missing_credentials_sets_request_auth_context(
+        self,
+        api_keys_file: Path,
+    ):
+        from fastapi import HTTPException
+
+        auth, orig = _load_auth_with_path(api_keys_file)
+        try:
+            request = MagicMock()
+            request.state = MagicMock()
+            request.scope = {}
+            request.method = "GET"
+            request.url = MagicMock(path="/v1/models")
+            request.client = MagicMock(host="10.0.0.8", port=5555)
+            request.headers = {"user-agent": "guardian-missing-key/1.0"}
+
+            with pytest.raises(HTTPException):
+                await auth.verify_api_key(request, None)
+
+            assert request.state.auth_context["source_ip"] == "10.0.0.8"
+            assert request.state.auth_context["user_agent"] == "guardian-missing-key/1.0"
+            assert request.state.auth_context["header_name"] is None
+            assert request.state.auth_context["key_fingerprint"] is None
+            assert request.state.auth_context["valid"] is False
+            assert request.scope["guardian_auth_context"]["source_ip"] == "10.0.0.8"
+        finally:
+            auth.API_KEYS_FILE = orig
+
+    @pytest.mark.asyncio
+    async def test_missing_credentials_finalize_usage_with_attribution(self, api_keys_file: Path, tmp_path: Path):
+        from fastapi import HTTPException
+        from app.proxy.usage import ApiUsageTracker
+
+        auth, orig = _load_auth_with_path(api_keys_file)
+        tracker = ApiUsageTracker(state_file=tmp_path / "usage_state.json")
+        try:
+            request = MagicMock()
+            request.state = SimpleNamespace(
+                guardian_usage_request_id="req-missing-key",
+                guardian_usage_finished=False,
+            )
+            request.scope = {}
+            request.method = "GET"
+            request.url = MagicMock(path="/v1/models")
+            request.client = MagicMock(host="10.0.0.8", port=5555)
+            request.headers = {"user-agent": "guardian-missing-key-test/1.0"}
+
+            tracker.start_request(
+                request_id="req-missing-key",
+                client_id=None,
+                endpoint="/v1/models",
+                method="GET",
+            )
+
+            with patch("app.proxy.server.state", SimpleNamespace(api_usage=tracker)):
+                with pytest.raises(HTTPException):
+                    await auth.verify_api_key(request, None)
+
+            snapshot = tracker.snapshot()
+            recent = snapshot["recent_requests"][0]
+            assert recent["status_code"] == 401
+            assert recent["client_id"] == "unauthenticated"
+            assert recent["source_ip"] == "10.0.0.8"
+            assert recent["user_agent"] == "guardian-missing-key-test/1.0"
+            assert request.state.guardian_usage_finished is True
         finally:
             auth.API_KEYS_FILE = orig
 

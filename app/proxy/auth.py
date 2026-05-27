@@ -149,6 +149,57 @@ def _build_auth_context(
     }
 
 
+def get_request_auth_context(request: Request) -> Optional[dict[str, Any]]:
+    """Return any auth context already stored on the request or its shared scope."""
+    state_obj = getattr(request, "state", None)
+    auth_context = getattr(state_obj, "auth_context", None)
+    if isinstance(auth_context, dict):
+        return auth_context
+
+    scope = getattr(request, "scope", None)
+    if isinstance(scope, dict):
+        auth_context = scope.get("guardian_auth_context")
+        if isinstance(auth_context, dict):
+            return auth_context
+
+    return None
+
+
+def set_request_auth_context(request: Request, auth_context: dict[str, Any]) -> dict[str, Any]:
+    """Store auth context on both request.state and the shared ASGI scope."""
+    state_obj = getattr(request, "state", None)
+    if state_obj is not None:
+        setattr(state_obj, "auth_context", auth_context)
+
+    scope = getattr(request, "scope", None)
+    if isinstance(scope, dict):
+        scope["guardian_auth_context"] = auth_context
+
+    return auth_context
+
+
+def build_request_auth_context(
+    request: Request,
+    *,
+    token: Optional[str] = None,
+    header_name: Optional[str] = None,
+    user_data: Optional[dict] = None,
+) -> dict[str, Any]:
+    """Build request attribution even when authentication has not succeeded yet."""
+    resolved_token = token
+    resolved_header_name = header_name
+    if resolved_token is None and resolved_header_name is None:
+        authorization = _get_request_header(request, "authorization")
+        if authorization:
+            scheme, _, credentials = authorization.partition(" ")
+            if scheme.lower() == "bearer" and credentials.strip():
+                resolved_token = credentials.strip()
+                resolved_header_name = "authorization"
+        if resolved_token is None and resolved_header_name is None:
+            resolved_token, resolved_header_name = _extract_api_key(request, None)
+    return _build_auth_context(request, resolved_token, resolved_header_name, user_data)
+
+
 def _extract_api_key(
     request: Request,
     creds: Optional[HTTPAuthorizationCredentials],
@@ -191,6 +242,40 @@ def _log_unauthorized_attempt(
         local_process or "-",
     )
 
+
+def _record_unauthorized_api_usage(request: Request, *, status_code: int = HTTP_401_UNAUTHORIZED) -> None:
+    """Finalize usage tracking for auth failures before FastAPI returns the 401."""
+    state_obj = getattr(request, "state", None)
+    if state_obj is None or getattr(state_obj, "guardian_usage_finished", False):
+        return
+
+    request_id = getattr(state_obj, "guardian_usage_request_id", None)
+    if not isinstance(request_id, str) or not request_id.strip():
+        return
+
+    endpoint = _request_path(request)
+    method = _request_method(request)
+    if endpoint is None or method is None:
+        return
+
+    try:
+        from app.proxy.server import state as proxy_state
+    except Exception:
+        return
+
+    auth_context = get_request_auth_context(request) or build_request_auth_context(request)
+    proxy_state.api_usage.finish_request(
+        request_id=request_id,
+        client_id=None,
+        endpoint=endpoint,
+        method=method,
+        status_code=status_code,
+        response_bytes=0,
+        streamed=False,
+        attribution=auth_context,
+    )
+    state_obj.guardian_usage_finished = True
+
 def load_api_keys() -> Dict[str, dict]:
     if not API_KEYS_FILE.exists():
         return {}
@@ -228,6 +313,14 @@ async def verify_api_key(request: Request, creds: Optional[HTTPAuthorizationCred
     Returns the metadata associated with the key (including name).
     """
     token, header_name = _extract_api_key(request, creds)
+    set_request_auth_context(
+        request,
+        build_request_auth_context(
+            request,
+            token=token,
+            header_name=header_name,
+        ),
+    )
     if not token:
         _log_unauthorized_attempt(
             request,
@@ -235,6 +328,7 @@ async def verify_api_key(request: Request, creds: Optional[HTTPAuthorizationCred
             token=None,
             header_name=header_name,
         )
+        _record_unauthorized_api_usage(request)
         raise HTTPException(
             status_code=HTTP_401_UNAUTHORIZED,
             detail="API Key required",
@@ -247,7 +341,15 @@ async def verify_api_key(request: Request, creds: Optional[HTTPAuthorizationCred
 
     keys = load_api_keys()
     user_data = keys.get(token)
-    request.state.auth_context = _build_auth_context(request, token, header_name, user_data)
+    set_request_auth_context(
+        request,
+        build_request_auth_context(
+            request,
+            token=token,
+            header_name=header_name,
+            user_data=user_data,
+        ),
+    )
     if user_data:
         # Attach user info to request state for logging
         request.state.user = user_data
@@ -260,6 +362,7 @@ async def verify_api_key(request: Request, creds: Optional[HTTPAuthorizationCred
         token=token,
         header_name=header_name,
     )
+    _record_unauthorized_api_usage(request)
     raise HTTPException(
         status_code=HTTP_401_UNAUTHORIZED,
         detail="Invalid API Key",

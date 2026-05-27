@@ -26,7 +26,7 @@ from collections import defaultdict
 from app.proxy.optimizer import RequestOptimizer
 from app.proxy.scaler import DynamicScaler
 from app.engine.manager import ModelManager, ModelLoadError
-from app.proxy.auth import verify_api_key
+from app.proxy.auth import build_request_auth_context, get_request_auth_context, set_request_auth_context, verify_api_key
 from app.proxy.queue import InferenceQueue, QueueAdmissionRejected, QueueRequestCancelled
 from app.proxy.usage import ApiUsageTracker
 from app.proxy.metrics import (
@@ -1468,10 +1468,10 @@ def _get_usage_client_id(request: Request) -> Optional[str]:
 
 def _get_usage_attribution(request: Request) -> Optional[Dict[str, Any]]:
     """Return request attribution details collected during auth."""
-    auth_context = getattr(request.state, "auth_context", None)
+    auth_context = get_request_auth_context(request)
     if isinstance(auth_context, dict):
         return auth_context
-    return None
+    return build_request_auth_context(request)
 
 
 def _get_queue_owner_id(request: Request, client_id: Optional[str]) -> Optional[str]:
@@ -1500,6 +1500,8 @@ def _get_live_usage_request_id(request: Request) -> Optional[str]:
 
 def _start_live_request_usage(request: Request) -> None:
     """Register the current API request as in-flight for dashboard polling."""
+    if not isinstance(get_request_auth_context(request), dict):
+        set_request_auth_context(request, build_request_auth_context(request))
     live_request_id = str(uuid.uuid4())
     request.state.guardian_usage_request_id = live_request_id
     request.state.guardian_usage_started_monotonic = time.monotonic()
