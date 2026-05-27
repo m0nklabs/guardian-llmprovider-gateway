@@ -296,7 +296,7 @@ async def test_begin_queued_request_rejects_unauthenticated_client():
 
 
 @pytest.mark.asyncio
-async def test_begin_queued_request_rejects_duplicate_running_request_for_same_api_key():
+async def test_begin_queued_request_waits_behind_running_request_for_same_api_key():
     queue = server.InferenceQueue(max_concurrent=1)
     request_id = queue.submit("openclaw", "model-x", owner_id="key:abc123")
     await queue.wait_for_turn(request_id)
@@ -307,19 +307,27 @@ async def test_begin_queued_request_rejects_duplicate_running_request_for_same_a
     )
 
     with patch.object(server, "inference_queue", queue):
-        with pytest.raises(server.HTTPException) as exc_info:
-            await server._begin_queued_request(fake_request, "openclaw", "model-y")
+        waiter_task = asyncio.create_task(server._begin_queued_request(fake_request, "openclaw", "model-y"))
+        await asyncio.sleep(0.05)
 
-    assert exc_info.value.status_code == 409
-    assert exc_info.value.detail["reason"] == "api_key_already_has_running_request"
-    assert exc_info.value.detail["existing_status"] == "running"
-    assert exc_info.value.detail["existing_request_id"] == request_id
+        assert not waiter_task.done()
+        assert queue.active_count == 1
+        assert queue.waiting_count == 1
 
-    queue.release(request_id)
+        queue.release(request_id)
+        waiter_id, disconnect_task = await asyncio.wait_for(waiter_task, timeout=1.0)
+
+        assert waiter_id != request_id
+        assert queue.active_count == 1
+        assert queue.waiting_count == 0
+
+        await server._stop_background_task(disconnect_task)
+        queue.release(waiter_id)
+
 
 
 @pytest.mark.asyncio
-async def test_begin_queued_request_rejects_duplicate_queued_request_for_same_api_key():
+async def test_begin_queued_request_allows_multiple_queued_requests_for_same_api_key():
     queue = server.InferenceQueue(max_concurrent=1)
     blocker_id = await queue.acquire("blocker", "model-x", owner_id="key:blocker")
     queued_id = queue.submit("openclaw", "model-x", owner_id="key:abc123")
@@ -330,16 +338,21 @@ async def test_begin_queued_request_rejects_duplicate_queued_request_for_same_ap
     )
 
     with patch.object(server, "inference_queue", queue):
-        with pytest.raises(server.HTTPException) as exc_info:
-            await server._begin_queued_request(fake_request, "openclaw", "model-y")
+        waiter_task = asyncio.create_task(server._begin_queued_request(fake_request, "openclaw", "model-y"))
+        await asyncio.sleep(0.05)
 
-    assert exc_info.value.status_code == 409
-    assert exc_info.value.detail["reason"] == "api_key_already_has_queued_request"
-    assert exc_info.value.detail["existing_status"] == "queued"
-    assert exc_info.value.detail["existing_request_id"] == queued_id
+        assert not waiter_task.done()
+        assert queue.waiting_count == 2
+        assert queued_id in queue._waiting
 
-    queue.cancel(queued_id, owner_id="key:abc123", reason="test_cleanup")
-    queue.release(blocker_id)
+        queue.cancel(queued_id, owner_id="key:abc123", reason="test_cleanup")
+        queue.release(blocker_id)
+        waiter_id, disconnect_task = await asyncio.wait_for(waiter_task, timeout=1.0)
+
+        assert waiter_id != queued_id
+        await server._stop_background_task(disconnect_task)
+        queue.release(waiter_id)
+
 
 
 @pytest.mark.asyncio
@@ -729,3 +742,31 @@ async def test_admin_load_returns_400_for_runtime_override_validation_error():
         with pytest.raises(server.HTTPException) as exc:
             await server.admin_load(DummyRequest(), client_id="test-user")
     assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_admin_load_passes_kv_type_runtime_override():
+    class DummyRequest:
+        async def json(self):
+            return {"model": "llama3", "runtime_overrides": {"kv_type": "f16"}}
+
+    captured_operation = None
+
+    async def capture_operation(**kwargs):
+        nonlocal captured_operation
+        captured_operation = kwargs["operation"]
+
+    with (
+        patch.object(server.model_manager, "resolve_model", return_value="llama3"),
+        patch.object(server.model_manager, "load", new_callable=AsyncMock) as load_mock,
+        patch.object(server, "_run_guardian_operation", side_effect=capture_operation),
+    ):
+        await server.admin_load(DummyRequest(), client_id="test-user")
+        assert captured_operation is not None
+        await captured_operation()
+
+    load_mock.assert_awaited_once_with(
+        "llama3",
+        enable_vision=None,
+        runtime_overrides={"kv_type": "f16"},
+    )

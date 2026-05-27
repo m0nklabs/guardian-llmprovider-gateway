@@ -154,13 +154,13 @@ models:
   Qwen-Agent:
     path: /models/qwen.gguf
     context: 65536
-    extra_args: "--chat-template-file /tmp/qwen_nonthinking.jinja --temp 0.7 --top-p 0.8"
+    extra_args: "--reasoning on --reasoning-budget 0 --temp 0.7 --top-p 0.8"
 """
         )
         (config_dir / "settings.yaml").write_text(SAMPLE_SETTINGS_YAML)
         (config_dir / "current_model.args").write_text(
             "-m /models/qwen.gguf -c 65536 -ngl 99 --host 127.0.0.1 --port 11440 "
-            "--chat-template-file /tmp/qwen_nonthinking.jinja --temp 0.7 --top-p 0.8"
+            "--reasoning on --reasoning-budget 0 --temp 0.7 --top-p 0.8"
         )
 
         with patch("app.engine.manager.subprocess.run") as mock_sub:
@@ -874,7 +874,7 @@ models:
     Qwen-Agent:
         path: /models/qwen.gguf
         context: 65536
-        extra_args: "--chat-template-file /tmp/qwen_nonthinking.jinja"
+        extra_args: "--reasoning on --reasoning-budget 0"
     Qwen-Bounded:
         path: /models/qwen.gguf
         context: 65536
@@ -931,6 +931,20 @@ class TestRuntimeOverridesValidation:
         mgr.current_model = "GLM-4.7-Flash"
         with pytest.raises(ValueError, match="ngl"):
             await mgr.load(runtime_overrides={"ngl": False})
+
+    @pytest.mark.asyncio
+    async def test_kv_type_non_string_raises(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+        with pytest.raises(ValueError, match="kv_type"):
+            await mgr.load(runtime_overrides={"kv_type": 16})
+
+    @pytest.mark.asyncio
+    async def test_kv_type_unknown_value_raises(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+        with pytest.raises(ValueError, match="kv_type"):
+            await mgr.load(runtime_overrides={"kv_type": "$(touch nope)"})
 
     @pytest.mark.asyncio
     async def test_context_float_raises(self, tmp_path: Path):
@@ -1015,3 +1029,20 @@ models:
             await mgr.load(runtime_overrides={"context": "65536"})
         written_config = mock_write.call_args.args[0]
         assert written_config["context"] == 65536
+
+    @pytest.mark.asyncio
+    async def test_valid_kv_type_accepted(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+        with (
+            patch.object(mgr, "_write_server_args") as mock_write,
+            patch.object(mgr, "_stop_server", new_callable=AsyncMock),
+            patch.object(mgr, "_free_gpu_memory", new_callable=AsyncMock),
+            patch.object(mgr, "_start_server", new_callable=AsyncMock),
+            patch.object(mgr, "_wait_for_health", new_callable=AsyncMock, return_value=True),
+            patch.object(mgr, "verify_backend_model", new_callable=AsyncMock, return_value=True),
+            patch.object(mgr, "_save_context", new_callable=AsyncMock),
+        ):
+            await mgr.load(runtime_overrides={"kv_type": "F16"})
+        written_config = mock_write.call_args.args[0]
+        assert written_config["kv_type"] == "f16"

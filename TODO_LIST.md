@@ -1,5 +1,19 @@
 # Guardian TODO List
 
+## 2026-05-27 Same-Key Queue Robustness
+
+- [x] Allow one API key to submit multiple waiting GPU-backed requests without duplicate-admission `409` failures.
+- [x] Keep per-key running-slot fairness by blocking a queued request until that key has no active running request.
+- [x] Update queue contract documentation and regression tests for Hermes-style helper/auxiliary traffic.
+
+## 2026-05-27 Qwen Thinking Runtime Repair
+
+- [x] Restore explicit Qwen3.6 Hauhau `--reasoning on --reasoning-format deepseek` runtime flags.
+- [x] Reintroduce Qwen3.6 tool-friendly and bounded-reasoning agent aliases using the current validated tensor split.
+- [x] Remove the custom `qwen3_nonthinking.jinja` template injection from Qwen agent launches.
+- [x] Prove Qwen3.6 35B q4 works again via Guardian on known-good official llama.cpp `b1176` with the validated `0.36,0.64` split and clean VRAM except Frigate.
+- [ ] Live-validate Gemma4 31B through Guardian after the b1258 regression is isolated upstream.
+
 ## 2026-05-27 Stream-Safe Config Sync
 
 - [x] Stop `scripts/sync_models.py` from restarting `llama-guardian.service` after `models.yaml` edits now that Guardian hot-reloads registry state.

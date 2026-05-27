@@ -23,4 +23,6 @@ LLAMA_SLOTS_DIR = _expand_path(
 LLAMA_CPP_OFFICIAL_ROOT = _expand_path(
     os.getenv("LLAMA_CPP_OFFICIAL_ROOT", str(REPO_ROOT.parent / "llama_cpp_official"))
 )
-OFFICIAL_LLAMA_SERVER_BIN = LLAMA_CPP_OFFICIAL_ROOT / "build" / "bin" / "llama-server"
+OFFICIAL_LLAMA_SERVER_BIN = _expand_path(
+    os.getenv("LLAMA_SERVER_BINARY", str(LLAMA_CPP_OFFICIAL_ROOT / "build" / "bin" / "llama-server"))
+)

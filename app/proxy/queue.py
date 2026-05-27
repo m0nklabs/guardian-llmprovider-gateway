@@ -174,6 +174,16 @@ class InferenceQueue:
         self._prune_history()
         return self._entries.get(request_id)
 
+    def _owner_has_active_request(self, owner_id: str) -> bool:
+        """Return whether *owner_id* already owns a running GPU slot."""
+        for active_request_id in self._active:
+            entry = self._entries.get(active_request_id)
+            if entry is None:
+                continue
+            if entry.owner_id == owner_id and entry.status in ACTIVE_STATES:
+                return True
+        return False
+
     def submit(
         self,
         client_id: str,
@@ -190,27 +200,6 @@ class InferenceQueue:
         normalized_owner_id = _normalize_owner_id(owner_id, normalized_client_id)
         if normalized_owner_id is None:
             raise ValueError("authenticated owner_id required for queue submission")
-
-        for entry in self._entries.values():
-            if entry.owner_id != normalized_owner_id or entry.status in FINAL_STATES:
-                continue
-            if entry.status == "queued":
-                raise QueueAdmissionRejected(
-                    owner_id=normalized_owner_id,
-                    client_id=normalized_client_id,
-                    existing_request_id=entry.request_id,
-                    existing_status=entry.status,
-                    reason="api_key_already_has_queued_request",
-                    message="This API key already has a queued Guardian request. Wait for it to run or cancel it before submitting another.",
-                )
-            raise QueueAdmissionRejected(
-                owner_id=normalized_owner_id,
-                client_id=normalized_client_id,
-                existing_request_id=entry.request_id,
-                existing_status=entry.status,
-                reason="api_key_already_has_running_request",
-                message="This API key already has an active Guardian request. Wait for it to finish before submitting another.",
-            )
 
         request_id = request_id or str(uuid.uuid4())
         if request_id in self._entries:
@@ -253,7 +242,13 @@ class InferenceQueue:
                 self.cancel(request_id, reason=entry.cancel_reason or "cancelled")
                 raise QueueRequestCancelled(request_id, entry.cancel_reason or "cancelled")
 
-            if entry.status == "queued" and self._waiting and self._waiting[0] == request_id and len(self._active) < self.max_concurrent:
+            if (
+                entry.status == "queued"
+                and self._waiting
+                and self._waiting[0] == request_id
+                and len(self._active) < self.max_concurrent
+                and not self._owner_has_active_request(entry.owner_id)
+            ):
                 self._waiting.pop(0)
                 entry.status = "running"
                 entry.started_at = time.time()

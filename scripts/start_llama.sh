@@ -26,6 +26,7 @@ echo "CUDA_DEVICE_ORDER=$CUDA_DEVICE_ORDER"
 
 # Default binary: official llama.cpp
 DEFAULT_BINARY="$OFFICIAL_ROOT/build/bin/llama-server"
+BINARY="${LLAMA_SERVER_BINARY:-$DEFAULT_BINARY}"
 
 # Default fallback if config missing — MUST match manager.py default_model
 # SECURITY: This fallback should match the pinned/default model in Guardian config
@@ -34,13 +35,12 @@ ARGS="-m $DEFAULT_MODEL -c 262144 -ngl 99 -ctk q4_0 -ctv q4_0 --host 127.0.0.1 -
 
 if [ -f "$CONFIG_FILE" ]; then
     # Read args from file (expecting single line)
-    ARGS=$(cat "$CONFIG_FILE")
+    IFS= read -r ARGS < "$CONFIG_FILE"
     echo "Starting Llama Server with dynamic args: $ARGS"
 else
     echo "Config file not found, using default: $ARGS"
 fi
 
-BINARY="$DEFAULT_BINARY"
 echo "Using official llama.cpp binary: $BINARY"
 
 # Verify binary exists

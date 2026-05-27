@@ -65,6 +65,8 @@ This script:
 
 - resolves repo-relative defaults for the Guardian repo, models directory, and
   official llama.cpp checkout
+- honors `LLAMA_SERVER_BINARY` when a specific known-good official backend build
+  must be pinned for runtime stability
 - sources optional `config/current_model.env`
 - forces `CUDA_DEVICE_ORDER=PCI_BUS_ID`
 - starts the official `llama-server` binary with the generated arguments

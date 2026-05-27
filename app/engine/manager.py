@@ -213,6 +213,8 @@ class ModelManager:
 
     def _uses_reasoning(self, config: Dict) -> bool:
         extra_args = str(config.get("extra_args", ""))
+        if "--reasoning-budget 0" in extra_args:
+            return False
         return "--reasoning on" in extra_args
 
     def _resolve_vision_mmproj(self, config: Dict[str, Any]) -> Optional[str]:
@@ -330,7 +332,7 @@ class ModelManager:
             return (
                 0 if "Agent" in name else 1,
                 0 if self._is_tool_friendly_config(cfg) else 1,
-                0 if "chat-template-file" in extra_args else 1,
+                0 if "--reasoning-budget 0" in extra_args else 1,
                 -context,
                 name,
             )
@@ -969,15 +971,25 @@ class ModelManager:
                     runtime_total_layers = int(total_layers_value)
                 except (TypeError, ValueError):
                     runtime_total_layers = None
-            allowed_keys = {"context", "ngl", "tensor_split"}
+            allowed_keys = {"context", "ngl", "tensor_split", "kv_type"}
+            allowed_kv_types = {
+                "f16",
+                "bf16",
+                "q8_0",
+                "q4_0",
+                "q4_1",
+                "iq4_nl",
+                "q5_0",
+                "q5_1",
+            }
             unknown_keys = set(runtime_overrides) - allowed_keys
             if unknown_keys:
                 unknown_keys_list = ", ".join(sorted(repr(key) for key in unknown_keys))
                 raise ValueError(
                     "runtime_overrides contains unsupported keys: "
-                    f"{unknown_keys_list}. Allowed keys: context, ngl, tensor_split"
+                    f"{unknown_keys_list}. Allowed keys: context, ngl, tensor_split, kv_type"
                 )
-            for key in ("context", "ngl", "tensor_split"):
+            for key in ("context", "ngl", "tensor_split", "kv_type"):
                 if key not in runtime_overrides:
                     continue
                 value = runtime_overrides[key]
@@ -1049,12 +1061,25 @@ class ModelManager:
                     if split_total <= 0:
                         raise ValueError("runtime_overrides.tensor_split must have a positive total")
                     target_config["tensor_split"] = ",".join(split_parts)
+                elif key == "kv_type":
+                    if not isinstance(value, str):
+                        raise ValueError(
+                            f"runtime_overrides.kv_type must be a string, got {type(value).__name__!r}"
+                        )
+                    kv_type = value.strip().lower()
+                    if kv_type not in allowed_kv_types:
+                        allowed_values = ", ".join(sorted(allowed_kv_types))
+                        raise ValueError(
+                            f"runtime_overrides.kv_type must be one of: {allowed_values}; got {value!r}"
+                        )
+                    target_config["kv_type"] = kv_type
         logger.info(
-            "Runtime config for %s [%s]: context=%s ngl=%s split=%s mmproj=%s",
+            "Runtime config for %s [%s]: context=%s ngl=%s kv=%s split=%s mmproj=%s",
             target,
             "vision" if desired_vision else "text",
             target_config.get("context"),
             target_config.get("ngl"),
+            target_config.get("kv_type"),
             target_config.get("tensor_split") or "auto",
             target_config.get("mmproj") or "none",
         )

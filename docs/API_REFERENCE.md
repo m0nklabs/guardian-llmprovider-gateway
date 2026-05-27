@@ -200,7 +200,8 @@ Representative multimodal request:
 Runtime behavior:
 
 - the requested `model` is resolved against Guardian's configured registry before queue admission; unknown or unserved values fail with `404 model_not_served`
-- queue admission rejects a second queued or running GPU request from the same API key with `409 queue_admission_rejected`
+- requests from the same API key may queue behind each other, but Guardian only
+  grants one running GPU slot per key at a time
 - if the requested model differs from the active model and the client is
   allowed to switch, Guardian reloads inside the queue slot before proxying
 - if the same model needs a text-to-vision or vision-to-text runtime flip,

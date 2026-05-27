@@ -8,10 +8,12 @@
 - Ground-up documentation suite for the live Guardian runtime: rewritten `README.md` and `ARCHITECTURE.md`, plus new `HARDWARE_TUNING.md` and `API_REFERENCE.md`, all aligned to the current queue, model lifecycle, systemd-backed backend control, ComfyUI `/free` integration, and finetune v2 behavior.
 
 ### Changed
+- Relaxed same-key queue admission so one authenticated API key may own multiple waiting GPU requests while still receiving at most one running GPU slot at a time. This keeps helper/auxiliary calls from failing with duplicate-admission `409` responses while preserving per-key running-slot fairness.
+- Restored explicit Qwen3.6 Hauhau reasoning runtime flags (`--reasoning on --reasoning-format deepseek`) and reintroduced the Qwen3.6 agent/reasoning aliases that share the current validated `0.36,0.64` split, so Guardian no longer relies on implicit GGUF/template defaults for thinking behavior.
 - Retired the stale OpenClaw Guardian client path by removing its dedicated API key from `config/api_keys.json`; active OpenClaw config remnants were also pulled out of the live `~/.openclaw` path so dead local configs stop authenticating against Guardian.
 - `scripts/sync_models.py` no longer runs `systemctl restart llama-guardian.service` after updating `config/models.yaml`. Guardian already hot-reloads the model registry, so the old restart path only risked killing active long-lived streams mid-response.
 - Reworked Guardian's inference queue from a timeout-driven semaphore gate into an explicit request lifecycle state machine. Queued requests now wait safely until they run, disconnect, or are cancelled; downstream disconnects and explicit cancels now clean up waiting/running slots instead of orphaning the backend.
-- Guardian queue admission is now enforced per authenticated API key fingerprint instead of just the display name: one key may own only one GPU-backed queued/running request at a time, duplicate GPU admissions get a clear `409 queue_admission_rejected` reason payload, and non-GPU `/v1/...` routes still bypass the queue entirely.
+- Guardian queue admission is enforced per authenticated API key fingerprint instead of just the display name: one key may own multiple queued GPU requests, only one request per key may run at a time, and non-GPU `/v1/...` routes still bypass the queue entirely.
 - GPU-backed inference routes now reject unknown or unserved model names before queue admission with a clear `404 model_not_served` payload, so bogus model requests never appear in the queue or operator telemetry.
 - The dashboard live-request card now prefers queue-truth over telemetry-only truth for queue-managed work, so an active queued/running request still shows up even when `api_usage.active_requests` has not attached yet.
 - OpenAI-compatible streaming cancel paths now translate `_GuardianRequestCancelled` into a normal client-facing cancellation response instead of leaking a proxy-side 500 when the downstream client disconnects mid-stream.
@@ -28,7 +30,7 @@
 - Added `docs/FINETUNE_V2_REQUIREMENTS.md`, a rewrite brief for a cleaner finetune v2 flow with explicit mode-aware ranking, layer ceilings, projector handling, split-balancing rules, acceptance criteria, and a Mermaid search-flow diagram.
 - Public liveness probe `GET /healthz` (no auth) returning `{"ok": true}` for external monitors (monifuse, uptime checks). Does not reflect llama-server backend health; for that use the auth-gated `/api/status`.
 - Added the tracked `llama_cpp_guardian.code-workspace` file so the intended multi-root VS Code workspace layout for Guardian, config, models, editor settings, and local llama.cpp sources is reproducible.
-- Qwen3.6 Agent profile and `qwen3-35b-uncensored-agent` alias using Qwen's official non-thinking llama.cpp chat template for low-latency tool-facing agents.
+- Qwen3.6 Agent profile and `qwen3-35b-uncensored-agent` alias using normal llama.cpp reasoning-budget flags for low-latency tool-facing agents.
 - Bounded Qwen3.6 reasoning agent profile and `qwen3-35b-reasoning-agent` alias with 65k context and a 2048-token reasoning budget for daily local-agent work.
 - Gemma4 31B uncensored max-reasoning Agent Zero profile based on `TrevorJS/gemma-4-31B-it-uncensored`, with unrestricted reasoning and anti-repeat sampler settings under `gemma4-31b-uncensored-max-agent`.
 - Explicit `gemma4-26b-agent` alias for the stable 26B Agent Zero route; the 31B uncensored route remains opt-in as `gemma4-31b-uncensored-max-agent`.
@@ -40,6 +42,9 @@
 - Added `docs/SERVER_UPGRADE_PLAN.md`, a normalized English planning document for the next Guardian host hardware upgrade based on the decoded server-upgrade note.
 
 ### Changed
+- Removed the custom `qwen3_nonthinking.jinja` Qwen chat-template injection from the agent profile so Guardian no longer writes a hand-rolled prompt template into `current_model.args` for normal Qwen agent loads.
+- `scripts/start_llama.sh` now honors `LLAMA_SERVER_BINARY`, allowing Guardian to pin a known-good official llama.cpp backend binary while leaving model profiles, tensor splits, and queue behavior unchanged.
+- Live-pinned the host systemd runtime to official llama.cpp `b1176` after direct clean-VRAM A/B testing showed Qwen3.6 35B q4 returns corrupted output on current `b1258` but answers correctly on `b1176` with the same model settings and tensor split.
 - Guardian OpenAI-compatible streams now emit lightweight SSE keepalive comments during long upstream quiet periods, so local stream clients like Hermes do not hit idle read timeouts while Guardian still enforces its own real stall watchdog.
 - Guardian stream-stall watchdog warnings now include request correlation context (`request_id`, route, client, and model) so Hermes-side stream drops can be matched back to the exact stalled proxy stream instead of relying on timestamp-only log correlation.
 - Streaming proxy routes now use a dynamic Guardian-side stall watchdog instead of a flat read timeout: once a stream proves healthy with non-repeating token chunks, the allowed stall window expands in bounded steps, while obviously repeating chunk loops do not earn more time.

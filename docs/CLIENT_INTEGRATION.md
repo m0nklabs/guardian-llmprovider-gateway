@@ -33,7 +33,8 @@ Bearer is the recommended style for new clients.
 API keys follow the format `{prefix}_{32-char-hex}` (for example
 `flip_abc123def456...`). Queue ownership is derived from the API key
 fingerprint, not from the client display name, so all processes sharing one key
-also share one GPU queue slot.
+may submit multiple waiting requests but only one of that key's requests can run
+on the GPU at a time.
 
 Keys are managed in `config/api_keys.json`. Client code should read keys from
 environment or secret storage, never hardcode them.
@@ -46,8 +47,8 @@ If you maintain a Guardian client, treat this as the minimum contract:
 2. Populate model selectors from `GET /v1/models` or `GET /api/tags`; do not assume a model is served just because a client config mentions it.
 3. Treat only GPU-backed inference routes as queued; metadata and queue-status routes remain directly callable.
 4. Capture `X-Request-Id` and `X-Queue-Wait-Ms` from inference responses.
-5. Handle `404 model_not_served` and `409 queue_admission_rejected` as first-class client states, not generic retryable failures.
-6. If a client needs independent GPU concurrency, give it a separate API key instead of reusing a shared key.
+5. Handle `404 model_not_served` as a first-class client state, not a generic retryable failure.
+6. If a client needs independent running GPU concurrency, give it a separate API key instead of reusing a shared key.
 
 ---
 
@@ -178,31 +179,17 @@ Client action:
 - show the rejection message to the user or operator
 - do not blindly retry the same unknown model name
 
-#### Duplicate queue admission rejection
+#### Same-key queueing
 
-If the same API key already has a GPU request queued or running, Guardian
-returns `409 queue_admission_rejected` instead of adding another queue entry:
-
-```json
-{
-  "detail": {
-    "error": "queue_admission_rejected",
-    "reason": "api_key_already_has_running_request",
-    "message": "This API key already has a running GPU-backed request.",
-    "existing_request_id": "28b9fd72-8aed-4426-9645-156a43ec9074",
-    "existing_status": "running"
-  }
-}
-```
-
-You may also receive `reason: "api_key_already_has_queued_request"` when the
-existing request is still waiting.
+If the same API key submits more than one GPU-backed request, Guardian accepts
+the later requests into the queue. They wait behind earlier work from that key
+and only one request for the key can hold a running GPU slot at a time.
 
 Client action:
 
-- do not auto-retry immediately with the same key
-- surface the message and existing request ID to the caller
-- if you own the existing request, poll `GET /v1/queue/requests/{request_id}` or `GET /v1/queue/status`
+- treat queued same-key work as a normal waiting state
+- poll `GET /v1/queue/status` or `GET /v1/queue/requests/{request_id}` when you need operator-visible progress
+- use distinct API keys only when the client genuinely needs independent running GPU concurrency
 - if you truly need separate concurrency, mint a different API key for the second client
 
 ### Queue Information Channels
@@ -1128,7 +1115,6 @@ curl -X POST -H "Authorization: Bearer $KEY" \
 | 400 | Malformed JSON body, invalid request contract, or missing model on inference routes | Fix the client request; do not retry unchanged |
 | 401 | Invalid or missing API key | Refresh credentials; the request never entered the queue |
 | 404 | `model_not_served` or model metadata lookup failure | Refresh model catalog from `/v1/models` or `/api/tags`; fix the requested model |
-| 409 | `queue_admission_rejected` because the same API key already owns a queued or running GPU request | Surface the message, inspect the existing request, and avoid immediate blind retry |
 | 422 | Vision runtime unavailable or invalid backend image path | Fix the multimodal request or model selection |
 | 499 | Request cancelled by Guardian after disconnect or explicit cancel | Treat as client-side cancellation / closed request |
 | 500 | Backend or proxy error | Log and retry cautiously; inspect `/api/status` if retries keep failing |

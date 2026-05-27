@@ -29,8 +29,8 @@ instead of hard-crashing into CUDA OOM loops or restart storms.
   disconnect-aware cleanup, queue polling, per-request status/cancel endpoints,
   and `X-Request-Id` / `X-Queue-Wait-Ms` headers
 - Admission control for GPU-backed inference: unauthenticated requests never
-  enter the queue, each API key gets one queued/running GPU slot, and unknown
-  model names fail fast with clear `404`/`409` client-facing payloads
+  enter the queue, each API key may own multiple waiting requests but only one
+  running GPU slot, and unknown model names fail fast with clear `404` payloads
 - Model lifecycle ownership through `sudo systemctl start|stop llama-server`
 - Hot-reloaded model registry from [config/models.yaml](config/models.yaml),
   including aliases, text and vision runtime fields, and switch policy
@@ -96,6 +96,7 @@ expects:
 
 - the official `llama-server` binary at
   `${LLAMA_CPP_OFFICIAL_ROOT}/build/bin/llama-server`
+  or an explicit known-good `LLAMA_SERVER_BINARY` override
 - GGUFs in `${MODELS_DIR}` (default: sibling `../models`)
 - a `llama-server` systemd unit that starts
   [scripts/start_llama.sh](scripts/start_llama.sh)

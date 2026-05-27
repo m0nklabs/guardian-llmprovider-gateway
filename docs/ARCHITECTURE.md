@@ -139,7 +139,8 @@ tool-oriented variants.
 - [../scripts/start_llama.sh](../scripts/start_llama.sh) reads that file,
   sources the optional `config/current_model.env`, forces
   `CUDA_DEVICE_ORDER=PCI_BUS_ID`, and launches the official `llama-server`
-  binary.
+  binary. `LLAMA_SERVER_BINARY` can pin a specific known-good official
+  `llama-server` build without changing model profiles or tensor splits.
 - Guardian starts and stops the backend with `sudo systemctl start llama-server`
   and `sudo systemctl stop llama-server`.
 

@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from app.proxy.queue import InferenceQueue, QueueAdmissionRejected, QueueEntry
+from app.proxy.queue import InferenceQueue, QueueEntry
 
 
 # ── QueueEntry ─────────────────────────────────────────────────────────
@@ -58,28 +58,36 @@ class TestQueueInit:
         assert q.waiting_count == 0
         assert q.active_count == 0
 
-    def test_submit_rejects_duplicate_queued_request_for_same_owner(self):
+    def test_submit_allows_multiple_queued_requests_for_same_owner(self):
         q = InferenceQueue()
-        q.submit("openclaw", "model-x", owner_id="key:openclaw")
+        first_id = q.submit("openclaw", "model-x", owner_id="key:openclaw")
+        second_id = q.submit("openclaw", "model-y", owner_id="key:openclaw")
 
-        with pytest.raises(QueueAdmissionRejected) as exc_info:
-            q.submit("openclaw", "model-y", owner_id="key:openclaw")
-
-        assert exc_info.value.reason == "api_key_already_has_queued_request"
-        assert exc_info.value.existing_status == "queued"
-        assert q.waiting_count == 1
+        assert first_id != second_id
+        assert q.waiting_count == 2
 
     @pytest.mark.asyncio
-    async def test_submit_rejects_duplicate_running_request_for_same_owner(self):
-        q = InferenceQueue()
+    async def test_same_owner_request_waits_while_owner_is_running(self):
+        q = InferenceQueue(max_concurrent=2)
         rid = await q.acquire("openclaw", "model-x", owner_id="key:openclaw")
+        acquired = asyncio.Event()
 
-        with pytest.raises(QueueAdmissionRejected) as exc_info:
-            q.submit("openclaw", "model-y", owner_id="key:openclaw")
+        async def second_request():
+            second_id = await q.acquire("openclaw", "model-y", owner_id="key:openclaw")
+            acquired.set()
+            return second_id
 
-        assert exc_info.value.reason == "api_key_already_has_running_request"
-        assert exc_info.value.existing_status == "running"
+        task = asyncio.create_task(second_request())
+        await asyncio.sleep(0.05)
+
+        assert not acquired.is_set()
+        assert q.active_count == 1
+        assert q.waiting_count == 1
+
         q.release(rid)
+        second_id = await asyncio.wait_for(task, timeout=1.0)
+        assert acquired.is_set()
+        q.release(second_id)
 
 
 # ── acquire / release ─────────────────────────────────────────────────
