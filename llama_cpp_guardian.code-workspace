@@ -17,6 +17,15 @@
 		},
 		{
 			"path": "../llama_cpp_official"
+		},
+		{
+			"path": "../.hermes"
+		},
+		{
+			"path": "../.config"
+		},
+		{
+			"path": "../hermes-agent"
 		}
 	],
 	"settings": {

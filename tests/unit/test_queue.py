@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from app.proxy.queue import InferenceQueue, QueueEntry
+from app.proxy.queue import InferenceQueue, QueueAdmissionRejected, QueueEntry
 
 
 # ── QueueEntry ─────────────────────────────────────────────────────────
@@ -17,6 +17,7 @@ class TestQueueEntry:
         entry = QueueEntry(
             request_id="abc-123",
             client_id="test",
+            owner_id="key:test",
             model="GLM-4.7-Flash",
             enqueued_at=now,
         )
@@ -27,7 +28,7 @@ class TestQueueEntry:
 
     def test_started_at_set(self):
         entry = QueueEntry(
-            request_id="x", client_id="y", model="m", enqueued_at=1.0, started_at=2.0
+            request_id="x", client_id="y", owner_id="key:y", model="m", enqueued_at=1.0, started_at=2.0
         )
         assert entry.started_at == 2.0
 
@@ -47,6 +48,38 @@ class TestQueueInit:
         q = InferenceQueue(max_concurrent=3, queue_timeout=60.0)
         assert q.max_concurrent == 3
         assert q.queue_timeout == 60.0
+
+    def test_submit_rejects_unauthenticated_client(self):
+        q = InferenceQueue()
+
+        with pytest.raises(ValueError, match="authenticated client_id"):
+            q.submit("unauthenticated", "model-x")
+
+        assert q.waiting_count == 0
+        assert q.active_count == 0
+
+    def test_submit_rejects_duplicate_queued_request_for_same_owner(self):
+        q = InferenceQueue()
+        q.submit("openclaw", "model-x", owner_id="key:openclaw")
+
+        with pytest.raises(QueueAdmissionRejected) as exc_info:
+            q.submit("openclaw", "model-y", owner_id="key:openclaw")
+
+        assert exc_info.value.reason == "api_key_already_has_queued_request"
+        assert exc_info.value.existing_status == "queued"
+        assert q.waiting_count == 1
+
+    @pytest.mark.asyncio
+    async def test_submit_rejects_duplicate_running_request_for_same_owner(self):
+        q = InferenceQueue()
+        rid = await q.acquire("openclaw", "model-x", owner_id="key:openclaw")
+
+        with pytest.raises(QueueAdmissionRejected) as exc_info:
+            q.submit("openclaw", "model-y", owner_id="key:openclaw")
+
+        assert exc_info.value.reason == "api_key_already_has_running_request"
+        assert exc_info.value.existing_status == "running"
+        q.release(rid)
 
 
 # ── acquire / release ─────────────────────────────────────────────────

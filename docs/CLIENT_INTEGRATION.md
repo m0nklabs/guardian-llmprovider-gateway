@@ -1,6 +1,9 @@
 # Guardian Client Integration Guide
 
-This document describes how to integrate with Guardian middleware, including authentication, inference requests, the request queue, and status polling.
+This is the canonical handoff document for maintainers of Guardian-backed
+clients. If you are wiring or debugging a chat UI, agent runtime, bot, worker,
+or API service against Guardian, start here before reading the lower-level API
+reference.
 
 ## Base URL
 
@@ -12,19 +15,39 @@ Guardian exposes both OpenAI-compatible and Ollama-compatible endpoints on the s
 
 ## Authentication
 
-All endpoints require a Bearer token:
+On port `11434`, every endpoint requires authentication except:
 
-```
+- `GET /healthz`
+- `GET /metrics`
+
+Guardian accepts any of these header styles:
+
+```http
 Authorization: Bearer <api_key>
+x-api-key: <api_key>
+api-key: <api_key>
 ```
 
-API keys follow the format `{prefix}_{32-char-hex}` (e.g., `flip_abc123def456...`).
+Bearer is the recommended style for new clients.
 
-Keys are managed in `config/api_keys.json`. Generate new keys with:
+API keys follow the format `{prefix}_{32-char-hex}` (for example
+`flip_abc123def456...`). Queue ownership is derived from the API key
+fingerprint, not from the client display name, so all processes sharing one key
+also share one GPU queue slot.
 
-```bash
-python3 scripts/generate_key.py --name "my-app"
-```
+Keys are managed in `config/api_keys.json`. Client code should read keys from
+environment or secret storage, never hardcode them.
+
+## Integration Checklist
+
+If you maintain a Guardian client, treat this as the minimum contract:
+
+1. Send a valid API key on every `:11434` request.
+2. Populate model selectors from `GET /v1/models` or `GET /api/tags`; do not assume a model is served just because a client config mentions it.
+3. Treat only GPU-backed inference routes as queued; metadata and queue-status routes remain directly callable.
+4. Capture `X-Request-Id` and `X-Queue-Wait-Ms` from inference responses.
+5. Handle `404 model_not_served` and `409 queue_admission_rejected` as first-class client states, not generic retryable failures.
+6. If a client needs independent GPU concurrency, give it a separate API key instead of reusing a shared key.
 
 ---
 
@@ -36,8 +59,15 @@ python3 scripts/generate_key.py --name "my-app"
 POST /v1/chat/completions
 POST /v1/completions
 POST /v1/embeddings
+POST /v1/messages
 GET  /v1/models
+GET  /v1/models/{model_id}
 ```
+
+Only the `POST` inference routes are queued. `GET /v1/models` and
+`GET /v1/models/{model_id}` are not queued and should be used to drive model
+pickers, preflight validation, and cache refresh when a request gets rejected
+for an unknown model.
 
 Standard OpenAI request/response format. See [OpenAI API reference](https://platform.openai.com/docs/api-reference/chat).
 
@@ -76,7 +106,24 @@ GET  /api/tags
 GET  /api/version
 ```
 
+Only `POST /api/chat` and `POST /api/generate` are queued. `GET /api/tags` and
+`GET /api/version` are direct metadata endpoints.
+
 Standard Ollama request/response format. Existing Ollama clients work without modification.
+
+### Non-inference operational endpoints
+
+These endpoints bypass the GPU queue and remain usable while another request is
+running or waiting:
+
+```
+GET    /v1/queue/status
+GET    /v1/queue/requests/{request_id}
+DELETE /v1/queue/requests/{request_id}
+GET    /api/status
+GET    /api/tags
+GET    /v1/models
+```
 
 ---
 
@@ -84,15 +131,79 @@ Standard Ollama request/response format. Existing Ollama clients work without mo
 
 Guardian runs a single-slot `llama-server` backend. Only one inference request can be processed at a time. A FIFO queue serializes concurrent requests.
 
+Queue admission applies only to GPU-backed inference routes. Metadata,
+dashboard, scaler, model-info, and queue-status routes do not consume queue
+slots.
+
 ### How It Works
 
-1. Client sends an inference request (e.g., `POST /v1/chat/completions`).
-2. Guardian places the request in the queue.
-3. If the slot is free, inference starts immediately.
-4. If the slot is occupied, the request **blocks** until the current inference completes.
-5. The response is delivered — identical to a standard OpenAI/Ollama response.
+1. Client sends an authenticated GPU-backed inference request (for example `POST /v1/chat/completions`).
+2. Guardian validates the requested model against the served model registry before queue admission.
+3. Guardian rejects the request immediately if the same API key already owns a queued or running GPU request.
+4. If admission succeeds and the slot is free, inference starts immediately.
+5. If the slot is occupied, the request **blocks** until the current inference completes.
+6. The response is delivered using the normal OpenAI/Ollama response format.
 
 The queue is transparent to clients that don't care about it. Responses are **100% OpenAI/Ollama-compatible** — no queue metadata is injected into the response body or SSE stream.
+
+### Admission Rules and Rejection Contracts
+
+Guardian now enforces three important client-facing rules before it lets a GPU
+request wait:
+
+1. Unauthenticated requests are rejected with `401` and never enter the queue.
+2. Unknown or unserved models are rejected with `404 model_not_served` before queue admission.
+3. One API key may own only one queued or running GPU request at a time.
+
+#### Unserved model rejection
+
+If the requested model is not in Guardian's served registry, the inference route
+fails immediately:
+
+```json
+{
+  "detail": {
+    "error": "model_not_served",
+    "reason": "requested_model_not_served",
+    "message": "Model 'ghost-model' is not configured in Guardian and cannot be served.",
+    "requested_model": "ghost-model",
+    "hint": "Use /v1/models to discover the models currently served by Guardian."
+  }
+}
+```
+
+Client action:
+
+- refresh the local model catalog from `GET /v1/models` or `GET /api/tags`
+- show the rejection message to the user or operator
+- do not blindly retry the same unknown model name
+
+#### Duplicate queue admission rejection
+
+If the same API key already has a GPU request queued or running, Guardian
+returns `409 queue_admission_rejected` instead of adding another queue entry:
+
+```json
+{
+  "detail": {
+    "error": "queue_admission_rejected",
+    "reason": "api_key_already_has_running_request",
+    "message": "This API key already has a running GPU-backed request.",
+    "existing_request_id": "28b9fd72-8aed-4426-9645-156a43ec9074",
+    "existing_status": "running"
+  }
+}
+```
+
+You may also receive `reason: "api_key_already_has_queued_request"` when the
+existing request is still waiting.
+
+Client action:
+
+- do not auto-retry immediately with the same key
+- surface the message and existing request ID to the caller
+- if you own the existing request, poll `GET /v1/queue/requests/{request_id}` or `GET /v1/queue/status`
+- if you truly need separate concurrency, mint a different API key for the second client
 
 ### Queue Information Channels
 
@@ -204,6 +315,7 @@ Authorization: Bearer <api_key>
 - `GET` returns the lifecycle snapshot for that request only
 - `DELETE` cancels a queued request immediately or marks a running request as `cancelling`
 - this is the clean server-side way to abort a long wait instead of dropping the HTTP socket and hoping cleanup happens later
+- these endpoints are scoped to the same API key fingerprint that created the request; another key gets `404`
 
 ### Queue Wait Budget and Cancellation
 
@@ -792,14 +904,21 @@ Guardian automatically switches models when a request specifies a different mode
 - No concurrent inference can interfere with the switch.
 - Other requests wait in the queue until the switch + inference completes.
 - Model switching adds latency (10–60s depending on model size).
+- Model validation still happens before queue admission. A completely unknown or unserved model is rejected with `404 model_not_served` instead of falling through to whatever happens to be loaded.
 
 ### Pinned Model
 
-If `guardian.pinned_model` is set in `models.yaml`, only that model can be loaded. Requests for other models will use the pinned model instead.
+If `guardian.pinned_model` is set in `models.yaml`, only that model can be loaded. Requests for other **configured** models may be served by the pinned model instead.
 
 ### Switch Allowlist
 
-Only API keys whose `client_id` is in `guardian.switch_allowlist` can trigger model switches. Others will use whatever model is currently loaded.
+Only API keys whose `client_id` is in `guardian.switch_allowlist` can trigger model switches. Others may be served by whatever compatible model is currently loaded.
+
+Client guidance:
+
+- if your workflow requires a specific served model, preflight against `GET /v1/models`
+- if your environment uses pinned-model or allowlist policy, compare the returned response model with what you requested
+- treat `404 model_not_served` as a hard config/catalog issue, not as a switch-policy issue
 
 ---
 
@@ -1006,10 +1125,14 @@ curl -X POST -H "Authorization: Bearer $KEY" \
 | HTTP Status | Meaning | Client Action |
 |-------------|---------|---------------|
 | 200 | Success | Process response normally |
-| 401 | Invalid/missing API key | Check your Bearer token |
+| 400 | Malformed JSON body, invalid request contract, or missing model on inference routes | Fix the client request; do not retry unchanged |
+| 401 | Invalid or missing API key | Refresh credentials; the request never entered the queue |
+| 404 | `model_not_served` or model metadata lookup failure | Refresh model catalog from `/v1/models` or `/api/tags`; fix the requested model |
+| 409 | `queue_admission_rejected` because the same API key already owns a queued or running GPU request | Surface the message, inspect the existing request, and avoid immediate blind retry |
+| 422 | Vision runtime unavailable or invalid backend image path | Fix the multimodal request or model selection |
 | 499 | Request cancelled by Guardian after disconnect or explicit cancel | Treat as client-side cancellation / closed request |
-| 500 | Backend error | Log and retry; check `/api/status` for health |
-| 503 | Model not loaded / backend down | Wait and retry; Guardian auto-reloads on next request |
+| 500 | Backend or proxy error | Log and retry cautiously; inspect `/api/status` if retries keep failing |
+| 503 | Model load, auto-reload, or backend recovery failure | Back off and retry later; Guardian could not make the backend ready |
 
 ---
 

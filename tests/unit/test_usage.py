@@ -139,3 +139,51 @@ class TestApiUsageTracker:
         assert snapshot["summary"]["total_requests"] == 1
         assert snapshot["summary"]["total_errors"] == 1
         assert snapshot["summary"]["unauthenticated_requests"] == 1
+
+    def test_tracks_live_active_requests_until_finish(self, tmp_path):
+        """In-flight requests expose live counters before being finalized."""
+        tracker = ApiUsageTracker(state_file=tmp_path / "usage_state.json")
+
+        tracker.start_request(
+            request_id="live-req-1",
+            client_id="hydroponics",
+            endpoint="/v1/chat/completions",
+            method="POST",
+            model="Qwen3.6-35B-A3B-HauhauCS-Aggressive",
+            request_bytes=512,
+            streamed=True,
+            attribution={"source_ip": "127.0.0.1", "project_prefix": "hydro"},
+        )
+        tracker.update_active_request(
+            request_id="live-req-1",
+            phase="running",
+            queue_request_id="queue-req-1",
+            queue_wait_ms=250.0,
+            prompt_tokens=48,
+            completion_tokens=96,
+            output_chars_delta=180,
+            response_bytes_delta=1024,
+        )
+
+        live_snapshot = tracker.snapshot()
+        live_entry = live_snapshot["active_requests"][0]
+
+        assert live_snapshot["summary"]["active_requests_count"] == 1
+        assert live_snapshot["summary"]["active_streaming_requests"] == 1
+        assert live_entry["client_id"] == "hydroponics"
+        assert live_entry["queue_request_id"] == "queue-req-1"
+        assert live_entry["phase"] == "running"
+        assert live_entry["total_tokens"] == 144
+        assert live_entry["output_chars"] == 180
+        assert live_entry["response_bytes"] == 1024
+
+        tracker.finish_request(
+            request_id="live-req-1",
+            status_code=200,
+            duration_ms=912.0,
+        )
+
+        finished_snapshot = tracker.snapshot()
+        assert finished_snapshot["summary"]["active_requests_count"] == 0
+        assert finished_snapshot["summary"]["total_requests"] == 1
+        assert finished_snapshot["recent_requests"][0]["client_id"] == "hydroponics"

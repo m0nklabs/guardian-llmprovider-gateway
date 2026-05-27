@@ -12,7 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import uvicorn
 
-from app.proxy.server import app as proxy_app, state as proxy_state, get_gpu_metrics, get_model_size
+from app.proxy.server import app as proxy_app, state as proxy_state, get_gpu_metrics, get_model_size, inference_queue
 from app.scheduler.manager import SchedulerManager
 
 # Configure logging
@@ -40,6 +40,7 @@ async def read_index():
 async def get_stats():
     # VRAM
     vram = get_gpu_metrics()
+    queue_status = inference_queue.get_status()
     
     # Active Models
     active_models = list(proxy_state.scheduler.active_counts.keys())
@@ -72,8 +73,11 @@ async def get_stats():
             "average_duration_ms": 0.0,
             "requests_last_5m": 0,
             "requests_last_hour": 0,
+            "active_requests_count": 0,
+            "active_streaming_requests": 0,
             "requests_per_minute": 0.0,
         },
+        "active_requests": [],
         "top_clients": [],
         "top_endpoints": [],
         "recent_requests": [],
@@ -82,7 +86,8 @@ async def get_stats():
     return {
         "vram": vram,
         "active_models": active_models,
-        "queue_size": 0,
+        "queue_size": queue_status.get("queue_length", 0),
+        "queue_status": queue_status,
         "optimized_count": 0,
         "cached_models": cached_models,
         "records": [],

@@ -7,6 +7,7 @@ import re
 import signal
 import subprocess
 import time
+import uuid
 import errno
 import struct
 import zlib
@@ -26,7 +27,7 @@ from app.proxy.optimizer import RequestOptimizer
 from app.proxy.scaler import DynamicScaler
 from app.engine.manager import ModelManager, ModelLoadError
 from app.proxy.auth import verify_api_key
-from app.proxy.queue import InferenceQueue, QueueRequestCancelled
+from app.proxy.queue import InferenceQueue, QueueAdmissionRejected, QueueRequestCancelled
 from app.proxy.usage import ApiUsageTracker
 from app.proxy.metrics import (
     track_request,
@@ -682,6 +683,31 @@ def _resolve_inference_model(raw_model: Optional[str], current_model: str) -> Op
         return raw_model
 
 
+def _reject_unserved_inference_model(raw_model: Optional[str]) -> None:
+    """Raise a client-facing error for a model Guardian does not serve."""
+    requested_model = str(raw_model or "").strip() or "(missing)"
+    raise HTTPException(
+        status_code=404,
+        detail={
+            "error": "model_not_served",
+            "reason": "requested_model_not_served",
+            "message": f"Model '{requested_model}' is not configured in Guardian and cannot be served.",
+            "requested_model": requested_model,
+            "hint": "Use /v1/models to discover the models currently served by Guardian.",
+        },
+    )
+
+
+def _resolve_or_reject_inference_model(raw_model: Optional[str], current_model: str) -> str:
+    """Resolve an inference model name and reject unknown or unserved values."""
+    resolved_model = _resolve_inference_model(raw_model, current_model)
+    if not resolved_model or resolved_model == "__MISMATCH__":
+        _reject_unserved_inference_model(raw_model)
+    if resolved_model not in model_manager.models:
+        _reject_unserved_inference_model(raw_model)
+    return resolved_model
+
+
 def _resolve_auto_reload_model(requested_model: Optional[str] = None) -> str:
     """Resolve the model Guardian should load when the backend is absent."""
     return model_manager.resolve_reload_target(requested_model)
@@ -745,13 +771,57 @@ async def _watch_request_disconnect(request: Request, request_id: str, client_id
 
 async def _begin_queued_request(request: Request, client_id: str, model: str) -> tuple[str, asyncio.Task]:
     """Register a queue request immediately and wait until Guardian grants a slot."""
-    request_id = inference_queue.submit(client_id, model)
-    disconnect_task = asyncio.create_task(_watch_request_disconnect(request, request_id, client_id))
+    normalized_client_id = client_id.strip() if isinstance(client_id, str) else ""
+    if not normalized_client_id or normalized_client_id.lower() == "unauthenticated":
+        logger.warning("🚫 Rejecting queue access without an authenticated client id")
+        raise HTTPException(
+            status_code=HTTP_401_UNAUTHORIZED,
+            detail="Authenticated client required for queue access",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    queue_owner_id = _get_queue_owner_id(request, normalized_client_id)
+    if not queue_owner_id:
+        logger.warning("🚫 Rejecting queue access without an authenticated API key fingerprint")
+        raise HTTPException(
+            status_code=HTTP_401_UNAUTHORIZED,
+            detail="Authenticated API key fingerprint required for queue access",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    try:
+        request_id = inference_queue.submit(
+            normalized_client_id,
+            model,
+            owner_id=queue_owner_id,
+        )
+    except QueueAdmissionRejected as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "queue_admission_rejected",
+                "reason": exc.reason,
+                "message": exc.message,
+                "existing_request_id": exc.existing_request_id,
+                "existing_status": exc.existing_status,
+                "client_id": exc.client_id,
+            },
+        ) from exc
+
+    _update_live_request_usage(request, queue_request_id=request_id, phase="queued")
+    disconnect_task = asyncio.create_task(_watch_request_disconnect(request, request_id, normalized_client_id))
     try:
         await inference_queue.wait_for_turn(request_id)
     except QueueRequestCancelled as exc:
+        _update_live_request_usage(request, queue_request_id=request_id, phase="cancelled")
         await _stop_background_task(disconnect_task)
         raise _GuardianRequestCancelled(request_id, exc.reason) from exc
+    _update_live_request_usage(
+        request,
+        queue_request_id=request_id,
+        phase="running",
+        queue_wait_ms=inference_queue.get_queue_wait_ms(request_id),
+    )
     return request_id, disconnect_task
 
 
@@ -1404,6 +1474,108 @@ def _get_usage_attribution(request: Request) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _get_queue_owner_id(request: Request, client_id: Optional[str]) -> Optional[str]:
+    """Return the per-key queue ownership identity for the current request."""
+    state_obj = getattr(request, "state", None)
+    auth_context = getattr(state_obj, "auth_context", None)
+    if isinstance(auth_context, dict):
+        fingerprint = auth_context.get("key_fingerprint")
+        if isinstance(fingerprint, str) and fingerprint.strip():
+            return f"key:{fingerprint.strip()}"
+    if isinstance(client_id, str) and client_id.strip():
+        return f"client:{client_id.strip()}"
+    return None
+
+
+def _get_live_usage_request_id(request: Request) -> Optional[str]:
+    """Return the dashboard request id bound to the current FastAPI request."""
+    state_obj = getattr(request, "state", None)
+    if state_obj is None:
+        return None
+    request_id = getattr(state_obj, "guardian_usage_request_id", None)
+    if isinstance(request_id, str) and request_id.strip():
+        return request_id.strip()
+    return None
+
+
+def _start_live_request_usage(request: Request) -> None:
+    """Register the current API request as in-flight for dashboard polling."""
+    live_request_id = str(uuid.uuid4())
+    request.state.guardian_usage_request_id = live_request_id
+    request.state.guardian_usage_started_monotonic = time.monotonic()
+    state.api_usage.start_request(
+        request_id=live_request_id,
+        client_id=_get_usage_client_id(request),
+        endpoint=request.url.path,
+        method=request.method,
+        model=getattr(request.state, "guardian_usage_model", None),
+        request_bytes=_request_size_bytes(request),
+        streamed=bool(getattr(request.state, "guardian_usage_streamed", False)),
+        attribution=_get_usage_attribution(request),
+    )
+
+
+def _update_live_request_usage(
+    request: Request,
+    *,
+    model: Optional[str] = None,
+    streamed: Optional[bool] = None,
+    queue_request_id: Optional[str] = None,
+    phase: Optional[str] = None,
+    queue_wait_ms: Optional[float] = None,
+    prompt_tokens: Optional[object] = None,
+    completion_tokens: Optional[object] = None,
+    output_chars_delta: object = 0,
+    response_bytes_delta: object = 0,
+) -> None:
+    """Push incremental request metadata into the live dashboard tracker."""
+    live_request_id = _get_live_usage_request_id(request)
+    if live_request_id is None:
+        return
+    state.api_usage.update_active_request(
+        request_id=live_request_id,
+        model=model,
+        streamed=streamed,
+        queue_request_id=queue_request_id,
+        phase=phase,
+        queue_wait_ms=queue_wait_ms,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        output_chars_delta=output_chars_delta,
+        response_bytes_delta=response_bytes_delta,
+    )
+
+
+def _finish_live_request_usage(
+    request: Request,
+    *,
+    status_code: int,
+    response_bytes: Optional[int] = None,
+) -> None:
+    """Finalize the live dashboard request entry and fold it into history."""
+    live_request_id = _get_live_usage_request_id(request)
+    if live_request_id is None or getattr(request.state, "guardian_usage_finished", False):
+        return
+    started = getattr(request.state, "guardian_usage_started_monotonic", None)
+    duration_ms = None
+    if isinstance(started, (int, float)):
+        duration_ms = max((time.monotonic() - float(started)) * 1000.0, 0.0)
+    state.api_usage.finish_request(
+        request_id=live_request_id,
+        client_id=_get_usage_client_id(request),
+        endpoint=request.url.path,
+        method=request.method,
+        status_code=status_code,
+        model=getattr(request.state, "guardian_usage_model", None),
+        duration_ms=duration_ms,
+        request_bytes=_request_size_bytes(request),
+        response_bytes=response_bytes,
+        streamed=bool(getattr(request.state, "guardian_usage_streamed", False)),
+        attribution=_get_usage_attribution(request),
+    )
+    request.state.guardian_usage_finished = True
+
+
 def _set_request_usage_metadata(
     request: Request,
     *,
@@ -1415,6 +1587,7 @@ def _set_request_usage_metadata(
         request.state.guardian_usage_model = model
     if streamed is not None:
         request.state.guardian_usage_streamed = streamed
+    _update_live_request_usage(request, model=model, streamed=streamed)
 
 
 def _record_request_token_usage(
@@ -1462,36 +1635,20 @@ async def track_api_usage_middleware(request: Request, call_next):
     if not _should_track_api_usage(path):
         return await call_next(request)
 
-    started = time.monotonic()
+    _start_live_request_usage(request)
     try:
         response = await call_next(request)
     except Exception:
-        state.api_usage.record_request(
-            client_id=_get_usage_client_id(request),
-            endpoint=path,
-            method=request.method,
-            status_code=500,
-            model=getattr(request.state, "guardian_usage_model", None),
-            duration_ms=(time.monotonic() - started) * 1000.0,
-            request_bytes=_request_size_bytes(request),
-            response_bytes=0,
-            streamed=bool(getattr(request.state, "guardian_usage_streamed", False)),
-            attribution=_get_usage_attribution(request),
-        )
+        _finish_live_request_usage(request, status_code=500, response_bytes=0)
         raise
 
-    state.api_usage.record_request(
-        client_id=_get_usage_client_id(request),
-        endpoint=path,
-        method=request.method,
-        status_code=response.status_code,
-        model=getattr(request.state, "guardian_usage_model", None),
-        duration_ms=(time.monotonic() - started) * 1000.0,
-        request_bytes=_request_size_bytes(request),
-        response_bytes=_response_size_bytes(response),
-        streamed=bool(getattr(request.state, "guardian_usage_streamed", False)),
-        attribution=_get_usage_attribution(request),
-    )
+    is_streaming_response = bool(getattr(request.state, "guardian_usage_streamed", False)) and isinstance(response, StreamingResponse)
+    if not is_streaming_response:
+        _finish_live_request_usage(
+            request,
+            status_code=response.status_code,
+            response_bytes=_response_size_bytes(response),
+        )
     return response
 
 
@@ -1574,7 +1731,7 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
         raise HTTPException(status_code=400, detail="Model not specified")
 
     current_model = await model_manager.get_current_model()
-    model = _resolve_inference_model(model, current_model) or model
+    model = _resolve_or_reject_inference_model(model, current_model)
 
     logger.info(f"bridge: Ollama chat request for '{model}' -> Translating to OpenAI format")
 
@@ -1742,7 +1899,15 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
                                             "message": {"role": "assistant", "content": content},
                                             "done": False
                                         }
-                                        yield json.dumps(ollama_chunk) + "\n"
+                                        payload = json.dumps(ollama_chunk) + "\n"
+                                        _update_live_request_usage(
+                                            request,
+                                            prompt_tokens=usage_totals["prompt_tokens"],
+                                            completion_tokens=usage_totals["completion_tokens"],
+                                            output_chars_delta=len(content),
+                                            response_bytes_delta=len(payload.encode("utf-8")),
+                                        )
+                                        yield payload
                             except:
                                 pass
                     if not inference_queue.is_cancel_requested(request_id):
@@ -1769,6 +1934,10 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
                         model,
                         prompt_tokens=usage_totals["prompt_tokens"],
                         completion_tokens=usage_totals["completion_tokens"],
+                    )
+                    _finish_live_request_usage(
+                        request,
+                        status_code=499 if inference_queue.is_cancel_requested(request_id) else r.status_code,
                     )
                     model_manager.active_requests = max(0, model_manager.active_requests - 1)
                     model_manager.last_request_time = time.time()
@@ -1840,7 +2009,7 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
         raise HTTPException(status_code=400, detail="Model not specified")
 
     current_model = await model_manager.get_current_model()
-    model = _resolve_inference_model(model, current_model) or model
+    model = _resolve_or_reject_inference_model(model, current_model)
 
     try:
         request_id, disconnect_task = await _begin_queued_request(request, client_id, model)
@@ -1998,7 +2167,15 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
                                             "response": content,
                                             "done": False
                                         }
-                                        yield json.dumps(ollama_chunk) + "\n"
+                                        payload = json.dumps(ollama_chunk) + "\n"
+                                        _update_live_request_usage(
+                                            request,
+                                            prompt_tokens=usage_totals["prompt_tokens"],
+                                            completion_tokens=usage_totals["completion_tokens"],
+                                            output_chars_delta=len(content),
+                                            response_bytes_delta=len(payload.encode("utf-8")),
+                                        )
+                                        yield payload
                             except:
                                 pass
                     if not inference_queue.is_cancel_requested(request_id):
@@ -2026,6 +2203,10 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
                         model,
                         prompt_tokens=usage_totals["prompt_tokens"],
                         completion_tokens=usage_totals["completion_tokens"],
+                    )
+                    _finish_live_request_usage(
+                        request,
+                        status_code=499 if inference_queue.is_cancel_requested(request_id) else r.status_code,
                     )
                     model_manager.active_requests = max(0, model_manager.active_requests - 1)
                     model_manager.last_request_time = time.time()
@@ -2444,26 +2625,34 @@ async def scaler_recommend(request: Request, client_id: str = Depends(verify_api
 # --- Queue status endpoint (non-queued, always immediately available) ---
 
 @app.get("/v1/queue/status")
-async def queue_status(client_id: str = Depends(verify_api_key)):
+async def queue_status(request: Request, client_id: str = Depends(verify_api_key)):
     """Return current queue status.  Clients should poll this while waiting."""
-    return inference_queue.get_status(client_id=client_id)
+    return inference_queue.get_status(
+        client_id=client_id,
+        owner_id=_get_queue_owner_id(request, client_id),
+    )
 
 
 @app.get("/v1/queue/requests/{request_id}")
-async def queue_request_status(request_id: str, client_id: str = Depends(verify_api_key)):
+async def queue_request_status(request_id: str, request: Request, client_id: str = Depends(verify_api_key)):
     """Return the lifecycle state for one tracked queue request."""
-    snapshot = inference_queue.get_request_status(request_id, client_id=client_id)
+    snapshot = inference_queue.get_request_status(
+        request_id,
+        client_id=client_id,
+        owner_id=_get_queue_owner_id(request, client_id),
+    )
     if snapshot is None:
         raise HTTPException(status_code=404, detail="Queue request not found")
     return snapshot
 
 
 @app.delete("/v1/queue/requests/{request_id}")
-async def cancel_queue_request(request_id: str, client_id: str = Depends(verify_api_key)):
+async def cancel_queue_request(request_id: str, request: Request, client_id: str = Depends(verify_api_key)):
     """Cancel a waiting request or request cancellation of a running one."""
     snapshot = inference_queue.cancel(
         request_id,
         client_id=client_id,
+        owner_id=_get_queue_owner_id(request, client_id),
         reason="client_requested_cancel",
     )
     if snapshot is None:
@@ -2496,14 +2685,47 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
             )
             return Response(content=resp.content, status_code=resp.status_code, headers=resp.headers)
 
-    # --- Inference path: acquire queue slot ---
-    # Determine requested model for queue tracking
-    requested_model = "_unknown"
     try:
         json_body = json.loads(body)
-        requested_model = json_body.get("model", requested_model)
-    except (json.JSONDecodeError, Exception):
-        pass
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_request",
+                "reason": "invalid_json_body",
+                "message": "Inference requests must provide a valid JSON object body.",
+                "parse_error": str(exc),
+            },
+        )
+
+    if not isinstance(json_body, dict):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_request",
+                "reason": "invalid_json_body",
+                "message": "Inference requests must provide a JSON object body.",
+            },
+        )
+
+    requested_model = json_body.get("model")
+    if not requested_model:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_request",
+                "reason": "model_not_specified",
+                "message": "Inference requests must include a model name.",
+            },
+        )
+
+    current_model = await model_manager.get_current_model()
+    requested_model = _resolve_or_reject_inference_model(requested_model, current_model)
+    json_body["model"] = requested_model
+    body = json.dumps(json_body).encode("utf-8")
+    has_image_inputs = False
+    if path in ("chat/completions", "messages"):
+        has_image_inputs = _messages_contain_image_input(json_body.get("messages", []))
 
     try:
         request_id, disconnect_task = await _begin_queued_request(request, client_id, requested_model)
@@ -2512,22 +2734,9 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
 
     _release_in_finally = True
     try:
-        json_body: Optional[Dict[str, Any]] = None
-        has_image_inputs = False
-        requested_model: Optional[str] = None
-        try:
-            json_body = json.loads(body)
-            requested_model = json_body.get("model")
-            if path in ("chat/completions", "messages"):
-                has_image_inputs = _messages_contain_image_input(json_body.get("messages", []))
-        except (json.JSONDecodeError, Exception):
-            json_body = None
-
         # If llama-server was unloaded, auto-reload before forwarding
         if model_manager.is_unloaded:
-            current_model = await model_manager.get_current_model()
-            reload_candidate = _resolve_inference_model(requested_model, current_model) if requested_model else current_model
-            reload_model = _resolve_auto_reload_model(reload_candidate)
+            reload_model = _resolve_auto_reload_model(requested_model)
             logger.info(f"🔄 Incoming request while unloaded — auto-reloading '{reload_model}'...")
             try:
                 generation = _reset_startup_check_status(
@@ -2564,15 +2773,7 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
         # Auto-switch logic for chat completions & messages (with concurrency lock)
         if path in ("chat/completions", "messages"):
             try:
-                if json_body is None:
-                    json_body = json.loads(body)
-                requested_model = json_body.get("model")
-
-                # Resolve aliases and case-insensitive names
                 current_model = await model_manager.get_current_model()
-                if requested_model:
-                    requested_model = _resolve_inference_model(requested_model, current_model)
-                
                 desired_model = requested_model or current_model
                 if desired_model in model_manager.models:
                     desired_vision = _desired_runtime_vision_enabled(desired_model, has_image_inputs)
@@ -2648,10 +2849,6 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                                 except Exception as e:
                                     logger.error(f"❌ Switch failed: {e}")
                                     raise HTTPException(status_code=500, detail="Model switch failed")
-                elif requested_model:
-                    logger.warning(f"⚠️ Requested model {requested_model} not managed by Guardian. Forwarding to current.")
-            except json.JSONDecodeError:
-                pass
             except HTTPException:
                 raise  # Let model-load errors propagate to the client
             except Exception as e:
@@ -2809,6 +3006,7 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                             try:
                                 data = json.loads(line[6:])
                                 usage = data.get("usage") or {}
+                                output_chars_delta = 0
                                 if isinstance(usage, dict):
                                     usage_totals["prompt_tokens"] = max(
                                         usage_totals["prompt_tokens"],
@@ -2820,9 +3018,25 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                                             usage.get("completion_tokens", usage.get("output_tokens", 0))
                                         ),
                                     )
+                                if "choices" in data and isinstance(data.get("choices"), list) and data["choices"]:
+                                    delta = data["choices"][0].get("delta", {})
+                                    if isinstance(delta, dict):
+                                        output_chars_delta = len(_extract_assistant_delta_text(delta))
+                                encoded_line = (line + "\n").encode("utf-8")
+                                _update_live_request_usage(
+                                    request,
+                                    prompt_tokens=usage_totals["prompt_tokens"],
+                                    completion_tokens=usage_totals["completion_tokens"],
+                                    output_chars_delta=output_chars_delta,
+                                    response_bytes_delta=len(encoded_line),
+                                )
                             except (TypeError, ValueError, json.JSONDecodeError):
-                                pass
-                        yield (line + "\n").encode("utf-8")
+                                encoded_line = (line + "\n").encode("utf-8")
+                                _update_live_request_usage(request, response_bytes_delta=len(encoded_line))
+                        else:
+                            encoded_line = (line + "\n").encode("utf-8")
+                            _update_live_request_usage(request, response_bytes_delta=len(encoded_line))
+                        yield encoded_line
                 except asyncio.CancelledError:
                     pass
                 finally:
@@ -2837,6 +3051,10 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                         active_model_for_request,
                         prompt_tokens=usage_totals["prompt_tokens"],
                         completion_tokens=usage_totals["completion_tokens"],
+                    )
+                    _finish_live_request_usage(
+                        request,
+                        status_code=499 if inference_queue.is_cancel_requested(request_id) else resp.status_code,
                     )
                     model_manager.active_requests = max(0, model_manager.active_requests - 1)
                     model_manager.last_request_time = time.time()

@@ -3,11 +3,15 @@
 ## [Unreleased]
 
 ### Added
+- The static monitoring UI on `:11437` now shows the current live Guardian request and a real queue contents table, including phase, client, model, elapsed time, queue wait, waiting positions, and in-flight token counters sourced from `queue_status` plus the active-request tracker in `api_usage`.
 - Guardian queue lifecycle endpoints `GET /v1/queue/requests/{request_id}` and `DELETE /v1/queue/requests/{request_id}`, plus richer queue status payloads that expose request states, cancellation counts, and the current wait policy.
 - Ground-up documentation suite for the live Guardian runtime: rewritten `README.md` and `ARCHITECTURE.md`, plus new `HARDWARE_TUNING.md` and `API_REFERENCE.md`, all aligned to the current queue, model lifecycle, systemd-backed backend control, ComfyUI `/free` integration, and finetune v2 behavior.
 
 ### Changed
 - Reworked Guardian's inference queue from a timeout-driven semaphore gate into an explicit request lifecycle state machine. Queued requests now wait safely until they run, disconnect, or are cancelled; downstream disconnects and explicit cancels now clean up waiting/running slots instead of orphaning the backend.
+- Guardian queue admission is now enforced per authenticated API key fingerprint instead of just the display name: one key may own only one GPU-backed queued/running request at a time, duplicate GPU admissions get a clear `409 queue_admission_rejected` reason payload, and non-GPU `/v1/...` routes still bypass the queue entirely.
+- GPU-backed inference routes now reject unknown or unserved model names before queue admission with a clear `404 model_not_served` payload, so bogus model requests never appear in the queue or operator telemetry.
+- Refreshed the integration docs so client-maintainer agents have one canonical handoff path: `docs/CLIENT_INTEGRATION.md` now documents model discovery, per-key queue ownership, duplicate-admission rejects, unserved-model rejects, queue polling, and timeout guidance, with `README.md` and `docs/API_REFERENCE.md` aligned to the same contract.
 - Replaced stale documentation claims that implied always-on benchmark/request optimization or broader runtime fencing than the current code actually enforces. The docs now distinguish the active queue and model-manager path from secondary or advisory surfaces such as the scaler, historical benchmark artifacts, and proxy-state VRAM scaffolding.
 - Reorganized the new Guardian documentation under the top-level `docs/` directory so the repo root stays focused on the standard front-door files without introducing unnecessary nested documentation paths.
 

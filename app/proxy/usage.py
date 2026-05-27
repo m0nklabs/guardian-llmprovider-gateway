@@ -15,6 +15,21 @@ from app.paths import DATA_DIR
 
 logger = logging.getLogger("guardian-usage")
 
+ATTRIBUTION_FIELDS = (
+    "project_prefix",
+    "key_prefix",
+    "key_fingerprint",
+    "header_name",
+    "source_ip",
+    "forwarded_for",
+    "host",
+    "origin",
+    "referer",
+    "user_agent",
+    "metadata_client",
+    "metadata_note",
+)
+
 
 def _safe_int(value: object) -> int:
     """Convert an arbitrary value to a non-negative integer."""
@@ -22,6 +37,22 @@ def _safe_int(value: object) -> int:
         return max(int(value), 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _safe_float(value: object) -> float:
+    """Convert an arbitrary value to a non-negative float."""
+    try:
+        return max(float(value), 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _normalize_request_id(value: object) -> Optional[str]:
+    """Normalize an active-request identifier into a non-empty string."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
 
 
 def _category_for_endpoint(endpoint: str) -> str:
@@ -63,6 +94,7 @@ class ApiUsageTracker:
         self._endpoint_counts: Counter[str] = Counter()
         self._recent_requests: deque[dict[str, Any]] = deque(maxlen=self._recent_limit)
         self._clients: dict[str, dict[str, Any]] = defaultdict(self._new_client_bucket)
+        self._active_requests: dict[str, dict[str, Any]] = {}
 
     def _new_client_bucket(self) -> dict[str, Any]:
         """Create an empty stats bucket for a client ID."""
@@ -133,7 +165,7 @@ class ApiUsageTracker:
             }
 
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "started_at": self.started_at,
             "total_requests": int(self.total_requests),
             "total_errors": int(self.total_errors),
@@ -266,7 +298,112 @@ class ApiUsageTracker:
             if value not in (None, ""):
                 bucket[bucket_field] = value
 
-    def record_request(
+    def start_request(
+        self,
+        *,
+        request_id: object,
+        client_id: Optional[str],
+        endpoint: str,
+        method: str,
+        model: Optional[str] = None,
+        request_bytes: object = 0,
+        streamed: bool = False,
+        attribution: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Register an in-flight request so the dashboard can show it live."""
+        normalized_request_id = _normalize_request_id(request_id)
+        if normalized_request_id is None:
+            return
+
+        now = time.time()
+        normalized_client = client_id.strip() if isinstance(client_id, str) and client_id.strip() else None
+        row: dict[str, Any] = {
+            "request_id": normalized_request_id,
+            "queue_request_id": None,
+            "client_id": normalized_client or "unauthenticated",
+            "endpoint": endpoint,
+            "method": method,
+            "model": model,
+            "streamed": bool(streamed),
+            "category": _category_for_endpoint(endpoint),
+            "phase": "handling",
+            "request_bytes": _safe_int(request_bytes),
+            "response_bytes": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "output_chars": 0,
+            "queue_wait_ms": 0.0,
+            "started_at": now,
+            "last_update_at": now,
+        }
+        if isinstance(attribution, dict):
+            for field in ATTRIBUTION_FIELDS:
+                value = attribution.get(field)
+                if value not in (None, ""):
+                    row[field] = value
+
+        with self._lock:
+            existing = self._active_requests.get(normalized_request_id)
+            if existing is not None:
+                row["started_at"] = existing.get("started_at", now)
+                row["request_bytes"] = max(_safe_int(existing.get("request_bytes", 0)), row["request_bytes"])
+                row["response_bytes"] = _safe_int(existing.get("response_bytes", 0))
+                row["prompt_tokens"] = _safe_int(existing.get("prompt_tokens", 0))
+                row["completion_tokens"] = _safe_int(existing.get("completion_tokens", 0))
+                row["total_tokens"] = _safe_int(existing.get("total_tokens", 0))
+                row["output_chars"] = _safe_int(existing.get("output_chars", 0))
+                row["phase"] = existing.get("phase", row["phase"])
+                row["queue_request_id"] = existing.get("queue_request_id")
+                row["queue_wait_ms"] = _safe_float(existing.get("queue_wait_ms", 0.0))
+            self._active_requests[normalized_request_id] = row
+
+    def update_active_request(
+        self,
+        *,
+        request_id: object,
+        model: Optional[str] = None,
+        streamed: Optional[bool] = None,
+        queue_request_id: Optional[str] = None,
+        phase: Optional[str] = None,
+        queue_wait_ms: Optional[float] = None,
+        prompt_tokens: Optional[object] = None,
+        completion_tokens: Optional[object] = None,
+        output_chars_delta: object = 0,
+        response_bytes_delta: object = 0,
+    ) -> None:
+        """Update live request details while the request is still in flight."""
+        normalized_request_id = _normalize_request_id(request_id)
+        if normalized_request_id is None:
+            return
+
+        with self._lock:
+            row = self._active_requests.get(normalized_request_id)
+            if row is None:
+                return
+            if model not in (None, ""):
+                row["model"] = model
+            if streamed is not None:
+                row["streamed"] = bool(streamed)
+            if queue_request_id not in (None, ""):
+                row["queue_request_id"] = str(queue_request_id)
+            if phase not in (None, ""):
+                row["phase"] = str(phase)
+            if queue_wait_ms is not None:
+                row["queue_wait_ms"] = round(_safe_float(queue_wait_ms), 1)
+            if prompt_tokens is not None:
+                row["prompt_tokens"] = max(_safe_int(row.get("prompt_tokens", 0)), _safe_int(prompt_tokens))
+            if completion_tokens is not None:
+                row["completion_tokens"] = max(
+                    _safe_int(row.get("completion_tokens", 0)),
+                    _safe_int(completion_tokens),
+                )
+            row["response_bytes"] = _safe_int(row.get("response_bytes", 0)) + _safe_int(response_bytes_delta)
+            row["output_chars"] = _safe_int(row.get("output_chars", 0)) + _safe_int(output_chars_delta)
+            row["total_tokens"] = _safe_int(row.get("prompt_tokens", 0)) + _safe_int(row.get("completion_tokens", 0))
+            row["last_update_at"] = time.time()
+
+    def _record_request_locked(
         self,
         *,
         client_id: Optional[str],
@@ -280,7 +417,7 @@ class ApiUsageTracker:
         streamed: bool = False,
         attribution: Optional[dict[str, Any]] = None,
     ) -> None:
-        """Record a completed API request."""
+        """Record a completed request while the caller already holds the lock."""
         now = time.time()
         normalized_client = client_id.strip() if isinstance(client_id, str) and client_id.strip() else None
         category = _category_for_endpoint(endpoint)
@@ -301,60 +438,141 @@ class ApiUsageTracker:
             "category": category,
         }
         if isinstance(attribution, dict):
-            for field in (
-                "project_prefix",
-                "key_prefix",
-                "key_fingerprint",
-                "header_name",
-                "source_ip",
-                "forwarded_for",
-                "host",
-                "origin",
-                "referer",
-                "user_agent",
-                "metadata_client",
-                "metadata_note",
-            ):
+            for field in ATTRIBUTION_FIELDS:
                 value = attribution.get(field)
                 if value not in (None, ""):
                     request_row[field] = value
 
-        with self._lock:
-            self.total_requests += 1
-            self._endpoint_counts[endpoint] += 1
-            if status_code >= 400:
-                self.total_errors += 1
-            if streamed:
-                self.streaming_requests += 1
-            if normalized_client is None:
-                self.unauthenticated_requests += 1
-            self.total_request_bytes += request_byte_count
-            self.total_response_bytes += response_byte_count
-            if duration_value is not None:
-                self.total_duration_ms += duration_value
-                self.requests_with_duration += 1
-            self._recent_requests.append(request_row)
+        self.total_requests += 1
+        self._endpoint_counts[endpoint] += 1
+        if status_code >= 400:
+            self.total_errors += 1
+        if streamed:
+            self.streaming_requests += 1
+        if normalized_client is None:
+            self.unauthenticated_requests += 1
+        self.total_request_bytes += request_byte_count
+        self.total_response_bytes += response_byte_count
+        if duration_value is not None:
+            self.total_duration_ms += duration_value
+            self.requests_with_duration += 1
+        self._recent_requests.append(request_row)
 
-            if normalized_client is None:
-                self._save_locked()
+        if normalized_client is None:
+            return
+
+        bucket = self._clients[normalized_client]
+        bucket["requests"] += 1
+        bucket["errors"] += int(status_code >= 400)
+        bucket["streaming_requests"] += int(streamed)
+        bucket["request_bytes"] += request_byte_count
+        bucket["response_bytes"] += response_byte_count
+        if duration_value is not None:
+            bucket["duration_total_ms"] += duration_value
+            bucket["requests_with_duration"] += 1
+        bucket["last_seen"] = now
+        bucket["last_endpoint"] = endpoint
+        bucket["last_model"] = model or bucket["last_model"]
+        bucket["categories"][category] += 1
+        bucket["endpoints"][endpoint] += 1
+        bucket["methods"][method] += 1
+        self._apply_attribution(bucket, attribution)
+
+    def finish_request(
+        self,
+        *,
+        request_id: object,
+        client_id: Optional[str] = None,
+        endpoint: Optional[str] = None,
+        method: Optional[str] = None,
+        status_code: int,
+        model: Optional[str] = None,
+        duration_ms: Optional[float] = None,
+        request_bytes: object | None = None,
+        response_bytes: object | None = None,
+        streamed: Optional[bool] = None,
+        attribution: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Finalize an active request and fold it into the aggregate history."""
+        normalized_request_id = _normalize_request_id(request_id)
+        if normalized_request_id is None:
+            return
+
+        with self._lock:
+            active = self._active_requests.pop(normalized_request_id, None)
+            if active is None and endpoint is None:
                 return
 
-            bucket = self._clients[normalized_client]
-            bucket["requests"] += 1
-            bucket["errors"] += int(status_code >= 400)
-            bucket["streaming_requests"] += int(streamed)
-            bucket["request_bytes"] += request_byte_count
-            bucket["response_bytes"] += response_byte_count
-            if duration_value is not None:
-                bucket["duration_total_ms"] += duration_value
-                bucket["requests_with_duration"] += 1
-            bucket["last_seen"] = now
-            bucket["last_endpoint"] = endpoint
-            bucket["last_model"] = model or bucket["last_model"]
-            bucket["categories"][category] += 1
-            bucket["endpoints"][endpoint] += 1
-            bucket["methods"][method] += 1
-            self._apply_attribution(bucket, attribution)
+            resolved_client = client_id
+            if resolved_client in (None, "") and isinstance(active, dict):
+                resolved_client = active.get("client_id")
+                if resolved_client == "unauthenticated":
+                    resolved_client = None
+
+            resolved_endpoint = endpoint or (active.get("endpoint") if isinstance(active, dict) else None)
+            resolved_method = method or (active.get("method") if isinstance(active, dict) else None)
+            if resolved_endpoint is None or resolved_method is None:
+                return
+
+            resolved_model = model or (active.get("model") if isinstance(active, dict) else None)
+            resolved_streamed = bool(streamed if streamed is not None else (active.get("streamed") if isinstance(active, dict) else False))
+            resolved_request_bytes = request_bytes
+            if resolved_request_bytes is None and isinstance(active, dict):
+                resolved_request_bytes = active.get("request_bytes", 0)
+            resolved_response_bytes = response_bytes
+            if resolved_response_bytes is None and isinstance(active, dict):
+                resolved_response_bytes = active.get("response_bytes", 0)
+
+            resolved_attribution = attribution
+            if resolved_attribution is None and isinstance(active, dict):
+                resolved_attribution = {
+                    field: active[field]
+                    for field in ATTRIBUTION_FIELDS
+                    if active.get(field) not in (None, "")
+                }
+
+            self._record_request_locked(
+                client_id=resolved_client,
+                endpoint=resolved_endpoint,
+                method=resolved_method,
+                status_code=status_code,
+                model=resolved_model,
+                duration_ms=duration_ms,
+                request_bytes=resolved_request_bytes or 0,
+                response_bytes=resolved_response_bytes or 0,
+                streamed=resolved_streamed,
+                attribution=resolved_attribution,
+            )
+            self._save_locked()
+
+    def record_request(
+        self,
+        *,
+        client_id: Optional[str],
+        endpoint: str,
+        method: str,
+        status_code: int,
+        model: Optional[str] = None,
+        duration_ms: Optional[float] = None,
+        request_bytes: object = 0,
+        response_bytes: object = 0,
+        streamed: bool = False,
+        attribution: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Record a completed API request."""
+        with self._lock:
+            self._record_request_locked(
+                client_id=client_id,
+                endpoint=endpoint,
+                method=method,
+                status_code=status_code,
+                model=model,
+                duration_ms=duration_ms,
+                request_bytes=request_bytes,
+                response_bytes=response_bytes,
+                streamed=streamed,
+                attribution=attribution,
+            )
             self._save_locked()
 
     def record_tokens(
@@ -455,6 +673,33 @@ class ApiUsageTracker:
             average_duration_ms = 0.0
             if self.requests_with_duration:
                 average_duration_ms = round(self.total_duration_ms / self.requests_with_duration, 1)
+            active_requests = []
+            phase_order = {"running": 0, "queued": 1, "cancelling": 2, "handling": 3}
+            for row in self._active_requests.values():
+                started_at = _safe_float(row.get("started_at", now)) or now
+                elapsed_seconds = max(now - started_at, 0.0)
+                completion_tokens = _safe_int(row.get("completion_tokens", 0))
+                active_row = dict(row)
+                active_row["prompt_tokens"] = _safe_int(active_row.get("prompt_tokens", 0))
+                active_row["completion_tokens"] = completion_tokens
+                active_row["total_tokens"] = _safe_int(active_row.get("total_tokens", 0))
+                active_row["request_bytes"] = _safe_int(active_row.get("request_bytes", 0))
+                active_row["response_bytes"] = _safe_int(active_row.get("response_bytes", 0))
+                active_row["output_chars"] = _safe_int(active_row.get("output_chars", 0))
+                active_row["elapsed_ms"] = round(elapsed_seconds * 1000.0, 1)
+                active_row["elapsed_s"] = round(elapsed_seconds, 1)
+                active_row["queue_wait_ms"] = round(_safe_float(active_row.get("queue_wait_ms", 0.0)), 1)
+                active_row["tokens_per_second"] = round(
+                    completion_tokens / elapsed_seconds,
+                    1,
+                ) if completion_tokens > 0 and elapsed_seconds > 0 else 0.0
+                active_requests.append(active_row)
+            active_requests.sort(
+                key=lambda row: (
+                    phase_order.get(str(row.get("phase", "handling")), 9),
+                    -_safe_float(row.get("started_at", 0.0)),
+                )
+            )
 
             return {
                 "summary": {
@@ -476,11 +721,14 @@ class ApiUsageTracker:
                     "average_duration_ms": average_duration_ms,
                     "requests_last_5m": requests_last_5m,
                     "requests_last_hour": requests_last_hour,
+                    "active_requests_count": len(active_requests),
+                    "active_streaming_requests": sum(1 for row in active_requests if row.get("streamed")),
                     "requests_per_minute": round(self.total_requests / max(uptime_seconds / 60.0, 1 / 60.0), 2)
                     if self.total_requests
                     else 0.0,
                 },
                 "top_clients": top_clients[:top_n],
                 "top_endpoints": endpoints,
+                "active_requests": active_requests,
                 "recent_requests": list(reversed(recent_rows[-recent_n:])),
             }

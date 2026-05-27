@@ -19,6 +19,49 @@ FINAL_STATES = {"completed", "cancelled", "failed", "expired"}
 ACTIVE_STATES = {"running", "cancelling"}
 
 
+def _normalize_client_id(client_id: object) -> Optional[str]:
+    """Return a safe queue client id, or ``None`` when the caller is not authenticated."""
+    if not isinstance(client_id, str):
+        return None
+    normalized = client_id.strip()
+    if not normalized:
+        return None
+    if normalized.lower() == "unauthenticated":
+        return None
+    return normalized
+
+
+def _normalize_owner_id(owner_id: object, fallback_client_id: object = None) -> Optional[str]:
+    """Return the queue ownership identity, falling back to the client name when needed."""
+    if isinstance(owner_id, str):
+        normalized_owner = owner_id.strip()
+        if normalized_owner:
+            return normalized_owner
+    return _normalize_client_id(fallback_client_id)
+
+
+class QueueAdmissionRejected(Exception):
+    """Raised when Guardian rejects queue admission before registration."""
+
+    def __init__(
+        self,
+        *,
+        owner_id: str,
+        client_id: str,
+        existing_request_id: str,
+        existing_status: str,
+        reason: str,
+        message: str,
+    ):
+        super().__init__(message)
+        self.owner_id = owner_id
+        self.client_id = client_id
+        self.existing_request_id = existing_request_id
+        self.existing_status = existing_status
+        self.reason = reason
+        self.message = message
+
+
 class QueueRequestCancelled(Exception):
     """Raised when a queued request is cancelled before it can run."""
 
@@ -34,6 +77,7 @@ class QueueEntry:
 
     request_id: str
     client_id: str
+    owner_id: str = field(repr=False)
     model: str
     enqueued_at: float
     status: str = "queued"
@@ -130,16 +174,52 @@ class InferenceQueue:
         self._prune_history()
         return self._entries.get(request_id)
 
-    def submit(self, client_id: str, model: str, request_id: Optional[str] = None) -> str:
+    def submit(
+        self,
+        client_id: str,
+        model: str,
+        request_id: Optional[str] = None,
+        *,
+        owner_id: Optional[str] = None,
+    ) -> str:
         """Register a new queued request and return its request id immediately."""
         self._prune_history()
+        normalized_client_id = _normalize_client_id(client_id)
+        if normalized_client_id is None:
+            raise ValueError("authenticated client_id required for queue submission")
+        normalized_owner_id = _normalize_owner_id(owner_id, normalized_client_id)
+        if normalized_owner_id is None:
+            raise ValueError("authenticated owner_id required for queue submission")
+
+        for entry in self._entries.values():
+            if entry.owner_id != normalized_owner_id or entry.status in FINAL_STATES:
+                continue
+            if entry.status == "queued":
+                raise QueueAdmissionRejected(
+                    owner_id=normalized_owner_id,
+                    client_id=normalized_client_id,
+                    existing_request_id=entry.request_id,
+                    existing_status=entry.status,
+                    reason="api_key_already_has_queued_request",
+                    message="This API key already has a queued Guardian request. Wait for it to run or cancel it before submitting another.",
+                )
+            raise QueueAdmissionRejected(
+                owner_id=normalized_owner_id,
+                client_id=normalized_client_id,
+                existing_request_id=entry.request_id,
+                existing_status=entry.status,
+                reason="api_key_already_has_running_request",
+                message="This API key already has an active Guardian request. Wait for it to finish before submitting another.",
+            )
+
         request_id = request_id or str(uuid.uuid4())
         if request_id in self._entries:
             raise ValueError(f"request_id '{request_id}' is already in use")
 
         entry = QueueEntry(
             request_id=request_id,
-            client_id=client_id,
+            client_id=normalized_client_id,
+            owner_id=normalized_owner_id,
             model=model,
             enqueued_at=time.time(),
         )
@@ -153,7 +233,7 @@ class InferenceQueue:
                 "📋 [%s] Queued at position %s (client: %s, model: %s)",
                 request_id[:8],
                 position,
-                client_id,
+                normalized_client_id,
                 model,
             )
         self._signal_change()
@@ -211,9 +291,9 @@ class InferenceQueue:
                 if not cancel_task.done():
                     cancel_task.cancel()
 
-    async def acquire(self, client_id: str, model: str) -> str:
+    async def acquire(self, client_id: str, model: str, *, owner_id: Optional[str] = None) -> str:
         """Legacy convenience wrapper: submit then wait for execution."""
-        request_id = self.submit(client_id, model)
+        request_id = self.submit(client_id, model, owner_id=owner_id)
         await self.wait_for_turn(request_id)
         return request_id
 
@@ -222,6 +302,7 @@ class InferenceQueue:
         request_id: str,
         *,
         client_id: Optional[str] = None,
+        owner_id: Optional[str] = None,
         reason: str = "cancelled",
         detail: Optional[str] = None,
     ) -> Optional[dict]:
@@ -229,7 +310,11 @@ class InferenceQueue:
         entry = self._get_entry(request_id)
         if entry is None:
             return None
-        if client_id is not None and entry.client_id != client_id:
+        normalized_owner_id = _normalize_owner_id(owner_id)
+        if normalized_owner_id is not None and entry.owner_id != normalized_owner_id:
+            return None
+        normalized_client_id = _normalize_client_id(client_id) if client_id is not None else None
+        if normalized_owner_id is None and normalized_client_id is not None and entry.client_id != normalized_client_id:
             return None
 
         now = time.time()
@@ -252,7 +337,7 @@ class InferenceQueue:
             logger.info("🛑 [%s] Cancellation requested while running (%s)", request_id[:8], reason)
 
         self._signal_change()
-        return self.get_request_status(request_id, client_id=client_id)
+        return self.get_request_status(request_id, client_id=client_id, owner_id=owner_id)
 
     def finish(self, request_id: str, outcome: str = "completed", detail: Optional[str] = None) -> float:
         """Finalize a request and free its slot if it was running."""
@@ -319,12 +404,21 @@ class InferenceQueue:
             return 0.0
         return max((entry.started_at - entry.enqueued_at) * 1000.0, 0.0)
 
-    def get_request_status(self, request_id: str, client_id: Optional[str] = None) -> Optional[dict]:
+    def get_request_status(
+        self,
+        request_id: str,
+        client_id: Optional[str] = None,
+        owner_id: Optional[str] = None,
+    ) -> Optional[dict]:
         """Return a request-specific status payload, if visible to the caller."""
         entry = self._get_entry(request_id)
         if entry is None:
             return None
-        if client_id is not None and entry.client_id != client_id:
+        normalized_owner_id = _normalize_owner_id(owner_id)
+        if normalized_owner_id is not None and entry.owner_id != normalized_owner_id:
+            return None
+        normalized_client_id = _normalize_client_id(client_id) if client_id is not None else None
+        if normalized_owner_id is None and normalized_client_id is not None and entry.client_id != normalized_client_id:
             return None
 
         position = None
@@ -336,7 +430,7 @@ class InferenceQueue:
             position = -1
         return entry.snapshot(now=time.time(), position=position)
 
-    def get_status(self, client_id: Optional[str] = None) -> dict:
+    def get_status(self, client_id: Optional[str] = None, owner_id: Optional[str] = None) -> dict:
         """Build a status dict for the ``GET /v1/queue/status`` endpoint."""
         self._prune_history()
         now = time.time()
@@ -371,7 +465,15 @@ class InferenceQueue:
                 if request_id in self._entries
             ]
 
-        if client_id:
+        normalized_owner_id = _normalize_owner_id(owner_id)
+        normalized_client_id = _normalize_client_id(client_id) if client_id is not None else None
+
+        if normalized_owner_id or normalized_client_id:
+            def _matches_request_owner(entry: QueueEntry) -> bool:
+                if normalized_owner_id is not None:
+                    return entry.owner_id == normalized_owner_id
+                return entry.client_id == normalized_client_id
+
             your_requests = [
                 entry.snapshot(
                     now=now,
@@ -380,7 +482,7 @@ class InferenceQueue:
                     else (0 if entry.request_id in self._active else -1),
                 )
                 for entry in self._entries.values()
-                if entry.client_id == client_id
+                if _matches_request_owner(entry)
             ]
             your_requests.sort(key=lambda item: item["enqueued_at"], reverse=True)
             result["your_requests"] = your_requests

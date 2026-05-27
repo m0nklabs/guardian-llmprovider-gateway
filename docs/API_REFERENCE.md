@@ -1,5 +1,9 @@
 # API Reference
 
+For client-side integration patterns, queue ownership rules, and recommended
+error handling, start with [CLIENT_INTEGRATION.md](CLIENT_INTEGRATION.md). This
+document stays focused on the raw surface contract.
+
 ## Ports and Auth Boundaries
 
 | Port | Surface | Auth in current code |
@@ -33,6 +37,21 @@ Guardian keeps a live queued request waiting until one of these things happens:
 - the client disconnects and Guardian cancels it
 - the client explicitly cancels it through `DELETE /v1/queue/requests/{request_id}`
 
+Only GPU-backed inference routes are queued:
+
+- `POST /v1/chat/completions`
+- `POST /v1/completions`
+- `POST /v1/embeddings`
+- `POST /v1/messages`
+- `POST /api/chat`
+- `POST /api/generate`
+
+Queue admission is rejected before waiting if either of these is true:
+
+- the request is unauthenticated
+- the requested model is not served by Guardian
+- the same API key already owns a queued or running GPU request
+
 The configured `queue.queue_timeout_seconds` is surfaced as queue-budget
 telemetry in status responses, but Guardian no longer drops a healthy waiter
 just because that budget has elapsed.
@@ -46,9 +65,10 @@ backend timeouts.
 Common statuses:
 
 - `200`: success
-- `400`: bad admin load override or malformed request contract
+- `400`: bad admin load override, malformed JSON body, or missing required request fields
 - `401`: missing or invalid API key
-- `404`: model metadata lookup failed
+- `404`: model metadata lookup failed or inference requested an unserved model
+- `409`: queue admission rejected because the same API key already has a queued or running GPU request
 - `422`: vision runtime unavailable or backend image path rejected
 - `499`: Guardian cancelled the request because the downstream client
   disconnected or the client explicitly cancelled its queue entry
@@ -179,6 +199,8 @@ Representative multimodal request:
 
 Runtime behavior:
 
+- the requested `model` is resolved against Guardian's configured registry before queue admission; unknown or unserved values fail with `404 model_not_served`
+- queue admission rejects a second queued or running GPU request from the same API key with `409 queue_admission_rejected`
 - if the requested model differs from the active model and the client is
   allowed to switch, Guardian reloads inside the queue slot before proxying
 - if the same model needs a text-to-vision or vision-to-text runtime flip,
@@ -260,6 +282,7 @@ Queue rule for generic `POST /v1/{path:path}`:
 - queued only when `path` is `chat/completions`, `completions`, `embeddings`,
   or `messages`
 - direct passthrough for all other `POST /v1/*` paths
+- for queued inference paths, Guardian requires a valid JSON object body with a served `model` field before queue admission
 
 ### Queue and status endpoints
 
@@ -313,6 +336,9 @@ Representative response:
   "waiting_s": 14.2
 }
 ```
+
+The request must belong to the same API key fingerprint that created it.
+Guardian returns `404` for another key instead of leaking cross-key queue state.
 
 #### `DELETE /v1/queue/requests/{request_id}`
 

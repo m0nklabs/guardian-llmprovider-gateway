@@ -4,7 +4,8 @@ import asyncio
 import json
 import os
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -157,6 +158,21 @@ def test_resolve_inference_model_prefers_tool_profile():
         assert server._resolve_inference_model("auto", "Qwen-Deep") == "Qwen-Agent"
 
 
+def test_resolve_or_reject_inference_model_rejects_unserved_model():
+    """Unknown inference models should be rejected before queue admission."""
+    with (
+        patch.object(server.model_manager, "models", {"Qwen-Agent": {}}),
+        patch.object(server.model_manager, "resolve_model", side_effect=ValueError("not found")),
+    ):
+        with pytest.raises(server.HTTPException) as exc_info:
+            server._resolve_or_reject_inference_model("ghost-model", "Qwen-Agent")
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail["error"] == "model_not_served"
+    assert exc_info.value.detail["reason"] == "requested_model_not_served"
+    assert exc_info.value.detail["requested_model"] == "ghost-model"
+
+
 def test_reasoning_falls_back_for_ollama_clients():
     """Ollama bridges should use reasoning text when no visible content is present."""
     assert server._extract_assistant_delta_text({"reasoning_content": "thinking"}) == "thinking"
@@ -219,6 +235,70 @@ async def test_begin_queued_request_cleans_up_waiter_on_disconnect():
 
 
 @pytest.mark.asyncio
+async def test_begin_queued_request_rejects_unauthenticated_client():
+    queue = server.InferenceQueue(max_concurrent=1)
+
+    class _FakeRequest:
+        async def is_disconnected(self) -> bool:
+            return False
+
+    with patch.object(server, "inference_queue", queue):
+        with pytest.raises(server.HTTPException) as exc_info:
+            await server._begin_queued_request(_FakeRequest(), "unauthenticated", "model-x")
+
+    assert exc_info.value.status_code == 401
+    assert queue.waiting_count == 0
+    assert queue.active_count == 0
+
+
+@pytest.mark.asyncio
+async def test_begin_queued_request_rejects_duplicate_running_request_for_same_api_key():
+    queue = server.InferenceQueue(max_concurrent=1)
+    request_id = queue.submit("openclaw", "model-x", owner_id="key:abc123")
+    await queue.wait_for_turn(request_id)
+
+    fake_request = SimpleNamespace(
+        state=SimpleNamespace(auth_context={"key_fingerprint": "abc123"}),
+        is_disconnected=lambda: asyncio.sleep(0, result=False),
+    )
+
+    with patch.object(server, "inference_queue", queue):
+        with pytest.raises(server.HTTPException) as exc_info:
+            await server._begin_queued_request(fake_request, "openclaw", "model-y")
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["reason"] == "api_key_already_has_running_request"
+    assert exc_info.value.detail["existing_status"] == "running"
+    assert exc_info.value.detail["existing_request_id"] == request_id
+
+    queue.release(request_id)
+
+
+@pytest.mark.asyncio
+async def test_begin_queued_request_rejects_duplicate_queued_request_for_same_api_key():
+    queue = server.InferenceQueue(max_concurrent=1)
+    blocker_id = await queue.acquire("blocker", "model-x", owner_id="key:blocker")
+    queued_id = queue.submit("openclaw", "model-x", owner_id="key:abc123")
+
+    fake_request = SimpleNamespace(
+        state=SimpleNamespace(auth_context={"key_fingerprint": "abc123"}),
+        is_disconnected=lambda: asyncio.sleep(0, result=False),
+    )
+
+    with patch.object(server, "inference_queue", queue):
+        with pytest.raises(server.HTTPException) as exc_info:
+            await server._begin_queued_request(fake_request, "openclaw", "model-y")
+
+    assert exc_info.value.status_code == 409
+    assert exc_info.value.detail["reason"] == "api_key_already_has_queued_request"
+    assert exc_info.value.detail["existing_status"] == "queued"
+    assert exc_info.value.detail["existing_request_id"] == queued_id
+
+    queue.cancel(queued_id, owner_id="key:abc123", reason="test_cleanup")
+    queue.release(blocker_id)
+
+
+@pytest.mark.asyncio
 async def test_await_or_cancel_request_cleans_up_running_request():
     queue = server.InferenceQueue(max_concurrent=1)
     request_id = queue.submit("runner", "model-x")
@@ -247,10 +327,11 @@ async def test_await_or_cancel_request_cleans_up_running_request():
 @pytest.mark.asyncio
 async def test_queue_request_status_endpoint_returns_snapshot():
     queue = server.InferenceQueue(max_concurrent=1)
-    request_id = queue.submit("observer", "model-x")
+    request_id = queue.submit("observer", "model-x", owner_id="key:observer")
+    request = SimpleNamespace(state=SimpleNamespace(auth_context={"key_fingerprint": "observer"}))
 
     with patch.object(server, "inference_queue", queue):
-        snapshot = await server.queue_request_status(request_id, client_id="observer")
+        snapshot = await server.queue_request_status(request_id, request=request, client_id="observer")
 
     assert snapshot["request_id"] == request_id
     assert snapshot["status"] == "queued"
@@ -260,14 +341,102 @@ async def test_queue_request_status_endpoint_returns_snapshot():
 @pytest.mark.asyncio
 async def test_cancel_queue_request_endpoint_marks_running_request():
     queue = server.InferenceQueue(max_concurrent=1)
-    request_id = await queue.acquire("observer", "model-x")
+    request_id = await queue.acquire("observer", "model-x", owner_id="key:observer")
+    request = SimpleNamespace(state=SimpleNamespace(auth_context={"key_fingerprint": "observer"}))
 
     with patch.object(server, "inference_queue", queue):
-        snapshot = await server.cancel_queue_request(request_id, client_id="observer")
+        snapshot = await server.cancel_queue_request(request_id, request=request, client_id="observer")
 
     assert snapshot["request_id"] == request_id
     assert snapshot["status"] == "cancelling"
     assert snapshot["cancel_reason"] == "client_requested_cancel"
+
+
+@pytest.mark.asyncio
+async def test_queue_request_status_endpoint_is_isolated_per_api_key():
+    queue = server.InferenceQueue(max_concurrent=1)
+    request_id = queue.submit("observer", "model-x", owner_id="key:owner-a")
+    foreign_request = SimpleNamespace(state=SimpleNamespace(auth_context={"key_fingerprint": "owner-b"}))
+
+    with patch.object(server, "inference_queue", queue):
+        with pytest.raises(server.HTTPException) as exc_info:
+            await server.queue_request_status(request_id, request=foreign_request, client_id="observer")
+
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_non_gpu_v1_route_bypasses_queue_even_with_same_key_busy():
+    class _FakeRequest:
+        def __init__(self):
+            self.headers = {"Content-Type": "application/json"}
+            self.state = SimpleNamespace(auth_context={"key_fingerprint": "abc123"})
+            self.url = SimpleNamespace(path="/v1/models")
+            self.method = "POST"
+
+        async def body(self) -> bytes:
+            return b'{"input":"metadata only"}'
+
+    class _FakeAsyncClient:
+        class _FakeHTTPXResponse:
+            def __init__(self):
+                self.content = b'{"ok":true}'
+                self.status_code = 200
+                self.headers = {"content-type": "application/json"}
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, content=None, headers=None):
+            return self._FakeHTTPXResponse()
+
+    request = _FakeRequest()
+
+    with (
+        patch.object(server, "_set_request_usage_metadata", lambda *args, **kwargs: None),
+        patch.object(server, "_begin_queued_request", side_effect=AssertionError("queue should not be used")),
+        patch.object(server.httpx, "AsyncClient", _FakeAsyncClient),
+    ):
+        response = await server.proxy_v1_post("models", request, client_id="openclaw")
+
+    assert response.status_code == 200
+    assert response.body == b'{"ok":true}'
+
+
+@pytest.mark.asyncio
+async def test_v1_inference_rejects_unserved_model_before_queue_admission():
+    class _FakeRequest:
+        def __init__(self):
+            self.headers = {"Content-Type": "application/json"}
+            self.state = SimpleNamespace(auth_context={"key_fingerprint": "abc123"})
+            self.url = SimpleNamespace(path="/v1/chat/completions")
+            self.method = "POST"
+
+        async def body(self) -> bytes:
+            return json.dumps({"model": "ghost-model", "messages": [{"role": "user", "content": "hi"}]}).encode("utf-8")
+
+    request = _FakeRequest()
+
+    with (
+        patch.object(server, "_set_request_usage_metadata", lambda *args, **kwargs: None),
+        patch.object(server, "_begin_queued_request", side_effect=AssertionError("queue should not be used")),
+        patch.object(server.model_manager, "models", {"Qwen-Agent": {}}),
+        patch.object(server.model_manager, "get_current_model", AsyncMock(return_value="Qwen-Agent")),
+        patch.object(server.model_manager, "resolve_model", side_effect=ValueError("not found")),
+    ):
+        with pytest.raises(server.HTTPException) as exc_info:
+            await server.proxy_v1_post("chat/completions", request, client_id="openclaw")
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail["error"] == "model_not_served"
+    assert exc_info.value.detail["reason"] == "requested_model_not_served"
+    assert exc_info.value.detail["requested_model"] == "ghost-model"
 
 
 @pytest.mark.asyncio

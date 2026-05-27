@@ -28,6 +28,9 @@ instead of hard-crashing into CUDA OOM loops or restart storms.
 - Single-slot FIFO inference queue with explicit request lifecycle tracking,
   disconnect-aware cleanup, queue polling, per-request status/cancel endpoints,
   and `X-Request-Id` / `X-Queue-Wait-Ms` headers
+- Admission control for GPU-backed inference: unauthenticated requests never
+  enter the queue, each API key gets one queued/running GPU slot, and unknown
+  model names fail fast with clear `404`/`409` client-facing payloads
 - Model lifecycle ownership through `sudo systemctl start|stop llama-server`
 - Hot-reloaded model registry from [config/models.yaml](config/models.yaml),
   including aliases, text and vision runtime fields, and switch policy
@@ -202,6 +205,11 @@ Browse to `http://127.0.0.1:11437/`.
 ## Documentation Map
 
 Detailed docs now live under `docs/` instead of cluttering the repo root.
+
+Client maintainers should start with
+[docs/CLIENT_INTEGRATION.md](docs/CLIENT_INTEGRATION.md). It is the canonical
+handoff document for auth, model discovery, queue ownership, rejection
+contracts, polling, and timeout behavior.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - [docs/HARDWARE_TUNING.md](docs/HARDWARE_TUNING.md)
