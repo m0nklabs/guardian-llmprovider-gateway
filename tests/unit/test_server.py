@@ -572,6 +572,39 @@ async def test_stream_watchdog_emits_keepalive_before_timeout():
 
 
 @pytest.mark.asyncio
+async def test_stream_watchdog_exits_when_queue_request_is_cancelled():
+    queue = server.InferenceQueue(max_concurrent=1)
+    request_id = await queue.acquire("runner", "model-x")
+
+    class _FakeResponse:
+        def __init__(self):
+            self.request = server.httpx.Request("POST", "http://127.0.0.1:11440/v1/chat/completions")
+
+        async def aiter_lines(self):
+            await asyncio.Future()
+            yield ""
+
+    response = _FakeResponse()
+    watchdog = server.StreamProgressWatchdog(base_timeout_s=300)
+
+    with patch.object(server, "inference_queue", queue):
+        stream_iter = server._iter_sse_lines_with_watchdog(
+            response,
+            watchdog,
+            request_id=request_id,
+            route="/v1/chat/completions",
+            cancel_event=queue.get_cancel_event(request_id),
+        )
+        queue.cancel(request_id, client_id="runner", reason="client_requested_cancel")
+
+        try:
+            with pytest.raises(server._GuardianRequestCancelled, match="client_requested_cancel"):
+                await asyncio.wait_for(stream_iter.__anext__(), timeout=0.1)
+        finally:
+            await stream_iter.aclose()
+
+
+@pytest.mark.asyncio
 async def test_stream_watchdog_timeout_logs_request_context():
     class _NeverYields:
         def __aiter__(self):

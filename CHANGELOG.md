@@ -8,6 +8,7 @@
 - Ground-up documentation suite for the live Guardian runtime: rewritten `README.md` and `ARCHITECTURE.md`, plus new `HARDWARE_TUNING.md` and `API_REFERENCE.md`, all aligned to the current queue, model lifecycle, systemd-backed backend control, ComfyUI `/free` integration, and finetune v2 behavior.
 
 ### Changed
+- Streaming proxy cancellation now observes queue cancellation events and bounds upstream response/client/background-task cleanup, preventing cancelled Hermes streams from sitting in `cancelling` indefinitely.
 - Updated the Qwen3.6 agent runtime to bounded reasoning instead of `--reasoning-budget 0`, keeping reasoning as the normal agent default on current llama.cpp while preserving the proven model path, context, KV, and tensor split settings.
 - Marked Nomic embedding profiles as dedicated non-thinking embedding runtimes with `--embedding --reasoning off`, so special non-chat routes do not inherit the new server-side thinking default.
 - Guardian's OpenAI-compatible inference proxy now applies `reasoning_budget: 0` plus `chat_template_kwargs.enable_thinking=false` only for explicit no-thinking requests or special non-reasoning model profiles, leaving normal chat/agent requests untouched.

@@ -51,6 +51,7 @@ def load_config() -> dict:
     default_config = {
         "proxy": {
             "stream_heartbeat_seconds": 15,
+            "stream_close_timeout_seconds": 5,
         },
         "timeouts": {
             "tiers": {
@@ -111,6 +112,18 @@ def _load_stream_heartbeat_interval_s() -> Optional[float]:
 
 
 STREAM_HEARTBEAT_INTERVAL_S = _load_stream_heartbeat_interval_s()
+
+
+def _load_stream_close_timeout_s() -> float:
+    """Return the bounded timeout used for upstream stream cleanup."""
+    try:
+        timeout = float(CONFIG.get("proxy", {}).get("stream_close_timeout_seconds", 5))
+    except (TypeError, ValueError):
+        timeout = 5.0
+    return max(timeout, 0.5)
+
+
+STREAM_CLOSE_TIMEOUT_S = _load_stream_close_timeout_s()
 
 # Logging
 logging.basicConfig(level=logging.INFO)
@@ -398,6 +411,7 @@ async def _iter_sse_lines_with_watchdog(
     client_id: Optional[str] = None,
     model_name: Optional[str] = None,
     heartbeat_interval_s: Optional[float] = None,
+    cancel_event: Optional[asyncio.Event] = None,
 ) -> AsyncIterator[str]:
     """Yield SSE lines while enforcing a dynamic stall timeout and optional downstream keepalives."""
     queue: "asyncio.Queue[tuple[str, Optional[Any]]]" = asyncio.Queue()
@@ -406,6 +420,13 @@ async def _iter_sse_lines_with_watchdog(
 
     try:
         while True:
+            if cancel_event is not None and cancel_event.is_set():
+                reason = "cancelled"
+                if request_id:
+                    snapshot = inference_queue.get_request_status(request_id)
+                    reason = (snapshot or {}).get("cancel_reason") or reason
+                raise _GuardianRequestCancelled(request_id or "unknown", reason)
+
             timeout_exc: Optional[asyncio.TimeoutError] = None
             elapsed_without_data_s = time.monotonic() - last_data_at
             remaining_timeout_s = watchdog.current_timeout_s - elapsed_without_data_s
@@ -417,7 +438,36 @@ async def _iter_sse_lines_with_watchdog(
                 if heartbeat_interval_s is not None:
                     wait_timeout_s = min(wait_timeout_s, heartbeat_interval_s)
                 try:
-                    event_type, payload = await asyncio.wait_for(queue.get(), timeout=wait_timeout_s)
+                    if cancel_event is None:
+                        event_type, payload = await asyncio.wait_for(queue.get(), timeout=wait_timeout_s)
+                    else:
+                        queue_task = asyncio.create_task(queue.get())
+                        cancel_task = asyncio.create_task(cancel_event.wait())
+                        try:
+                            done, pending = await asyncio.wait(
+                                {queue_task, cancel_task},
+                                timeout=wait_timeout_s,
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            for pending_task in pending:
+                                pending_task.cancel()
+                            for pending_task in pending:
+                                with suppress(asyncio.CancelledError):
+                                    await pending_task
+                            if not done:
+                                raise asyncio.TimeoutError()
+                            if cancel_task in done and cancel_event.is_set():
+                                reason = "cancelled"
+                                if request_id:
+                                    snapshot = inference_queue.get_request_status(request_id)
+                                    reason = (snapshot or {}).get("cancel_reason") or reason
+                                raise _GuardianRequestCancelled(request_id or "unknown", reason)
+                            event_type, payload = queue_task.result()
+                        finally:
+                            if not queue_task.done():
+                                queue_task.cancel()
+                            if not cancel_task.done():
+                                cancel_task.cancel()
                 except asyncio.TimeoutError as exc:
                     timeout_exc = exc
                     elapsed_without_data_s = time.monotonic() - last_data_at
@@ -746,8 +796,16 @@ async def _stop_background_task(task: Optional[asyncio.Task]) -> None:
     if task is None:
         return
     task.cancel()
-    with suppress(asyncio.CancelledError):
-        await task
+    try:
+        await asyncio.wait_for(task, timeout=STREAM_CLOSE_TIMEOUT_S)
+    except asyncio.CancelledError:
+        pass
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Timed out after %.1fs while stopping background task %s",
+            STREAM_CLOSE_TIMEOUT_S,
+            task.get_name(),
+        )
 
 
 async def _watch_request_disconnect(request: Request, request_id: str, client_id: str) -> None:
@@ -844,11 +902,11 @@ async def _await_or_cancel_request(
         if cancel_task in done and cancel_event.is_set():
             if cleanup is not None:
                 with suppress(Exception):
-                    await cleanup()
+                    await asyncio.wait_for(cleanup(), timeout=STREAM_CLOSE_TIMEOUT_S)
             if not operation_task.done():
                 operation_task.cancel()
                 with suppress(asyncio.CancelledError, Exception):
-                    await operation_task
+                    await asyncio.wait_for(operation_task, timeout=STREAM_CLOSE_TIMEOUT_S)
             snapshot = inference_queue.get_request_status(request_id)
             reason = (snapshot or {}).get("cancel_reason", "cancelled")
             raise _GuardianRequestCancelled(request_id, reason)
@@ -861,10 +919,20 @@ async def _await_or_cancel_request(
 
 async def _close_stream_resources(response: httpx.Response, client: httpx.AsyncClient) -> None:
     """Close the upstream streaming response and client without surfacing cleanup noise."""
-    with suppress(Exception):
-        await response.aclose()
-    with suppress(Exception):
-        await client.aclose()
+    for resource_name, closer in (
+        ("response", response.aclose),
+        ("client", client.aclose),
+    ):
+        try:
+            await asyncio.wait_for(closer(), timeout=STREAM_CLOSE_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Timed out after %.1fs closing upstream stream %s during cancellation",
+                STREAM_CLOSE_TIMEOUT_S,
+                resource_name,
+            )
+        except Exception:
+            pass
 
 
 async def _close_on_request_cancel(
@@ -876,7 +944,14 @@ async def _close_on_request_cancel(
     if cancel_event is None:
         return
     await cancel_event.wait()
-    await cleanup()
+    try:
+        await asyncio.wait_for(cleanup(), timeout=STREAM_CLOSE_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Timed out after %.1fs while closing upstream resources for cancelled request %s",
+            STREAM_CLOSE_TIMEOUT_S,
+            request_id[:8],
+        )
 
 
 def _request_outcome(request_id: str) -> str:
@@ -1940,6 +2015,7 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
                         route="/api/chat",
                         client_id=client_id,
                         model_name=model,
+                        cancel_event=inference_queue.get_cancel_event(request_id),
                     ):
                         if not chunk or chunk.strip() == "data: [DONE]": 
                             continue
@@ -1988,7 +2064,7 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
                             "prompt_eval_count": 0,
                             "eval_count": 0
                         }) + "\n"
-                except asyncio.CancelledError:
+                except (asyncio.CancelledError, _GuardianRequestCancelled):
                     pass
                 finally:
                     cancel_cleanup_task.cancel()
@@ -2209,6 +2285,7 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
                         route="/api/generate",
                         client_id=client_id,
                         model_name=model,
+                        cancel_event=inference_queue.get_cancel_event(request_id),
                     ):
                         if not chunk or chunk.strip() == "data: [DONE]": 
                             continue
@@ -2258,7 +2335,7 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
                             "prompt_eval_count": 0,
                             "eval_count": 0
                         }) + "\n"
-                except asyncio.CancelledError:
+                except (asyncio.CancelledError, _GuardianRequestCancelled):
                     pass
                 finally:
                     cancel_cleanup_task.cancel()
@@ -3083,6 +3160,7 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                         client_id=client_id,
                         model_name=active_model_for_request,
                         heartbeat_interval_s=STREAM_HEARTBEAT_INTERVAL_S,
+                        cancel_event=inference_queue.get_cancel_event(request_id),
                     ):
                         if line.startswith("data: "):
                             try:
@@ -3119,7 +3197,7 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                             encoded_line = (line + "\n").encode("utf-8")
                             _update_live_request_usage(request, response_bytes_delta=len(encoded_line))
                         yield encoded_line
-                except asyncio.CancelledError:
+                except (asyncio.CancelledError, _GuardianRequestCancelled):
                     pass
                 finally:
                     cancel_cleanup_task.cancel()
