@@ -641,6 +641,67 @@
             })[0] || null;
         }
 
+        function pickQueueActiveRequest(queueActiveRequests) {
+            return [...queueActiveRequests].sort((a, b) => {
+                const phaseDiff = livePhaseRank(a.status) - livePhaseRank(b.status);
+                if (phaseDiff !== 0) return phaseDiff;
+                return Number(b.started_at || b.enqueued_at || 0) - Number(a.started_at || a.enqueued_at || 0);
+            })[0] || null;
+        }
+
+        function buildLiveRequestFromQueue(queueEntry, telemetryEntry = null) {
+            if (!queueEntry && !telemetryEntry) return null;
+
+            const merged = {
+                ...(queueEntry || {}),
+                ...(telemetryEntry || {}),
+            };
+            const queueRequestId = String(
+                merged.queue_request_id
+                || telemetryEntry?.queue_request_id
+                || queueEntry?.request_id
+                || merged.request_id
+                || ''
+            ).trim();
+            const elapsedMs = telemetryEntry?.elapsed_ms ?? (Number(queueEntry?.elapsed_s || 0) * 1000);
+            const queueWaitMs = telemetryEntry?.queue_wait_ms ?? queueEntry?.queue_wait_ms ?? (Number(queueEntry?.queue_wait_s || 0) * 1000);
+
+            return {
+                ...merged,
+                request_id: telemetryEntry?.request_id || queueEntry?.request_id || merged.request_id || null,
+                queue_request_id: queueRequestId || null,
+                telemetry_attached: Boolean(telemetryEntry),
+                client_id: merged.client_id || 'unknown',
+                model: merged.model || '—',
+                phase: merged.phase || merged.status || 'handling',
+                endpoint: merged.endpoint || 'queue-managed inference',
+                method: merged.method || 'POST',
+                streamed: telemetryEntry?.streamed ?? false,
+                prompt_tokens: Number(merged.prompt_tokens || 0),
+                completion_tokens: Number(merged.completion_tokens || 0),
+                total_tokens: Number(merged.total_tokens || 0),
+                output_chars: Number(merged.output_chars || 0),
+                elapsed_ms: Number(elapsedMs || 0),
+                elapsed_s: Number(merged.elapsed_s || queueEntry?.elapsed_s || 0),
+                queue_wait_ms: Number(queueWaitMs || 0),
+                tokens_per_second: Number(merged.tokens_per_second || 0),
+                last_update_at: merged.last_update_at || queueEntry?.started_at || queueEntry?.enqueued_at || null,
+            };
+        }
+
+        function resolveLiveRequest(activeRequests, queueActiveRequests) {
+            const queueEntry = pickQueueActiveRequest(queueActiveRequests);
+            if (queueEntry) {
+                const queueRequestId = String(queueEntry.request_id || '').trim();
+                const telemetryEntry = activeRequests.find(entry => {
+                    const candidateId = String(entry.queue_request_id || entry.request_id || '').trim();
+                    return Boolean(candidateId) && candidateId === queueRequestId;
+                }) || null;
+                return buildLiveRequestFromQueue(queueEntry, telemetryEntry);
+            }
+            return pickLiveRequest(activeRequests);
+        }
+
         function renderQueueContents(queueStatus) {
             const tbody = document.getElementById('queue-contents-table');
             const footnote = document.getElementById('queue-contents-footnote');
@@ -709,7 +770,6 @@
             const activeRequests = Array.isArray(apiUsage.active_requests)
                 ? apiUsage.active_requests.filter(entry => isAuthenticatedClientId(entry.client_id))
                 : [];
-            const liveRequest = pickLiveRequest(activeRequests);
             const phaseEl = document.getElementById('live-request-phase');
             const waiting = Array.isArray(queueStatus.waiting)
                 ? queueStatus.waiting.filter(entry => isAuthenticatedClientId(entry.client_id))
@@ -717,6 +777,13 @@
             const queueActive = Array.isArray(queueStatus.active_requests)
                 ? queueStatus.active_requests.filter(entry => isAuthenticatedClientId(entry.client_id))
                 : [];
+            const liveRequest = resolveLiveRequest(activeRequests, queueActive);
+            const clientLookup = new Map(
+                (Array.isArray(apiUsage.top_clients) ? apiUsage.top_clients : []).flatMap(entry => {
+                    const keys = [bucketLookupKey(entry), entry.client_id].filter(Boolean);
+                    return keys.map(key => [String(key), entry]);
+                })
+            );
 
             renderQueueContents(queueStatus);
 
@@ -761,13 +828,17 @@
             phaseEl.textContent = phase.toUpperCase();
             phaseEl.className = `pill ${livePhaseBadgeClass(phase)}`;
 
-            const source = sourceSummary(liveRequest);
+            const fallbackClient = clientLookup.get(bucketLookupKey(liveRequest)) || clientLookup.get(String(liveRequest.client_id || ''));
+            const source = sourceSummary(liveRequest, fallbackClient);
             const queueId = liveRequest.queue_request_id || liveRequest.request_id || '—';
             const endpointLabel = `${liveRequest.method || '—'} ${liveRequest.endpoint || '—'}`;
             const throughput = Number(liveRequest.tokens_per_second || 0);
             const updatedLabel = liveRequest.last_update_at ? formatIso(liveRequest.last_update_at) : 'just now';
+            const requestKind = liveRequest.telemetry_attached
+                ? (liveRequest.streamed ? 'Streaming' : 'Blocking')
+                : 'Queue-managed';
 
-            document.getElementById('live-request-footnote').textContent = `${liveRequest.streamed ? 'Streaming' : 'Blocking'} request • updated ${updatedLabel}`;
+            document.getElementById('live-request-footnote').textContent = `${requestKind} request • updated ${updatedLabel}`;
             document.getElementById('live-request-client').textContent = liveRequest.client_id || 'unknown';
             document.getElementById('live-request-model').textContent = liveRequest.model || '—';
             document.getElementById('live-request-endpoint').textContent = endpointLabel;

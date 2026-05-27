@@ -2958,12 +2958,15 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                         request_id,
                         cleanup=client.aclose,
                     )
+                except _GuardianRequestCancelled as exc:
+                    await client.aclose()
+                    raise _request_cancel_http_exception(exc.request_id, exc.reason)
                 except Exception as retry_error:
                     await client.aclose()
                     raise HTTPException(status_code=502, detail=f"Backend request failed after reload: {retry_error}")
-            except _GuardianRequestCancelled:
+            except _GuardianRequestCancelled as exc:
                 await client.aclose()
-                raise
+                raise _request_cancel_http_exception(exc.request_id, exc.reason)
             except Exception as e:
                 await client.aclose()
                 raise HTTPException(status_code=502, detail=f"Backend request failed: {e}")
