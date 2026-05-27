@@ -108,6 +108,16 @@ class TestSwitchAllowlist:
         assert mgr.is_switch_allowed("oelala") is True
         assert mgr.is_switch_allowed("random") is False
 
+    def test_allowlist_hot_reloads_from_config(self, tmp_path: Path):
+        yaml_with_al = SAMPLE_MODELS_YAML + "\nguardian:\n  switch_allowlist:\n    - admin\n"
+        mgr = _make_manager(tmp_path, models_yaml=yaml_with_al)
+        assert mgr.is_switch_allowed("hermes") is False
+
+        updated_yaml = SAMPLE_MODELS_YAML + "\nguardian:\n  switch_allowlist:\n    - admin\n    - hermes\n"
+        mgr.config_path.write_text(updated_yaml)
+
+        assert mgr.is_switch_allowed("hermes") is True
+
 
 # ── _detect_initial_model ─────────────────────────────────────────────
 
@@ -154,13 +164,14 @@ models:
   Qwen-Agent:
     path: /models/qwen.gguf
     context: 65536
-    extra_args: "--reasoning on --reasoning-budget 0 --temp 0.7 --top-p 0.8"
+    profile_role: agent
+    extra_args: "--reasoning on --reasoning-budget 1024 --temp 0.7 --top-p 0.8"
 """
         )
         (config_dir / "settings.yaml").write_text(SAMPLE_SETTINGS_YAML)
         (config_dir / "current_model.args").write_text(
             "-m /models/qwen.gguf -c 65536 -ngl 99 --host 127.0.0.1 --port 11440 "
-            "--reasoning on --reasoning-budget 0 --temp 0.7 --top-p 0.8"
+            "--reasoning on --reasoning-budget 1024 --temp 0.7 --top-p 0.8"
         )
 
         with patch("app.engine.manager.subprocess.run") as mock_sub:
@@ -874,15 +885,18 @@ models:
     Qwen-Agent:
         path: /models/qwen.gguf
         context: 65536
-        extra_args: "--reasoning on --reasoning-budget 0"
+        profile_role: agent
+        extra_args: "--reasoning on --reasoning-budget 1024"
     Qwen-Bounded:
         path: /models/qwen.gguf
         context: 65536
+        profile_role: agent
         extra_args: "--reasoning on --reasoning-budget 2048"
     Other-Model:
         path: /models/other.gguf
         context: 32768
-        extra_args: "--reasoning-budget 0"
+        model_type: embedding
+        extra_args: "--embedding --reasoning off"
 """
 
 

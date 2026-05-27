@@ -179,6 +179,46 @@ def test_reasoning_falls_back_for_ollama_clients():
     assert server._extract_assistant_message_text({"reasoning_content": "answer"}) == "answer"
 
 
+def test_request_reasoning_defaults_keep_normal_chat_reasoning_enabled():
+    payload = {"model": "Qwen-Agent", "messages": [{"role": "user", "content": "hi"}]}
+
+    with patch.object(server.model_manager, "models", {"Qwen-Agent": {"profile_role": "agent"}}):
+        changed = server._apply_request_reasoning_defaults("chat/completions", payload, "Qwen-Agent")
+
+    assert changed is False
+    assert "reasoning_budget" not in payload
+    assert "chat_template_kwargs" not in payload
+
+
+def test_request_reasoning_defaults_disable_thinking_for_embedding_chat_payload():
+    payload = {"model": "nomic-embed", "messages": [{"role": "user", "content": "embed this"}]}
+
+    with patch.object(
+        server.model_manager,
+        "models",
+        {"nomic-embed": {"model_type": "embedding", "default_enable_thinking": False}},
+    ):
+        changed = server._apply_request_reasoning_defaults("chat/completions", payload, "nomic-embed")
+
+    assert changed is True
+    assert payload["reasoning_budget"] == 0
+    assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_request_reasoning_defaults_honor_explicit_no_thinking_request():
+    payload = {
+        "model": "Qwen-Agent",
+        "reasoning_budget": 0,
+        "messages": [{"role": "user", "content": "short answer"}],
+    }
+
+    with patch.object(server.model_manager, "models", {"Qwen-Agent": {"profile_role": "agent"}}):
+        changed = server._apply_request_reasoning_defaults("chat/completions", payload, "Qwen-Agent")
+
+    assert changed is True
+    assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+
+
 def test_stream_watchdog_extends_timeout_for_healthy_progress():
     watchdog = server.StreamProgressWatchdog(base_timeout_s=300)
 

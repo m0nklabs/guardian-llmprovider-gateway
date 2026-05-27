@@ -8,6 +8,13 @@
 - Ground-up documentation suite for the live Guardian runtime: rewritten `README.md` and `ARCHITECTURE.md`, plus new `HARDWARE_TUNING.md` and `API_REFERENCE.md`, all aligned to the current queue, model lifecycle, systemd-backed backend control, ComfyUI `/free` integration, and finetune v2 behavior.
 
 ### Changed
+- Updated the Qwen3.6 agent runtime to bounded reasoning instead of `--reasoning-budget 0`, keeping reasoning as the normal agent default on current llama.cpp while preserving the proven model path, context, KV, and tensor split settings.
+- Marked Nomic embedding profiles as dedicated non-thinking embedding runtimes with `--embedding --reasoning off`, so special non-chat routes do not inherit the new server-side thinking default.
+- Guardian's OpenAI-compatible inference proxy now applies `reasoning_budget: 0` plus `chat_template_kwargs.enable_thinking=false` only for explicit no-thinking requests or special non-reasoning model profiles, leaving normal chat/agent requests untouched.
+- The `/v1` proxy now runs the guarded model-switch path for `completions` and `embeddings` as well as chat endpoints, so special routes load their requested runtime instead of accidentally hitting whichever chat model is currently active.
+- Model switch allowlist checks now hot-reload from `models.yaml`, and the live `hermes` client is allowed to switch models again so Hermes can select Guardian-served Qwen/Gemma routes.
+- The live systemd backend override now points to the upstream official llama.cpp b1295 CUDA 13.2 build at `/home/flip/llama_cpp_official/worktrees/cuda132-master/build-cuda132/bin/llama-server`.
+- Gemma4 31B keeps its proven full-context `262144 / ngl 60 / 0.42,0.58` runtime on b1295 by adding explicit `--flash-attn on --parallel 1 --batch-size 256 --ubatch-size 128`, reducing compute-buffer pressure without lowering the model profile.
 - Relaxed same-key queue admission so one authenticated API key may own multiple waiting GPU requests while still receiving at most one running GPU slot at a time. This keeps helper/auxiliary calls from failing with duplicate-admission `409` responses while preserving per-key running-slot fairness.
 - Restored explicit Qwen3.6 Hauhau reasoning runtime flags (`--reasoning on --reasoning-format deepseek`) and reintroduced the Qwen3.6 agent/reasoning aliases that share the current validated `0.36,0.64` split, so Guardian no longer relies on implicit GGUF/template defaults for thinking behavior.
 - Retired the stale OpenClaw Guardian client path by removing its dedicated API key from `config/api_keys.json`; active OpenClaw config remnants were also pulled out of the live `~/.openclaw` path so dead local configs stop authenticating against Guardian.

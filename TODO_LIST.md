@@ -1,5 +1,16 @@
 # Guardian TODO List
 
+## 2026-05-27 llama.cpp b1295 Runtime Integration
+
+- [x] Keep reasoning as the default for normal chat and agent model profiles.
+- [x] Replace the Qwen3.6 agent profile's no-thinking `--reasoning-budget 0` runtime with bounded reasoning.
+- [x] Add non-thinking defaults only for special embedding runtimes.
+- [x] Make OpenAI-compatible `completions` and `embeddings` requests participate in guarded model switching.
+- [x] Restore Hermes model-switch permission and hot-reload switch allowlist checks from `models.yaml`.
+- [x] Switch the live systemd runtime from the b1176 fallback to the new CUDA 13.2 b1295 `llama-server` build.
+- [x] Keep Gemma4 31B on full context by reducing b1295 compute batch sizes instead of lowering context, `ngl`, or tensor split.
+- [x] Validate Qwen3.6, Gemma4 31B, and embeddings through Guardian after the live runtime switch.
+
 ## 2026-05-27 Same-Key Queue Robustness
 
 - [x] Allow one API key to submit multiple waiting GPU-backed requests without duplicate-admission `409` failures.
@@ -12,7 +23,7 @@
 - [x] Reintroduce Qwen3.6 tool-friendly and bounded-reasoning agent aliases using the current validated tensor split.
 - [x] Remove the custom `qwen3_nonthinking.jinja` template injection from Qwen agent launches.
 - [x] Prove Qwen3.6 35B q4 works again via Guardian on known-good official llama.cpp `b1176` with the validated `0.36,0.64` split and clean VRAM except Frigate.
-- [ ] Live-validate Gemma4 31B through Guardian after the b1258 regression is isolated upstream.
+- [x] Live-validate Gemma4 31B through Guardian after the b1258 regression is isolated upstream.
 
 ## 2026-05-27 Stream-Safe Config Sync
 

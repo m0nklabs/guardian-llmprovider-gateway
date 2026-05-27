@@ -19,10 +19,13 @@ models:
 
   nomic-embed-text-v2-moe.f16:
     path: /home/flip/models/nomic-embed-text-v2-moe.f16.gguf
+    model_type: embedding
+    default_enable_thinking: false
     total_layers: 12
     benchmark_context_limit: 512
     context: 32768
     ngl: 99
+    extra_args: "--embedding --reasoning off"
   Phi-4-reasoning-plus:
     path: /home/flip/models/Phi-4-reasoning-plus-Q8_0.gguf
     total_layers: 40
@@ -49,10 +52,13 @@ models:
     kv_type: f16
   nomic-embed-text-cpu:
     path: /home/flip/models/nomic-embed-text-cpu.gguf
+    model_type: embedding
+    default_enable_thinking: false
     total_layers: 12
     benchmark_context_limit: 2048
     context: 32768
     ngl: 99
+    extra_args: "--embedding --reasoning off"
   Qwen3-30B-A3B-Thinking-2507:
     path: /home/flip/models/Qwen3-30B-A3B-Thinking-2507-Q4_K_M.gguf
     total_layers: 48
@@ -96,7 +102,7 @@ models:
     kv_type: "q4_0"
     tensor_split: "0.42,0.58"
     mmproj: "/home/flip/models/gemma-4-31B-it-mmproj-BF16.gguf"
-    extra_args: "--repeat-penalty 1.3 --repeat-last-n 128 --dry-multiplier 1.0 --dry-base 1.75 --dry-penalty-last-n 256 --temp 0.6 --top-k 40"
+    extra_args: "--flash-attn on --parallel 1 --batch-size 256 --ubatch-size 128 --repeat-penalty 1.3 --repeat-last-n 128 --dry-multiplier 1.0 --dry-base 1.75 --dry-penalty-last-n 256 --temp 0.6 --top-k 40"
   gemma-4-E4B-it-uncensored:
     path: "/home/flip/models/gemma-4-E4B-it-uncensored-Q4_K_M.gguf"
     total_layers: 42
@@ -120,6 +126,7 @@ models:
     extra_args: "--reasoning on --reasoning-format deepseek --reasoning-budget -1 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
   Qwen3.6-35B-A3B-HauhauCS-Aggressive-Agent:
     path: "/home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf"
+    profile_role: agent
     total_layers: 40
     benchmark_context_limit: 262144
     context: 131072
@@ -130,9 +137,10 @@ models:
     vision_context: 131072
     vision_ngl: 40
     vision_tensor_split: "0.36,0.64"
-    extra_args: "--reasoning on --reasoning-format deepseek --reasoning-budget 0 --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
+    extra_args: "--reasoning on --reasoning-format deepseek --reasoning-budget 1024 --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
   Qwen3.6-35B-A3B-HauhauCS-Aggressive-Reasoning-Agent:
     path: "/home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf"
+    profile_role: agent
     total_layers: 40
     benchmark_context_limit: 262144
     context: 131072
@@ -205,6 +213,7 @@ guardian:
   switch_allowlist:
     - "m0nk111"
     - "claudecode"
+    - "hermes"
     - "oelala"
     - "kyberm0nk"
 

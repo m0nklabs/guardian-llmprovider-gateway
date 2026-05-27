@@ -213,9 +213,19 @@ class ModelManager:
 
     def _uses_reasoning(self, config: Dict) -> bool:
         extra_args = str(config.get("extra_args", ""))
-        if "--reasoning-budget 0" in extra_args:
+        if "--reasoning off" in extra_args:
             return False
-        return "--reasoning on" in extra_args
+        return "--reasoning on" in extra_args or self._reasoning_budget(config) is not None
+
+    def _reasoning_budget(self, config: Dict) -> Optional[int]:
+        extra_args = str(config.get("extra_args", ""))
+        match = re.search(r"--reasoning-budget(?:=|\s+)(-?\d+)", extra_args)
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except ValueError:
+            return None
 
     def _resolve_vision_mmproj(self, config: Dict[str, Any]) -> Optional[str]:
         """Return the mmproj path used for vision runtime, if any."""
@@ -300,9 +310,11 @@ class ModelManager:
 
     def _is_tool_friendly_config(self, config: Dict) -> bool:
         extra_args = str(config.get("extra_args", ""))
+        profile_role = str(config.get("profile_role", "")).strip().lower()
         return (
-            "chat-template-file" in extra_args
-            or "--reasoning-budget 0" in extra_args
+            config.get("tool_profile") is True
+            or profile_role in {"agent", "tool", "tool_agent"}
+            or "chat-template-file" in extra_args
             or not self._uses_reasoning(config)
         )
 
@@ -327,12 +339,14 @@ class ModelManager:
     def _sort_preferred_candidates(self, model_names: List[str]) -> List[str]:
         def sort_key(name: str):
             cfg = self.models.get(name, {})
-            extra_args = str(cfg.get("extra_args", ""))
             context = self.get_runtime_context_window(name) or 0
+            budget = self._reasoning_budget(cfg)
+            bounded_reasoning = budget is not None and budget > 0
             return (
                 0 if "Agent" in name else 1,
                 0 if self._is_tool_friendly_config(cfg) else 1,
-                0 if "--reasoning-budget 0" in extra_args else 1,
+                0 if bounded_reasoning else 1,
+                budget if bounded_reasoning else 999999,
                 -context,
                 name,
             )
@@ -362,7 +376,7 @@ class ModelManager:
         config = self.models.get(target)
         if not config:
             return None
-        if self._uses_reasoning(config):
+        if self._uses_reasoning(config) and self._reasoning_budget(config) == -1:
             return target
 
         candidates = [
@@ -621,6 +635,7 @@ class ModelManager:
         If no allowlist is configured, all clients can switch (backward compat).
         If allowlist exists, only listed clients can switch.
         """
+        self._switch_allowlist = self._load_switch_allowlist()
         if not self._switch_allowlist:
             return True  # No allowlist = unrestricted (backward compat)
         return client_id in self._switch_allowlist

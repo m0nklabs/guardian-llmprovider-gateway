@@ -1075,6 +1075,60 @@ def _desired_runtime_vision_enabled(model_name: str, has_image_inputs: bool) -> 
     return bool(has_image_inputs and capability.get("configured"))
 
 
+def _model_disables_thinking_by_default(model_name: str) -> bool:
+    """Return whether a configured model is a non-reasoning/special runtime."""
+    config = model_manager.models.get(model_name, {})
+    if config.get("default_enable_thinking") is False or config.get("enable_thinking") is False:
+        return True
+
+    model_type = str(config.get("model_type", "")).strip().lower()
+    if model_type in {"embedding", "embeddings"}:
+        return True
+
+    searchable = " ".join(
+        str(value).lower()
+        for value in (model_name, config.get("path", ""), config.get("extra_args", ""))
+    )
+    return "embed" in searchable or "--reasoning off" in searchable
+
+
+def _request_explicitly_disables_thinking(payload: Dict[str, Any]) -> bool:
+    if payload.get("reasoning_budget") == 0:
+        return True
+    template_kwargs = payload.get("chat_template_kwargs")
+    return isinstance(template_kwargs, dict) and template_kwargs.get("enable_thinking") is False
+
+
+def _apply_request_reasoning_defaults(path: str, payload: Dict[str, Any], model_name: str) -> bool:
+    """Apply no-thinking request flags only for explicit or special runtimes."""
+    if path not in {"chat/completions", "messages", "completions"}:
+        return False
+
+    should_disable = (
+        _request_explicitly_disables_thinking(payload)
+        or _model_disables_thinking_by_default(model_name)
+    )
+    if not should_disable:
+        return False
+
+    changed = False
+    if payload.get("reasoning_budget") != 0:
+        payload["reasoning_budget"] = 0
+        changed = True
+
+    if path in {"chat/completions", "messages"}:
+        template_kwargs = payload.get("chat_template_kwargs")
+        if not isinstance(template_kwargs, dict):
+            template_kwargs = {}
+            payload["chat_template_kwargs"] = template_kwargs
+            changed = True
+        if template_kwargs.get("enable_thinking") is not False:
+            template_kwargs["enable_thinking"] = False
+            changed = True
+
+    return changed
+
+
 def _map_multimodal_backend_error(
     model_name: str,
     status_code: int,
@@ -2738,6 +2792,7 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
     current_model = await model_manager.get_current_model()
     requested_model = _resolve_or_reject_inference_model(requested_model, current_model)
     json_body["model"] = requested_model
+    _apply_request_reasoning_defaults(path, json_body, requested_model)
     body = json.dumps(json_body).encode("utf-8")
     has_image_inputs = False
     if path in ("chat/completions", "messages"):
@@ -2786,13 +2841,17 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
         model_manager.last_request_time = time.time()
         model_manager.active_requests += 1
 
-        # Auto-switch logic for chat completions & messages (with concurrency lock)
-        if path in ("chat/completions", "messages"):
+        # Auto-switch logic for GPU-backed inference routes (with concurrency lock)
+        if path in ("chat/completions", "messages", "completions", "embeddings"):
             try:
                 current_model = await model_manager.get_current_model()
                 desired_model = requested_model or current_model
                 if desired_model in model_manager.models:
-                    desired_vision = _desired_runtime_vision_enabled(desired_model, has_image_inputs)
+                    desired_vision = (
+                        _desired_runtime_vision_enabled(desired_model, has_image_inputs)
+                        if path in ("chat/completions", "messages")
+                        else False
+                    )
                     current_vision = model_manager.current_runtime_uses_mmproj(current_model)
                     needs_model_switch = desired_model != current_model
                     needs_runtime_reload = desired_model == current_model and desired_vision != current_vision
@@ -2813,7 +2872,11 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                         async with _model_switch_lock:
                             current_model = await model_manager.get_current_model()
                             desired_model = requested_model or current_model
-                            desired_vision = _desired_runtime_vision_enabled(desired_model, has_image_inputs)
+                            desired_vision = (
+                                _desired_runtime_vision_enabled(desired_model, has_image_inputs)
+                                if path in ("chat/completions", "messages")
+                                else False
+                            )
                             current_vision = model_manager.current_runtime_uses_mmproj(current_model)
                             needs_model_switch = desired_model != current_model
                             needs_runtime_reload = desired_model == current_model and desired_vision != current_vision

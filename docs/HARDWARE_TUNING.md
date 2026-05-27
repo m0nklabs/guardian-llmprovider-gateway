@@ -19,6 +19,14 @@ same queue, reload, VRAM fencing, and backend lifecycle that production uses.
 
 - `proxy.vram_limit_mb: 27000` in [../config/settings.yaml](../config/settings.yaml)
 - official `llama-server` launched by [../scripts/start_llama.sh](../scripts/start_llama.sh)
+- current CUDA 13.2 upstream validation target:
+  `/home/flip/llama_cpp_official/worktrees/cuda132-master/build-cuda132/bin/llama-server`
+- mixed RTX 3060 + RTX 5060 Ti builds must keep CUDA graphs disabled and peer
+  copy disabled; the b1295 CUDA 13.2 build was compiled with
+  `GGML_CUDA_GRAPHS=OFF`, `GGML_CUDA_NO_PEER_COPY=ON`, NCCL, and
+  `86-real;120a-real`
+- Gemma4 31B uses explicit b1295 compute-buffer controls at full context:
+  `--flash-attn on --parallel 1 --batch-size 256 --ubatch-size 128`
 - generated runtime args written to [../config/current_model.args](../config/current_model.args)
 - GPU telemetry normalized to llama/CUDA order by PCI bus ID
 - optional ComfyUI cooperation through `services.comfyui_url`
