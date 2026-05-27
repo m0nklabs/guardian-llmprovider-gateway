@@ -560,9 +560,43 @@
             return { prefix, fingerprint };
         }
 
-        function sourceSummary(entry) {
-            const sourceIp = entry.source_ip || entry.last_source_ip || '—';
-            const location = entry.metadata_client || entry.last_host || entry.host || entry.origin || entry.last_origin || entry.referer || entry.last_referer || '—';
+        function isLoopbackHost(value) {
+            const text = String(value || '').trim().toLowerCase();
+            if (!text) return false;
+            let host = text;
+            if (host.startsWith('[') && host.includes(']')) {
+                host = host.slice(1, host.indexOf(']'));
+            } else if (host.includes(':') && host.indexOf(':') === host.lastIndexOf(':')) {
+                host = host.split(':', 1)[0];
+            }
+            return host === '127.0.0.1' || host === '::1' || host === 'localhost';
+        }
+
+        function bucketLookupKey(entry) {
+            if (!entry || typeof entry !== 'object') return null;
+            if (entry.bucket_key) return String(entry.bucket_key);
+            const fingerprint = entry.key_fingerprint || entry.last_key_fingerprint;
+            if (fingerprint) return `fingerprint:${String(fingerprint).trim()}`;
+            return entry.client_id ? String(entry.client_id) : null;
+        }
+
+        function sourceSummary(entry, fallbackEntry = null) {
+            const fallbackSourceIp = fallbackEntry?.preferred_source_ip || fallbackEntry?.source_ip || fallbackEntry?.last_source_ip || null;
+            const rawSourceIp = entry.preferred_source_ip || entry.source_ip || entry.last_source_ip || null;
+            const sourceIp = (isLoopbackHost(rawSourceIp) && fallbackSourceIp && !isLoopbackHost(fallbackSourceIp))
+                ? fallbackSourceIp
+                : (rawSourceIp || fallbackSourceIp || '—');
+            const location = entry.metadata_client
+                || fallbackEntry?.metadata_client
+                || entry.preferred_host
+                || fallbackEntry?.preferred_host
+                || entry.last_host
+                || entry.host
+                || entry.origin
+                || entry.last_origin
+                || entry.referer
+                || entry.last_referer
+                || '—';
             return {
                 sourceIp,
                 location,
@@ -1177,6 +1211,11 @@
                 }
 
                 const topClients = Array.isArray(apiUsage.top_clients) ? apiUsage.top_clients : [];
+                const clientLookup = new Map(
+                    topClients
+                        .map(client => [bucketLookupKey(client), client])
+                        .filter(([key]) => key)
+                );
                 const filteredClients = sortClients(
                     topClients.filter(client => matchesSearch(client, dashboardState.searchText))
                 );
@@ -1259,7 +1298,7 @@
                                     ? 'bg-cyan-950/15'
                                     : '';
                         const key = keySummary(entry);
-                        const source = sourceSummary(entry);
+                        const source = sourceSummary(entry, clientLookup.get(entry.client_id));
                         const agentText = entry.user_agent || '—';
                         const requestLabel = `${entry.method || '—'} ${entry.endpoint || '—'}`;
                         const usageLabel = `${formatBytes(entry.request_bytes || 0)} in / ${formatBytes(entry.response_bytes || 0)} out`;
@@ -1269,6 +1308,7 @@
                             : entry.streamed
                                 ? 'bg-cyan-900/70 text-cyan-200'
                                 : 'bg-emerald-900/70 text-emerald-200';
+                        const fallbackClient = clientLookup.get(bucketLookupKey(entry));
                         const row = `
                             <tr class="border-b border-slate-800 last:border-0 ${rowTone}">
                                 <td class="py-3">${formatIso(entry.timestamp)}</td>
@@ -1276,7 +1316,7 @@
                                 <td class="py-3">${escapeHtml(requestLabel)}<div class="text-xs text-slate-500">${entry.streamed ? 'streamed' : escapeHtml(entry.category || 'request')}</div></td>
                                 <td class="py-3">${escapeHtml(entry.model || '—')}</td>
                                 <td class="py-3">${usageLabel}<div class="text-xs text-slate-500">${usageDetail}</div></td>
-                                <td class="py-3"><div>${escapeHtml(source.sourceIp)}</div><div class="text-xs text-slate-500">${escapeHtml(shortenText(source.location, 32))}</div></td>
+                                <td class="py-3"><div>${escapeHtml(sourceSummary(entry, fallbackClient).sourceIp)}</div><div class="text-xs text-slate-500">${escapeHtml(shortenText(sourceSummary(entry, fallbackClient).location, 32))}</div></td>
                                 <td class="py-3" title="${escapeHtml(agentText)}">${escapeHtml(shortenText(agentText, 42))}</td>
                                 <td class="py-3 ${statusTone}"><span class="pill ${statusBadgeClass}">${entry.status_code}</span></td>
                             </tr>

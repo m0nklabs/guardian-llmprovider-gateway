@@ -15,6 +15,8 @@ from app.paths import DATA_DIR
 
 logger = logging.getLogger("guardian-usage")
 
+LOOPBACK_SOURCES = {"127.0.0.1", "::1", "localhost"}
+
 ATTRIBUTION_FIELDS = (
     "project_prefix",
     "key_prefix",
@@ -53,6 +55,28 @@ def _normalize_request_id(value: object) -> Optional[str]:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _normalize_client_id(value: object) -> Optional[str]:
+    """Normalize a client identifier into a non-empty string."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
+
+
+def _identity_bucket_key(client_id: object, attribution: Optional[dict[str, Any]] = None) -> Optional[str]:
+    """Return the aggregate bucket key for a request identity."""
+    normalized_client = _normalize_client_id(client_id)
+    if normalized_client is None:
+        return None
+    if isinstance(attribution, dict):
+        fingerprint = attribution.get("key_fingerprint")
+        if isinstance(fingerprint, str):
+            normalized_fingerprint = fingerprint.strip()
+            if normalized_fingerprint:
+                return f"fingerprint:{normalized_fingerprint}"
+    return normalized_client
 
 
 def _category_for_endpoint(endpoint: str) -> str:
@@ -99,6 +123,7 @@ class ApiUsageTracker:
     def _new_client_bucket(self) -> dict[str, Any]:
         """Create an empty stats bucket for a client ID."""
         return {
+            "client_id": None,
             "requests": 0,
             "errors": 0,
             "streaming_requests": 0,
@@ -118,6 +143,9 @@ class ApiUsageTracker:
             "last_source_ip": None,
             "last_forwarded_for": None,
             "last_host": None,
+            "preferred_source_ip": None,
+            "preferred_forwarded_for": None,
+            "preferred_host": None,
             "last_origin": None,
             "last_referer": None,
             "last_user_agent": None,
@@ -132,8 +160,9 @@ class ApiUsageTracker:
     def _serialize_locked(self) -> dict[str, Any]:
         """Build a JSON-safe snapshot for persistence."""
         clients: dict[str, dict[str, Any]] = {}
-        for client_id, bucket in self._clients.items():
-            clients[client_id] = {
+        for bucket_key, bucket in self._clients.items():
+            clients[bucket_key] = {
+                "client_id": bucket["client_id"],
                 "requests": int(bucket["requests"]),
                 "errors": int(bucket["errors"]),
                 "streaming_requests": int(bucket["streaming_requests"]),
@@ -153,6 +182,9 @@ class ApiUsageTracker:
                 "last_source_ip": bucket["last_source_ip"],
                 "last_forwarded_for": bucket["last_forwarded_for"],
                 "last_host": bucket["last_host"],
+                "preferred_source_ip": bucket["preferred_source_ip"],
+                "preferred_forwarded_for": bucket["preferred_forwarded_for"],
+                "preferred_host": bucket["preferred_host"],
                 "last_origin": bucket["last_origin"],
                 "last_referer": bucket["last_referer"],
                 "last_user_agent": bucket["last_user_agent"],
@@ -230,6 +262,7 @@ class ApiUsageTracker:
             return
 
         scalar_fields = (
+            "client_id",
             "requests",
             "errors",
             "streaming_requests",
@@ -249,6 +282,9 @@ class ApiUsageTracker:
             "last_source_ip",
             "last_forwarded_for",
             "last_host",
+            "preferred_source_ip",
+            "preferred_forwarded_for",
+            "preferred_host",
             "last_origin",
             "last_referer",
             "last_user_agent",
@@ -266,7 +302,55 @@ class ApiUsageTracker:
             bucket["categories"] = Counter(client_payload.get("categories", {}))
             bucket["endpoints"] = Counter(client_payload.get("endpoints", {}))
             bucket["methods"] = Counter(client_payload.get("methods", {}))
-            self._clients[str(client_id)] = bucket
+            display_client_id = (
+                _normalize_client_id(bucket.get("client_id"))
+                or _normalize_client_id(client_payload.get("metadata_client"))
+                or _normalize_client_id(client_payload.get("project_prefix"))
+                or _normalize_client_id(client_payload.get("last_key_prefix"))
+                or (_normalize_client_id(client_id) if not str(client_id).startswith("fingerprint:") else None)
+            )
+            bucket["client_id"] = display_client_id
+            bucket_key = _identity_bucket_key(
+                display_client_id,
+                {"key_fingerprint": bucket.get("last_key_fingerprint")},
+            )
+            if bucket_key is None:
+                bucket_key = str(client_id)
+                if bucket["client_id"] is None and not bucket_key.startswith("fingerprint:"):
+                    bucket["client_id"] = bucket_key
+            self._clients[str(bucket_key)] = bucket
+
+        self._backfill_preferred_sources_from_recent_locked()
+
+    def _backfill_preferred_sources_from_recent_locked(self) -> None:
+        """Restore preferred client sources from recent history for older state files."""
+        for row in self._recent_requests:
+            if not isinstance(row, dict):
+                continue
+            client_id = row.get("client_id")
+            if not isinstance(client_id, str) or not client_id.strip() or client_id == "unauthenticated":
+                continue
+            bucket_key = _identity_bucket_key(client_id, row)
+            if bucket_key is not None and row.get("bucket_key") in (None, ""):
+                row["bucket_key"] = bucket_key
+            bucket = self._clients.get(bucket_key) if bucket_key is not None else None
+            if bucket is None:
+                for existing_key, existing_bucket in self._clients.items():
+                    if existing_bucket.get("client_id") == client_id:
+                        bucket = existing_bucket
+                        if row.get("bucket_key") in (None, ""):
+                            row["bucket_key"] = existing_key
+                        break
+            if bucket is None or bucket.get("preferred_source_ip") not in (None, ""):
+                continue
+
+            attribution = {
+                field: row.get(field)
+                for field in ATTRIBUTION_FIELDS
+                if row.get(field) not in (None, "")
+            }
+            if attribution:
+                self._apply_preferred_source(bucket, attribution)
 
     def reset(self) -> None:
         """Clear all tracked usage and restart the local counters."""
@@ -298,6 +382,76 @@ class ApiUsageTracker:
             if value not in (None, ""):
                 bucket[bucket_field] = value
 
+        self._apply_preferred_source(bucket, attribution)
+
+    def _apply_preferred_source(self, bucket: dict[str, Any], attribution: dict[str, Any]) -> None:
+        """Persist the most meaningful non-loopback source without touching last-request fields."""
+        if not isinstance(attribution, dict):
+            return
+
+        preferred_ip = self._preferred_source_ip(attribution)
+        preferred_forwarded_for = self._preferred_forwarded_for(attribution)
+        preferred_host = self._preferred_host(attribution)
+        if preferred_ip is not None:
+            bucket["preferred_source_ip"] = preferred_ip
+            bucket["preferred_forwarded_for"] = preferred_forwarded_for
+            bucket["preferred_host"] = preferred_host
+
+    @staticmethod
+    def _first_forwarded_ip(value: object) -> Optional[str]:
+        """Return the first forwarded IP from a comma-separated header value."""
+        if not isinstance(value, str):
+            return None
+        parts = [part.strip() for part in value.split(",") if part.strip()]
+        if not parts:
+            return None
+        return parts[0]
+
+    @classmethod
+    def _is_loopback_host(cls, value: object) -> bool:
+        """Return whether a host/header value points at loopback or localhost."""
+        if not isinstance(value, str):
+            return False
+        text = value.strip().lower()
+        if not text:
+            return False
+        host = text
+        if host.startswith("[") and "]" in host:
+            host = host[1:host.index("]")]
+        elif ":" in host and host.count(":") == 1:
+            host = host.split(":", 1)[0]
+        return host in LOOPBACK_SOURCES
+
+    @classmethod
+    def _preferred_source_ip(cls, attribution: dict[str, Any]) -> Optional[str]:
+        """Select the most meaningful non-loopback source IP for a client bucket."""
+        forwarded_ip = cls._first_forwarded_ip(attribution.get("forwarded_for"))
+        if forwarded_ip and not cls._is_loopback_host(forwarded_ip):
+            return forwarded_ip
+
+        source_ip = attribution.get("source_ip")
+        if isinstance(source_ip, str) and source_ip.strip() and not cls._is_loopback_host(source_ip):
+            return source_ip.strip()
+
+        return None
+
+    @classmethod
+    def _preferred_forwarded_for(cls, attribution: dict[str, Any]) -> Optional[str]:
+        """Persist the forwarded chain only when it points at a non-loopback source."""
+        value = attribution.get("forwarded_for")
+        first_ip = cls._first_forwarded_ip(value)
+        if first_ip and not cls._is_loopback_host(first_ip) and isinstance(value, str) and value.strip():
+            return value.strip()
+        return None
+
+    @classmethod
+    def _preferred_host(cls, attribution: dict[str, Any]) -> Optional[str]:
+        """Persist the target host associated with a non-loopback source when available."""
+        host = attribution.get("host")
+        if isinstance(host, str) and host.strip() and not cls._is_loopback_host(host):
+            return host.strip()
+        return None
+
     def start_request(
         self,
         *,
@@ -316,7 +470,8 @@ class ApiUsageTracker:
             return
 
         now = time.time()
-        normalized_client = client_id.strip() if isinstance(client_id, str) and client_id.strip() else None
+        normalized_client = _normalize_client_id(client_id)
+        bucket_key = _identity_bucket_key(normalized_client, attribution)
         row: dict[str, Any] = {
             "request_id": normalized_request_id,
             "queue_request_id": None,
@@ -337,6 +492,8 @@ class ApiUsageTracker:
             "started_at": now,
             "last_update_at": now,
         }
+        if bucket_key is not None:
+            row["bucket_key"] = bucket_key
         if isinstance(attribution, dict):
             for field in ATTRIBUTION_FIELDS:
                 value = attribution.get(field)
@@ -419,7 +576,8 @@ class ApiUsageTracker:
     ) -> None:
         """Record a completed request while the caller already holds the lock."""
         now = time.time()
-        normalized_client = client_id.strip() if isinstance(client_id, str) and client_id.strip() else None
+        normalized_client = _normalize_client_id(client_id)
+        bucket_key = _identity_bucket_key(normalized_client, attribution)
         category = _category_for_endpoint(endpoint)
         request_byte_count = _safe_int(request_bytes)
         response_byte_count = _safe_int(response_bytes)
@@ -437,6 +595,8 @@ class ApiUsageTracker:
             "response_bytes": response_byte_count,
             "category": category,
         }
+        if bucket_key is not None:
+            request_row["bucket_key"] = bucket_key
         if isinstance(attribution, dict):
             for field in ATTRIBUTION_FIELDS:
                 value = attribution.get(field)
@@ -461,7 +621,8 @@ class ApiUsageTracker:
         if normalized_client is None:
             return
 
-        bucket = self._clients[normalized_client]
+        bucket = self._clients[bucket_key or normalized_client]
+        bucket["client_id"] = normalized_client
         bucket["requests"] += 1
         bucket["errors"] += int(status_code >= 400)
         bucket["streaming_requests"] += int(streamed)
@@ -583,12 +744,14 @@ class ApiUsageTracker:
         model: Optional[str],
         prompt_tokens: object = 0,
         completion_tokens: object = 0,
+        attribution: Optional[dict[str, Any]] = None,
     ) -> None:
         """Record token usage for a request when the backend reports it."""
         prompt_count = _safe_int(prompt_tokens)
         completion_count = _safe_int(completion_tokens)
         total_count = prompt_count + completion_count
-        normalized_client = client_id.strip() if isinstance(client_id, str) and client_id.strip() else None
+        normalized_client = _normalize_client_id(client_id)
+        bucket_key = _identity_bucket_key(normalized_client, attribution)
 
         if total_count == 0 and normalized_client is None and model is None:
             return
@@ -602,13 +765,15 @@ class ApiUsageTracker:
                 self._save_locked()
                 return
 
-            bucket = self._clients[normalized_client]
+            bucket = self._clients[bucket_key or normalized_client]
+            bucket["client_id"] = normalized_client
             bucket["prompt_tokens"] += prompt_count
             bucket["completion_tokens"] += completion_count
             bucket["total_tokens"] += total_count
             bucket["last_seen"] = time.time()
             bucket["last_endpoint"] = endpoint
             bucket["last_model"] = model or bucket["last_model"]
+            self._apply_attribution(bucket, attribution)
             self._save_locked()
 
     def snapshot(self, top_n: int = 10, recent_n: int = 20, endpoint_n: int = 10) -> dict[str, Any]:
@@ -618,7 +783,7 @@ class ApiUsageTracker:
             uptime_seconds = max(now - self.started_at, 0.0)
             recent_rows = list(self._recent_requests)
             top_clients = []
-            for client_id, bucket in self._clients.items():
+            for bucket_key, bucket in self._clients.items():
                 requests = int(bucket["requests"])
                 errors = int(bucket["errors"])
                 top_endpoint = None
@@ -630,9 +795,11 @@ class ApiUsageTracker:
                         float(bucket["duration_total_ms"]) / int(bucket["requests_with_duration"]),
                         1,
                     )
+                display_client_id = bucket.get("client_id") or bucket_key
                 top_clients.append(
                     {
-                        "client_id": client_id,
+                        "bucket_key": bucket_key,
+                        "client_id": display_client_id,
                         "requests": requests,
                         "errors": errors,
                         "error_rate_pct": round((errors / requests) * 100, 1) if requests else 0.0,
@@ -653,6 +820,9 @@ class ApiUsageTracker:
                         "last_source_ip": bucket["last_source_ip"],
                         "last_forwarded_for": bucket["last_forwarded_for"],
                         "last_host": bucket["last_host"],
+                        "preferred_source_ip": bucket["preferred_source_ip"],
+                        "preferred_forwarded_for": bucket["preferred_forwarded_for"],
+                        "preferred_host": bucket["preferred_host"],
                         "last_origin": bucket["last_origin"],
                         "last_referer": bucket["last_referer"],
                         "last_user_agent": bucket["last_user_agent"],

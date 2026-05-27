@@ -1594,16 +1594,23 @@ def _record_request_token_usage(
     client_id: Optional[str],
     endpoint: str,
     model: Optional[str],
+    *,
+    request: Optional[Request] = None,
+    attribution: Optional[Dict[str, Any]] = None,
     prompt_tokens: object = 0,
     completion_tokens: object = 0,
 ) -> None:
     """Store token usage for a completed request when available."""
+    resolved_attribution = attribution
+    if resolved_attribution is None and request is not None:
+        resolved_attribution = _get_usage_attribution(request)
     state.api_usage.record_tokens(
         client_id=client_id,
         endpoint=endpoint,
         model=model,
         prompt_tokens=_coerce_usage_int(prompt_tokens),
         completion_tokens=_coerce_usage_int(completion_tokens),
+        attribution=resolved_attribution,
     )
 
 
@@ -1612,6 +1619,9 @@ def _record_usage_from_payload(
     endpoint: str,
     model: Optional[str],
     payload: Optional[Dict[str, Any]],
+    *,
+    request: Optional[Request] = None,
+    attribution: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Extract OpenAI-style usage fields from a JSON payload."""
     if not isinstance(payload, dict):
@@ -1623,6 +1633,8 @@ def _record_usage_from_payload(
         client_id,
         endpoint,
         model,
+        request=request,
+        attribution=attribution,
         prompt_tokens=usage.get("prompt_tokens", usage.get("input_tokens", 0)),
         completion_tokens=usage.get("completion_tokens", usage.get("output_tokens", 0)),
     )
@@ -1932,6 +1944,7 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
                         client_id,
                         "/api/chat",
                         model,
+                        request=request,
                         prompt_tokens=usage_totals["prompt_tokens"],
                         completion_tokens=usage_totals["completion_tokens"],
                     )
@@ -1962,7 +1975,7 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
                 )
                 data = json.loads(data)
                 content = _extract_assistant_message_text(data["choices"][0]["message"])
-                _record_usage_from_payload(client_id, "/api/chat", model, data)
+                _record_usage_from_payload(client_id, "/api/chat", model, data, request=request)
                 ollama_resp = {
                     "model": model,
                     "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
@@ -2201,6 +2214,7 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
                         client_id,
                         "/api/generate",
                         model,
+                        request=request,
                         prompt_tokens=usage_totals["prompt_tokens"],
                         completion_tokens=usage_totals["completion_tokens"],
                     )
@@ -2230,7 +2244,7 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
                 )
                 data = json.loads(data)
                 content = _extract_assistant_message_text(data["choices"][0]["message"])
-                _record_usage_from_payload(client_id, "/api/generate", model, data)
+                _record_usage_from_payload(client_id, "/api/generate", model, data, request=request)
                 ollama_resp = {
                     "model": model,
                     "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
@@ -3049,6 +3063,7 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                         client_id,
                         f"/v1/{path}",
                         active_model_for_request,
+                        request=request,
                         prompt_tokens=usage_totals["prompt_tokens"],
                         completion_tokens=usage_totals["completion_tokens"],
                     )
@@ -3115,7 +3130,7 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                         payload = resp.json()
                     except (TypeError, ValueError, json.JSONDecodeError):
                         payload = None
-                    _record_usage_from_payload(client_id, f"/v1/{path}", active_model_for_request, payload)
+                    _record_usage_from_payload(client_id, f"/v1/{path}", active_model_for_request, payload, request=request)
                 if has_image_inputs:
                     if 200 <= resp.status_code < 400:
                         model_manager.mark_vision_validation(active_model_for_request, "supported")

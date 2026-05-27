@@ -87,6 +87,112 @@ class TestApiUsageTracker:
         assert recent["metadata_client"] == "openclaw-ui"
         assert recent["user_agent"] == "OpenClaw/1.0"
 
+    def test_preserves_preferred_non_loopback_source_for_client_bucket(self, tmp_path):
+        """Client buckets keep the last meaningful LAN source even after localhost follow-up calls."""
+        tracker = ApiUsageTracker(state_file=tmp_path / "usage_state.json")
+
+        tracker.record_request(
+            client_id="hydroponics",
+            endpoint="/v1/chat/completions",
+            method="POST",
+            status_code=200,
+            attribution={
+                "project_prefix": "hydroponics",
+                "source_ip": "192.168.1.M",
+                "host": "192.168.1.G:11434",
+                "metadata_client": "hydroponics",
+            },
+        )
+        tracker.record_request(
+            client_id="hydroponics",
+            endpoint="/v1/queue/status",
+            method="GET",
+            status_code=200,
+            attribution={
+                "project_prefix": "hydroponics",
+                "source_ip": "127.0.0.1",
+                "host": "127.0.0.1:11434",
+                "metadata_client": "hydroponics",
+            },
+        )
+
+        snapshot = tracker.snapshot()
+        top_client = snapshot["top_clients"][0]
+        recent = snapshot["recent_requests"]
+
+        assert top_client["last_source_ip"] == "127.0.0.1"
+        assert top_client["preferred_source_ip"] == "192.168.1.M"
+        assert top_client["preferred_host"] == "192.168.1.G:11434"
+        assert recent[0]["source_ip"] == "127.0.0.1"
+        assert recent[1]["source_ip"] == "192.168.1.M"
+
+    def test_separates_shared_client_ids_by_key_fingerprint(self, tmp_path):
+        """Shared display names stay isolated per authenticated key fingerprint."""
+        tracker = ApiUsageTracker(state_file=tmp_path / "usage_state.json")
+
+        tracker.record_request(
+            client_id="shared-client",
+            endpoint="/v1/chat/completions",
+            method="POST",
+            status_code=200,
+            attribution={
+                "project_prefix": "shared-client",
+                "key_prefix": "shared-client-a",
+                "key_fingerprint": "fingerprint-a",
+                "source_ip": "10.0.0.11",
+                "host": "guardian-a.local",
+            },
+        )
+        tracker.record_tokens(
+            client_id="shared-client",
+            endpoint="/v1/chat/completions",
+            model="GLM-4.7-Flash",
+            prompt_tokens=10,
+            completion_tokens=5,
+            attribution={
+                "key_fingerprint": "fingerprint-a",
+                "source_ip": "10.0.0.11",
+                "host": "guardian-a.local",
+            },
+        )
+
+        tracker.record_request(
+            client_id="shared-client",
+            endpoint="/v1/chat/completions",
+            method="POST",
+            status_code=200,
+            attribution={
+                "project_prefix": "shared-client",
+                "key_prefix": "shared-client-b",
+                "key_fingerprint": "fingerprint-b",
+                "source_ip": "10.0.0.22",
+                "host": "guardian-b.local",
+            },
+        )
+        tracker.record_tokens(
+            client_id="shared-client",
+            endpoint="/v1/chat/completions",
+            model="GLM-4.7-Flash",
+            prompt_tokens=2,
+            completion_tokens=3,
+            attribution={
+                "key_fingerprint": "fingerprint-b",
+                "source_ip": "10.0.0.22",
+                "host": "guardian-b.local",
+            },
+        )
+
+        snapshot = tracker.snapshot(top_n=10)
+        clients = {row["bucket_key"]: row for row in snapshot["top_clients"]}
+
+        assert len(clients) == 2
+        assert clients["fingerprint:fingerprint-a"]["client_id"] == "shared-client"
+        assert clients["fingerprint:fingerprint-a"]["total_tokens"] == 15
+        assert clients["fingerprint:fingerprint-a"]["last_source_ip"] == "10.0.0.11"
+        assert clients["fingerprint:fingerprint-b"]["client_id"] == "shared-client"
+        assert clients["fingerprint:fingerprint-b"]["total_tokens"] == 5
+        assert clients["fingerprint:fingerprint-b"]["last_source_ip"] == "10.0.0.22"
+
     def test_restores_persisted_state_after_restart(self, tmp_path):
         """Counters survive creating a new tracker with the same state file."""
         state_file = tmp_path / "api_usage_state.json"
@@ -120,6 +226,93 @@ class TestApiUsageTracker:
         assert snapshot["top_clients"][0]["client_id"] == "openclaw"
         assert snapshot["top_clients"][0]["project_prefix"] == "openclaw"
         assert snapshot["recent_requests"][0]["source_ip"] == "127.0.0.1"
+
+    def test_backfills_preferred_source_from_recent_requests_on_restart(self, tmp_path):
+        """Older persisted state without preferred fields is repaired from recent history."""
+        state_file = tmp_path / "api_usage_state.json"
+        state_file.write_text(
+            """
+{
+    "schema_version": 3,
+    "started_at": 1,
+    "total_requests": 2,
+    "total_errors": 0,
+    "unauthenticated_requests": 0,
+    "streaming_requests": 0,
+    "prompt_tokens": 0,
+    "completion_tokens": 0,
+    "total_tokens": 0,
+    "total_request_bytes": 0,
+    "total_response_bytes": 0,
+    "total_duration_ms": 0,
+    "requests_with_duration": 0,
+    "endpoint_counts": {},
+    "recent_requests": [
+        {
+            "timestamp": 10,
+            "client_id": "hydroponics",
+            "endpoint": "/v1/chat/completions",
+            "method": "POST",
+            "status_code": 200,
+            "source_ip": "192.168.1.M",
+            "host": "192.168.1.G:11434",
+            "project_prefix": "hydroponics"
+        },
+        {
+            "timestamp": 11,
+            "client_id": "hydroponics",
+            "endpoint": "/v1/queue/status",
+            "method": "GET",
+            "status_code": 200,
+            "source_ip": "127.0.0.1",
+            "host": "127.0.0.1:11434",
+            "project_prefix": "hydroponics"
+        }
+    ],
+    "clients": {
+        "hydroponics": {
+            "requests": 2,
+            "errors": 0,
+            "streaming_requests": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "request_bytes": 0,
+            "response_bytes": 0,
+            "duration_total_ms": 0,
+            "requests_with_duration": 0,
+            "last_seen": 11,
+            "last_model": null,
+            "last_endpoint": "/v1/queue/status",
+            "last_key_prefix": "hydro",
+            "last_key_fingerprint": "fingerprint",
+            "last_auth_header": "authorization",
+            "last_source_ip": "127.0.0.1",
+            "last_forwarded_for": null,
+            "last_host": "127.0.0.1:11434",
+            "last_origin": null,
+            "last_referer": null,
+            "last_user_agent": "python-httpx/0.28.1",
+            "project_prefix": "hydroponics",
+            "metadata_client": "hydroponics",
+            "metadata_note": "Mycodo/Pi4 hydroponics automation",
+            "categories": {"inference": 2},
+            "endpoints": {"/v1/chat/completions": 1, "/v1/queue/status": 1},
+            "methods": {"POST": 1, "GET": 1}
+        }
+    }
+}
+            """.strip(),
+            encoding="utf-8",
+        )
+
+        restarted = ApiUsageTracker(state_file=state_file)
+        snapshot = restarted.snapshot()
+        top_client = snapshot["top_clients"][0]
+
+        assert top_client["last_source_ip"] == "127.0.0.1"
+        assert top_client["preferred_source_ip"] == "192.168.1.M"
+        assert top_client["preferred_host"] == "192.168.1.G:11434"
 
     def test_persists_unauthenticated_requests_across_restart(self, tmp_path):
         """401-style unauthenticated requests are part of persisted history."""

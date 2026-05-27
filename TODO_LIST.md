@@ -1,5 +1,15 @@
 # Guardian TODO List
 
+## 2026-05-27 Stream-Safe Config Sync
+
+- [x] Stop `scripts/sync_models.py` from restarting `llama-guardian.service` after `models.yaml` edits now that Guardian hot-reloads registry state.
+- [x] Keep long-lived client streams safe from config-sync induced Guardian restarts.
+
+## 2026-05-27 Framework Key Attribution
+
+- [x] Register dedicated Guardian API keys for the Kyber-managed framework runtimes.
+- [x] Keep `config/api_keys.json` aligned with the live per-framework key split used by Kyber and ClaudeCode.
+
 ## 2026-05-24 Backend Reload Recovery
 
 - [x] Restore live inference after the Step3 startup OOM left Guardian in the internal `__MISMATCH__` state.

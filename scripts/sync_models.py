@@ -3,8 +3,6 @@ import os
 import yaml
 from pathlib import Path
 import logging
-import subprocess
-import time
 
 from _paths import CONFIG_DIR, MODELS_DIR as DEFAULT_MODELS_DIR
 
@@ -160,20 +158,16 @@ def sync_models():
             
         known_paths.add(abs_path)
 
-    # 3. Update config and restart if needed
+    # 3. Update config. Guardian hot-reloads models.yaml-derived registry state
+    # on request/load/switch, so a service restart here only risks killing
+    # active client streams for no benefit.
     config["models"] = current_models
     
     if stale_keys or new_count > 0 or dedupe_count > 0:
         save_config(config)
-        logger.info("Config updated. Restarting services...")
-        try:
-            # Try reloading first, if supported, otherwise restart
-            # Llama-server needs restart to load new config? No, llama-guardian reads config?
-            # Llama-guardian reads config on startup.
-            subprocess.run(["sudo", "systemctl", "restart", "llama-guardian.service"], check=True)
-            logger.info("Restarted llama-guardian.service")
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to restart service: {e}")
+        logger.info(
+            "Config updated. Guardian hot-reloads models.yaml on subsequent requests; skipping service restart."
+        )
             
     else:
         logger.info("Models are up to date. No changes needed.")
