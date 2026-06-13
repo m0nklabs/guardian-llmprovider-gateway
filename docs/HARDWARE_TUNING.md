@@ -153,6 +153,26 @@ The latest direct full-context probe was run against the same backend shape that
 Guardian currently manages, with a synthetic long code-style prompt plus an
 exact needle recall check.
 
+### Gemma4 26B A4B abliterated text route
+
+- The configured runtime had an invalid `ngl: 99` even though the model only
+  exposes `total_layers: 30`; Guardian's runtime-override validation catches
+  that, so both the base and q8 profiles now use `ngl: 30`
+- A dedicated full-context `q8_0/q8_0` quality route fits cleanly at `262144`
+  context on this host
+
+Focused q8 split sweep at `context 262144`, `ngl 30`:
+
+- `0.36,0.64`: `45.427s`, post-smoke free VRAM `3390 MiB / 3191 MiB` — winner
+- `0.38,0.62`: `46.712s`, post-smoke free VRAM `2864 MiB / 3719 MiB`
+- `0.40,0.60`: `46.038s`, post-smoke free VRAM `2864 MiB / 3719 MiB`
+- `0.42,0.58`: `47.609s`, post-smoke free VRAM `2334 MiB / 4245 MiB`
+- `0.45,0.55`: `47.991s`, post-smoke free VRAM `1808 MiB / 4773 MiB`
+
+Operational conclusion: the 26B q8 route is a valid full-context quality option
+here, and its tuned production split is `0.36,0.64`. Guardian now exposes it
+through the short aliases `gemma4-q8kv` and `gemma4-quality`.
+
 ### Gemma4 31B text route
 
 - Stable winner: `q4_0/q4_0` KV with `--batch-size 256 --ubatch-size 128`

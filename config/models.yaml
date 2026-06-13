@@ -89,11 +89,24 @@ models:
     total_layers: 30
     benchmark_context_limit: 262144
     context: 262144
-    ngl: 99
+    ngl: 30
     kv_type: q4_0
     tensor_split: "0.45,0.55"
     mmproj: /home/flip/models/gemma-4-26b-a4b-mmproj-BF16.gguf
     extra_args: "--flash-attn on --repeat-penalty 1 --temp 1.0 --top-p 0.95 --top-k 64"
+  Huihui-gemma-4-26B-A4B-it-abliterated-Q8KV:
+    path: /home/flip/models/gemma-4-26B-A4B.unsloth-imatrix-UD-Q4_K_XL.gguf
+    total_layers: 30
+    benchmark_context_limit: 262144
+    context: 262144
+    ngl: 30
+    kv_type: q8_0
+    tensor_split: "0.36,0.64"
+    mmproj: /home/flip/models/gemma-4-26b-a4b-mmproj-BF16.gguf
+    extra_args: "--flash-attn on --repeat-penalty 1 --temp 1.0 --top-p 0.95 --top-k 64"
+    vision_context: 262144
+    vision_ngl: 30
+    vision_tensor_split: "0.36,0.64"
   gemma-4-31B-it-uncensored-heretic:
     path: "/home/flip/models/gemma-4-31B-it-uncensored-heretic-Q4_K_M.gguf"
     total_layers: 60
@@ -186,6 +199,10 @@ aliases:
   phi4: "Phi-4-reasoning-plus"
   ministral: "Ministral-3-14B-Reasoning-2512"
   gemma4: "Huihui-gemma-4-26B-A4B-it-abliterated"
+  gemma4-q8kv: "Huihui-gemma-4-26B-A4B-it-abliterated-Q8KV"
+  gemma4-quality: "Huihui-gemma-4-26B-A4B-it-abliterated-Q8KV"
+  gemma4-26b-q8kv: "Huihui-gemma-4-26B-A4B-it-abliterated-Q8KV"
+  gemma4-26b-quality: "Huihui-gemma-4-26B-A4B-it-abliterated-Q8KV"
   gemma4-heretic: "gemma-4-31B-it-uncensored-heretic"
   gemma4-31b-uncensored: "gemma-4-31B-it-uncensored-heretic"
   gemma4-heretic-q8kv: "gemma-4-31B-it-uncensored-heretic-Q8KV-160k"
