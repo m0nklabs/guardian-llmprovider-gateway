@@ -8,9 +8,10 @@
 - Ground-up documentation suite for the live Guardian runtime: rewritten `README.md` and `ARCHITECTURE.md`, plus new `HARDWARE_TUNING.md` and `API_REFERENCE.md`, all aligned to the current queue, model lifecycle, systemd-backed backend control, ComfyUI `/free` integration, and finetune v2 behavior.
 
 ### Changed
+- Replaced the redundant `gemma4-q8kv` / `gemma4-26b-q8kv` aliases with a single explicit `gemma4-26b` alias while keeping `gemma4` as the default 26B q8 route.
 - Switched the `qwen3.6-35b-uncensored` and `gemma4-31b-uncensored` aliases to their q8-backed profiles so those uncensored entrypoints now default to quantized-KV runtimes.
 - Switched the default `gemma4` alias to the tuned 26B `q8_0/q8_0` route and removed redundant `*-quality` aliases that only duplicated existing `*-q8kv` targets.
-- Fixed the Huihui Gemma4 26B A4B runtime metadata to use the real `ngl: 30` layer count, added the short `gemma4-q8kv` alias, and tuned its full-context `q8_0/q8_0` production split to `0.36,0.64` after a Guardian-backed sweep showed the best combined headroom and smoke latency on this host.
+- Fixed the Huihui Gemma4 26B A4B runtime metadata to use the real `ngl: 30` layer count, added the short `gemma4-26b` alias, and tuned its full-context `q8_0/q8_0` production split to `0.36,0.64` after a Guardian-backed sweep showed the best combined headroom and smoke latency on this host.
 - Documented the higher-token q8 batch follow-up: Qwen q8 stayed fastest with its implicit default batch even on a `~133k`-token prompt, while Gemma q8 at `160000` context disconnected under every tested higher-batch shape, so no additional q8 batch settings were applied to Guardian model profiles.
 - Documented the Qwen batch-size follow-up probe: explicitly pinning `--batch-size 256 --ubatch-size 128` on the current Qwen q4 and q8 routes stayed stable but roughly halved prompt-ingestion throughput on this host, so the Qwen profiles intentionally keep batch sizes unset.
 - Shortened the custom fork worktree path from `worktrees/fork-no-fit-draft-margin-1a7718b4` to `worktrees/fork`, updated the live systemd backend override plus operator docs to point at the shorter CUDA 13.3 `cu133-rel` binary path, and rewrote the moved build's embedded ELF `RUNPATH` entries so the service still resolves its local `libllama-*` shared libraries after the rename.

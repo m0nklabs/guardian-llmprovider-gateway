@@ -171,7 +171,7 @@ Focused q8 split sweep at `context 262144`, `ngl 30`:
 
 Operational conclusion: the 26B q8 route is a valid full-context quality option
 here, and its tuned production split is `0.36,0.64`. Guardian now exposes it
-as the default `gemma4` alias and the explicit `gemma4-q8kv` alias.
+as the default `gemma4` alias and the explicit `gemma4-26b` alias.
 
 ### Gemma4 31B text route
 
