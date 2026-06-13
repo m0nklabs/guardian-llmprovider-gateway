@@ -19,8 +19,11 @@ same queue, reload, VRAM fencing, and backend lifecycle that production uses.
 
 - `proxy.vram_limit_mb: 27000` in [../config/settings.yaml](../config/settings.yaml)
 - official `llama-server` launched by [../scripts/start_llama.sh](../scripts/start_llama.sh)
-- current CUDA 13.2 upstream validation target:
-  `/home/flip/llama_cpp_official/worktrees/cuda132-master/build-cuda132/bin/llama-server`
+- current pinned backend target:
+  `/home/flip/llama_cpp_official/worktrees/fork/cu133-rel/bin/llama-server`
+- the `cu133-rel` binaries embed an absolute local `RUNPATH`; if this worktree
+  directory is renamed again, patch the ELF runpaths in `cu133-rel/bin` or the
+  service will fail to resolve its bundled `libllama-*` shared libraries
 - mixed RTX 3060 + RTX 5060 Ti builds must keep CUDA graphs disabled and peer
   copy disabled; the b1295 CUDA 13.2 build was compiled with
   `GGML_CUDA_GRAPHS=OFF`, `GGML_CUDA_NO_PEER_COPY=ON`, NCCL, and
@@ -143,6 +146,126 @@ Qwen-speed:
 So the short version is: Gemma4 is slower because it is doing more real work per
 token than the Qwen A3B route, not because Guardian is leaving an obvious easy
 win on the table.
+
+## Focused Full-Context KV And Batch Findings
+
+The latest direct full-context probe was run against the same backend shape that
+Guardian currently manages, with a synthetic long code-style prompt plus an
+exact needle recall check.
+
+### Gemma4 31B text route
+
+- Stable winner: `q4_0/q4_0` KV with `--batch-size 256 --ubatch-size 128`
+- Observed load time: `19.232s`
+- Observed prompt ingestion: `23161` prompt tokens in `46321.241 ms`
+  (`~500.0 tok/s`)
+- Post-load free VRAM: `1156 MiB / 1661 MiB`
+- Needle recall: correct (`7319`)
+
+What lost:
+
+- `1024/512` did not improve prompt throughput in any meaningful way
+  (`~500.2 tok/s`) and only reduced free VRAM to `822 MiB / 1327 MiB`
+- `q4_0/q8_0` loaded with only `76 MiB / 57 MiB` free and then died during
+  prompt evaluation with a disconnected response
+- `q8_0/q8_0` never reached healthy load at `262144` context
+- `q8_0/q8_0` at `200000` context still loaded with only `26 MiB / 11 MiB`
+  free and also died during prompt evaluation
+
+Operational conclusion: keep Gemma4 31B on symmetric `q4_0` KV plus
+`256/128`. There is no credible full-context `q8` production profile for this
+host right now.
+
+Lower-context quality fallback:
+
+- `q8_0/q8_0` at `160000` context stayed healthy with the same `ngl 60`,
+  `tensor_split 0.42,0.58`, and `256/128` batch settings
+- Observed load time: `19.136s`
+- Observed prompt ingestion: `23161` prompt tokens in `46486.831 ms`
+  (`~498.2 tok/s`)
+- Post-load free VRAM: `692 MiB / 1021 MiB`
+- Needle recall: correct (`7319`)
+
+That means Gemma now has two meaningful operating points on this host:
+
+- default speed/context profile: `262144` context on `q4_0/q4_0`
+- opt-in quality profile: `160000` context on `q8_0/q8_0`
+
+The `160000` q8 route is not faster. It exists only as a deliberate context-for-
+KV-quality tradeoff.
+
+High-input q8 batch follow-up:
+
+- on a much larger `~133k`-token prompt, every tested Gemma `q8_0/q8_0` batch
+  shape disconnected during prompt processing: `256/128`, `512/256`, and
+  `1024/512`
+- those runs all loaded successfully, but post-load free VRAM kept shrinking as
+  batch size rose: about `692/1021 MiB`, `644/945 MiB`, then `436/733 MiB`
+
+Operational conclusion: do not raise Gemma q8 batch sizes in Guardian. For very
+large prompt ingestion, the `160000` Gemma q8 quality route should still be
+treated as fragile, and the stable high-context route remains the `262144`
+`q4_0/q4_0` profile.
+
+### Qwen3.6 35B text route
+
+- Fast default winner: `q4_0/q4_0`
+- Observed load time: `17.103s`
+- Observed prompt ingestion: `22661` prompt tokens in `9892.948 ms`
+  (`~2290.6 tok/s`)
+- Post-load free VRAM: `2682 MiB / 1659 MiB`
+- Needle recall: correct (`7319`)
+
+Batch-size follow-up:
+
+- forcing `--batch-size 256 --ubatch-size 128` on the same `q4_0/q4_0` route
+  cut prompt throughput to `~1150.9 tok/s` while only improving free VRAM to
+  `2914 MiB / 1891 MiB`
+- forcing the same `256/128` batch pair on the `q8_0/q8_0` route also cut
+  prompt throughput to `~1153.4 tok/s`
+
+Operational conclusion: the current Qwen speed routes should keep batch sizes
+unset. On this host, explicit `256/128` is stable but materially slower than the
+implicit llama.cpp default.
+
+Alternative full-context quality profile:
+
+- `q8_0/q8_0` stayed healthy at `262144` context
+- Observed load time: `17.126s`
+- Observed prompt ingestion: `22661` prompt tokens in `9929.196 ms`
+  (`~2282.3 tok/s`)
+- Post-load free VRAM: `2298 MiB / 763 MiB`
+- Needle recall: correct (`7319`)
+
+Why it does not replace the default:
+
+- Throughput difference versus `q4_0/q4_0` was negligible in this probe
+- The smaller GPU headroom on the second card (`763 MiB`) is much tighter for a
+  shared host that still has to coexist with other GPU consumers
+
+So Guardian keeps `q4_0/q4_0` as the default Qwen speed profile and exposes a
+separate opt-in `q8_0/q8_0` quality route instead of silently making the live
+default more fragile.
+
+High-input q8 batch follow-up:
+
+- on a much larger `~133k`-token prompt, the `q8_0/q8_0` Qwen route stayed best
+  with its implicit batch default at `~1606-1611 tok/s`
+- forcing `--batch-size 512 --ubatch-size 256` dropped that to `~1274.6 tok/s`
+- forcing `--batch-size 1024 --ubatch-size 512` landed at `~1602.8-1612.5 tok/s`
+  across two runs, which is effectively a wash against the implicit default and
+  not a durable win
+
+Operational conclusion: even for very large prompt ingestion, the Qwen q8 route
+should keep batch sizes unset on this host.
+
+### Important config limitation
+
+Guardian's current model config schema only exposes one `kv_type`, and
+`ModelManager._write_server_args()` maps it to both `-ctk` and `-ctv`.
+That means asymmetric K/V profiles such as `q4_0/q8_0` are benchmarkable via
+direct `llama-server` launches, but they are not yet representable as durable
+`models.yaml` profiles without widening Guardian's config/runtime model first.
 
 ## How Finetune V2 Probes the Host
 

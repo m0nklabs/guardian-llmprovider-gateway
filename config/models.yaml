@@ -107,6 +107,19 @@ models:
     vision_context: 262144
     vision_ngl: 60
     vision_tensor_split: "0.42,0.58"
+  gemma-4-31B-it-uncensored-heretic-Q8KV-160k:
+    path: "/home/flip/models/gemma-4-31B-it-uncensored-heretic-Q4_K_M.gguf"
+    total_layers: 60
+    benchmark_context_limit: 262144
+    context: 160000
+    ngl: 60
+    kv_type: "q8_0"
+    tensor_split: "0.42,0.58"
+    mmproj: "/home/flip/models/gemma-4-31B-it-mmproj-BF16.gguf"
+    extra_args: "--main-gpu 1 --flash-attn on --parallel 1 --batch-size 256 --ubatch-size 128 --repeat-penalty 1 --repeat-last-n 128 --dry-multiplier 1.0 --dry-base 1.75 --dry-penalty-last-n 256 --temp 1.0 --top-p 0.95 --top-k 64"
+    vision_context: 160000
+    vision_ngl: 60
+    vision_tensor_split: "0.42,0.58"
   gemma-4-E4B-it-uncensored:
     path: "/home/flip/models/gemma-4-E4B-it-uncensored-Q4_K_M.gguf"
     total_layers: 42
@@ -123,6 +136,19 @@ models:
     context: 262144
     ngl: 99
     kv_type: "q4_0"
+    tensor_split: "0.36,0.64"
+    mmproj: "/home/flip/models/Qwen3.6-35B-A3B-mmproj-BF16.gguf"
+    vision_context: 262144
+    vision_ngl: 40
+    vision_tensor_split: "0.36,0.64"
+    extra_args: "--reasoning on --reasoning-format deepseek --reasoning-budget -1 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
+  Qwen3.6-35B-A3B-HauhauCS-Aggressive-Q8KV:
+    path: "/home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf"
+    total_layers: 40
+    benchmark_context_limit: 262144
+    context: 262144
+    ngl: 99
+    kv_type: "q8_0"
     tensor_split: "0.36,0.64"
     mmproj: "/home/flip/models/Qwen3.6-35B-A3B-mmproj-BF16.gguf"
     vision_context: 262144
@@ -148,6 +174,12 @@ models:
 aliases:
   qwen3.6-35b: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
   qwen3.6-35b-uncensored: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
+  qwen3.6-35b-fast: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
+  qwen3.6-35b-uncensored-fast: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
+  qwen3.6-35b-q8kv: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Q8KV"
+  qwen3.6-35b-uncensored-q8kv: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Q8KV"
+  qwen3.6-35b-quality: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Q8KV"
+  qwen3.6-35b-uncensored-quality: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Q8KV"
   qwen3.6-35b-heretic-mtp: "Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved"
   qwen3.6-35b-mtp: "Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved"
   nemotron: "Nemotron-3-Nano-30B-A3B"
@@ -156,6 +188,9 @@ aliases:
   gemma4: "Huihui-gemma-4-26B-A4B-it-abliterated"
   gemma4-heretic: "gemma-4-31B-it-uncensored-heretic"
   gemma4-31b-uncensored: "gemma-4-31B-it-uncensored-heretic"
+  gemma4-heretic-q8kv: "gemma-4-31B-it-uncensored-heretic-Q8KV-160k"
+  gemma4-31b-uncensored-q8kv: "gemma-4-31B-it-uncensored-heretic-Q8KV-160k"
+  gemma4-31b-uncensored-quality: "gemma-4-31B-it-uncensored-heretic-Q8KV-160k"
   gemma4-e4b: "gemma-4-E4B-it-uncensored"
   step3-vl: "Step3-VL-10B"
   llama3: "llama3.2-3b"
