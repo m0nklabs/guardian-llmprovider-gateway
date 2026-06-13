@@ -186,7 +186,7 @@ models:
 # Use in API requests: {"model": "qwen3.6-35b-uncensored"}
 aliases:
   qwen3.6-35b: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
-  qwen3.6-35b-uncensored: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
+  qwen3.6-35b-uncensored: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Q8KV"
   qwen3.6-35b-fast: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
   qwen3.6-35b-uncensored-fast: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
   qwen3.6-35b-q8kv: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Q8KV"
@@ -200,7 +200,7 @@ aliases:
   gemma4-q8kv: "Huihui-gemma-4-26B-A4B-it-abliterated-Q8KV"
   gemma4-26b-q8kv: "Huihui-gemma-4-26B-A4B-it-abliterated-Q8KV"
   gemma4-heretic: "gemma-4-31B-it-uncensored-heretic"
-  gemma4-31b-uncensored: "gemma-4-31B-it-uncensored-heretic"
+  gemma4-31b-uncensored: "gemma-4-31B-it-uncensored-heretic-Q8KV-160k"
   gemma4-heretic-q8kv: "gemma-4-31B-it-uncensored-heretic-Q8KV-160k"
   gemma4-31b-uncensored-q8kv: "gemma-4-31B-it-uncensored-heretic-Q8KV-160k"
   gemma4-e4b: "gemma-4-E4B-it-uncensored"
