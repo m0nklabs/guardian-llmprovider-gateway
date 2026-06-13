@@ -1204,6 +1204,56 @@ def _apply_request_reasoning_defaults(path: str, payload: Dict[str, Any], model_
     return changed
 
 
+_SYSTEM_CONTEXT_UPDATE_PREFIX = "[System Context Update]:\n"
+
+
+def _stringify_message_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict):
+                if part.get("type") == "text" and isinstance(part.get("text"), str):
+                    parts.append(part["text"])
+                else:
+                    parts.append(json.dumps(part, ensure_ascii=False, sort_keys=True))
+            elif part is not None:
+                parts.append(str(part))
+        return "\n".join(parts)
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _sanitize_messages_for_qwen_chat_template(messages: Any) -> Any:
+    """Demote later system messages so strict Qwen templates can render them."""
+    if not isinstance(messages, list):
+        return messages
+
+    sanitized: list[Any] = []
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            sanitized.append(message)
+            continue
+
+        if message.get("role") == "system" and index > 0:
+            updated = dict(message)
+            updated["role"] = "user"
+            content = _stringify_message_content(message.get("content"))
+            updated["content"] = (
+                f"{_SYSTEM_CONTEXT_UPDATE_PREFIX}{content}"
+                if content
+                else _SYSTEM_CONTEXT_UPDATE_PREFIX.rstrip("\n")
+            )
+            sanitized.append(updated)
+            continue
+
+        sanitized.append(message)
+
+    return sanitized
+
+
 def _map_multimodal_backend_error(
     model_name: str,
     status_code: int,
@@ -2870,6 +2920,10 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
     requested_model = _resolve_or_reject_inference_model(requested_model, current_model)
     json_body["model"] = requested_model
     _apply_request_reasoning_defaults(path, json_body, requested_model)
+    if path in ("chat/completions", "messages"):
+        json_body["messages"] = _sanitize_messages_for_qwen_chat_template(
+            json_body.get("messages", [])
+        )
     body = json.dumps(json_body).encode("utf-8")
     has_image_inputs = False
     if path in ("chat/completions", "messages"):

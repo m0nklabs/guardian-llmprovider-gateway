@@ -93,16 +93,17 @@ models:
     kv_type: q4_0
     tensor_split: "0.45,0.55"
     mmproj: /home/flip/models/gemma-4-26b-a4b-mmproj-BF16.gguf
+    extra_args: "--flash-attn on --repeat-penalty 1 --temp 1.0 --top-p 0.95 --top-k 64"
   gemma-4-31B-it-uncensored-heretic:
     path: "/home/flip/models/gemma-4-31B-it-uncensored-heretic-Q4_K_M.gguf"
     total_layers: 60
     benchmark_context_limit: 262144
-    context: 262144
+    context: 196608
     ngl: 60
     kv_type: "q4_0"
     tensor_split: "0.42,0.58"
     mmproj: "/home/flip/models/gemma-4-31B-it-mmproj-BF16.gguf"
-    extra_args: "--flash-attn on --parallel 1 --batch-size 256 --ubatch-size 128 --repeat-penalty 1.3 --repeat-last-n 128 --dry-multiplier 1.0 --dry-base 1.75 --dry-penalty-last-n 256 --temp 0.6 --top-k 40"
+    extra_args: "--main-gpu 1 --flash-attn on --parallel 1 --batch-size 128 --ubatch-size 64 --repeat-penalty 1 --repeat-last-n 128 --dry-multiplier 1.0 --dry-base 1.75 --dry-penalty-last-n 256 --temp 1.0 --top-p 0.95 --top-k 64"
   gemma-4-E4B-it-uncensored:
     path: "/home/flip/models/gemma-4-E4B-it-uncensored-Q4_K_M.gguf"
     total_layers: 42
@@ -111,6 +112,7 @@ models:
     ngl: 42
     kv_type: "f16"
     tensor_split: "0.32,0.68"
+    extra_args: "--flash-attn on --parallel 1 --batch-size 256 --ubatch-size 128 --repeat-penalty 1 --repeat-last-n 128 --dry-multiplier 1.0 --dry-base 1.75 --dry-penalty-last-n 256 --temp 1.0 --top-p 0.95 --top-k 64"
   Qwen3.6-35B-A3B-HauhauCS-Aggressive:
     path: "/home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf"
     total_layers: 40
@@ -124,34 +126,6 @@ models:
     vision_ngl: 40
     vision_tensor_split: "0.36,0.64"
     extra_args: "--reasoning on --reasoning-format deepseek --reasoning-budget -1 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
-  Qwen3.6-35B-A3B-HauhauCS-Aggressive-Agent:
-    path: "/home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf"
-    profile_role: agent
-    total_layers: 40
-    benchmark_context_limit: 262144
-    context: 131072
-    ngl: 99
-    kv_type: "q4_0"
-    tensor_split: "0.36,0.64"
-    mmproj: "/home/flip/models/Qwen3.6-35B-A3B-mmproj-BF16.gguf"
-    vision_context: 131072
-    vision_ngl: 40
-    vision_tensor_split: "0.36,0.64"
-    extra_args: "--reasoning on --reasoning-format deepseek --reasoning-budget 1024 --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
-  Qwen3.6-35B-A3B-HauhauCS-Aggressive-Reasoning-Agent:
-    path: "/home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf"
-    profile_role: agent
-    total_layers: 40
-    benchmark_context_limit: 262144
-    context: 131072
-    ngl: 99
-    kv_type: "q4_0"
-    tensor_split: "0.36,0.64"
-    mmproj: "/home/flip/models/Qwen3.6-35B-A3B-mmproj-BF16.gguf"
-    vision_context: 131072
-    vision_ngl: 40
-    vision_tensor_split: "0.36,0.64"
-    extra_args: "--reasoning on --reasoning-format deepseek --reasoning-budget 2048 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
   Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved:
     path: "/home/flip/models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-Q4_K_M.gguf"
     total_layers: 41
@@ -169,23 +143,8 @@ models:
 # Short names that resolve to full model names above.
 # Use in API requests: {"model": "qwen3.6-35b-uncensored"}
 aliases:
-  qwen3: "Qwen3-30B-A3B-Thinking-2507"
-  qwen3-30b: "Qwen3-30B-A3B-Thinking-2507"
-  qwen3-30b-thinking: "Qwen3-30B-A3B-Thinking-2507"
-  qwen3-vl: "Qwen3-VL-30B-A3B-Thinking"
-  qwen3-vl-30b: "Qwen3-VL-30B-A3B-Thinking"
-  qwen3-vl-heretic: "Qwen3-VL-32B-Gemini-Heretic-Uncensored-Thinking"
-  qwen3-vl-32b-heretic: "Qwen3-VL-32B-Gemini-Heretic-Uncensored-Thinking"
-  qwen3-32b-uncensored: "Qwen3-VL-32B-Gemini-Heretic-Uncensored-Thinking"
   qwen3.6-35b: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
   qwen3.6-35b-uncensored: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
-  qwen3.6-35b-hauhau: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
-  qwen3.6-35b-aggressive: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
-  qwen3.6-35b-agent: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Agent"
-  qwen3.6-35b-uncensored-agent: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Agent"
-  qwen3.6-35b-reasoning-agent: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Reasoning-Agent"
-  qwen3-35b-uncensored-agent: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Agent"
-  qwen3-35b-reasoning-agent: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Reasoning-Agent"
   qwen3.6-35b-heretic-mtp: "Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved"
   qwen3.6-35b-mtp: "Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved"
   nemotron: "Nemotron-3-Nano-30B-A3B"
@@ -211,11 +170,7 @@ guardian:
   # If populated, only these clients can trigger auto-switch.
   # Client names come from api_keys.json "name" field.
   switch_allowlist:
-    - "m0nk111"
-    - "claudecode"
-    - "hermes"
-    - "oelala"
-    - "kyberm0nk"
+
 
   # Auto-unload llama-server after N minutes of inactivity to free VRAM for
   # ComfyUI or other GPU-heavy tasks. Set to null (or remove) to disable.

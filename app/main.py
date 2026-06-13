@@ -26,11 +26,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger("Guardian")
 
+
+def _configure_static_mount(application: FastAPI, static_dir: pathlib.Path) -> None:
+    if static_dir.is_dir():
+        application.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
+        return
+
+    logger.warning("Static UI directory %s is missing; skipping /static mount", static_dir)
+
+
 # Main App (UI + API)
 app = FastAPI()
 
 # Serve UI
-app.mount("/static", StaticFiles(directory="app/ui/static"), name="static")
+_configure_static_mount(app, pathlib.Path("app/ui/static"))
 
 @app.get("/")
 async def read_index():

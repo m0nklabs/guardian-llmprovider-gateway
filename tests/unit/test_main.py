@@ -1,11 +1,24 @@
 """Tests for app.main dashboard stats API."""
 
 from collections import defaultdict
+import logging
 
+from fastapi import FastAPI
 import pytest
 
 from app import main
 from app.proxy.usage import ApiUsageTracker
+
+
+def test_configure_static_mount_skips_missing_dir(tmp_path, caplog):
+    """Missing built dashboard assets should not block Guardian startup."""
+    application = FastAPI()
+
+    with caplog.at_level(logging.WARNING):
+        main._configure_static_mount(application, tmp_path / "static")
+
+    assert all(getattr(route, "path", None) != "/static" for route in application.routes)
+    assert "skipping /static mount" in caplog.text
 
 
 @pytest.mark.asyncio

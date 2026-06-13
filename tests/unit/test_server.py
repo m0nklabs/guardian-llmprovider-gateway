@@ -219,6 +219,41 @@ def test_request_reasoning_defaults_honor_explicit_no_thinking_request():
     assert payload["chat_template_kwargs"] == {"enable_thinking": False}
 
 
+def test_sanitize_messages_for_qwen_chat_template_demotes_late_system_messages():
+    messages = [
+        {"role": "system", "content": "primary"},
+        {"role": "user", "content": "hello"},
+        {"role": "system", "content": "update"},
+        {"role": "assistant", "content": "ok"},
+    ]
+
+    sanitized = server._sanitize_messages_for_qwen_chat_template(messages)
+
+    assert sanitized[0] == {"role": "system", "content": "primary"}
+    assert sanitized[2]["role"] == "user"
+    assert sanitized[2]["content"] == "[System Context Update]:\nupdate"
+    assert sanitized[3] == {"role": "assistant", "content": "ok"}
+
+
+def test_sanitize_messages_for_qwen_chat_template_preserves_multimodal_content():
+    messages = [
+        {"role": "system", "content": "primary"},
+        {
+            "role": "system",
+            "content": [
+                {"type": "text", "text": "update"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+            ],
+        },
+    ]
+
+    sanitized = server._sanitize_messages_for_qwen_chat_template(messages)
+
+    assert sanitized[1]["role"] == "user"
+    assert sanitized[1]["content"].startswith("[System Context Update]:\nupdate")
+    assert "image_url" in sanitized[1]["content"]
+
+
 def test_stream_watchdog_extends_timeout_for_healthy_progress():
     watchdog = server.StreamProgressWatchdog(base_timeout_s=300)
 
@@ -534,6 +569,193 @@ async def test_v1_inference_rejects_unserved_model_before_queue_admission():
     assert exc_info.value.detail["error"] == "model_not_served"
     assert exc_info.value.detail["reason"] == "requested_model_not_served"
     assert exc_info.value.detail["requested_model"] == "ghost-model"
+
+
+@pytest.mark.asyncio
+async def test_v1_chat_completions_sanitizes_late_system_messages_before_forwarding():
+    class _FakeRequest:
+        def __init__(self):
+            self.headers = {"Content-Type": "application/json"}
+            self.state = SimpleNamespace(auth_context={"key_fingerprint": "abc123"})
+            self.url = SimpleNamespace(path="/v1/chat/completions")
+            self.method = "POST"
+
+        async def body(self) -> bytes:
+            return json.dumps(
+                {
+                        "model": "auto",
+                    "stream": False,
+                    "messages": [
+                        {"role": "system", "content": "primary"},
+                        {"role": "user", "content": "hello"},
+                        {"role": "system", "content": "update"},
+                    ],
+                }
+            ).encode("utf-8")
+
+    captured_request = {}
+
+    class _FakeResponse:
+        def __init__(self):
+            self.content = b'{"ok":true}'
+            self.status_code = 200
+            self.headers = {"content-type": "application/json"}
+
+        def json(self):
+            return {"ok": True}
+
+        async def aiter_lines(self):
+            if False:
+                yield ""
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            self.kwargs = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def build_request(self, method, url, json=None, content=None, timeout=None, headers=None):
+            captured_request["method"] = method
+            captured_request["url"] = url
+            captured_request["json"] = json
+            captured_request["content"] = content
+            captured_request["timeout"] = timeout
+            return SimpleNamespace(
+                method=method,
+                url=url,
+                json=json,
+                content=content,
+                timeout=timeout,
+                headers=headers,
+            )
+
+        async def send(self, req, stream=False):
+            captured_request["stream"] = stream
+            return _FakeResponse()
+
+        async def post(self, url, content=None, headers=None):
+            captured_request["method"] = "POST"
+            captured_request["url"] = url
+            captured_request["content"] = content
+            captured_request["headers"] = headers
+            return _FakeResponse()
+
+        async def aclose(self):
+            return None
+
+    request = _FakeRequest()
+
+    with (
+        patch.object(server, "_set_request_usage_metadata", lambda *args, **kwargs: None),
+        patch.object(server, "_begin_queued_request", return_value=("req-123", None)),
+        patch.object(server, "_resolve_or_reject_inference_model", return_value="Qwen-Agent"),
+        patch.object(server.model_manager, "get_current_model", AsyncMock(return_value="Qwen-Agent")),
+        patch.object(server.model_manager, "models", {"Qwen-Agent": {}, "auto": {}}),
+        patch.object(server.httpx, "AsyncClient", _FakeAsyncClient),
+    ):
+        response = await server.proxy_v1_post("chat/completions", request, client_id="openclaw")
+
+    assert response.status_code == 200
+    assert captured_request["method"] == "POST"
+    assert captured_request["url"].endswith("/v1/chat/completions")
+    forwarded = json.loads(captured_request["content"].decode("utf-8"))
+    assert forwarded["messages"][0]["role"] == "system"
+    assert forwarded["messages"][2]["role"] == "user"
+    assert forwarded["messages"][2]["content"] == "[System Context Update]:\nupdate"
+
+
+@pytest.mark.asyncio
+async def test_v1_chat_completions_keeps_stream_flag_while_sanitizing_messages():
+    class _FakeRequest:
+        def __init__(self):
+            self.headers = {"Content-Type": "application/json"}
+            self.state = SimpleNamespace(auth_context={"key_fingerprint": "abc123"})
+            self.url = SimpleNamespace(path="/v1/chat/completions")
+            self.method = "POST"
+
+        async def body(self) -> bytes:
+            return json.dumps(
+                {
+                        "model": "auto",
+                    "stream": True,
+                    "messages": [
+                        {"role": "system", "content": "primary"},
+                        {"role": "system", "content": "update"},
+                    ],
+                }
+            ).encode("utf-8")
+
+    captured_request = {}
+
+    class _FakeResponse:
+        def __init__(self):
+            self.request = server.httpx.Request("POST", "http://127.0.0.1:11440/v1/chat/completions")
+            self.status_code = 200
+            self.headers = {"content-type": "text/event-stream"}
+
+        async def aiter_lines(self):
+            yield 'data: {"choices": [{"delta": {"content": "ok"}}]}'
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            self.kwargs = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def build_request(self, method, url, json=None, content=None, timeout=None, headers=None):
+            captured_request["method"] = method
+            captured_request["url"] = url
+            captured_request["json"] = json
+            captured_request["content"] = content
+            captured_request["timeout"] = timeout
+            return SimpleNamespace(
+                method=method,
+                url=url,
+                json=json,
+                content=content,
+                timeout=timeout,
+                headers=headers,
+            )
+
+        async def send(self, req, stream=False):
+            captured_request["stream"] = stream
+            return _FakeResponse()
+
+        async def post(self, url, content=None, headers=None):
+            captured_request["method"] = "POST"
+            captured_request["url"] = url
+            captured_request["content"] = content
+            captured_request["headers"] = headers
+            return _FakeResponse()
+
+        async def aclose(self):
+            return None
+
+    request = _FakeRequest()
+
+    with (
+        patch.object(server, "_set_request_usage_metadata", lambda *args, **kwargs: None),
+        patch.object(server, "_begin_queued_request", return_value=("req-123", None)),
+        patch.object(server, "_resolve_or_reject_inference_model", return_value="Qwen-Agent"),
+        patch.object(server.model_manager, "get_current_model", AsyncMock(return_value="Qwen-Agent")),
+        patch.object(server.model_manager, "models", {"Qwen-Agent": {}, "auto": {}}),
+        patch.object(server.httpx, "AsyncClient", _FakeAsyncClient),
+    ):
+        response = await server.proxy_v1_post("chat/completions", request, client_id="openclaw")
+
+    assert response.status_code == 200
+    assert captured_request["stream"] is True
+    forwarded = json.loads(captured_request["content"].decode("utf-8"))
+    assert forwarded["messages"][1]["role"] == "user"
+    assert forwarded["messages"][1]["content"] == "[System Context Update]:\nupdate"
 
 
 @pytest.mark.asyncio
