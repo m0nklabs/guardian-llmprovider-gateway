@@ -98,12 +98,15 @@ models:
     path: "/home/flip/models/gemma-4-31B-it-uncensored-heretic-Q4_K_M.gguf"
     total_layers: 60
     benchmark_context_limit: 262144
-    context: 196608
+    context: 262144
     ngl: 60
     kv_type: "q4_0"
     tensor_split: "0.42,0.58"
     mmproj: "/home/flip/models/gemma-4-31B-it-mmproj-BF16.gguf"
-    extra_args: "--main-gpu 1 --flash-attn on --parallel 1 --batch-size 128 --ubatch-size 64 --repeat-penalty 1 --repeat-last-n 128 --dry-multiplier 1.0 --dry-base 1.75 --dry-penalty-last-n 256 --temp 1.0 --top-p 0.95 --top-k 64"
+    extra_args: "--main-gpu 1 --flash-attn on --parallel 1 --batch-size 256 --ubatch-size 128 --repeat-penalty 1 --repeat-last-n 128 --dry-multiplier 1.0 --dry-base 1.75 --dry-penalty-last-n 256 --temp 1.0 --top-p 0.95 --top-k 64"
+    vision_context: 262144
+    vision_ngl: 60
+    vision_tensor_split: "0.42,0.58"
   gemma-4-E4B-it-uncensored:
     path: "/home/flip/models/gemma-4-E4B-it-uncensored-Q4_K_M.gguf"
     total_layers: 42

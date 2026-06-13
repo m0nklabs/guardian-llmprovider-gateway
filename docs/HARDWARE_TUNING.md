@@ -83,6 +83,67 @@ That `CUDA_DEVICE_ORDER` detail matters because the finetune telemetry layer
 maps `nvidia-smi` data into the same order. Split decisions are therefore made
 against the same device order that the backend actually uses.
 
+## Gemma4 31B: Why VRAM Jumped
+
+The big Gemma4 regression was not that the model itself changed. The load path
+changed.
+
+On this host the failing combination was:
+
+- `gemma-4-31B-it-uncensored-heretic-Q4_K_M.gguf`
+- `context: 262144`
+- quantized KV cache (`-ctk q4_0 -ctv q4_0`)
+- flash attention enabled
+
+That shape used to fit, then newer upstream llama.cpp started reserving more GPU
+memory earlier during startup. The main culprit for the extra VRAM pressure was
+the CUDA-side change from `#23907` (`reserve space for quantize kv-cache at
+startup`). With quantized KV plus flash attention, that reserve moved memory
+pressure from "allocate later while running" to "reserve now while loading".
+Because Gemma4 was already near the edge on GPU0, that extra reserve was enough
+to push the old full-context profile into `graph_reserve` / CUDA OOM territory.
+
+There was a second upstream change, `#23485` (`server: add margin for draft
+model for fit`), which makes fit decisions more conservative. That one matters
+more for draft/MTP paths than for the plain Gemma text route, but the fork keeps
+both reverts so the host no longer carries either source of extra fit pressure.
+
+The working recovery on this machine is:
+
+- fork branch: `m0nk111/llama.cpp:no-fit-draft-margin`
+- extra revert: `1cd97ea09` for `#23907`
+- build/toolchain: CUDA 13.3 `cu133-rel`
+- runtime: `262144 / ngl 60 / tensor_split 0.42,0.58 / --main-gpu 1 / --flash-attn on / --parallel 1 / --batch-size 256 / --ubatch-size 128`
+
+CUDA 13.3 was the chosen toolchain for the rebuilt fork, but it was not the
+root-cause fix by itself. The key fix was removing the newer startup-reserve and
+fit-margin behavior that made Gemma4 load fatter than before.
+
+## Why Gemma4 Is Slower Than Qwen3.6
+
+This is mostly architecture, not a bad Guardian config.
+
+`Qwen3.6-35B-A3B` is a sparse MoE-style route: total model size is large, but a
+much smaller active subset does work per generated token. `Gemma4 31B` behaves
+like a much denser workload, so more of the model participates every token. On
+the same GPUs, that means lower decode throughput even when both models fit.
+
+There are still a few knobs worth tuning, but none of them will turn Gemma4 into
+Qwen-speed:
+
+- Keep flash attention on. For the current Gemma KV setup it is required.
+- `ngl 60` is already the right direction; less CPU fallback is better.
+- `batch-size` and `ubatch-size` help prompt ingestion more than decode speed.
+- Small `tensor_split` nudges around `0.42,0.58` can still be tested if GPU0
+  becomes the bottleneck, but the gains are usually incremental.
+- If you want lower latency over maximum context, the biggest practical tradeoff
+  is reducing context, because the larger KV working set hurts both memory headroom
+  and token speed.
+
+So the short version is: Gemma4 is slower because it is doing more real work per
+token than the Qwen A3B route, not because Guardian is leaving an obvious easy
+win on the table.
+
 ## How Finetune V2 Probes the Host
 
 `GuardianV2ProbeRunner` executes one probe as a live Guardian cycle:
