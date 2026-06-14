@@ -107,6 +107,31 @@ models:
     vision_context: 262144
     vision_ngl: 30
     vision_tensor_split: "0.36,0.64"
+  unsloth-gemma-4-26B-A4B-it-qat-UD-Q4_K_XL-Q8KV:
+    path: /home/flip/models/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
+    total_layers: 30
+    benchmark_context_limit: 262144
+    context: 262144
+    ngl: 30
+    kv_type: q8_0
+    tensor_split: "0.36,0.64"
+    mmproj: /home/flip/models/gemma-4-26b-a4b-mmproj-BF16.gguf
+    extra_args: "--flash-attn on --repeat-penalty 1 --temp 1.0 --top-p 0.95 --top-k 64 --main-gpu 1 -sm layer"
+    vision_context: 262144
+    vision_ngl: 30
+    vision_tensor_split: "0.36,0.64"
+  google-gemma-4-12B-it-qat-q4_0-GPU1:
+    path: /home/flip/models/gemma-4-12b-it-qat-q4_0.gguf
+    total_layers: 48
+    benchmark_context_limit: 131072
+    context: 131072
+    ngl: 48
+    kv_type: q4_0
+    cuda_visible_devices: "1"
+    mmproj: /home/flip/models/mmproj-gemma-4-12b-it-qat-q4_0.gguf
+    extra_args: "--main-gpu 1 -sm none --flash-attn on"
+    vision_context: 131072
+    vision_ngl: 48
   gemma-4-31B-it-uncensored-heretic:
     path: "/home/flip/models/gemma-4-31B-it-uncensored-heretic-Q4_K_M.gguf"
     total_layers: 60
@@ -129,7 +154,7 @@ models:
     kv_type: "q8_0"
     tensor_split: "0.42,0.58"
     mmproj: "/home/flip/models/gemma-4-31B-it-mmproj-BF16.gguf"
-    extra_args: "--main-gpu 1 --flash-attn on --parallel 1 --batch-size 256 --ubatch-size 128 --repeat-penalty 1 --repeat-last-n 128 --dry-multiplier 1.0 --dry-base 1.75 --dry-penalty-last-n 256 --temp 1.0 --top-p 0.95 --top-k 64"
+    extra_args: "--main-gpu 1 --flash-attn on --repeat-penalty 1 --repeat-last-n 128 --dry-multiplier 1.0 --dry-base 1.75 --dry-penalty-last-n 256 --temp 1.0 --top-p 0.95 --top-k 64"
     vision_context: 160000
     vision_ngl: 60
     vision_tensor_split: "0.42,0.58"
@@ -149,7 +174,7 @@ models:
     context: 262144
     ngl: 99
     kv_type: "q4_0"
-    tensor_split: "0.36,0.64"
+    tensor_split: "0.38,0.62"
     mmproj: "/home/flip/models/Qwen3.6-35B-A3B-mmproj-BF16.gguf"
     vision_context: 262144
     vision_ngl: 40
@@ -162,11 +187,11 @@ models:
     context: 262144
     ngl: 99
     kv_type: "q8_0"
-    tensor_split: "0.36,0.64"
+    tensor_split: "0.39,0.61"
     mmproj: "/home/flip/models/Qwen3.6-35B-A3B-mmproj-BF16.gguf"
     vision_context: 262144
     vision_ngl: 40
-    vision_tensor_split: "0.36,0.64"
+    vision_tensor_split: "0.40,0.60"
     extra_args: "--reasoning on --reasoning-format deepseek --reasoning-budget -1 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
   Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved:
     path: "/home/flip/models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-Q4_K_M.gguf"
@@ -198,6 +223,11 @@ aliases:
   ministral: "Ministral-3-14B-Reasoning-2512"
   gemma4: "Huihui-gemma-4-26B-A4B-it-abliterated-Q8KV"
   gemma4-26b: "Huihui-gemma-4-26B-A4B-it-abliterated-Q8KV"
+  gemma4-26b-qat: "unsloth-gemma-4-26B-A4B-it-qat-UD-Q4_K_XL-Q8KV"
+  gemma4-26b-qat-q8kv: "unsloth-gemma-4-26B-A4B-it-qat-UD-Q4_K_XL-Q8KV"
+  gemma4-12b: "google-gemma-4-12B-it-qat-q4_0-GPU1"
+  gemma4-12b-qat: "google-gemma-4-12B-it-qat-q4_0-GPU1"
+  gemma4-12b-gpu1: "google-gemma-4-12B-it-qat-q4_0-GPU1"
   gemma4-heretic: "gemma-4-31B-it-uncensored-heretic"
   gemma4-31b-uncensored: "gemma-4-31B-it-uncensored-heretic-Q8KV-160k"
   gemma4-heretic-q8kv: "gemma-4-31B-it-uncensored-heretic-Q8KV-160k"

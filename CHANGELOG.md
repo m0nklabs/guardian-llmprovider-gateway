@@ -8,6 +8,8 @@
 - Ground-up documentation suite for the live Guardian runtime: rewritten `README.md` and `ARCHITECTURE.md`, plus new `HARDWARE_TUNING.md` and `API_REFERENCE.md`, all aligned to the current queue, model lifecycle, systemd-backed backend control, ComfyUI `/free` integration, and finetune v2 behavior.
 
 ### Changed
+- Installed `google/gemma-4-12B-it-qat-q4_0-gguf` (`gemma-4-12b-it-qat-q4_0.gguf` + matching `mmproj`) and added a dedicated Guardian profile `google-gemma-4-12B-it-qat-q4_0-GPU1` with single-GPU routing enforced via `CUDA_VISIBLE_DEVICES=1` plus `--main-gpu 1 -sm none`, exposed through aliases `gemma4-12b`, `gemma4-12b-qat`, and `gemma4-12b-gpu1`.
+- Added a dedicated Guardian runtime profile for `unsloth/gemma-4-26B-A4B-it-qat-GGUF` (`UD-Q4_K_XL`) with full `q8_0/q8_0` KV, multimodal projector wiring, no explicit batch-size limits, and new aliases `gemma4-26b-qat` plus `gemma4-26b-qat-q8kv`.
 - Replaced the redundant `gemma4-q8kv` / `gemma4-26b-q8kv` aliases with a single explicit `gemma4-26b` alias while keeping `gemma4` as the default 26B q8 route.
 - Switched the `qwen3.6-35b-uncensored` and `gemma4-31b-uncensored` aliases to their q8-backed profiles so those uncensored entrypoints now default to quantized-KV runtimes.
 - Switched the default `gemma4` alias to the tuned 26B `q8_0/q8_0` route and removed redundant `*-quality` aliases that only duplicated existing `*-q8kv` targets.

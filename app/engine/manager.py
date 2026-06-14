@@ -16,6 +16,7 @@ from datetime import UTC, datetime
 from app.paths import (
     CONFIG_DIR,
     CURRENT_MODEL_ARGS_FILE,
+    CURRENT_MODEL_ENV_FILE,
     LLAMA_SLOTS_DIR,
     OFFICIAL_LLAMA_SERVER_BIN,
 )
@@ -1152,9 +1153,11 @@ class ModelManager:
         """Build llama-server CLI arguments from model config and write to args file.
 
         Supported config keys (from models.yaml):
-            path, context, ngl, kv_type, tensor_split, mmproj, extra_args
+            path, context, ngl, kv_type, tensor_split, mmproj, extra_args,
+            cuda_visible_devices
         """
         args_file = CURRENT_MODEL_ARGS_FILE
+        env_file = CURRENT_MODEL_ENV_FILE
         path = config["path"]
         ctx = config.get("context", 4096)
         ngl = config.get("ngl", 99)
@@ -1162,6 +1165,7 @@ class ModelManager:
         tensor_split = config.get("tensor_split", "")
         mmproj = config.get("mmproj", "")
         extra_args = config.get("extra_args", "")
+        cuda_visible_devices = config.get("cuda_visible_devices", "")
 
         logger.info(f"Using official llama.cpp binary: {OFFICIAL_LLAMA_SERVER_BIN}")
 
@@ -1192,6 +1196,17 @@ class ModelManager:
 
         with open(args_file, "w") as f:
             f.write(args_content)
+
+        # Optional per-model GPU pinning for the systemd launch wrapper.
+        # scripts/start_llama.sh sources current_model.env before launching llama-server.
+        cuda_visible_devices = str(cuda_visible_devices).strip()
+        if cuda_visible_devices:
+            with open(env_file, "w") as f:
+                f.write(f"export CUDA_VISIBLE_DEVICES={cuda_visible_devices}\n")
+            logger.info(f"CUDA_VISIBLE_DEVICES={cuda_visible_devices}")
+        elif env_file.exists():
+            env_file.unlink()
+            logger.info("Cleared model environment file (no CUDA_VISIBLE_DEVICES override)")
 
     async def _stop_server(self):
         # Use simple os.system or subprocess to handle sudo if needed
