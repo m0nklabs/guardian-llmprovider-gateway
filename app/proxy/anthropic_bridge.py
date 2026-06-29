@@ -109,6 +109,12 @@ def translate_anthropic_request_to_openai(anthropic_body: Dict[str, Any]) -> Dic
     if "stream" in anthropic_body:
         openai_body["stream"] = anthropic_body["stream"]
 
+    # When streaming, request usage data in the final chunk.
+    # Many OpenAI-compatible providers (e.g. NVIDIA NIM) do not include
+    # usage information in streaming responses unless explicitly requested.
+    if openai_body.get("stream"):
+        openai_body["stream_options"] = {"include_usage": True}
+
     # Pass through tools if present (best-effort conversion)
     if "tools" in anthropic_body:
         openai_body["tools"] = _convert_anthropic_tools_to_openai(anthropic_body["tools"])
@@ -550,7 +556,7 @@ async def translate_openai_stream_to_anthropic(
     yield _format_sse_event("message_delta", {
         "type": "message_delta",
         "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-        "usage": {"output_tokens": output_tokens},
+        "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
     })
 
     # ── Emit message_stop ──────────────────────────────────────────────

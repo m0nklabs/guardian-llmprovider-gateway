@@ -105,6 +105,28 @@ class TestRequestTranslation:
         openai = translate_anthropic_request_to_openai(anthropic)
         assert openai["stream"] is True
 
+    def test_stream_options_include_usage_when_streaming(self):
+        """When stream=True, stream_options.include_usage must be set so
+        that providers like NVIDIA NIM return usage in the final chunk."""
+        anthropic = {
+            "model": "test",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 50,
+            "stream": True,
+        }
+        openai = translate_anthropic_request_to_openai(anthropic)
+        assert openai["stream_options"] == {"include_usage": True}
+
+    def test_no_stream_options_when_not_streaming(self):
+        """When stream is not set, stream_options should not be present."""
+        anthropic = {
+            "model": "test",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 50,
+        }
+        openai = translate_anthropic_request_to_openai(anthropic)
+        assert "stream_options" not in openai
+
     def test_content_blocks_text(self):
         anthropic = {
             "model": "test",
@@ -326,6 +348,35 @@ class TestStreamingTranslation:
         msg_delta = [p for p in parsed if p.get("type") == "message_delta"]
         assert msg_delta[0]["delta"]["stop_reason"] == "tool_use"
         assert msg_delta[0]["usage"]["output_tokens"] == 15
+
+    @pytest.mark.asyncio
+    async def test_streaming_message_delta_includes_input_tokens(self):
+        """The message_delta event must include input_tokens, not just output_tokens.
+        Without this, clients like Claude Code show 0 tokens used in their status bar."""
+        openai_lines = [
+            'data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":42,"completion_tokens":7}}',
+            'data: [DONE]',
+        ]
+
+        async def line_gen():
+            for line in openai_lines:
+                yield line
+
+        events = []
+        async for event in translate_openai_stream_to_anthropic(line_gen(), "test-model"):
+            events.append(event)
+
+        parsed = []
+        for event in events:
+            for part in event.split("\n"):
+                if part.startswith("data: "):
+                    parsed.append(json.loads(part[6:]))
+
+        msg_delta = [p for p in parsed if p.get("type") == "message_delta"]
+        assert len(msg_delta) == 1
+        assert msg_delta[0]["usage"]["input_tokens"] == 42
+        assert msg_delta[0]["usage"]["output_tokens"] == 7
 
     @pytest.mark.asyncio
     async def test_streaming_tool_use_only(self):
