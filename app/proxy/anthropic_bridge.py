@@ -7,6 +7,7 @@ speaks OpenAI format (e.g. NVIDIA NIM), this module transparently translates:
 1. **Request**: Anthropic ``/v1/messages`` → OpenAI ``/v1/chat/completions``
 2. **Response (non-streaming)**: OpenAI JSON → Anthropic JSON
 3. **Response (streaming)**: OpenAI SSE chunks → Anthropic SSE events
+4. **Errors**: OpenAI error JSON → Anthropic error format
 
 This allows clients that speak Anthropic protocol (Claude Code, the
 ``anthropic`` Python SDK, etc.) to use NVIDIA NIM and other OpenAI-only
@@ -14,6 +15,36 @@ cloud providers without any code changes on their side.
 
 OpenRouter natively supports ``/v1/messages``, so translation is only
 applied when the provider does not offer a native Anthropic API.
+Use ``provider_needs_anthropic_translation()`` to check.
+
+## Supported features
+
+**Request translation:**
+- System prompt (string and content-block array forms)
+- Content blocks: text, image (base64 + URL), document/PDF (base64 + URL),
+  thinking, redacted_thinking, tool_use, tool_result (with is_error)
+- Tools with input_schema → OpenAI function format
+- tool_choice: auto, any, none, named (string and dict forms)
+- disable_parallel_tool_use → parallel_tool_calls: false
+- stop_sequences, temperature, top_p, top_k, max_tokens, stream
+
+**Response translation:**
+- Text blocks, thinking blocks (from reasoning_content/reasoning), tool_use blocks
+- Stop reasons: end_turn, max_tokens, tool_use, refusal (content_filter), stop_sequence
+- Usage: input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens
+- Stop sequence detection (best-effort, checks if output ends with a requested stop)
+
+**Streaming translation:**
+- Full Anthropic SSE event flow: message_start → content_block_start →
+  thinking_delta → signature_delta → content_block_stop → text_delta →
+  input_json_delta → message_delta → message_stop
+- Dynamic block indexing for interleaved text/thinking/tool_use blocks
+- Ping events every 15s when upstream is idle (prevents Claude Code 5-min timeout)
+- Cumulative input_tokens in message_delta usage
+
+**Error translation:**
+- HTTP status code → Anthropic error type mapping
+- Error body extraction from OpenAI, string, and detail-field formats
 
 ## Anthropic Messages API vs OpenAI Chat Completions — key differences
 
@@ -22,10 +53,15 @@ applied when the provider does not offer a native Anthropic API.
 | System prompt        | Top-level ``system`` field      | A ``{"role":"system"}`` message       |
 | Max tokens            | Required ``max_tokens``         | Optional ``max_tokens``               |
 | Response format       | ``content`` is a list of blocks  | ``choices[0].message.content`` string |
-| Tool calling         | ``tools`` with different schema | ``tools`` with ``function`` wrapper   |
-| Streaming events      | ``message_start``, ``content_block_delta``, ``message_delta``, ``message_stop`` | ``chat.completion.chunk`` with deltas |
+| Tool calling         | ``tools`` with ``input_schema``  | ``tools`` with ``function`` wrapper   |
+| Tool choice          | ``auto``/``any``/``none``/``tool`` | ``auto``/``required``/``none``/``function`` |
+| Parallel tools       | ``disable_parallel_tool_use``   | ``parallel_tool_calls: false``        |
+| Streaming events      | ``message_start``, ``content_block_delta``, ``message_delta``, ``message_stop``, ``ping`` | ``chat.completion.chunk`` with deltas |
 | Stop reason          | ``stop_reason: "end_turn"``     | ``finish_reason: "stop"``             |
-| Usage                | ``input_tokens``, ``output_tokens`` | ``prompt_tokens``, ``completion_tokens`` |
+| Thinking             | ``thinking: {type, budget_tokens}`` | ``reasoning_content`` in response |
+| Usage                | ``input_tokens``, ``output_tokens``, ``cache_creation_input_tokens`` | ``prompt_tokens``, ``completion_tokens`` |
+
+See ``docs/ANTHROPIC_BRIDGE.md`` for full documentation.
 """
 
 from __future__ import annotations

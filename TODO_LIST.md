@@ -195,3 +195,38 @@
 - [x] Add regression coverage for startup/status generation handling and preferred tool-model selection.
 - [x] Add a live restart-race regression that restarts the active Guardian systemd service, performs an immediate alias load, checks status, and runs a mini chat.
 - [x] Validate the changes with focused unit tests, live metadata probes, restart smoke checks, and practical end-to-end load/inference tests.
+
+## 2026-06-29 Anthropic Messages API Bridge — Claude Code Compatibility
+
+### Cloud Bridge (`anthropic_bridge.py`)
+- [x] Compare OpenRouter OpenAPI spec against our bridge implementation — identified 10 gaps.
+- [x] Fix HIGH: Thinking blocks not translated (reasoning_content/reasoning → thinking blocks in response + streaming).
+- [x] Fix HIGH: Error responses not translated (added `translate_openai_error_to_anthropic()` with HTTP status → error type mapping).
+- [x] Fix MED: Image URL source missing (`source.type == "url"`).
+- [x] Fix MED: Cache usage fields missing (`cache_creation_input_tokens`, `cache_read_input_tokens` in streaming + non-streaming).
+- [x] Fix MED: `stop_sequence` value always null (added `request_stop_sequences` parameter + best-effort detection).
+- [x] Fix MED: PDF/document content blocks not handled (base64 + URL → data URLs).
+- [x] Fix MED: Streaming `thinking_delta` missing.
+- [x] Fix MED: Interleaved blocks in streaming (text after tool_use gets new block index).
+- [x] Fix LOW: Stop sequence detection in streaming.
+- [x] Fix HIGH: Ping SSE events during idle upstream (prevents Claude Code 5-min idle timeout).
+- [x] Fix MED: `signature_delta` event before thinking block `content_block_stop`.
+- [x] Fix MED: `content_filter` → `refusal` stop_reason mapping (was `end_turn`).
+- [x] Fix MED: `is_error` field in `tool_result` not passed through.
+- [x] Fix MED: `disable_parallel_tool_use` not translated to `parallel_tool_calls: false`.
+- [x] Fix: `_convert_tool_choice()` didn't handle dict-form `tool_choice` like `{"type": "auto"}`.
+- [x] E2E verified against live NVIDIA NIM with minimax-m3 model (non-streaming, streaming, errors, cache usage).
+- [x] 63 unit tests in `tests/unit/test_anthropic_bridge.py`.
+
+### Local Model Enrichment (`server.py`)
+- [x] Fix HIGH: Prefill workaround broke on Anthropic content blocks (`str(content)` → `_stringify_message_content()`).
+- [x] Fix MED: `message_delta` usage missing `input_tokens` (Claude Code shows 0 tokens in status bar).
+- [x] Fix MED: `cache_creation_input_tokens` missing from llama-server responses (added in streaming + non-streaming).
+- [x] Fix MED: Keepalive comments → Anthropic `ping` events for `/v1/messages` streams.
+- [x] Fix: Non-streaming Response headers — `content-length` from llama-server caused truncated responses when enriched content had different size.
+- [x] Fix HIGH: Anthropic `thinking: {type: "disabled"}` not converted to llama-server params (added `_apply_anthropic_thinking_to_llama_params()`).
+- [x] Fix HIGH: Anthropic `thinking: {type: "enabled", budget_tokens: N}` → `reasoning_budget: N`.
+- [x] Fix MED: `stop_reason` incorrect when stop_sequence matched (llama-server returns `"end_turn"`, corrected to `"stop_sequence"`).
+- [x] E2E verified with local Qwen3.6 model (thinking disabled/enabled/adaptive, tool use, stop_sequences, streaming, non-streaming).
+- [x] Documentation in `docs/ANTHROPIC_BRIDGE.md`.
+- [x] 526 total unit tests passing.
