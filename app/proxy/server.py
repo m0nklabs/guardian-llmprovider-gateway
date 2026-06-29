@@ -32,6 +32,7 @@ from app.proxy.providers import CloudProvider, ProviderRegistry
 from app.proxy.cloud_keys import CloudCredentialStore, parse_guardian_route, mask_api_key
 from app.proxy.usage import ApiUsageTracker
 from app.proxy.anthropic_bridge import (
+    _format_sse_event,
     provider_needs_anthropic_translation,
     translate_anthropic_request_to_openai,
     translate_openai_error_to_anthropic,
@@ -419,6 +420,87 @@ def _build_sse_keepalive_comment(request_id: Optional[str] = None) -> str:
     """Emit a lightweight SSE comment to keep downstream clients from idling out."""
     suffix = f" request_id={request_id}" if request_id else ""
     return f": guardian-keepalive{suffix}"
+
+
+def _enrich_anthropic_sse_line(line: str, *, input_tokens: int = 0, cache_read_tokens: int = 0) -> tuple[str, int, int]:
+    """Enrich an Anthropic SSE line from llama-server with missing usage fields.
+
+    llama-server's ``/v1/messages`` endpoint is missing:
+    - ``input_tokens`` and ``cache_creation_input_tokens`` in ``message_delta`` usage
+    - ``cache_creation_input_tokens`` in ``message_start`` usage
+
+    Returns ``(enriched_line, new_input_tokens, new_cache_read_tokens)``.
+    """
+    if not line.startswith("data: "):
+        return line, input_tokens, cache_read_tokens
+
+    data_str = line[6:].strip()
+    if not data_str:
+        return line, input_tokens, cache_read_tokens
+
+    try:
+        data = json.loads(data_str)
+    except (json.JSONDecodeError, TypeError):
+        return line, input_tokens, cache_read_tokens
+
+    changed = False
+
+    # Enrich message_start usage
+    if data.get("type") == "message_start":
+        msg = data.get("message", {})
+        usage = msg.get("usage", {})
+        if isinstance(usage, dict):
+            if "input_tokens" in usage:
+                input_tokens = usage["input_tokens"]
+            if "cache_read_input_tokens" in usage:
+                cache_read_tokens = usage["cache_read_input_tokens"]
+            if "cache_creation_input_tokens" not in usage:
+                usage["cache_creation_input_tokens"] = 0
+                changed = True
+            msg["usage"] = usage
+
+    # Enrich message_delta usage (cumulative — must include input_tokens)
+    if data.get("type") == "message_delta":
+        usage = data.get("usage", {})
+        if isinstance(usage, dict):
+            if "input_tokens" not in usage:
+                usage["input_tokens"] = input_tokens
+                changed = True
+            if "cache_creation_input_tokens" not in usage:
+                usage["cache_creation_input_tokens"] = 0
+                changed = True
+            if "cache_read_input_tokens" not in usage:
+                usage["cache_read_input_tokens"] = cache_read_tokens
+                changed = True
+            data["usage"] = usage
+
+    if changed:
+        return f"data: {json.dumps(data)}\n", input_tokens, cache_read_tokens
+
+    return line, input_tokens, cache_read_tokens
+
+
+def _enrich_anthropic_response(payload: dict) -> dict:
+    """Enrich a non-streaming Anthropic response from llama-server with missing usage fields."""
+    usage = payload.get("usage", {})
+    if isinstance(usage, dict):
+        if "cache_creation_input_tokens" not in usage:
+            usage["cache_creation_input_tokens"] = 0
+        if "cache_read_input_tokens" not in usage:
+            usage["cache_read_input_tokens"] = 0
+        if "input_tokens" not in usage:
+            usage["input_tokens"] = 0
+        if "output_tokens" not in usage:
+            usage["output_tokens"] = 0
+        payload["usage"] = usage
+    else:
+        payload["usage"] = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+        }
+    return payload
 
 
 async def _iter_sse_lines_with_watchdog(
@@ -3783,7 +3865,8 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                     popped = msgs.pop()
                     content = popped.get("content", "")
                     if content:
-                        trailing_assistant_contents.insert(0, str(content))
+                        # Handle both string content and Anthropic content blocks
+                        trailing_assistant_contents.insert(0, _stringify_message_content(content))
                         
                 if trailing_assistant_contents and len(msgs) >= 1:
                     combined_prefill = "\\n".join(trailing_assistant_contents)
@@ -3796,7 +3879,8 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                             break
                             
                     if last_user_idx != -1:
-                        msgs[last_user_idx]["content"] = str(msgs[last_user_idx].get("content", "")) + f"\n\n[System directive: Please start your response exactly with the following text: {combined_prefill}]"
+                        user_content = _stringify_message_content(msgs[last_user_idx].get("content", ""))
+                        msgs[last_user_idx]["content"] = user_content + f"\n\n[System directive: Please start your response exactly with the following text: {combined_prefill}]"
                         json_body["messages"] = msgs
                         body = json.dumps(json_body).encode("utf-8")
                     else:
@@ -3891,6 +3975,9 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                         lambda: _close_stream_resources(resp, client),
                     )
                 )
+                is_anthropic_stream = path == "messages"
+                anthropic_input_tokens = 0
+                anthropic_cache_read = 0
                 try:
                     watchdog = StreamProgressWatchdog(timeout_sec)
                     async for line in _iter_sse_lines_with_watchdog(
@@ -3903,6 +3990,27 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                         heartbeat_interval_s=STREAM_HEARTBEAT_INTERVAL_S,
                         cancel_event=inference_queue.get_cancel_event(request_id),
                     ):
+                        # ── Anthropic /v1/messages enrichment ───────────────────
+                        # llama-server's Anthropic endpoint is missing some fields
+                        # that Claude Code expects. Enrich SSE events on the fly.
+                        if is_anthropic_stream:
+                            # Convert keepalive comments to Anthropic ping events
+                            if line.startswith(": guardian-keepalive"):
+                                ping_event = _format_sse_event("ping", {"type": "ping"})
+                                encoded_line = ping_event.encode("utf-8")
+                                _update_live_request_usage(request, response_bytes_delta=len(encoded_line))
+                                yield encoded_line
+                                continue
+
+                            # Enrich Anthropic SSE data lines with missing usage fields
+                            if line.startswith("data: "):
+                                enriched, anthropic_input_tokens, anthropic_cache_read = _enrich_anthropic_sse_line(
+                                    line,
+                                    input_tokens=anthropic_input_tokens,
+                                    cache_read_tokens=anthropic_cache_read,
+                                )
+                                line = enriched
+
                         if line.startswith("data: "):
                             try:
                                 data = json.loads(line[6:])
@@ -4031,6 +4139,29 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                         )
                         if mapped is not None:
                             return mapped
+                # ── Anthropic /v1/messages non-streaming enrichment ──────
+                # Enrich llama-server's Anthropic response with missing usage
+                # fields (cache_creation_input_tokens, etc.) that Claude Code expects.
+                if path == "messages" and 200 <= resp.status_code < 400:
+                    try:
+                        anthropic_payload = json.loads(resp.content)
+                        if isinstance(anthropic_payload, dict):
+                            anthropic_payload = _enrich_anthropic_response(anthropic_payload)
+                            enriched_content = json.dumps(anthropic_payload).encode("utf-8")
+                            # Strip content-length/transfer-encoding — enriched
+                            # content has a different size than the original.
+                            safe_headers = {
+                                k: v for k, v in resp.headers.items()
+                                if k.lower() not in ("transfer-encoding", "content-length", "content-encoding")
+                            }
+                            return Response(
+                                content=enriched_content,
+                                status_code=resp.status_code,
+                                headers=safe_headers | _queue_headers(request_id, queue_wait_ms),
+                                media_type="application/json",
+                            )
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        pass
                 return Response(
                     content=resp.content,
                     status_code=resp.status_code,
