@@ -166,6 +166,34 @@ def _convert_content_blocks_to_openai(
                     "type": "image_url",
                     "image_url": {"url": f"data:{media_type};base64,{data}"},
                 })
+            elif source.get("type") == "url":
+                image_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": source.get("url", "")},
+                })
+        elif block_type == "document":
+            # PDF / document blocks: pass as data URL so providers can handle them
+            source = block.get("source", {})
+            if source.get("type") == "base64":
+                media_type = source.get("media_type", "application/pdf")
+                data = source.get("data", "")
+                image_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{media_type};base64,{data}"},
+                })
+            elif source.get("type") == "url":
+                image_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": source.get("url", "")},
+                })
+        elif block_type == "thinking":
+            # Thinking blocks in assistant messages: convert to text for OpenAI providers
+            thinking_text = block.get("thinking", "")
+            if thinking_text:
+                text_parts.append(thinking_text)
+        elif block_type == "redacted_thinking":
+            # Skip redacted thinking blocks — cannot reconstruct from opaque data
+            pass
         elif block_type == "tool_use":
             tool_calls.append({
                 "id": block.get("id", ""),
@@ -285,6 +313,15 @@ def translate_openai_response_to_anthropic(
     # Build content blocks
     content_blocks: List[Dict[str, Any]] = []
 
+    # Thinking / reasoning content (some providers return reasoning_content or reasoning)
+    reasoning = message.get("reasoning_content") or message.get("reasoning")
+    if reasoning:
+        content_blocks.append({
+            "type": "thinking",
+            "thinking": reasoning,
+            "signature": "",  # No signature available from OpenAI format
+        })
+
     # Text content
     text = message.get("content")
     if text:
@@ -334,6 +371,8 @@ def translate_openai_response_to_anthropic(
         "usage": {
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
+            "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0),
+            "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
         },
     }
     return response
@@ -375,25 +414,30 @@ async def translate_openai_stream_to_anthropic(
     output_tokens = 0
     stop_reason = "end_turn"
 
-    # Track open content blocks.  We support interleaved text + tool_use blocks.
-    # block_index 0 = text (if any), then tool_use blocks at indices 1, 2, ...
-    # OpenAI sends text deltas and tool_calls deltas separately, often as:
-    #   chunk 1: delta.content = "Let me check..."
-    #   chunk 2: delta.tool_calls[0] = {id, function.name, arguments=""}
-    #   chunk 3: delta.tool_calls[0].function.arguments += '{"city"'
-    #   chunk 4: delta.tool_calls[0].function.arguments += ':"Paris"}'
-    #   chunk 5: finish_reason = "tool_calls"
+    # Track open content blocks.  We support thinking + text + tool_use blocks.
+    # Block ordering is dynamic: thinking (if any) first, then text, then tool_use.
+    # OpenAI sends reasoning_content, then text content, then tool_calls deltas:
+    #   chunk 1: delta.reasoning_content = "Let me think..."
+    #   chunk 2: delta.content = "The answer is..."
+    #   chunk 3: delta.tool_calls[0] = {id, function.name, arguments=""}
+    #   chunk 4: delta.tool_calls[0].function.arguments += '{"city"'
+    #   chunk 5: delta.tool_calls[0].function.arguments += ':"Paris"}'
+    #   chunk 6: finish_reason = "tool_calls"
     #
     # We need to:
+    # - Start a thinking block for reasoning_content, close it when text/tool_calls appear.
     # - Start a text block for content, close it when tool_calls appear.
     # - Start a tool_use block per tool_calls[index], stream arguments as input_json_delta.
     # - Close all blocks at the end.
 
     # State: which block indices are currently open, and what type
-    open_blocks: Dict[int, str] = {}  # {index: "text" | "tool_use"}
+    open_blocks: Dict[int, str] = {}  # {index: "thinking" | "text" | "tool_use"}
     next_block_index = 0
     # Map OpenAI tool_call.index → our content block index
     tool_call_index_map: Dict[int, int] = {}
+    # Track thinking and text block indices (assigned lazily on first delta)
+    thinking_block_idx: Optional[int] = None
+    text_block_idx: Optional[int] = None
 
     def close_block(idx: int):
         if idx in open_blocks:
@@ -444,18 +488,45 @@ async def translate_openai_stream_to_anthropic(
         if not isinstance(delta, dict):
             delta = {}
 
+        # ── Thinking / reasoning delta ─────────────────────────────────
+        reasoning_delta = delta.get("reasoning_content") or delta.get("reasoning")
+        if reasoning_delta:
+            if thinking_block_idx is None:
+                thinking_block_idx = next_block_index
+                next_block_index += 1
+                yield _format_sse_event("content_block_start", {
+                    "type": "content_block_start",
+                    "index": thinking_block_idx,
+                    "content_block": {"type": "thinking", "thinking": ""},
+                })
+                open_blocks[thinking_block_idx] = "thinking"
+
+            yield _format_sse_event("content_block_delta", {
+                "type": "content_block_delta",
+                "index": thinking_block_idx,
+                "delta": {"type": "thinking_delta", "thinking": reasoning_delta},
+            })
+
         # ── Text content delta ────────────────────────────────────────
         text_delta = delta.get("content")
         if text_delta:
-            text_block_idx = 0  # text is always block 0
-            if text_block_idx not in open_blocks:
+            # Close thinking block if open before starting text
+            if thinking_block_idx is not None and thinking_block_idx in open_blocks:
+                yield _format_sse_event("content_block_stop", {
+                    "type": "content_block_stop",
+                    "index": thinking_block_idx,
+                })
+                close_block(thinking_block_idx)
+
+            if text_block_idx is None:
+                text_block_idx = next_block_index
+                next_block_index += 1
                 yield _format_sse_event("content_block_start", {
                     "type": "content_block_start",
                     "index": text_block_idx,
                     "content_block": {"type": "text", "text": ""},
                 })
                 open_blocks[text_block_idx] = "text"
-                next_block_index = max(next_block_index, 1)
 
             yield _format_sse_event("content_block_delta", {
                 "type": "content_block_delta",
@@ -469,13 +540,19 @@ async def translate_openai_stream_to_anthropic(
         # Subsequent chunks contain function.arguments fragments.
         tool_calls = delta.get("tool_calls")
         if tool_calls:
-            # Close any open text block before emitting tool_use blocks
-            if 0 in open_blocks and open_blocks[0] == "text":
+            # Close any open text or thinking block before emitting tool_use blocks
+            if text_block_idx is not None and text_block_idx in open_blocks:
                 yield _format_sse_event("content_block_stop", {
                     "type": "content_block_stop",
-                    "index": 0,
+                    "index": text_block_idx,
                 })
-                close_block(0)
+                close_block(text_block_idx)
+            if thinking_block_idx is not None and thinking_block_idx in open_blocks:
+                yield _format_sse_event("content_block_stop", {
+                    "type": "content_block_stop",
+                    "index": thinking_block_idx,
+                })
+                close_block(thinking_block_idx)
 
             for tc in tool_calls:
                 if not isinstance(tc, dict):
@@ -556,7 +633,12 @@ async def translate_openai_stream_to_anthropic(
     yield _format_sse_event("message_delta", {
         "type": "message_delta",
         "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-        "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+        },
     })
 
     # ── Emit message_stop ──────────────────────────────────────────────
@@ -588,3 +670,60 @@ def provider_needs_anthropic_translation(provider_name: str, path: str) -> bool:
     if path != "messages":
         return False
     return provider_name not in _PROVIDERS_WITH_NATIVE_ANTHROPIC
+
+
+# ── Error translation: OpenAI → Anthropic ──────────────────────────────
+
+
+def translate_openai_error_to_anthropic(
+    status_code: int,
+    error_body: Any,
+) -> Dict[str, Any]:
+    """Convert an OpenAI-format error response to Anthropic error format.
+
+    Anthropic error format::
+
+        {"type": "error", "error": {"type": "...", "message": "..."}}
+
+    OpenAI error format::
+
+        {"error": {"message": "...", "type": "...", "code": "..."}}
+    """
+    error_detail: Any = {}
+    if isinstance(error_body, dict):
+        error_detail = error_body.get("error", error_body)
+    elif isinstance(error_body, str):
+        error_detail = {"message": error_body}
+
+    if not isinstance(error_detail, dict):
+        error_detail = {"message": str(error_detail)}
+
+    # Map HTTP status → Anthropic error type if not already set
+    error_type = error_detail.get("type", "")
+    if not error_type:
+        if status_code == 400:
+            error_type = "invalid_request_error"
+        elif status_code == 401:
+            error_type = "authentication_error"
+        elif status_code == 403:
+            error_type = "permission_error"
+        elif status_code == 404:
+            error_type = "not_found_error"
+        elif status_code == 429:
+            error_type = "rate_limit_error"
+        elif status_code == 500:
+            error_type = "api_error"
+        elif status_code in (503, 529):
+            error_type = "overloaded_error"
+        else:
+            error_type = "api_error"
+
+    message = error_detail.get("message", error_detail.get("detail", "Unknown error"))
+
+    return {
+        "type": "error",
+        "error": {
+            "type": error_type,
+            "message": message,
+        },
+    }

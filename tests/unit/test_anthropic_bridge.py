@@ -6,12 +6,19 @@ import pytest
 from app.proxy.anthropic_bridge import (
     provider_needs_anthropic_translation,
     translate_anthropic_request_to_openai,
+    translate_openai_error_to_anthropic,
     translate_openai_response_to_anthropic,
     translate_openai_stream_to_anthropic,
     _format_sse_event,
     _convert_content_blocks_to_openai,
     _convert_anthropic_tools_to_openai,
 )
+
+
+async def _async_iter(lines):
+    """Helper: yield a list of strings as an async iterator."""
+    for line in lines:
+        yield line
 
 
 # ── provider_needs_anthropic_translation ──────────────────────────────
@@ -490,3 +497,290 @@ class TestSSEFormat:
         assert event.endswith("\n\n")
         data = json.loads(event.split("data: ")[1].strip())
         assert data["type"] == "test_event"
+
+
+# ── Image URL source ──────────────────────────────────────────────────
+
+
+class TestImageUrlSource:
+    def test_image_url_source_converted(self):
+        """Anthropic image with source.type=url should become OpenAI image_url."""
+        blocks = _convert_content_blocks_to_openai(
+            [{"type": "image", "source": {"type": "url", "url": "https://example.com/img.png"}}],
+            "user",
+        )
+        assert len(blocks) == 1
+        assert blocks[0]["content"][0]["type"] == "image_url"
+        assert blocks[0]["content"][0]["image_url"]["url"] == "https://example.com/img.png"
+
+
+# ── PDF / document blocks ─────────────────────────────────────────────
+
+
+class TestPdfDocumentBlocks:
+    def test_pdf_base64_converted_to_data_url(self):
+        """Anthropic document blocks should be passed as data URLs."""
+        blocks = _convert_content_blocks_to_openai(
+            [{"type": "document", "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERi0x"}}],
+            "user",
+        )
+        assert len(blocks) == 1
+        content = blocks[0]["content"]
+        assert any(
+            p.get("type") == "image_url" and "data:application/pdf;base64,JVBERi0x" in p["image_url"]["url"]
+            for p in content
+        )
+
+    def test_pdf_url_source(self):
+        """Anthropic document with URL source should become image_url."""
+        blocks = _convert_content_blocks_to_openai(
+            [{"type": "document", "source": {"type": "url", "url": "https://example.com/doc.pdf"}}],
+            "user",
+        )
+        assert len(blocks) == 1
+        content = blocks[0]["content"]
+        assert any(
+            p.get("type") == "image_url" and p["image_url"]["url"] == "https://example.com/doc.pdf"
+            for p in content
+        )
+
+
+# ── Thinking blocks in request ─────────────────────────────────────────
+
+
+class TestThinkingBlocksInRequest:
+    def test_thinking_block_converted_to_text(self):
+        """Thinking blocks in assistant messages should become text for OpenAI."""
+        blocks = _convert_content_blocks_to_openai(
+            [
+                {"type": "thinking", "thinking": "Let me reason about this...", "signature": "sig123"},
+                {"type": "text", "text": "The answer is 42."},
+            ],
+            "assistant",
+        )
+        # Should produce one message with combined text
+        assert len(blocks) == 1
+        content = blocks[0]["content"]
+        assert "Let me reason about this..." in content
+        assert "The answer is 42." in content
+
+    def test_redacted_thinking_skipped(self):
+        """Redacted thinking blocks should be silently dropped."""
+        blocks = _convert_content_blocks_to_openai(
+            [
+                {"type": "redacted_thinking", "data": "cmVkYWN0ZWQ="},
+                {"type": "text", "text": "Hello"},
+            ],
+            "assistant",
+        )
+        assert len(blocks) == 1
+        assert blocks[0]["content"] == "Hello"
+
+
+# ── Thinking in non-streaming response ────────────────────────────────
+
+
+class TestThinkingInResponse:
+    def test_reasoning_content_becomes_thinking_block(self):
+        """OpenAI reasoning_content should become a thinking block."""
+        resp = translate_openai_response_to_anthropic(
+            {
+                "id": "chatcmpl-1",
+                "choices": [{
+                    "message": {
+                        "reasoning_content": "I need to calculate 6*7.",
+                        "content": "The answer is 42.",
+                    },
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            },
+            "test-model",
+        )
+        blocks = resp["content"]
+        assert blocks[0]["type"] == "thinking"
+        assert blocks[0]["thinking"] == "I need to calculate 6*7."
+        assert blocks[1]["type"] == "text"
+        assert blocks[1]["text"] == "The answer is 42."
+
+    def test_reasoning_field_also_handled(self):
+        """Some providers use 'reasoning' instead of 'reasoning_content'."""
+        resp = translate_openai_response_to_anthropic(
+            {
+                "choices": [{
+                    "message": {"reasoning": "Thinking...", "content": "Answer."},
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+            "m",
+        )
+        assert resp["content"][0]["type"] == "thinking"
+        assert resp["content"][0]["thinking"] == "Thinking..."
+
+
+# ── Cache usage fields ─────────────────────────────────────────────────
+
+
+class TestCacheUsageFields:
+    def test_cache_usage_in_non_streaming_response(self):
+        """Non-streaming response should include cache usage fields."""
+        resp = translate_openai_response_to_anthropic(
+            {
+                "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                    "cache_creation_input_tokens": 10,
+                    "cache_read_input_tokens": 20,
+                },
+            },
+            "m",
+        )
+        assert resp["usage"]["cache_creation_input_tokens"] == 10
+        assert resp["usage"]["cache_read_input_tokens"] == 20
+
+    def test_cache_usage_defaults_to_zero(self):
+        """Cache usage fields should default to 0 when not present."""
+        resp = translate_openai_response_to_anthropic(
+            {
+                "choices": [{"message": {"content": "hi"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 3},
+            },
+            "m",
+        )
+        assert resp["usage"]["cache_creation_input_tokens"] == 0
+        assert resp["usage"]["cache_read_input_tokens"] == 0
+
+    @pytest.mark.asyncio
+    async def test_cache_usage_in_streaming_message_delta(self):
+        """Streaming message_delta should include cache usage fields."""
+        chunks = [
+            'data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":3}}',
+            "data: [DONE]",
+        ]
+        events = []
+        async for evt in translate_openai_stream_to_anthropic(_async_iter(chunks), "m"):
+            events.append(evt)
+        msg_delta = [json.loads(e.split("data: ")[1].strip()) for e in events if "message_delta" in e]
+        assert msg_delta[0]["usage"]["cache_creation_input_tokens"] == 0
+        assert msg_delta[0]["usage"]["cache_read_input_tokens"] == 0
+
+
+# ── Thinking in streaming ─────────────────────────────────────────────
+
+
+class TestThinkingInStreaming:
+    @pytest.mark.asyncio
+    async def test_reasoning_content_produces_thinking_delta(self):
+        """Streaming reasoning_content should produce thinking_delta events."""
+        chunks = [
+            'data: {"choices":[{"delta":{"reasoning_content":"Let me think..."},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{"reasoning_content":" about this."},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{"content":"42"},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            "data: [DONE]",
+        ]
+        events = []
+        async for evt in translate_openai_stream_to_anthropic(_async_iter(chunks), "m"):
+            events.append(evt)
+        parsed = [json.loads(e.split("data: ")[1].strip()) for e in events if e.startswith("event:")]
+
+        # Should have thinking_delta events
+        thinking_deltas = [p for p in parsed if p.get("delta", {}).get("type") == "thinking_delta"]
+        assert len(thinking_deltas) == 2
+        assert thinking_deltas[0]["delta"]["thinking"] == "Let me think..."
+        assert thinking_deltas[1]["delta"]["thinking"] == " about this."
+
+        # Should have a thinking content_block_start
+        starts = [p for p in parsed if p.get("type") == "content_block_start"]
+        thinking_starts = [s for s in starts if s["content_block"]["type"] == "thinking"]
+        assert len(thinking_starts) == 1
+
+        # Should also have text content_block_start and text_delta
+        text_starts = [s for s in starts if s["content_block"]["type"] == "text"]
+        assert len(text_starts) == 1
+        text_deltas = [p for p in parsed if p.get("delta", {}).get("type") == "text_delta"]
+        assert len(text_deltas) == 1
+        assert text_deltas[0]["delta"]["text"] == "42"
+
+        # Thinking block should be closed before text block starts
+        thinking_stops = [p for p in parsed if p.get("type") == "content_block_stop" and p["index"] == thinking_starts[0]["index"]]
+        assert len(thinking_stops) == 1
+
+    @pytest.mark.asyncio
+    async def test_thinking_then_tool_use(self):
+        """Thinking deltas should close before tool_use blocks start."""
+        chunks = [
+            'data: {"choices":[{"delta":{"reasoning_content":"Thinking..."},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":""}}]},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"city\\":\\"Paris\\"}"}}]},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+            "data: [DONE]",
+        ]
+        events = []
+        async for evt in translate_openai_stream_to_anthropic(_async_iter(chunks), "m"):
+            events.append(evt)
+        parsed = [json.loads(e.split("data: ")[1].strip()) for e in events if e.startswith("event:")]
+
+        # Should have thinking_delta
+        thinking_deltas = [p for p in parsed if p.get("delta", {}).get("type") == "thinking_delta"]
+        assert len(thinking_deltas) == 1
+
+        # Should have tool_use content_block_start
+        tool_starts = [s for s in parsed if s.get("type") == "content_block_start" and s["content_block"]["type"] == "tool_use"]
+        assert len(tool_starts) == 1
+
+        # Should have input_json_delta
+        json_deltas = [p for p in parsed if p.get("delta", {}).get("type") == "input_json_delta"]
+        assert len(json_deltas) == 1
+
+        # stop_reason should be tool_use
+        msg_delta = [p for p in parsed if p.get("type") == "message_delta"]
+        assert msg_delta[0]["delta"]["stop_reason"] == "tool_use"
+
+
+# ── Error translation ─────────────────────────────────────────────────
+
+
+class TestErrorTranslation:
+    def test_openai_error_to_anthropic_format(self):
+        """OpenAI error body should become Anthropic error format."""
+        result = translate_openai_error_to_anthropic(
+            400,
+            {"error": {"message": "Invalid model", "type": "invalid_request_error"}},
+        )
+        assert result["type"] == "error"
+        assert result["error"]["type"] == "invalid_request_error"
+        assert result["error"]["message"] == "Invalid model"
+
+    def test_error_status_code_to_type_mapping(self):
+        """HTTP status codes should map to correct Anthropic error types."""
+        assert translate_openai_error_to_anthropic(401, {"error": {"message": "x"}})["error"]["type"] == "authentication_error"
+        assert translate_openai_error_to_anthropic(403, {"error": {"message": "x"}})["error"]["type"] == "permission_error"
+        assert translate_openai_error_to_anthropic(429, {"error": {"message": "x"}})["error"]["type"] == "rate_limit_error"
+        assert translate_openai_error_to_anthropic(503, {"error": {"message": "x"}})["error"]["type"] == "overloaded_error"
+        assert translate_openai_error_to_anthropic(500, {"error": {"message": "x"}})["error"]["type"] == "api_error"
+
+    def test_error_with_string_body(self):
+        """Non-JSON error body should still produce a valid error."""
+        result = translate_openai_error_to_anthropic(502, "Bad Gateway")
+        assert result["type"] == "error"
+        assert result["error"]["message"] == "Bad Gateway"
+
+    def test_error_preserves_type_from_body(self):
+        """If OpenAI body has a type, it should be preserved."""
+        result = translate_openai_error_to_anthropic(
+            400,
+            {"error": {"message": "Rate limited", "type": "rate_limit_exceeded"}},
+        )
+        assert result["error"]["type"] == "rate_limit_exceeded"
+
+    def test_error_extracts_detail_field(self):
+        """Fallback to 'detail' field if 'message' is missing."""
+        result = translate_openai_error_to_anthropic(
+            422,
+            {"error": {"detail": "Validation failed"}},
+        )
+        assert result["error"]["message"] == "Validation failed"

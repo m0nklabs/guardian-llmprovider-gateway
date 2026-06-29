@@ -34,6 +34,7 @@ from app.proxy.usage import ApiUsageTracker
 from app.proxy.anthropic_bridge import (
     provider_needs_anthropic_translation,
     translate_anthropic_request_to_openai,
+    translate_openai_error_to_anthropic,
     translate_openai_response_to_anthropic,
     translate_openai_stream_to_anthropic,
 )
@@ -3354,6 +3355,37 @@ async def _forward_to_cloud_provider(
             logger.error("☁️  Cloud provider '%s' request failed: %s", provider.name, e)
             raise HTTPException(status_code=502, detail=f"Cloud provider request failed: {e}")
 
+        # ── Error translation for Anthropic clients ───────────────────
+        # If the upstream provider returned an error (non-SSE body), translate
+        # it to Anthropic error format instead of trying to stream it.
+        if resp.status_code >= 400:
+            body_bytes = await resp.aread()
+            await resp.aclose()
+            await client.aclose()
+            _finish_live_request_usage(request, status_code=resp.status_code, response_bytes=len(body_bytes))
+            if needs_translation:
+                try:
+                    error_payload = json.loads(body_bytes)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    error_payload = body_bytes.decode("utf-8", errors="replace")
+                anthropic_error = translate_openai_error_to_anthropic(resp.status_code, error_payload)
+                logger.warning(
+                    "🌉 Anthropic bridge: translated %s error from %s: %s",
+                    resp.status_code,
+                    provider.name,
+                    anthropic_error["error"]["message"][:200],
+                )
+                return Response(
+                    content=json.dumps(anthropic_error).encode("utf-8"),
+                    status_code=resp.status_code,
+                    headers={"Content-Type": "application/json"},
+                )
+            return Response(
+                content=body_bytes,
+                status_code=resp.status_code,
+                headers=dict(resp.headers),
+            )
+
         usage_totals = {"prompt_tokens": 0, "completion_tokens": 0}
 
         async def _read_sse_lines():
@@ -3474,6 +3506,14 @@ async def _forward_to_cloud_provider(
 
         # ── Anthropic response translation (non-streaming) ───────────
         if needs_translation and payload and isinstance(payload, dict):
+            # Translate errors first
+            if resp.status_code >= 400:
+                anthropic_error = translate_openai_error_to_anthropic(resp.status_code, payload)
+                return Response(
+                    content=json.dumps(anthropic_error).encode("utf-8"),
+                    status_code=resp.status_code,
+                    headers={"Content-Type": "application/json"},
+                )
             anthropic_response = translate_openai_response_to_anthropic(payload, effective_model_name)
             translated_content = json.dumps(anthropic_response).encode("utf-8")
             return Response(
