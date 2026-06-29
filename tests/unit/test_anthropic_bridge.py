@@ -784,3 +784,146 @@ class TestErrorTranslation:
             {"error": {"detail": "Validation failed"}},
         )
         assert result["error"]["message"] == "Validation failed"
+
+
+# ── Stop sequence detection ──────────────────────────────────────────
+
+
+class TestStopSequenceDetection:
+    def test_stop_sequence_detected_non_streaming(self):
+        """When the response text ends with a requested stop sequence, stop_reason
+        should be 'stop_sequence' and stop_sequence should contain the matched string."""
+        resp = translate_openai_response_to_anthropic(
+            {
+                "choices": [{
+                    "message": {"content": "Hello world\nSTOP"},
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 3},
+            },
+            "m",
+            request_stop_sequences=["STOP", "END"],
+        )
+        assert resp["stop_reason"] == "stop_sequence"
+        assert resp["stop_sequence"] == "STOP"
+
+    def test_no_stop_sequence_when_not_matched(self):
+        """If text doesn't end with any stop sequence, stop_reason stays 'end_turn'."""
+        resp = translate_openai_response_to_anthropic(
+            {
+                "choices": [{
+                    "message": {"content": "Hello world"},
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 3},
+            },
+            "m",
+            request_stop_sequences=["STOP", "END"],
+        )
+        assert resp["stop_reason"] == "end_turn"
+        assert resp["stop_sequence"] is None
+
+    def test_no_stop_sequences_in_request(self):
+        """If no stop_sequences in the request, stop_reason stays 'end_turn'."""
+        resp = translate_openai_response_to_anthropic(
+            {
+                "choices": [{
+                    "message": {"content": "Hello"},
+                    "finish_reason": "stop",
+                }],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+            },
+            "m",
+        )
+        assert resp["stop_reason"] == "end_turn"
+        assert resp["stop_sequence"] is None
+
+    @pytest.mark.asyncio
+    async def test_stop_sequence_detected_streaming(self):
+        """Streaming should also detect stop sequences in accumulated text."""
+        chunks = [
+            'data: {"choices":[{"delta":{"content":"Hello "},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{"content":"world"},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{"content":"STOP"},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            "data: [DONE]",
+        ]
+        events = []
+        async for evt in translate_openai_stream_to_anthropic(
+            _async_iter(chunks), "m", request_stop_sequences=["STOP"],
+        ):
+            events.append(evt)
+        msg_delta = [json.loads(e.split("data: ")[1].strip()) for e in events if "message_delta" in e]
+        assert msg_delta[0]["delta"]["stop_reason"] == "stop_sequence"
+        assert msg_delta[0]["delta"]["stop_sequence"] == "STOP"
+
+
+# ── Interleaved text + tool_use in streaming ─────────────────────────
+
+
+class TestInterleavedStreaming:
+    @pytest.mark.asyncio
+    async def test_text_after_tool_use_gets_new_block(self):
+        """Text appearing after a tool_use block should get a new content block index,
+        not reuse the closed text block."""
+        chunks = [
+            # First text block
+            'data: {"choices":[{"delta":{"content":"Let me check"},"finish_reason":null}]}',
+            # Tool call
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":""}}]},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"q\\":\\"Paris\\"}"}}]},"finish_reason":null}]}',
+            # More text after tool call
+            'data: {"choices":[{"delta":{"content":"Based on the weather..."},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            "data: [DONE]",
+        ]
+        events = []
+        async for evt in translate_openai_stream_to_anthropic(_async_iter(chunks), "m"):
+            events.append(evt)
+        parsed = [json.loads(e.split("data: ")[1].strip()) for e in events if e.startswith("event:")]
+
+        # Should have 2 text content_block_starts (different indices)
+        text_starts = [p for p in parsed if p.get("type") == "content_block_start" and p["content_block"]["type"] == "text"]
+        assert len(text_starts) == 2
+        assert text_starts[0]["index"] != text_starts[1]["index"]
+
+        # Should have 1 tool_use block
+        tool_starts = [p for p in parsed if p.get("type") == "content_block_start" and p["content_block"]["type"] == "tool_use"]
+        assert len(tool_starts) == 1
+
+        # All blocks should be closed
+        starts_count = len([p for p in parsed if p.get("type") == "content_block_start"])
+        stops_count = len([p for p in parsed if p.get("type") == "content_block_stop"])
+        assert starts_count == stops_count
+
+    @pytest.mark.asyncio
+    async def test_multiple_text_blocks_different_indices(self):
+        """Multiple text segments separated by tool calls should each get unique indices."""
+        chunks = [
+            'data: {"choices":[{"delta":{"content":"First"},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"f","arguments":""}}]},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{"content":"Second"},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"c2","type":"function","function":{"name":"g","arguments":""}}]},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{"content":"Third"},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+            "data: [DONE]",
+        ]
+        events = []
+        async for evt in translate_openai_stream_to_anthropic(_async_iter(chunks), "m"):
+            events.append(evt)
+        parsed = [json.loads(e.split("data: ")[1].strip()) for e in events if e.startswith("event:")]
+
+        text_starts = [p for p in parsed if p.get("type") == "content_block_start" and p["content_block"]["type"] == "text"]
+        tool_starts = [p for p in parsed if p.get("type") == "content_block_start" and p["content_block"]["type"] == "tool_use"]
+
+        assert len(text_starts) == 3  # three separate text blocks
+        assert len(tool_starts) == 2  # two tool_use blocks
+
+        # All 5 blocks should be closed
+        starts_count = len([p for p in parsed if p.get("type") == "content_block_start"])
+        stops_count = len([p for p in parsed if p.get("type") == "content_block_stop"])
+        assert starts_count == stops_count
+
+        # All indices should be unique
+        all_indices = [p["index"] for p in parsed if p.get("type") == "content_block_start"]
+        assert len(all_indices) == len(set(all_indices))

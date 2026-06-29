@@ -297,6 +297,8 @@ def _convert_tool_choice(tool_choice: Any) -> Any:
 def translate_openai_response_to_anthropic(
     openai_response: Dict[str, Any],
     model_name: str,
+    *,
+    request_stop_sequences: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Convert an OpenAI chat completion response to Anthropic Messages format.
 
@@ -305,6 +307,7 @@ def translate_openai_response_to_anthropic(
     - ``finish_reason`` → ``stop_reason``
     - ``usage`` token fields
     - ``tool_calls`` → ``content`` tool_use blocks
+    - ``stop_sequences`` from the original request → ``stop_sequence`` value
     """
     choices = openai_response.get("choices", [])
     choice = choices[0] if choices else {}
@@ -355,6 +358,19 @@ def translate_openai_response_to_anthropic(
     }
     stop_reason = stop_reason_map.get(finish_reason, "end_turn")
 
+    # Stop sequence detection: if the model stopped due to a stop sequence,
+    # try to determine which one was matched. OpenAI doesn't report this
+    # explicitly, so we check if the response text ends with one of the
+    # requested stop sequences.
+    stop_sequence_value: Optional[str] = None
+    if finish_reason == "stop" and request_stop_sequences:
+        response_text = text or ""
+        for seq in request_stop_sequences:
+            if seq and response_text.endswith(seq):
+                stop_reason = "stop_sequence"
+                stop_sequence_value = seq
+                break
+
     # Usage
     usage = openai_response.get("usage", {})
     input_tokens = usage.get("prompt_tokens", usage.get("input_tokens", 0))
@@ -367,7 +383,7 @@ def translate_openai_response_to_anthropic(
         "model": model_name,
         "content": content_blocks if content_blocks else [{"type": "text", "text": ""}],
         "stop_reason": stop_reason,
-        "stop_sequence": None,
+        "stop_sequence": stop_sequence_value,
         "usage": {
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,
@@ -386,6 +402,7 @@ async def translate_openai_stream_to_anthropic(
     model_name: str,
     *,
     request_id: str = "",
+    request_stop_sequences: Optional[List[str]] = None,
 ) -> AsyncIterator[str]:
     """Translate an OpenAI streaming SSE response to Anthropic SSE events.
 
@@ -438,6 +455,8 @@ async def translate_openai_stream_to_anthropic(
     # Track thinking and text block indices (assigned lazily on first delta)
     thinking_block_idx: Optional[int] = None
     text_block_idx: Optional[int] = None
+    # Accumulate all text deltas for stop_sequence detection at the end
+    accumulated_text = ""
 
     def close_block(idx: int):
         if idx in open_blocks:
@@ -533,6 +552,7 @@ async def translate_openai_stream_to_anthropic(
                 "index": text_block_idx,
                 "delta": {"type": "text_delta", "text": text_delta},
             })
+            accumulated_text += text_delta
 
         # ── Tool call deltas ─────────────────────────────────────────
         # OpenAI streams tool calls across multiple chunks. The first chunk
@@ -547,12 +567,14 @@ async def translate_openai_stream_to_anthropic(
                     "index": text_block_idx,
                 })
                 close_block(text_block_idx)
+                text_block_idx = None  # allow a new text block after tool_use
             if thinking_block_idx is not None and thinking_block_idx in open_blocks:
                 yield _format_sse_event("content_block_stop", {
                     "type": "content_block_stop",
                     "index": thinking_block_idx,
                 })
                 close_block(thinking_block_idx)
+                thinking_block_idx = None  # allow a new thinking block later
 
             for tc in tool_calls:
                 if not isinstance(tc, dict):
@@ -621,7 +643,6 @@ async def translate_openai_stream_to_anthropic(
                 "content_filter": "end_turn",
             }
             stop_reason = stop_reason_map.get(finish_reason, "end_turn")
-
     # ── Close all open content blocks ──────────────────────────────────
     for idx in sorted(open_blocks.keys()):
         yield _format_sse_event("content_block_stop", {
@@ -630,9 +651,21 @@ async def translate_openai_stream_to_anthropic(
         })
 
     # ── Emit message_delta with stop_reason and usage ──────────────────
+    # Determine stop_sequence value: if the model stopped at a stop sequence,
+    # try to detect which one by checking accumulated text against request
+    # stop_sequences. This is best-effort since OpenAI doesn't report which
+    # stop sequence was matched.
+    stop_sequence_value: Optional[str] = None
+    if stop_reason == "end_turn" and request_stop_sequences:
+        for seq in request_stop_sequences:
+            if seq and accumulated_text.endswith(seq):
+                stop_reason = "stop_sequence"
+                stop_sequence_value = seq
+                break
+
     yield _format_sse_event("message_delta", {
         "type": "message_delta",
-        "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+        "delta": {"stop_reason": stop_reason, "stop_sequence": stop_sequence_value},
         "usage": {
             "input_tokens": input_tokens,
             "output_tokens": output_tokens,

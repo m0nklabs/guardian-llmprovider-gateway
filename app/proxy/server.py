@@ -3409,6 +3409,7 @@ async def _forward_to_cloud_provider(
                     async for event_line in translate_openai_stream_to_anthropic(
                         _read_sse_lines(),
                         effective_model_name,
+                        request_stop_sequences=json_body.get("stop_sequences") if needs_translation else None,
                     ):
                         # Extract usage from the translated events
                         if "message_delta" in event_line:
@@ -3514,7 +3515,11 @@ async def _forward_to_cloud_provider(
                     status_code=resp.status_code,
                     headers={"Content-Type": "application/json"},
                 )
-            anthropic_response = translate_openai_response_to_anthropic(payload, effective_model_name)
+            anthropic_response = translate_openai_response_to_anthropic(
+                payload,
+                effective_model_name,
+                request_stop_sequences=json_body.get("stop_sequences"),
+            )
             translated_content = json.dumps(anthropic_response).encode("utf-8")
             return Response(
                 content=translated_content,
