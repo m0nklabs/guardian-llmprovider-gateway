@@ -180,6 +180,36 @@ class TestRequestTranslation:
         assert openai["messages"][2]["role"] == "tool"
         assert openai["messages"][2]["tool_call_id"] == "tool_1"
 
+    def test_tool_result_with_is_error(self):
+        """Anthropic tool_result with is_error=true should produce is_error on the OpenAI tool message."""
+        anthropic = {
+            "model": "test",
+            "messages": [
+                {"role": "user", "content": "Run the command"},
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "tool_1", "name": "run_cmd", "input": {"cmd": "ls"}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tool_1", "content": "Error: not found", "is_error": True}]},
+            ],
+            "max_tokens": 50,
+        }
+        openai = translate_anthropic_request_to_openai(anthropic)
+        tool_msg = [m for m in openai["messages"] if m["role"] == "tool"][0]
+        assert tool_msg["is_error"] is True
+        assert tool_msg["content"] == "Error: not found"
+
+    def test_tool_result_without_is_error(self):
+        """Anthropic tool_result without is_error should not add the field."""
+        anthropic = {
+            "model": "test",
+            "messages": [
+                {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "f", "input": {}}]},
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]},
+            ],
+            "max_tokens": 50,
+        }
+        openai = translate_anthropic_request_to_openai(anthropic)
+        tool_msg = [m for m in openai["messages"] if m["role"] == "tool"][0]
+        assert "is_error" not in tool_msg
+
     def test_tools_conversion(self):
         anthropic = {
             "model": "test",
@@ -195,6 +225,41 @@ class TestRequestTranslation:
         assert openai["tools"][0]["type"] == "function"
         assert openai["tools"][0]["function"]["name"] == "get_weather"
         assert openai["tools"][0]["function"]["parameters"]["properties"]["city"]["type"] == "string"
+
+    def test_disable_parallel_tool_use_auto(self):
+        """Anthropic disable_parallel_tool_use should map to OpenAI parallel_tool_calls=false."""
+        anthropic = {
+            "model": "test",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 50,
+            "tool_choice": {"type": "auto", "disable_parallel_tool_use": True},
+        }
+        openai = translate_anthropic_request_to_openai(anthropic)
+        assert openai["tool_choice"] == "auto"
+        assert openai["parallel_tool_calls"] is False
+
+    def test_disable_parallel_tool_use_any(self):
+        """disable_parallel_tool_use with tool_choice=any."""
+        anthropic = {
+            "model": "test",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 50,
+            "tool_choice": {"type": "any", "disable_parallel_tool_use": True},
+        }
+        openai = translate_anthropic_request_to_openai(anthropic)
+        assert openai["tool_choice"] == "required"
+        assert openai["parallel_tool_calls"] is False
+
+    def test_no_parallel_tool_calls_when_not_set(self):
+        """parallel_tool_calls should not be set when disable_parallel_tool_use is absent."""
+        anthropic = {
+            "model": "test",
+            "messages": [{"role": "user", "content": "Hi"}],
+            "max_tokens": 50,
+            "tool_choice": {"type": "auto"},
+        }
+        openai = translate_anthropic_request_to_openai(anthropic)
+        assert "parallel_tool_calls" not in openai
 
 
 # ── translate_openai_response_to_anthropic ───────────────────────────
@@ -228,6 +293,16 @@ class TestResponseTranslation:
         }
         anthropic = translate_openai_response_to_anthropic(openai_resp, "test-model")
         assert anthropic["stop_reason"] == "max_tokens"
+
+    def test_content_filter_maps_to_refusal(self):
+        """OpenAI content_filter finish_reason should map to Anthropic refusal."""
+        openai_resp = {
+            "id": "chatcmpl-123",
+            "choices": [{"message": {"role": "assistant", "content": ""}, "finish_reason": "content_filter"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 0},
+        }
+        anthropic = translate_openai_response_to_anthropic(openai_resp, "test-model")
+        assert anthropic["stop_reason"] == "refusal"
 
     def test_tool_calls_response(self):
         openai_resp = {
@@ -710,6 +785,53 @@ class TestThinkingInStreaming:
         assert len(thinking_stops) == 1
 
     @pytest.mark.asyncio
+    async def test_signature_delta_before_thinking_block_stop(self):
+        """A signature_delta event must be emitted just before content_block_stop for thinking blocks."""
+        chunks = [
+            'data: {"choices":[{"delta":{"reasoning_content":"Hmm"},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{"content":"OK"},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            "data: [DONE]",
+        ]
+        events = []
+        async for evt in translate_openai_stream_to_anthropic(_async_iter(chunks), "m"):
+            events.append(evt)
+        parsed = [json.loads(e.split("data: ")[1].strip()) for e in events if e.startswith("event:")]
+
+        thinking_starts = [p for p in parsed if p.get("type") == "content_block_start" and p["content_block"]["type"] == "thinking"]
+        assert len(thinking_starts) == 1
+        thinking_idx = thinking_starts[0]["index"]
+
+        # signature_delta must appear before content_block_stop for the thinking block
+        sig_deltas = [p for p in parsed if p.get("delta", {}).get("type") == "signature_delta"]
+        assert len(sig_deltas) == 1
+        assert sig_deltas[0]["index"] == thinking_idx
+        assert sig_deltas[0]["delta"]["signature"] == ""
+
+        # Verify order: signature_delta comes before content_block_stop for the same index
+        all_events = [(p.get("type"), p.get("index")) for p in parsed]
+        sig_pos = next(i for i, (t, idx) in enumerate(all_events) if t == "content_block_delta" and parsed[i].get("delta", {}).get("type") == "signature_delta")
+        stop_pos = next(i for i, (t, idx) in enumerate(all_events) if t == "content_block_stop" and idx == thinking_idx)
+        assert sig_pos < stop_pos
+
+    @pytest.mark.asyncio
+    async def test_signature_delta_for_thinking_only_block(self):
+        """When thinking block is the last block (closed at end), signature_delta must still appear."""
+        chunks = [
+            'data: {"choices":[{"delta":{"reasoning_content":"Just thinking..."},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            "data: [DONE]",
+        ]
+        events = []
+        async for evt in translate_openai_stream_to_anthropic(_async_iter(chunks), "m"):
+            events.append(evt)
+        parsed = [json.loads(e.split("data: ")[1].strip()) for e in events if e.startswith("event:")]
+
+        sig_deltas = [p for p in parsed if p.get("delta", {}).get("type") == "signature_delta"]
+        assert len(sig_deltas) == 1
+        assert sig_deltas[0]["delta"]["signature"] == ""
+
+    @pytest.mark.asyncio
     async def test_thinking_then_tool_use(self):
         """Thinking deltas should close before tool_use blocks start."""
         chunks = [
@@ -927,3 +1049,85 @@ class TestInterleavedStreaming:
         # All indices should be unique
         all_indices = [p["index"] for p in parsed if p.get("type") == "content_block_start"]
         assert len(all_indices) == len(set(all_indices))
+
+
+# ── Ping events in streaming ─────────────────────────────────────────
+
+
+class TestPingEvents:
+    @pytest.mark.asyncio
+    async def test_no_pings_with_fast_stream(self):
+        """When upstream data arrives quickly, no ping events should be emitted."""
+        chunks = [
+            'data: {"choices":[{"delta":{"content":"Hi"},"finish_reason":null}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            "data: [DONE]",
+        ]
+        events = []
+        async for evt in translate_openai_stream_to_anthropic(_async_iter(chunks), "m"):
+            events.append(evt)
+        ping_events = [e for e in events if e.startswith("event: ping")]
+        assert len(ping_events) == 0
+
+    @pytest.mark.asyncio
+    async def test_ping_emitted_on_idle_upstream(self):
+        """When the upstream is idle for longer than PING_INTERVAL, ping events appear."""
+        import asyncio as _asyncio
+
+        async def slow_gen():
+            yield 'data: {"choices":[{"delta":{"content":"Hi"},"finish_reason":null}]}'
+            # Sleep longer than ping interval
+            await _asyncio.sleep(0.5)
+            yield 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}'
+            yield "data: [DONE]"
+
+        events = []
+        async for evt in translate_openai_stream_to_anthropic(slow_gen(), "m", _ping_interval=0.1):
+            events.append(evt)
+
+        ping_events = [e for e in events if e.startswith("event: ping")]
+        assert len(ping_events) >= 1
+        # Verify ping format
+        data = json.loads(ping_events[0].split("data: ")[1].strip())
+        assert data["type"] == "ping"
+
+    @pytest.mark.asyncio
+    async def test_ping_does_not_break_message_flow(self):
+        """Ping events should not interfere with the normal message events."""
+        import asyncio as _asyncio
+
+        async def slow_gen():
+            yield 'data: {"choices":[{"delta":{"content":"Hello"},"finish_reason":null}]}'
+            await _asyncio.sleep(0.3)
+            yield 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}'
+            yield "data: [DONE]"
+
+        events = []
+        async for evt in translate_openai_stream_to_anthropic(slow_gen(), "m", _ping_interval=0.1):
+            events.append(evt)
+
+        event_types = [e.split("\n")[0].replace("event: ", "") for e in events]
+        # Core flow still intact
+        assert "message_start" in event_types
+        assert "content_block_start" in event_types
+        assert "content_block_delta" in event_types
+        assert "content_block_stop" in event_types
+        assert "message_delta" in event_types
+        assert "message_stop" in event_types
+        # Pings present
+        assert "ping" in event_types
+
+    @pytest.mark.asyncio
+    async def test_content_filter_maps_to_refusal_streaming(self):
+        """Streaming content_filter finish_reason should map to refusal stop_reason."""
+        chunks = [
+            'data: {"choices":[{"delta":{"content":""},"finish_reason":"content_filter"}]}',
+            "data: [DONE]",
+        ]
+        events = []
+        async for evt in translate_openai_stream_to_anthropic(_async_iter(chunks), "m"):
+            events.append(evt)
+        parsed = [json.loads(e.split("data: ")[1].strip()) for e in events if e.startswith("event:")]
+        msg_delta = [p for p in parsed if p.get("type") == "message_delta"]
+        assert len(msg_delta) == 1
+        assert msg_delta[0]["delta"]["stop_reason"] == "refusal"

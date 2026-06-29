@@ -30,13 +30,19 @@ applied when the provider does not offer a native Anthropic API.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
 import logging
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("Guardian.AnthropicBridge")
+
+# Interval between ping SSE events when the upstream is idle.
+# Claude Code aborts streaming connections after 5 minutes of inactivity
+# (configurable via API_FORCE_IDLE_TIMEOUT), so we emit pings well before that.
+PING_INTERVAL_SECONDS = 15.0
 
 
 # ── Request translation: Anthropic → OpenAI ───────────────────────────
@@ -119,7 +125,11 @@ def translate_anthropic_request_to_openai(anthropic_body: Dict[str, Any]) -> Dic
     if "tools" in anthropic_body:
         openai_body["tools"] = _convert_anthropic_tools_to_openai(anthropic_body["tools"])
     if "tool_choice" in anthropic_body:
-        openai_body["tool_choice"] = _convert_tool_choice(anthropic_body["tool_choice"])
+        tc = anthropic_body["tool_choice"]
+        openai_body["tool_choice"] = _convert_tool_choice(tc)
+        # Anthropic's disable_parallel_tool_use maps to OpenAI's parallel_tool_calls
+        if isinstance(tc, dict) and tc.get("disable_parallel_tool_use"):
+            openai_body["parallel_tool_calls"] = False
 
     return openai_body
 
@@ -219,11 +229,14 @@ def _convert_content_blocks_to_openai(
             elif not isinstance(tool_content, str):
                 tool_content = json.dumps(tool_content)
 
-            result_messages.append({
+            tool_msg: Dict[str, Any] = {
                 "role": "tool",
                 "tool_call_id": block.get("tool_use_id", ""),
                 "content": tool_content,
-            })
+            }
+            if block.get("is_error"):
+                tool_msg["is_error"] = True
+            result_messages.append(tool_msg)
 
     # Build the primary message (text + images + tool_calls)
     primary: Dict[str, Any] = {"role": role}
@@ -277,7 +290,14 @@ def _convert_anthropic_tools_to_openai(tools: List[Dict[str, Any]]) -> List[Dict
 
 
 def _convert_tool_choice(tool_choice: Any) -> Any:
-    """Convert Anthropic tool_choice to OpenAI format."""
+    """Convert Anthropic tool_choice to OpenAI format.
+
+    Anthropic supports both string and dict forms:
+    - ``"auto"`` / ``{"type": "auto"}`` → ``"auto"``
+    - ``"any"``  / ``{"type": "any"}``  → ``"required"``
+    - ``"none"`` / ``{"type": "none"}`` → ``"none"``
+    - ``{"type": "tool", "name": "..."}`` → ``{"type": "function", "function": {"name": "..."}}``
+    """
     if isinstance(tool_choice, str):
         if tool_choice == "auto":
             return "auto"
@@ -286,8 +306,15 @@ def _convert_tool_choice(tool_choice: Any) -> Any:
         if tool_choice == "none":
             return "none"
     elif isinstance(tool_choice, dict):
-        if "name" in tool_choice:
-            return {"type": "function", "function": {"name": tool_choice["name"]}}
+        tc_type = tool_choice.get("type", "")
+        if tc_type == "auto":
+            return "auto"
+        if tc_type == "any":
+            return "required"
+        if tc_type == "none":
+            return "none"
+        if tc_type == "tool" or "name" in tool_choice:
+            return {"type": "function", "function": {"name": tool_choice.get("name", "")}}
     return tool_choice
 
 
@@ -354,7 +381,7 @@ def translate_openai_response_to_anthropic(
         "length": "max_tokens",
         "tool_calls": "tool_use",
         "function_call": "tool_use",
-        "content_filter": "end_turn",
+        "content_filter": "refusal",
     }
     stop_reason = stop_reason_map.get(finish_reason, "end_turn")
 
@@ -394,6 +421,48 @@ def translate_openai_response_to_anthropic(
     return response
 
 
+# ── Streaming helpers ─────────────────────────────────────────────────
+
+
+async def _iter_with_pings(
+    openai_sse_lines: AsyncIterator[str],
+    interval: float = PING_INTERVAL_SECONDS,
+) -> AsyncIterator[Tuple[str, Optional[str]]]:
+    """Wrap an upstream SSE iterator, yielding ping heartbeats when idle.
+
+    Returns tuples of ``("line", str)`` for upstream lines and
+    ``("ping", None)`` every *interval* seconds when the source is silent.
+
+    This prevents Claude Code's idle timeout (5 min by default) from
+    aborting the connection while the upstream provider is still thinking
+    or generating.
+    """
+    aiter = openai_sse_lines.__aiter__()
+    while True:
+        read_task = asyncio.ensure_future(aiter.__anext__())
+        while True:
+            sleep_task = asyncio.ensure_future(asyncio.sleep(interval))
+            done, _ = await asyncio.wait(
+                {read_task, sleep_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if read_task in done:
+                sleep_task.cancel()
+                try:
+                    await sleep_task
+                except asyncio.CancelledError:
+                    pass
+                break
+            # Sleep completed first — emit a ping
+            yield ("ping", None)
+        # read_task is done; extract result
+        try:
+            line = read_task.result()
+        except StopAsyncIteration:
+            return
+        yield ("line", line)
+
+
 # ── Streaming translation: OpenAI SSE → Anthropic SSE ─────────────────
 
 
@@ -403,6 +472,7 @@ async def translate_openai_stream_to_anthropic(
     *,
     request_id: str = "",
     request_stop_sequences: Optional[List[str]] = None,
+    _ping_interval: float = PING_INTERVAL_SECONDS,
 ) -> AsyncIterator[str]:
     """Translate an OpenAI streaming SSE response to Anthropic SSE events.
 
@@ -477,7 +547,12 @@ async def translate_openai_stream_to_anthropic(
         },
     })
 
-    async for line in openai_sse_lines:
+    async for kind, value in _iter_with_pings(openai_sse_lines, _ping_interval):
+        if kind == "ping":
+            yield _format_sse_event("ping", {"type": "ping"})
+            continue
+
+        line = value
         if not line or not line.startswith("data: "):
             continue
 
@@ -531,6 +606,11 @@ async def translate_openai_stream_to_anthropic(
         if text_delta:
             # Close thinking block if open before starting text
             if thinking_block_idx is not None and thinking_block_idx in open_blocks:
+                yield _format_sse_event("content_block_delta", {
+                    "type": "content_block_delta",
+                    "index": thinking_block_idx,
+                    "delta": {"type": "signature_delta", "signature": ""},
+                })
                 yield _format_sse_event("content_block_stop", {
                     "type": "content_block_stop",
                     "index": thinking_block_idx,
@@ -569,6 +649,11 @@ async def translate_openai_stream_to_anthropic(
                 close_block(text_block_idx)
                 text_block_idx = None  # allow a new text block after tool_use
             if thinking_block_idx is not None and thinking_block_idx in open_blocks:
+                yield _format_sse_event("content_block_delta", {
+                    "type": "content_block_delta",
+                    "index": thinking_block_idx,
+                    "delta": {"type": "signature_delta", "signature": ""},
+                })
                 yield _format_sse_event("content_block_stop", {
                     "type": "content_block_stop",
                     "index": thinking_block_idx,
@@ -640,11 +725,17 @@ async def translate_openai_stream_to_anthropic(
                 "length": "max_tokens",
                 "tool_calls": "tool_use",
                 "function_call": "tool_use",
-                "content_filter": "end_turn",
+                "content_filter": "refusal",
             }
             stop_reason = stop_reason_map.get(finish_reason, "end_turn")
     # ── Close all open content blocks ──────────────────────────────────
     for idx in sorted(open_blocks.keys()):
+        if open_blocks[idx] == "thinking":
+            yield _format_sse_event("content_block_delta", {
+                "type": "content_block_delta",
+                "index": idx,
+                "delta": {"type": "signature_delta", "signature": ""},
+            })
         yield _format_sse_event("content_block_stop", {
             "type": "content_block_stop",
             "index": idx,
