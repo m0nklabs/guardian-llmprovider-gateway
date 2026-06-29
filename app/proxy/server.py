@@ -461,6 +461,7 @@ def _enrich_anthropic_sse_line(line: str, *, input_tokens: int = 0, cache_read_t
 
     # Enrich message_delta usage (cumulative — must include input_tokens)
     if data.get("type") == "message_delta":
+        delta = data.get("delta", {})
         usage = data.get("usage", {})
         if isinstance(usage, dict):
             if "input_tokens" not in usage:
@@ -474,6 +475,13 @@ def _enrich_anthropic_sse_line(line: str, *, input_tokens: int = 0, cache_read_t
                 changed = True
             data["usage"] = usage
 
+        # Fix stop_reason: llama-server returns "end_turn" even when a
+        # stop_sequence was matched. Anthropic expects "stop_sequence".
+        if isinstance(delta, dict):
+            if delta.get("stop_reason") == "end_turn" and delta.get("stop_sequence"):
+                delta["stop_reason"] = "stop_sequence"
+                changed = True
+
     if changed:
         return f"data: {json.dumps(data)}\n", input_tokens, cache_read_tokens
 
@@ -481,7 +489,12 @@ def _enrich_anthropic_sse_line(line: str, *, input_tokens: int = 0, cache_read_t
 
 
 def _enrich_anthropic_response(payload: dict) -> dict:
-    """Enrich a non-streaming Anthropic response from llama-server with missing usage fields."""
+    """Enrich a non-streaming Anthropic response from llama-server with missing fields.
+
+    llama-server's ``/v1/messages`` endpoint has several quirks:
+    - Missing ``cache_creation_input_tokens`` and ``cache_read_input_tokens`` in usage
+    - ``stop_reason`` is ``"end_turn"`` even when a ``stop_sequence`` was matched
+    """
     usage = payload.get("usage", {})
     if isinstance(usage, dict):
         if "cache_creation_input_tokens" not in usage:
@@ -500,6 +513,12 @@ def _enrich_anthropic_response(payload: dict) -> dict:
             "cache_creation_input_tokens": 0,
             "cache_read_input_tokens": 0,
         }
+
+    # Fix stop_reason: llama-server returns "end_turn" even when a stop_sequence
+    # was matched. Anthropic expects "stop_sequence" in that case.
+    if payload.get("stop_reason") == "end_turn" and payload.get("stop_sequence"):
+        payload["stop_reason"] = "stop_sequence"
+
     return payload
 
 
@@ -1285,7 +1304,57 @@ def _request_explicitly_disables_thinking(payload: Dict[str, Any]) -> bool:
     if payload.get("reasoning_budget") == 0:
         return True
     template_kwargs = payload.get("chat_template_kwargs")
-    return isinstance(template_kwargs, dict) and template_kwargs.get("enable_thinking") is False
+    if isinstance(template_kwargs, dict) and template_kwargs.get("enable_thinking") is False:
+        return True
+    # Anthropic format: thinking: {"type": "disabled"}
+    thinking = payload.get("thinking")
+    if isinstance(thinking, dict) and thinking.get("type") == "disabled":
+        return True
+    return False
+
+
+def _apply_anthropic_thinking_to_llama_params(payload: Dict[str, Any]) -> bool:
+    """Convert Anthropic ``thinking`` config to llama-server parameters.
+
+    llama-server's ``/v1/messages`` endpoint doesn't properly handle
+    ``thinking: {type: "disabled"}`` — thinking stays enabled. This function
+    translates the Anthropic thinking config to llama-server's native
+    ``reasoning_budget`` and ``chat_template_kwargs.enable_thinking``
+    parameters so that thinking is correctly controlled.
+
+    Also handles ``thinking: {type: "enabled", budget_tokens: N}`` by
+    setting ``reasoning_budget: N``.
+    """
+    thinking = payload.get("thinking")
+    if not isinstance(thinking, dict):
+        return False
+
+    changed = False
+    t_type = thinking.get("type", "")
+
+    if t_type == "disabled":
+        # Disable thinking entirely
+        if payload.get("reasoning_budget") != 0:
+            payload["reasoning_budget"] = 0
+            changed = True
+        template_kwargs = payload.get("chat_template_kwargs")
+        if not isinstance(template_kwargs, dict):
+            template_kwargs = {}
+            payload["chat_template_kwargs"] = template_kwargs
+            changed = True
+        if template_kwargs.get("enable_thinking") is not False:
+            template_kwargs["enable_thinking"] = False
+            changed = True
+
+    elif t_type == "enabled":
+        # Map budget_tokens → reasoning_budget
+        budget = thinking.get("budget_tokens", 0)
+        if budget and payload.get("reasoning_budget") != budget:
+            payload["reasoning_budget"] = budget
+            changed = True
+
+    # type == "adaptive": leave as-is (llama-server's default behavior)
+    return changed
 
 
 def _apply_request_reasoning_defaults(path: str, payload: Dict[str, Any], model_name: str) -> bool:
@@ -3688,6 +3757,7 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
             client_id=client_id,
         )
 
+    _apply_anthropic_thinking_to_llama_params(json_body)
     _apply_request_reasoning_defaults(path, json_body, requested_model)
     if path in ("chat/completions", "messages"):
         json_body["messages"] = _sanitize_messages_for_qwen_chat_template(
