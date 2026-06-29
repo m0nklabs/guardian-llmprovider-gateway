@@ -12,7 +12,15 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import uvicorn
 
+# Load .env file early — before any module that reads environment variables
+from dotenv import load_dotenv
+load_dotenv(pathlib.Path(__file__).parent.parent / ".env")
+
 from app.proxy.server import app as proxy_app, state as proxy_state, get_gpu_metrics, get_model_size, inference_queue
+from app.proxy.auth import load_api_keys, generate_api_key, _token_fingerprint
+from app.proxy.cloud_keys import CloudCredentialStore, parse_guardian_route, mask_api_key
+from app.proxy.providers import ProviderRegistry
+from app.proxy.server import provider_registry, cloud_cred_store
 from app.scheduler.manager import SchedulerManager
 
 # Configure logging
@@ -44,6 +52,12 @@ _configure_static_mount(app, pathlib.Path("app/ui/static"))
 @app.get("/")
 async def read_index():
     return FileResponse("app/ui/index.html")
+
+@app.get("/favicon.ico")
+async def favicon():
+    # Return empty 1x1 GIF to suppress 404
+    from fastapi.responses import Response
+    return Response(content=b'\x47\x49\x46\x38\x39\x61\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff\x21\xf9\x04\x01\x00\x00\x00\x00\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\x44\x01\x00\x3b', media_type="image/gif")
 
 @app.get("/api/stats")
 async def get_stats():
@@ -201,6 +215,125 @@ async def start_benchmark():
 @app.post("/api/benchmark/stop")
 async def stop_benchmark():
     raise HTTPException(status_code=410, detail="Legacy BenchmarkSuite is disabled")
+
+
+# ── Cloud LLM Router Admin API (no auth — LAN dashboard) ─────────────
+
+
+@app.get("/api/keys")
+async def list_api_keys_ui():
+    """List all Guardian API keys."""
+    keys = load_api_keys()
+    result = []
+    for token, data in keys.items():
+        result.append({
+            "key_fingerprint": _token_fingerprint(token),
+            "name": data.get("name"),
+            "created_at": data.get("created_at"),
+        })
+    result.sort(key=lambda x: x.get("created_at", 0), reverse=True)
+    return {"keys": result}
+
+
+@app.post("/api/keys")
+async def create_api_key_ui(request: Request):
+    """Generate a new Guardian API key. Body: {"name": "my-app"}"""
+    body = await request.json()
+    name = str(body.get("name", "")).strip()
+    if not name:
+        name = f"key-{len(load_api_keys()) + 1}"
+    prefix = body.get("prefix")
+    api_key = generate_api_key(name, metadata={"client": name}, prefix=prefix)
+    return {
+        "api_key": api_key,
+        "key_fingerprint": _token_fingerprint(api_key),
+        "name": name,
+    }
+
+
+@app.get("/api/cloud/credentials")
+async def list_cloud_creds_ui():
+    return {"credentials": cloud_cred_store.list_credentials()}
+
+
+@app.post("/api/cloud/credentials")
+async def add_cloud_cred_ui(request: Request):
+    body = await request.json()
+    provider = str(body.get("provider", "")).strip().lower()
+    name = str(body.get("name", "")).strip()
+    api_key = str(body.get("api_key", "")).strip()
+    models = body.get("models") or []
+    if not provider or not api_key:
+        raise HTTPException(status_code=400, detail="provider and api_key required")
+    if not name:
+        name = f"{provider}-credential"
+    return await cloud_cred_store.add_credential(provider, name, api_key, [str(m) for m in models if m])
+
+
+@app.delete("/api/cloud/credentials/{cred_id}")
+async def delete_cloud_cred_ui(cred_id: str):
+    deleted = await cloud_cred_store.delete_credential(cred_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="not found")
+    return {"status": "deleted"}
+
+
+@app.get("/api/cloud/links")
+async def list_cloud_links_ui():
+    return {"links": cloud_cred_store.list_links()}
+
+
+@app.post("/api/cloud/links")
+async def link_cloud_cred_ui(request: Request):
+    body = await request.json()
+    key_fp = str(body.get("guardian_key_fingerprint", "")).strip()
+    provider = str(body.get("provider", "")).strip().lower()
+    cred_id = str(body.get("credential_id", "")).strip()
+    if not key_fp or not provider or not cred_id:
+        raise HTTPException(status_code=400, detail="all fields required")
+    linked = await cloud_cred_store.link_credential(key_fp, provider, cred_id)
+    if not linked:
+        raise HTTPException(status_code=404, detail="credential not found")
+    return {"status": "linked"}
+
+
+@app.delete("/api/cloud/links")
+async def unlink_cloud_cred_ui(request: Request):
+    body = await request.json()
+    key_fp = str(body.get("guardian_key_fingerprint", "")).strip()
+    provider = str(body.get("provider", "")).strip().lower()
+    unlinked = await cloud_cred_store.unlink_credential(key_fp, provider)
+    if not unlinked:
+        raise HTTPException(status_code=404, detail="link not found")
+    return {"status": "unlinked"}
+
+
+@app.get("/api/cloud/providers")
+async def list_providers_ui():
+    providers = []
+    for p in provider_registry.get_enabled_providers():
+        providers.append({"name": p.name, "configured": p.is_configured, "models": p.models})
+    return {"providers": providers}
+
+
+@app.get("/api/cloud/models")
+async def list_cloud_models_ui():
+    """All cloud models — global + all per-key routes."""
+    models = []
+    for model_name in provider_registry.get_all_cloud_models():
+        entry = provider_registry.build_model_metadata_entry(model_name)
+        if entry:
+            models.append(entry)
+    for c in cloud_cred_store.list_credentials():
+        for m in c.get("models", []):
+            models.append({
+                "id": f"guardian/{c['provider']}/{m}",
+                "provider": c["provider"],
+                "credential_id": c["id"],
+                "credential_name": c["name"],
+            })
+    return {"models": models}
+
 
 class GuardianService:
     def __init__(self):

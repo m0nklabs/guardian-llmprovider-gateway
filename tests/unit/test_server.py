@@ -931,7 +931,7 @@ async def test_list_models_includes_vision_metadata():
             },
         ),
     ):
-        payload = await server.list_models(client_id="test-user")
+        payload = await server.list_models(request=SimpleNamespace(headers={}, state=SimpleNamespace(), url=SimpleNamespace(path="/v1/models"), method="GET"), client_id="test-user")
 
     model_entry = payload["data"][0]
     assert model_entry["id"] == "vision-alias"
@@ -958,7 +958,7 @@ async def test_list_models_treats_configured_unverified_vision_as_image_capable(
             },
         ),
     ):
-        payload = await server.list_models(client_id="test-user")
+        payload = await server.list_models(request=SimpleNamespace(headers={}, state=SimpleNamespace(), url=SimpleNamespace(path="/v1/models"), method="GET"), client_id="test-user")
 
     model_entry = payload["data"][0]
     assert model_entry["input_modalities"] == ["text", "image"]
@@ -1065,3 +1065,191 @@ async def test_admin_load_passes_kv_type_runtime_override():
         enable_vision=None,
         runtime_overrides={"kv_type": "f16"},
     )
+
+
+# ── Cloud LLM router tests ─────────────────────────────────────────────
+
+from app.proxy.providers import CloudProvider
+
+
+@pytest.mark.asyncio
+async def test_resolve_or_reject_accepts_cloud_model():
+    """Cloud-provider models should pass model resolution without 404."""
+    fake_provider = CloudProvider(
+        name="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-or-test",
+        models=["openai/gpt-4o"],
+    )
+    with (
+        patch.object(server.provider_registry, "is_cloud_model", return_value=True),
+        patch.object(server.model_manager, "models", {"local-model": {}}),
+        patch.object(server.model_manager, "resolve_model", side_effect=ValueError("not local")),
+    ):
+        resolved = server._resolve_or_reject_inference_model("openai/gpt-4o", "local-model")
+    assert resolved == "openai/gpt-4o"
+
+
+@pytest.mark.asyncio
+async def test_resolve_or_reject_still_rejects_unknown_non_cloud_model():
+    """Non-cloud, non-local models should still be rejected with 404."""
+    with (
+        patch.object(server.provider_registry, "is_cloud_model", return_value=False),
+        patch.object(server.model_manager, "models", {"local-model": {}}),
+        patch.object(server.model_manager, "resolve_model", side_effect=ValueError("not found")),
+    ):
+        with pytest.raises(server.HTTPException) as exc_info:
+            server._resolve_or_reject_inference_model("ghost-model", "local-model")
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_v1_post_forwards_cloud_model_to_provider_not_local():
+    """A cloud model request should bypass the queue and hit the cloud provider URL."""
+
+    class _FakeRequest:
+        def __init__(self):
+            self.headers = {"Content-Type": "application/json"}
+            self.state = SimpleNamespace(auth_context={"key_fingerprint": "abc123"})
+            self.url = SimpleNamespace(path="/v1/chat/completions")
+            self.method = "POST"
+
+        async def body(self) -> bytes:
+            return json.dumps(
+                {"model": "openai/gpt-4o", "messages": [{"role": "user", "content": "hi"}], "stream": False}
+            ).encode("utf-8")
+
+    fake_provider = CloudProvider(
+        name="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-or-test",
+        models=["openai/gpt-4o"],
+    )
+
+    captured = {}
+
+    class _FakeResponse:
+        def __init__(self):
+            self.content = b'{"choices":[{"message":{"role":"assistant","content":"hello"}}],"usage":{"prompt_tokens":5,"completion_tokens":3}}'
+            self.status_code = 200
+            self.headers = {"content-type": "application/json"}
+
+        def json(self):
+            return json.loads(self.content)
+
+    class _FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, content=None, headers=None):
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["content"] = content
+            return _FakeResponse()
+
+    with (
+        patch.object(server.provider_registry, "is_cloud_model", return_value=True),
+        patch.object(server.provider_registry, "get_provider_for_model", return_value=fake_provider),
+        patch.object(server.ProviderRegistry, "build_forward_headers", return_value={"Authorization": "Bearer sk-or-test", "Content-Type": "application/json"}),
+        patch.object(server.ProviderRegistry, "build_forward_url", return_value="https://openrouter.ai/api/v1/chat/completions"),
+        patch.object(server.httpx, "AsyncClient", _FakeAsyncClient),
+        patch.object(server, "_set_request_usage_metadata", lambda *a, **k: None),
+        patch.object(server, "_start_live_request_usage", lambda *a, **k: None),
+        patch.object(server, "_finish_live_request_usage", lambda *a, **k: None),
+        patch.object(server, "_record_usage_from_payload", lambda *a, **k: None),
+        patch.object(server.model_manager, "get_current_model", AsyncMock(return_value="local-model")),
+        patch.object(server.model_manager, "resolve_model", side_effect=ValueError("not local")),
+        patch.object(server, "_begin_queued_request", side_effect=AssertionError("queue must be bypassed for cloud models")),
+    ):
+        response = await server.proxy_v1_post("chat/completions", _FakeRequest(), client_id="test-user")
+
+    assert response.status_code == 200
+    assert captured["url"] == "https://openrouter.ai/api/v1/chat/completions"
+    assert "sk-or-test" in captured["headers"]["Authorization"]
+
+
+@pytest.mark.asyncio
+async def test_v1_post_cloud_model_without_api_key_returns_503():
+    """A cloud model whose provider has no API key should return 503."""
+
+    class _FakeRequest:
+        def __init__(self):
+            self.headers = {"Content-Type": "application/json"}
+            self.state = SimpleNamespace(auth_context={"key_fingerprint": "abc123"})
+            self.url = SimpleNamespace(path="/v1/chat/completions")
+            self.method = "POST"
+
+        async def body(self) -> bytes:
+            return json.dumps(
+                {"model": "openai/gpt-4o", "messages": [{"role": "user", "content": "hi"}], "stream": False}
+            ).encode("utf-8")
+
+    fake_provider = CloudProvider(
+        name="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="",  # no key configured
+        models=["openai/gpt-4o"],
+    )
+
+    with (
+        patch.object(server.provider_registry, "is_cloud_model", return_value=True),
+        patch.object(server.provider_registry, "get_provider_for_model", return_value=fake_provider),
+        patch.object(server, "_set_request_usage_metadata", lambda *a, **k: None),
+        patch.object(server, "_start_live_request_usage", lambda *a, **k: None),
+        patch.object(server, "_finish_live_request_usage", lambda *a, **k: None),
+        patch.object(server.model_manager, "get_current_model", AsyncMock(return_value="local-model")),
+        patch.object(server.model_manager, "resolve_model", side_effect=ValueError("not local")),
+        patch.object(server, "_begin_queued_request", side_effect=AssertionError("queue must be bypassed")),
+    ):
+        with pytest.raises(server.HTTPException) as exc_info:
+            await server.proxy_v1_post("chat/completions", _FakeRequest(), client_id="test-user")
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail["error"] == "provider_unavailable"
+    assert exc_info.value.detail["provider"] == "openrouter"
+
+
+@pytest.mark.asyncio
+async def test_list_models_includes_cloud_models():
+    """The /v1/models endpoint should include cloud-provider models."""
+    fake_provider = CloudProvider(
+        name="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-or-test",
+        models=["openai/gpt-4o", "anthropic/claude-3.5-sonnet"],
+    )
+
+    with (
+        patch.object(server.provider_registry, "get_all_cloud_models", return_value=["openai/gpt-4o", "anthropic/claude-3.5-sonnet"]),
+        patch.object(server.provider_registry, "build_model_metadata_entry") as build_mock,
+        patch.object(server.model_manager, "get_public_model_map", return_value={"local-model": "local-model"}),
+        patch.object(server, "_build_model_metadata_entry", return_value={"id": "local-model", "object": "model"}),
+    ):
+        build_mock.side_effect = lambda name: {"id": name, "object": "model", "owned_by": "openrouter", "served_by": "cloud"}
+        result = await server.list_models(request=SimpleNamespace(headers={}, state=SimpleNamespace(), url=SimpleNamespace(path="/v1/models"), method="GET"), client_id="test-user")
+
+    ids = [m["id"] for m in result["data"]]
+    assert "local-model" in ids
+    assert "openai/gpt-4o" in ids
+    assert "anthropic/claude-3.5-sonnet" in ids
+
+
+@pytest.mark.asyncio
+async def test_get_model_metadata_returns_cloud_model():
+    """GET /v1/models/{model_id} should return cloud metadata for cloud models."""
+    with (
+        patch.object(server.provider_registry, "is_cloud_model", return_value=True),
+        patch.object(server.provider_registry, "build_model_metadata_entry") as build_mock,
+    ):
+        build_mock.return_value = {"id": "openai/gpt-4o", "object": "model", "owned_by": "openrouter", "served_by": "cloud"}
+        result = await server.get_model_metadata("openai/gpt-4o", client_id="test-user")
+
+    assert result["id"] == "openai/gpt-4o"
+    assert result["owned_by"] == "openrouter"
+    assert result["served_by"] == "cloud"

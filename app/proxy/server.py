@@ -20,15 +20,24 @@ import yaml
 import httpx
 from fastapi import FastAPI, Request, HTTPException, Response, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.status import HTTP_401_UNAUTHORIZED
 
 from collections import defaultdict
 from app.proxy.optimizer import RequestOptimizer
 from app.proxy.scaler import DynamicScaler
 from app.engine.manager import ModelManager, ModelLoadError
-from app.proxy.auth import build_request_auth_context, get_request_auth_context, set_request_auth_context, verify_api_key
-from app.proxy.queue import InferenceQueue, QueueAdmissionRejected, QueueRequestCancelled
+from app.proxy.auth import build_request_auth_context, get_request_auth_context, set_request_auth_context, verify_api_key, generate_api_key, load_api_keys, _token_fingerprint
+from app.proxy.providers import CloudProvider, ProviderRegistry
+from app.proxy.cloud_keys import CloudCredentialStore, parse_guardian_route, mask_api_key
 from app.proxy.usage import ApiUsageTracker
+from app.proxy.anthropic_bridge import (
+    provider_needs_anthropic_translation,
+    translate_anthropic_request_to_openai,
+    translate_openai_response_to_anthropic,
+    translate_openai_stream_to_anthropic,
+)
+from app.proxy.queue import InferenceQueue, QueueAdmissionRejected, QueueRequestCancelled
 from app.proxy.metrics import (
     track_request,
     update_queue_metrics,
@@ -82,6 +91,15 @@ def load_config() -> dict:
 
 # Load config at module level
 CONFIG = load_config()
+
+# Cloud LLM provider registry (OpenRouter, NVIDIA, …) — enables Guardian to
+# act as a unified LLM router alongside its local GPU-backed llama-server.
+provider_registry = ProviderRegistry()
+
+# Per-key cloud credential store — allows linking cloud provider credentials
+# (NVIDIA, OpenRouter) to individual Guardian API keys so each key can route
+# to its own cloud backend via guardian/{provider}/{model} routes.
+cloud_cred_store = CloudCredentialStore()
 
 # Configuration
 LLAMA_SERVER_URL = "http://127.0.0.1:11440"
@@ -749,13 +767,26 @@ def _reject_unserved_inference_model(raw_model: Optional[str]) -> None:
 
 
 def _resolve_or_reject_inference_model(raw_model: Optional[str], current_model: str) -> str:
-    """Resolve an inference model name and reject unknown or unserved values."""
+    """Resolve an inference model name and reject unknown or unserved values.
+
+    Cloud-provider models (OpenRouter, NVIDIA, …) are accepted as-is so they
+    can be forwarded to their upstream API instead of the local backend.
+
+    Per-key cloud routes using the ``guardian/{provider}/{model}`` convention
+    are also accepted — the actual upstream model name is extracted at
+    forwarding time once the requesting client's linked credential is known.
+    """
     resolved_model = _resolve_inference_model(raw_model, current_model)
     if not resolved_model or resolved_model == "__MISMATCH__":
         _reject_unserved_inference_model(raw_model)
-    if resolved_model not in model_manager.models:
-        _reject_unserved_inference_model(raw_model)
-    return resolved_model
+    if resolved_model in model_manager.models:
+        return resolved_model
+    if provider_registry.is_cloud_model(resolved_model):
+        return resolved_model
+    # Per-key cloud route: guardian/{provider}/{model_path}
+    if parse_guardian_route(resolved_model) is not None:
+        return resolved_model
+    _reject_unserved_inference_model(raw_model)
 
 
 def _resolve_auto_reload_model(requested_model: Optional[str] = None) -> str:
@@ -1425,6 +1456,16 @@ async def lifespan(app: FastAPI):
             logger.warning(f"Failed to clean up PID file: {e}")
 
 app = FastAPI(lifespan=lifespan)
+
+# CORS — allow the dashboard UI on :11437 to call the proxy API on :11434
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 model_manager = ModelManager()
 
 
@@ -1928,6 +1969,28 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
 
     logger.info(f"bridge: Ollama chat request for '{model}' -> Translating to OpenAI format")
 
+    # ── Cloud LLM router: forward to OpenRouter / NVIDIA / … ─────────
+    # Ollama-style requests are translated to OpenAI format and forwarded
+    # to the cloud provider directly.
+    if _is_cloud_or_guardian_route(model):
+        messages = body.get("messages", [])
+        stream = body.get("stream", True)
+        options = body.get("options", {})
+        openai_body = {
+            "model": model,
+            "messages": messages,
+            "stream": stream,
+            "temperature": options.get("temperature", 0.7),
+        }
+        return await _forward_to_cloud_provider(
+            path="chat/completions",
+            body=json.dumps(openai_body).encode("utf-8"),
+            json_body=openai_body,
+            model_name=model,
+            request=request,
+            client_id=client_id,
+        )
+
     try:
         request_id, disconnect_task = await _begin_queued_request(request, client_id, model)
     except _GuardianRequestCancelled as exc:
@@ -2205,6 +2268,24 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
 
     current_model = await model_manager.get_current_model()
     model = _resolve_or_reject_inference_model(model, current_model)
+
+    # ── Cloud LLM router: forward to OpenRouter / NVIDIA / … ─────────
+    if _is_cloud_or_guardian_route(model):
+        messages = body.get("messages", [])
+        stream = body.get("stream", True)
+        openai_body = {
+            "model": model,
+            "messages": messages,
+            "stream": stream,
+        }
+        return await _forward_to_cloud_provider(
+            path="chat/completions",
+            body=json.dumps(openai_body).encode("utf-8"),
+            json_body=openai_body,
+            model_name=model,
+            request=request,
+            client_id=client_id,
+        )
 
     try:
         request_id, disconnect_task = await _begin_queued_request(request, client_id, model)
@@ -2556,21 +2637,59 @@ def _build_model_metadata_entry(public_name: str, canonical_name: str, client_id
 
 
 @app.get("/v1/models")
-async def list_models(client_id: str = Depends(verify_api_key)):
-    """List available models from config."""
+async def list_models(request: Request, client_id: str = Depends(verify_api_key)):
+    """List available models from config and cloud providers.
+
+    Returns local GPU-backed models, global cloud-provider models from
+    settings.yaml, and per-key cloud routes (guardian/{provider}/{model})
+    linked to the requesting client's API key.
+    """
     models_list = []
     try:
         for public_name, canonical_name in model_manager.get_public_model_map().items():
             models_list.append(_build_model_metadata_entry(public_name, canonical_name, client_id))
     except Exception as e:
         logger.error(f"Failed to list models: {e}")
-        
+
+    # Append global cloud-provider models (OpenRouter, NVIDIA, …)
+    try:
+        for cloud_model in provider_registry.get_all_cloud_models():
+            entry = provider_registry.build_model_metadata_entry(cloud_model)
+            if entry is not None:
+                models_list.append(entry)
+    except Exception as e:
+        logger.error(f"Failed to list cloud models: {e}")
+
+    # Append per-key cloud routes (guardian/{provider}/{model})
+    try:
+        auth_ctx = get_request_auth_context(request) or {}
+        key_fp = auth_ctx.get("key_fingerprint") or client_id
+        for cloud_model in cloud_cred_store.get_linked_models_for_key(key_fp):
+            models_list.append({
+                "id": cloud_model["id"],
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": cloud_model["provider"],
+                "permission": [],
+                "served_by": "cloud",
+                "provider": cloud_model["provider"],
+                "credential_id": cloud_model["credential_id"],
+            })
+    except Exception as e:
+        logger.error(f"Failed to list per-key cloud models: {e}")
+
     return {"object": "list", "data": models_list}
 
 
 @app.get("/v1/models/{model_id:path}")
 async def get_model_metadata(model_id: str, client_id: str = Depends(verify_api_key)):
-    """Return metadata for a configured canonical model or public alias."""
+    """Return metadata for a configured canonical model, public alias, or cloud model."""
+    # Cloud-provider models first (they may contain slashes like "openai/gpt-4o")
+    if provider_registry.is_cloud_model(model_id):
+        entry = provider_registry.build_model_metadata_entry(model_id)
+        if entry is not None:
+            return entry
+
     public_models = model_manager.get_public_model_map()
     canonical_name = public_models.get(model_id)
     if canonical_name is None:
@@ -2642,6 +2761,217 @@ async def admin_load(request: Request, client_id: str = Depends(verify_api_key))
         model_manager.active_requests = max(0, model_manager.active_requests - 1)
         model_manager.last_request_time = time.time()
     return {"status": "loaded", "model": model_manager.current_model}
+
+
+# ── Cloud credential management API ───────────────────────────────────
+
+
+@app.get("/api/keys")
+async def list_api_keys(client_id: str = Depends(verify_api_key)):
+    """List all Guardian API keys (tokens masked, fingerprints shown)."""
+    keys = load_api_keys()
+    result = []
+    for token, data in keys.items():
+        result.append({
+            "key_fingerprint": _token_fingerprint(token),
+            "key_prefix": token.split("_")[0] if "_" in token else "legacy",
+            "name": data.get("name"),
+            "created_at": data.get("created_at"),
+            "metadata": data.get("metadata", {}),
+        })
+    result.sort(key=lambda x: x.get("created_at", 0), reverse=True)
+    return {"keys": result}
+
+
+@app.post("/api/keys")
+async def create_api_key(request: Request, client_id: str = Depends(verify_api_key)):
+    """Generate a new Guardian API key.
+
+    Body: ``{"name": "my-app", "prefix": "myapp", "metadata": {"client": "my-app"}}``
+    Returns the full API key (only shown once).
+    """
+    body = await request.json()
+    name = str(body.get("name", "")).strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    prefix = body.get("prefix")
+    metadata = body.get("metadata")
+    api_key = generate_api_key(name, metadata=metadata, prefix=prefix)
+    logger.info("🔑 Admin '%s' generated new API key for '%s'", client_id, name)
+    return {
+        "api_key": api_key,
+        "key_fingerprint": _token_fingerprint(api_key),
+        "name": name,
+        "message": "Store this key securely — it will not be shown again.",
+    }
+
+
+@app.get("/api/cloud/credentials")
+async def list_cloud_credentials(client_id: str = Depends(verify_api_key)):
+    """List all stored cloud provider credentials (API keys masked)."""
+    return {"credentials": cloud_cred_store.list_credentials()}
+
+
+@app.post("/api/cloud/credentials")
+async def add_cloud_credential(request: Request, client_id: str = Depends(verify_api_key)):
+    """Add a new cloud provider credential.
+
+    Body: ``{"provider": "nvidia", "name": "NVIDIA Default", "api_key": "nvapi-xxx", "models": ["minimax/minimax-m3"]}``
+    """
+    body = await request.json()
+    provider = str(body.get("provider", "")).strip().lower()
+    name = str(body.get("name", "")).strip()
+    api_key = str(body.get("api_key", "")).strip()
+    models = body.get("models") or []
+    if not provider:
+        raise HTTPException(status_code=400, detail="provider is required")
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    if not api_key:
+        raise HTTPException(status_code=400, detail="api_key is required")
+    if not isinstance(models, list):
+        raise HTTPException(status_code=400, detail="models must be a list")
+    cred = await cloud_cred_store.add_credential(
+        provider=provider,
+        name=name,
+        api_key=api_key,
+        models=[str(m) for m in models if m],
+    )
+    logger.info("☁️  Admin '%s' added cloud credential '%s' for provider '%s'", client_id, cred["id"], provider)
+    return cred
+
+
+@app.delete("/api/cloud/credentials/{cred_id}")
+async def delete_cloud_credential(cred_id: str, client_id: str = Depends(verify_api_key)):
+    """Delete a cloud provider credential and all its links."""
+    deleted = await cloud_cred_store.delete_credential(cred_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Credential '{cred_id}' not found")
+    logger.info("☁️  Admin '%s' deleted cloud credential '%s'", client_id, cred_id)
+    return {"status": "deleted", "credential_id": cred_id}
+
+
+@app.post("/api/cloud/credentials/{cred_id}/models")
+async def add_model_to_credential(cred_id: str, request: Request, client_id: str = Depends(verify_api_key)):
+    """Add a model to an existing credential's model list.
+
+    Body: ``{"model": "minimax/minimax-m3"}``
+    """
+    body = await request.json()
+    model_name = str(body.get("model", "")).strip()
+    if not model_name:
+        raise HTTPException(status_code=400, detail="model is required")
+    added = await cloud_cred_store.add_model_to_credential(cred_id, model_name)
+    if not added:
+        raise HTTPException(status_code=404, detail=f"Credential '{cred_id}' not found or model already present")
+    return {"status": "added", "credential_id": cred_id, "model": model_name}
+
+
+@app.delete("/api/cloud/credentials/{cred_id}/models/{model_name:path}")
+async def remove_model_from_credential(cred_id: str, model_name: str, client_id: str = Depends(verify_api_key)):
+    """Remove a model from a credential's model list."""
+    removed = await cloud_cred_store.remove_model_from_credential(cred_id, model_name)
+    if not removed:
+        raise HTTPException(status_code=404, detail="Credential or model not found")
+    return {"status": "removed", "credential_id": cred_id, "model": model_name}
+
+
+@app.get("/api/cloud/links")
+async def list_cloud_links(client_id: str = Depends(verify_api_key)):
+    """List all Guardian key → cloud credential links."""
+    return {"links": cloud_cred_store.list_links()}
+
+
+@app.post("/api/cloud/links")
+async def link_credential(request: Request, client_id: str = Depends(verify_api_key)):
+    """Link a cloud credential to a Guardian API key.
+
+    Body: ``{"guardian_key_fingerprint": "abc123...", "provider": "nvidia", "credential_id": "cred_001"}``
+    """
+    body = await request.json()
+    key_fp = str(body.get("guardian_key_fingerprint", "")).strip()
+    provider = str(body.get("provider", "")).strip().lower()
+    cred_id = str(body.get("credential_id", "")).strip()
+    if not key_fp:
+        raise HTTPException(status_code=400, detail="guardian_key_fingerprint is required")
+    if not provider:
+        raise HTTPException(status_code=400, detail="provider is required")
+    if not cred_id:
+        raise HTTPException(status_code=400, detail="credential_id is required")
+    linked = await cloud_cred_store.link_credential(key_fp, provider, cred_id)
+    if not linked:
+        raise HTTPException(status_code=404, detail="Credential not found")
+    logger.info("☁️  Admin '%s' linked credential '%s' to key '%s' for provider '%s'", client_id, cred_id, key_fp, provider)
+    return {"status": "linked", "guardian_key_fingerprint": key_fp, "provider": provider, "credential_id": cred_id}
+
+
+@app.delete("/api/cloud/links")
+async def unlink_credential(request: Request, client_id: str = Depends(verify_api_key)):
+    """Unlink a cloud credential from a Guardian API key.
+
+    Body: ``{"guardian_key_fingerprint": "abc123...", "provider": "nvidia"}``
+    """
+    body = await request.json()
+    key_fp = str(body.get("guardian_key_fingerprint", "")).strip()
+    provider = str(body.get("provider", "")).strip().lower()
+    if not key_fp:
+        raise HTTPException(status_code=400, detail="guardian_key_fingerprint is required")
+    if not provider:
+        raise HTTPException(status_code=400, detail="provider is required")
+    unlinked = await cloud_cred_store.unlink_credential(key_fp, provider)
+    if not unlinked:
+        raise HTTPException(status_code=404, detail="Link not found")
+    return {"status": "unlinked", "guardian_key_fingerprint": key_fp, "provider": provider}
+
+
+@app.get("/api/cloud/providers")
+async def list_cloud_providers(client_id: str = Depends(verify_api_key)):
+    """List all configured cloud providers and their status."""
+    providers = []
+    for p in provider_registry.get_enabled_providers():
+        providers.append({
+            "name": p.name,
+            "base_url": p.base_url,
+            "configured": p.is_configured,
+            "model_count": len(p.models),
+            "models": p.models,
+        })
+    # Include known providers even if not in settings.yaml
+    known = set(_PROVIDER_BASE_URLS.keys())
+    configured = {p["name"] for p in providers}
+    for name in known - configured:
+        providers.append({"name": name, "base_url": _PROVIDER_BASE_URLS[name], "configured": False, "model_count": 0, "models": []})
+    return {"providers": providers}
+
+
+@app.get("/api/cloud/models")
+async def list_cloud_models(request: Request, client_id: str = Depends(verify_api_key)):
+    """List all cloud models available to the requesting client.
+
+    Combines global cloud models from settings.yaml with per-key cloud routes
+    linked to the requesting Guardian API key.
+    """
+    models = []
+    # Global cloud models
+    for model_name in provider_registry.get_all_cloud_models():
+        entry = provider_registry.build_model_metadata_entry(model_name)
+        if entry:
+            models.append(entry)
+    # Per-key cloud routes
+    auth_ctx = get_request_auth_context(request) or {}
+    key_fp = auth_ctx.get("key_fingerprint") or client_id
+    for cloud_model in cloud_cred_store.get_linked_models_for_key(key_fp):
+        models.append({
+            "id": cloud_model["id"],
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": cloud_model["provider"],
+            "permission": [],
+            "served_by": "cloud",
+            "provider": cloud_model["provider"],
+            "credential_id": cloud_model["credential_id"],
+        })
+    return {"models": models}
 
 
 @app.get("/api/crashes")
@@ -2864,6 +3194,301 @@ async def proxy_v1_get(path: str, request: Request, client_id: str = Depends(ver
         resp = await client.get(f"{LLAMA_SERVER_URL}/v1/{path}", params=request.query_params)
         return Response(content=resp.content, status_code=resp.status_code, headers=resp.headers)
 
+
+# ── Cloud LLM router: forward to OpenRouter / NVIDIA / … ─────────────
+
+_PROVIDER_BASE_URLS = {
+    "openrouter": "https://openrouter.ai/api/v1",
+    "nvidia": "https://integrate.api.nvidia.com/v1",
+}
+
+
+def _provider_base_url(provider_name: str) -> str:
+    """Return the base URL for a known provider, or empty string."""
+    return _PROVIDER_BASE_URLS.get(provider_name, "")
+
+
+def _cloud_provider_for_request(model_name: str) -> Optional[CloudProvider]:
+    """Return the configured cloud provider for *model_name*, or None."""
+    return provider_registry.get_provider_for_model(model_name)
+
+
+def _is_cloud_or_guardian_route(model_name: str) -> bool:
+    """Check if a model name is a cloud model or a per-key guardian route."""
+    if provider_registry.is_cloud_model(model_name):
+        return True
+    return parse_guardian_route(model_name) is not None
+
+
+def _cloud_provider_unavailable_error(provider: CloudProvider) -> HTTPException:
+    """Build a 503 error for a provider that lacks an API key."""
+    return HTTPException(
+        status_code=503,
+        detail={
+            "error": "provider_unavailable",
+            "reason": "missing_api_key",
+            "message": (
+                f"Cloud provider '{provider.name}' is enabled but has no API key "
+                f"configured. Set the {provider.name.upper()}_API_KEY environment "
+                f"variable or disable the provider in settings.yaml."
+            ),
+            "provider": provider.name,
+        },
+    )
+
+
+async def _forward_to_cloud_provider(
+    path: str,
+    body: bytes,
+    json_body: Dict[str, Any],
+    model_name: str,
+    request: Request,
+    client_id: str,
+) -> Response:
+    """Forward an inference request to a cloud LLM provider.
+
+    Cloud requests bypass the VRAM scheduler, model switch logic, and inference
+    queue — the cloud API handles its own rate limiting and concurrency.
+    Streaming responses are proxied in real-time so SSE tokens reach the client
+    without buffering.
+
+    Supports two routing modes:
+    - **Global cloud models** (e.g. ``openai/gpt-4o``): routed via the
+      ``ProviderRegistry`` using the provider's global API key from settings.yaml.
+    - **Per-key cloud routes** (e.g. ``guardian/nvidia/minimax/minimax-m3``):
+      routed via the ``CloudCredentialStore`` using the credential linked to
+      the requesting client's Guardian API key.  The upstream model name is
+      extracted from the route prefix.
+    """
+    # ── Determine provider, API key, and upstream model name ────────
+    guardian_route = parse_guardian_route(model_name)
+    if guardian_route is not None:
+        # Per-key cloud route: guardian/{provider}/{model_path}
+        provider_name, upstream_model = guardian_route
+
+        # Look up the linked credential for this client
+        auth_ctx = get_request_auth_context(request) or {}
+        key_fingerprint = auth_ctx.get("key_fingerprint") or client_id
+        cred = cloud_cred_store.get_credential_for_key(key_fingerprint, provider_name)
+        if cred is None:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "cloud_credential_not_linked",
+                    "reason": "no_credential_for_provider",
+                    "message": (
+                        f"No {provider_name} credential is linked to your Guardian API key. "
+                        f"Link a credential via the Guardian admin API or dashboard."
+                    ),
+                    "provider": provider_name,
+                    "requested_route": model_name,
+                },
+            )
+
+        # Build a temporary CloudProvider for this credential
+        provider = CloudProvider(
+            name=provider_name,
+            base_url=_provider_base_url(provider_name),
+            api_key=cred.api_key,
+            models=[upstream_model],
+        )
+        # Rewrite the model field in the request body to the upstream model name
+        json_body = {**json_body, "model": upstream_model}
+        body = json.dumps(json_body).encode("utf-8")
+        effective_model_name = model_name  # Keep guardian/... for logging/usage
+    else:
+        # Global cloud model from settings.yaml providers config
+        provider = _cloud_provider_for_request(model_name)
+        if provider is None:
+            raise HTTPException(status_code=404, detail=f"Model '{model_name}' is not a cloud model")
+        if not provider.is_configured:
+            raise _cloud_provider_unavailable_error(provider)
+        effective_model_name = model_name
+
+    # ── Anthropic ↔ OpenAI bridge ──────────────────────────────────
+    # When the client sends a /v1/messages (Anthropic) request but the target
+    # provider only speaks OpenAI format (e.g. NVIDIA NIM), translate the
+    # request and response transparently. OpenRouter supports /v1/messages
+    # natively, so translation is skipped for that provider.
+    needs_translation = provider_needs_anthropic_translation(provider.name, path)
+    effective_path = path
+    if needs_translation:
+        logger.info(
+            "🌉 Anthropic→OpenAI bridge: translating /v1/messages for provider '%s'",
+            provider.name,
+        )
+        json_body = translate_anthropic_request_to_openai(json_body)
+        effective_path = "chat/completions"
+        body = json.dumps(json_body).encode("utf-8")
+
+    is_stream = bool(json_body.get("stream", False))
+    _set_request_usage_metadata(request, model=effective_model_name, streamed=is_stream)
+    _start_live_request_usage(request)
+
+    forward_headers = ProviderRegistry.build_forward_headers(provider)
+    forward_url = ProviderRegistry.build_forward_url(provider, effective_path)
+    timeout = httpx.Timeout(provider.timeout_seconds, connect=15.0)
+
+    logger.info(
+        "☁️  Cloud route: client '%s' → %s /v1/%s (model: %s, stream: %s)",
+        client_id,
+        provider.name,
+        path,
+        effective_model_name,
+        is_stream,
+    )
+
+    if is_stream:
+        client = httpx.AsyncClient(timeout=httpx.Timeout(provider.timeout_seconds, connect=15.0))
+        req = client.build_request(
+            "POST",
+            forward_url,
+            content=body,
+            headers=forward_headers,
+        )
+        try:
+            resp = await client.send(req, stream=True)
+        except Exception as e:
+            await client.aclose()
+            _finish_live_request_usage(request, status_code=502, response_bytes=0)
+            logger.error("☁️  Cloud provider '%s' request failed: %s", provider.name, e)
+            raise HTTPException(status_code=502, detail=f"Cloud provider request failed: {e}")
+
+        usage_totals = {"prompt_tokens": 0, "completion_tokens": 0}
+
+        async def _read_sse_lines():
+            """Yield raw SSE lines from the upstream response with watchdog."""
+            watchdog = StreamProgressWatchdog(provider.timeout_seconds)
+            async for line in _iter_sse_lines_with_watchdog(
+                resp,
+                watchdog,
+                request_id=str(uuid.uuid4()),
+                route=f"/v1/{path}",
+                client_id=client_id,
+                model_name=effective_model_name,
+            ):
+                yield line
+
+        async def cloud_stream():
+            try:
+                if needs_translation:
+                    # ── Anthropic streaming translation ───────────────
+                    # Translate OpenAI SSE chunks to Anthropic SSE events
+                    async for event_line in translate_openai_stream_to_anthropic(
+                        _read_sse_lines(),
+                        effective_model_name,
+                    ):
+                        # Extract usage from the translated events
+                        if "message_delta" in event_line:
+                            try:
+                                # Parse the data line to get output_tokens
+                                for part in event_line.split("\n"):
+                                    if part.startswith("data: "):
+                                        data = json.loads(part[6:])
+                                        if data.get("type") == "message_delta":
+                                            usage_totals["completion_tokens"] = max(
+                                                usage_totals["completion_tokens"],
+                                                data.get("usage", {}).get("output_tokens", 0),
+                                            )
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+                        encoded_line = event_line.encode("utf-8")
+                        _update_live_request_usage(
+                            request,
+                            response_bytes_delta=len(encoded_line),
+                        )
+                        yield encoded_line
+                else:
+                    # ── Pass-through (no translation needed) ──────────
+                    async for line in _read_sse_lines():
+                        if line.startswith("data: "):
+                            try:
+                                data = json.loads(line[6:])
+                                usage = data.get("usage") or {}
+                                if isinstance(usage, dict):
+                                    usage_totals["prompt_tokens"] = max(
+                                        usage_totals["prompt_tokens"],
+                                        _coerce_usage_int(usage.get("prompt_tokens", usage.get("input_tokens", 0))),
+                                    )
+                                    usage_totals["completion_tokens"] = max(
+                                        usage_totals["completion_tokens"],
+                                        _coerce_usage_int(
+                                            usage.get("completion_tokens", usage.get("output_tokens", 0))
+                                        ),
+                                    )
+                            except (TypeError, ValueError, json.JSONDecodeError):
+                                pass
+                        encoded_line = (line + "\n").encode("utf-8")
+                        _update_live_request_usage(
+                            request,
+                            response_bytes_delta=len(encoded_line),
+                        )
+                        yield encoded_line
+            except (asyncio.CancelledError, _GuardianRequestCancelled):
+                pass
+            finally:
+                await resp.aclose()
+                await client.aclose()
+                _record_request_token_usage(
+                    client_id,
+                    f"/v1/{path}",
+                    effective_model_name,
+                    request=request,
+                    prompt_tokens=usage_totals["prompt_tokens"],
+                    completion_tokens=usage_totals["completion_tokens"],
+                )
+                _finish_live_request_usage(
+                    request,
+                    status_code=499 if False else resp.status_code,
+                )
+
+        return StreamingResponse(
+            cloud_stream(),
+            status_code=resp.status_code,
+            media_type="text/event-stream",
+            headers={
+                k: v for k, v in resp.headers.items()
+                if k.lower() not in ("transfer-encoding", "content-length")
+            },
+        )
+
+    # Non-streaming
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        try:
+            resp = await client.post(
+                forward_url,
+                content=body,
+                headers=forward_headers,
+            )
+        except Exception as e:
+            _finish_live_request_usage(request, status_code=502, response_bytes=0)
+            logger.error("☁️  Cloud provider '%s' request failed: %s", provider.name, e)
+            raise HTTPException(status_code=502, detail=f"Cloud provider request failed: {e}")
+
+        # Record token usage from response payload
+        try:
+            payload = resp.json()
+        except (TypeError, ValueError, json.JSONDecodeError):
+            payload = None
+        _record_usage_from_payload(client_id, f"/v1/{path}", effective_model_name, payload, request=request)
+
+        # ── Anthropic response translation (non-streaming) ───────────
+        if needs_translation and payload and isinstance(payload, dict):
+            anthropic_response = translate_openai_response_to_anthropic(payload, effective_model_name)
+            translated_content = json.dumps(anthropic_response).encode("utf-8")
+            return Response(
+                content=translated_content,
+                status_code=resp.status_code,
+                headers={"Content-Type": "application/json"},
+            )
+
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            headers=dict(resp.headers),
+        )
+
+
 @app.post("/v1/{path:path}")
 async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(verify_api_key)):
     body = await request.body()
@@ -2919,6 +3544,23 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
     current_model = await model_manager.get_current_model()
     requested_model = _resolve_or_reject_inference_model(requested_model, current_model)
     json_body["model"] = requested_model
+
+    # ── Cloud LLM router: forward to OpenRouter / NVIDIA / … ─────────
+    # Cloud models bypass the VRAM scheduler, model switch logic, and inference
+    # queue entirely — the cloud API handles its own rate limiting.
+    if _is_cloud_or_guardian_route(requested_model):
+        # Cloud models don't need Qwen message sanitization or reasoning defaults
+        # — those are llama-server-specific workarounds.
+        body = json.dumps(json_body).encode("utf-8")
+        return await _forward_to_cloud_provider(
+            path=path,
+            body=body,
+            json_body=json_body,
+            model_name=requested_model,
+            request=request,
+            client_id=client_id,
+        )
+
     _apply_request_reasoning_defaults(path, json_body, requested_model)
     if path in ("chat/completions", "messages"):
         json_body["messages"] = _sanitize_messages_for_qwen_chat_template(

@@ -7,3 +7,4 @@ pydantic
 schedule
 huggingface_hub
 prometheus-client
+python-dotenv

@@ -1,5 +1,44 @@
 # Guardian TODO List
 
+## 2026-06-28 LLM Router — Cloud Provider Support (OpenRouter + NVIDIA)
+
+- [x] Add `app/proxy/providers.py` with `ProviderRegistry` that loads cloud provider config from `settings.yaml`.
+- [x] Support `${ENV_VAR}` expansion for API keys so secrets stay out of the repo.
+- [x] Add `providers` section to `config/settings.yaml` with OpenRouter and NVIDIA stub entries.
+- [x] Cloud models appear in `GET /v1/models` with `served_by: cloud` and `owned_by: <provider>`.
+- [x] `GET /v1/models/{model_id}` returns cloud metadata for cloud models (including slash-containing IDs).
+- [x] `_resolve_or_reject_inference_model` accepts cloud models instead of rejecting them with 404.
+- [x] `POST /v1/{path}` routes cloud models to the provider API, bypassing queue/VRAM/switch logic.
+- [x] `POST /api/chat` (Ollama bridge) forwards cloud models to the provider with Ollama→OpenAI translation.
+- [x] `POST /api/generate` (Ollama bridge) forwards cloud models to the provider.
+- [x] Streaming SSE passthrough for cloud models with `StreamProgressWatchdog` timeout protection.
+- [x] Usage tracking (token counts, live dashboard) for cloud requests via existing `_record_usage_from_payload` and `_update_live_request_usage`.
+- [x] `503 provider_unavailable` error when a provider is enabled but has no API key.
+- [x] `502` error mapping when a cloud provider request fails.
+- [x] Hot-reload: provider registry re-reads `settings.yaml` on every model resolution.
+- [x] Unit tests for `ProviderRegistry` (26 tests) and server-level cloud routing tests (6 tests).
+- [x] Documentation in `docs/LLM_ROUTER.md`.
+- [x] Populate `config/settings.yaml` with actual OpenRouter and NVIDIA model lists once API keys are provisioned.
+- [ ] Add admin endpoint to reload/reload-check the provider registry on demand.
+
+## 2026-06-28 Per-Key Cloud Credential Routing
+
+- [x] Add `app/proxy/cloud_keys.py` with `CloudCredentialStore` for per-key cloud credentials.
+- [x] Store credentials and key↔credential links in `config/cloud_keys.json`.
+- [x] `parse_guardian_route()` parses `guardian/{provider}/{model}` routes.
+- [x] `_forward_to_cloud_provider` resolves per-key credentials and rewrites model name to upstream model.
+- [x] `_resolve_or_reject_inference_model` accepts `guardian/` routes.
+- [x] `_is_cloud_or_guardian_route()` helper for both global and per-key cloud models.
+- [x] `/v1/models` includes per-key cloud routes for the requesting client.
+- [x] `GET/POST /api/keys` — generate and list Guardian API keys.
+- [x] `GET/POST/DELETE /api/cloud/credentials` — manage cloud credentials (masked API keys).
+- [x] `GET/POST/DELETE /api/cloud/links` — link/unlink credentials to Guardian keys.
+- [x] `GET /api/cloud/providers` — list configured providers and status.
+- [x] `GET /api/cloud/models` — list all cloud models available to the requesting client.
+- [x] Dashboard UI: API key generation panel, cloud credential management, key↔credential linking, available cloud models table.
+- [x] Unit tests for `CloudCredentialStore` (33 tests) covering lifecycle, model management, linking, per-key lookup, and persistence.
+- [x] Full test suite passes (463 tests).
+
 ## 2026-05-27 llama.cpp b1295 Runtime Integration
 
 - [x] Keep reasoning as the default for normal chat and agent model profiles.

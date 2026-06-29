@@ -16,6 +16,41 @@ proxy:
   target: http://localhost:11440
   vram_limit_mb: 27000
   stream_heartbeat_seconds: 15
+# === Cloud LLM Providers (LLM Router) ===
+# When a requested model matches a provider entry below, Guardian forwards
+# the request directly to that cloud API instead of the local llama-server.
+# Cloud models bypass the VRAM scheduler, model switch logic, and inference
+# queue — the cloud API handles its own rate limiting.
+#
+# API keys support ${ENV_VAR} expansion so secrets stay out of the repo.
+# Leave api_key empty (or unset the env var) to disable a provider at runtime.
+providers:
+  openrouter:
+    enabled: true
+    base_url: https://openrouter.ai/api/v1
+    api_key: ${OPENROUTER_API_KEY}
+    timeout_seconds: 600
+    models:
+      - anthropic/claude-3.5-sonnet
+      - openai/gpt-4o
+      - openai/gpt-4o-mini
+      - google/gemini-2.0-flash-exp
+      - meta-llama/llama-3.3-70b-instruct
+      - deepseek/deepseek-chat
+      - qwen/qwen-2.5-72b-instruct
+      - mistralai/mistral-large
+  nvidia:
+    enabled: true
+    base_url: https://integrate.api.nvidia.com/v1
+    api_key: ${NVIDIA_API_KEY}
+    timeout_seconds: 600
+    models:
+      - minimaxai/minimax-m3
+      - nvidia/llama-3.1-nemotron-70b-instruct
+      - nvidia/llama-3.1-nemotron-ultra-253b-v1
+      - deepseek-ai/deepseek-v4-pro
+      - nvidia/nemotron-3-nano-30b-a3b
+      - nvidia/nemotron-3-super-120b-a12b
 queue:
   max_concurrent: 1
   queue_timeout_seconds: 300  # advisory queue wait budget for clients/status, not an internal 429 drop timer
