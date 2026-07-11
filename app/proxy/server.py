@@ -14,7 +14,7 @@ import zlib
 from dataclasses import dataclass, field
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
-from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import yaml
 import httpx
@@ -30,6 +30,7 @@ from app.engine.manager import ModelManager, ModelLoadError
 from app.proxy.auth import build_request_auth_context, get_request_auth_context, set_request_auth_context, verify_api_key, generate_api_key, load_api_keys, _token_fingerprint
 from app.proxy.providers import CloudProvider, ProviderRegistry
 from app.proxy.cloud_keys import CloudCredentialStore, parse_guardian_route, mask_api_key
+from app.proxy.failover import FailoverRegistry, ProviderHealthTracker
 from app.proxy.usage import ApiUsageTracker
 from app.proxy.anthropic_bridge import (
     _format_sse_event,
@@ -102,6 +103,12 @@ provider_registry = ProviderRegistry()
 # (NVIDIA, OpenRouter) to individual Guardian API keys so each key can route
 # to its own cloud backend via guardian/{provider}/{model} routes.
 cloud_cred_store = CloudCredentialStore()
+
+# Cross-provider failover — lets a single logical model (e.g. minimax-m3) be
+# served by multiple cloud providers via guardian/failover/{group} routes,
+# automatically skipping a provider that is currently erroring/degraded.
+failover_registry = FailoverRegistry()
+failover_health = ProviderHealthTracker()
 
 # Configuration
 LLAMA_SERVER_URL = "http://127.0.0.1:11440"
@@ -3389,6 +3396,215 @@ def _cloud_provider_unavailable_error(provider: CloudProvider) -> HTTPException:
     )
 
 
+#: Upstream status codes worth retrying against the next failover candidate.
+#: 429 is deliberately excluded: Claude Code already retries 429s itself with
+#: its own exponential backoff (up to ~10 attempts), and a provider being
+#: rate-limited for a moment does not mean it is unhealthy — it usually
+#: clears up within those retries. Failing over on every 429 would burn
+#: OpenRouter quota/cost for a transient NVIDIA rate limit instead of just
+#: letting the client's own retry ride it out. A 429 is passed straight
+#: through to the client unmodified and does NOT count against the health
+#: tracker (see the ``status_code == 429`` special case at each call site).
+_RETRYABLE_STATUS_CODES = {408, 409, 425, 500, 502, 503, 504}
+
+#: Some providers (observed on NVIDIA NIM) report a degraded/unavailable
+#: backend as an HTTP 400 with a descriptive message instead of a 5xx, e.g.
+#: ``"Function id '...': DEGRADED function cannot be invoked"``. These
+#: substrings (checked case-insensitively against the error body) are treated
+#: as retryable even though the status code itself is not in
+#: :data:`_RETRYABLE_STATUS_CODES`.
+_DEGRADED_ERROR_MARKERS = (
+    "degraded function",
+    "function cannot be invoked",
+    "service is degraded",
+    "service unavailable",
+    "temporarily unavailable",
+)
+
+
+def _is_retryable_cloud_error(status_code: int, error_body_text: str) -> bool:
+    """Return True if a failover candidate's error is worth retrying on the next one.
+
+    429 never qualifies (see :data:`_RETRYABLE_STATUS_CODES`). Standard
+    retryable status codes (5xx/408/409/425) always qualify. A 400 also
+    qualifies when its body matches a known "provider is degraded" pattern —
+    other 400s (malformed request, bad schema) are left alone since they would
+    fail identically on every candidate.
+    """
+    if status_code == 429:
+        return False
+    if status_code in _RETRYABLE_STATUS_CODES:
+        return True
+    if status_code == 400 and error_body_text:
+        lowered = error_body_text.lower()
+        return any(marker in lowered for marker in _DEGRADED_ERROR_MARKERS)
+    return False
+
+
+def _guardian_debug_headers(
+    provider: CloudProvider,
+    upstream_model: str,
+    failover_group: Optional[str],
+) -> Dict[str, str]:
+    """Build response headers revealing which provider actually served a request.
+
+    Claude Code's own model badge is a static label set once at launch
+    (``ANTHROPIC_DEFAULT_SONNET_MODEL_NAME``) and never updates per-turn, so
+    it cannot show which failover candidate answered a given request. These
+    headers — plus the ``@provider`` suffix applied to the translated Anthropic
+    response's ``model`` field for failover routes — are the only per-request
+    signal of the winning provider; inspect them via ``claude --verbose``
+    network traces or Guardian's own logs (``journalctl -u llama-guardian.service
+    | grep 'Cloud route'``).
+    """
+    headers = {
+        "X-Guardian-Provider": provider.name,
+        "X-Guardian-Upstream-Model": upstream_model,
+    }
+    if failover_group:
+        headers["X-Guardian-Failover-Group"] = failover_group
+    return headers
+
+
+def _resolve_cloud_attempts(
+    model_name: str,
+    request: Request,
+    client_id: str,
+) -> Tuple[List[Tuple[CloudProvider, str]], Optional[str]]:
+    """Resolve the ordered list of ``(provider, upstream_model)`` attempts.
+
+    Returns ``(attempts, failover_group_name)``. *failover_group_name* is only
+    set for ``guardian/failover/{group}`` routes (used for logging); every
+    other route resolves to exactly one attempt.
+
+    Raises the same ``HTTPException``s the single-provider code used to raise
+    when a route, credential, or provider cannot be resolved.
+    """
+    guardian_route = parse_guardian_route(model_name)
+    if guardian_route is None:
+        # Global cloud model from settings.yaml providers config
+        provider = _cloud_provider_for_request(model_name)
+        if provider is None:
+            raise HTTPException(status_code=404, detail=f"Model '{model_name}' is not a cloud model")
+        if not provider.is_configured:
+            raise _cloud_provider_unavailable_error(provider)
+        return [(provider, model_name)], None
+
+    provider_name, model_path = guardian_route
+    auth_ctx = get_request_auth_context(request) or {}
+    key_fingerprint = auth_ctx.get("key_fingerprint") or client_id
+
+    if provider_name == "failover":
+        # guardian/failover/{group}: try each candidate in the group,
+        # health-ordered, until one succeeds.
+        group = failover_registry.get_group(model_path)
+        if group is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": "failover_group_not_found",
+                    "group": model_path,
+                    "message": f"No failover group named '{model_path}' is configured.",
+                },
+            )
+        ordered = failover_health.order_candidates(group.candidates)
+        attempts: List[Tuple[CloudProvider, str]] = []
+        for candidate in ordered:
+            cred = cloud_cred_store.get_credential_for_key(key_fingerprint, candidate.provider)
+            if cred is None:
+                continue
+            attempts.append((
+                CloudProvider(
+                    name=candidate.provider,
+                    base_url=_provider_base_url(candidate.provider),
+                    api_key=cred.api_key,
+                    models=[candidate.model],
+                ),
+                candidate.model,
+            ))
+        if not attempts:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "cloud_credential_not_linked",
+                    "reason": "no_credential_for_failover_group",
+                    "message": (
+                        f"No credential is linked to your Guardian API key for any "
+                        f"provider in failover group '{model_path}'."
+                    ),
+                    "group": model_path,
+                },
+            )
+        return attempts, model_path
+
+    # Per-key cloud route: guardian/{provider}/{model_path}
+    cred = cloud_cred_store.get_credential_for_key(key_fingerprint, provider_name)
+    if cred is None:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "cloud_credential_not_linked",
+                "reason": "no_credential_for_provider",
+                "message": (
+                    f"No {provider_name} credential is linked to your Guardian API key. "
+                    f"Link a credential via the Guardian admin API or dashboard."
+                ),
+                "provider": provider_name,
+                "requested_route": model_name,
+            },
+        )
+    provider = CloudProvider(
+        name=provider_name,
+        base_url=_provider_base_url(provider_name),
+        api_key=cred.api_key,
+        models=[model_path],
+    )
+    return [(provider, model_path)], None
+
+
+def _prepare_cloud_candidate_request(
+    provider: CloudProvider,
+    upstream_model: str,
+    path: str,
+    base_json_body: Dict[str, Any],
+) -> Tuple[str, Dict[str, Any], bytes, bool]:
+    """Build the request body/path for one failover candidate.
+
+    Rewrites the ``model`` field to *upstream_model*, applies the Anthropic ↔
+    OpenAI bridge translation when the candidate provider needs it, and fills
+    in any per-model default sampling params the client did not already
+    specify.
+
+    Returns ``(effective_path, json_body, body_bytes, needs_translation)``.
+    """
+    candidate_json_body = {**base_json_body, "model": upstream_model}
+
+    # When the client sends a /v1/messages (Anthropic) request but the target
+    # provider only speaks OpenAI format (e.g. NVIDIA NIM), translate the
+    # request transparently. OpenRouter supports /v1/messages natively, so
+    # translation is skipped for that provider.
+    needs_translation = provider_needs_anthropic_translation(provider.name, path)
+    effective_path = path
+    if needs_translation:
+        candidate_json_body = translate_anthropic_request_to_openai(candidate_json_body)
+        effective_path = "chat/completions"
+
+    # Some providers (NVIDIA NIM) recommend specific sampling defaults per
+    # model (e.g. temperature/top_p/max_tokens/seed). These are configured in
+    # cloud_keys.json's top-level "model_defaults" map and only fill in
+    # fields the client did not already specify — an explicit value from the
+    # client (Claude Code, etc.) always wins.
+    model_defaults = cloud_cred_store.get_model_defaults(upstream_model)
+    if model_defaults:
+        missing = {k: v for k, v in model_defaults.items() if k not in candidate_json_body}
+        if missing:
+            candidate_json_body = {**candidate_json_body, **missing}
+            logger.info("☁️  Applied model defaults for '%s': %s", upstream_model, missing)
+
+    candidate_body = json.dumps(candidate_json_body).encode("utf-8")
+    return effective_path, candidate_json_body, candidate_body, needs_translation
+
+
 async def _forward_to_cloud_provider(
     path: str,
     body: bytes,
@@ -3404,285 +3620,317 @@ async def _forward_to_cloud_provider(
     Streaming responses are proxied in real-time so SSE tokens reach the client
     without buffering.
 
-    Supports two routing modes:
+    Supports three routing modes:
     - **Global cloud models** (e.g. ``openai/gpt-4o``): routed via the
       ``ProviderRegistry`` using the provider's global API key from settings.yaml.
     - **Per-key cloud routes** (e.g. ``guardian/nvidia/minimax/minimax-m3``):
       routed via the ``CloudCredentialStore`` using the credential linked to
-      the requesting client's Guardian API key.  The upstream model name is
+      the requesting client's Guardian API key. The upstream model name is
       extracted from the route prefix.
+    - **Failover groups** (``guardian/failover/{group}``): tries each provider
+      candidate configured for *group* in health-ordered priority, skipping a
+      candidate that is currently tripped (see :mod:`app.proxy.failover`) and
+      falling through to the next one on a connection failure or retryable
+      upstream error (429/5xx). A successful response resets that candidate's
+      health so Guardian prefers it again once it recovers.
     """
-    # ── Determine provider, API key, and upstream model name ────────
-    guardian_route = parse_guardian_route(model_name)
-    if guardian_route is not None:
-        # Per-key cloud route: guardian/{provider}/{model_path}
-        provider_name, upstream_model = guardian_route
-
-        # Look up the linked credential for this client
-        auth_ctx = get_request_auth_context(request) or {}
-        key_fingerprint = auth_ctx.get("key_fingerprint") or client_id
-        cred = cloud_cred_store.get_credential_for_key(key_fingerprint, provider_name)
-        if cred is None:
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "error": "cloud_credential_not_linked",
-                    "reason": "no_credential_for_provider",
-                    "message": (
-                        f"No {provider_name} credential is linked to your Guardian API key. "
-                        f"Link a credential via the Guardian admin API or dashboard."
-                    ),
-                    "provider": provider_name,
-                    "requested_route": model_name,
-                },
-            )
-
-        # Build a temporary CloudProvider for this credential
-        provider = CloudProvider(
-            name=provider_name,
-            base_url=_provider_base_url(provider_name),
-            api_key=cred.api_key,
-            models=[upstream_model],
-        )
-        # Rewrite the model field in the request body to the upstream model name
-        json_body = {**json_body, "model": upstream_model}
-        body = json.dumps(json_body).encode("utf-8")
-        effective_model_name = model_name  # Keep guardian/... for logging/usage
-    else:
-        # Global cloud model from settings.yaml providers config
-        provider = _cloud_provider_for_request(model_name)
-        if provider is None:
-            raise HTTPException(status_code=404, detail=f"Model '{model_name}' is not a cloud model")
-        if not provider.is_configured:
-            raise _cloud_provider_unavailable_error(provider)
-        effective_model_name = model_name
-
-    # ── Anthropic ↔ OpenAI bridge ──────────────────────────────────
-    # When the client sends a /v1/messages (Anthropic) request but the target
-    # provider only speaks OpenAI format (e.g. NVIDIA NIM), translate the
-    # request and response transparently. OpenRouter supports /v1/messages
-    # natively, so translation is skipped for that provider.
-    needs_translation = provider_needs_anthropic_translation(provider.name, path)
-    effective_path = path
-    if needs_translation:
-        logger.info(
-            "🌉 Anthropic→OpenAI bridge: translating /v1/messages for provider '%s'",
-            provider.name,
-        )
-        json_body = translate_anthropic_request_to_openai(json_body)
-        effective_path = "chat/completions"
-        body = json.dumps(json_body).encode("utf-8")
+    attempts, failover_group = _resolve_cloud_attempts(model_name, request, client_id)
 
     is_stream = bool(json_body.get("stream", False))
-    _set_request_usage_metadata(request, model=effective_model_name, streamed=is_stream)
+    _set_request_usage_metadata(request, model=model_name, streamed=is_stream)
     _start_live_request_usage(request)
 
-    forward_headers = ProviderRegistry.build_forward_headers(provider)
-    forward_url = ProviderRegistry.build_forward_url(provider, effective_path)
-    timeout = httpx.Timeout(provider.timeout_seconds, connect=15.0)
-
-    logger.info(
-        "☁️  Cloud route: client '%s' → %s /v1/%s (model: %s, stream: %s)",
-        client_id,
-        provider.name,
-        path,
-        effective_model_name,
-        is_stream,
-    )
-
-    if is_stream:
-        client = httpx.AsyncClient(timeout=httpx.Timeout(provider.timeout_seconds, connect=15.0))
-        req = client.build_request(
-            "POST",
-            forward_url,
-            content=body,
-            headers=forward_headers,
+    for attempt_index, (provider, upstream_model) in enumerate(attempts):
+        is_last_attempt = attempt_index == len(attempts) - 1
+        effective_path, candidate_json_body, candidate_body, needs_translation = (
+            _prepare_cloud_candidate_request(provider, upstream_model, path, json_body)
         )
-        try:
-            resp = await client.send(req, stream=True)
-        except Exception as e:
-            await client.aclose()
-            _finish_live_request_usage(request, status_code=502, response_bytes=0)
-            logger.error("☁️  Cloud provider '%s' request failed: %s", provider.name, e)
-            raise HTTPException(status_code=502, detail=f"Cloud provider request failed: {e}")
 
-        # ── Error translation for Anthropic clients ───────────────────
-        # If the upstream provider returned an error (non-SSE body), translate
-        # it to Anthropic error format instead of trying to stream it.
-        if resp.status_code >= 400:
-            body_bytes = await resp.aread()
-            await resp.aclose()
-            await client.aclose()
-            _finish_live_request_usage(request, status_code=resp.status_code, response_bytes=len(body_bytes))
-            if needs_translation:
-                try:
-                    error_payload = json.loads(body_bytes)
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    error_payload = body_bytes.decode("utf-8", errors="replace")
-                anthropic_error = translate_openai_error_to_anthropic(resp.status_code, error_payload)
-                logger.warning(
-                    "🌉 Anthropic bridge: translated %s error from %s: %s",
-                    resp.status_code,
-                    provider.name,
-                    anthropic_error["error"]["message"][:200],
-                )
-                return Response(
-                    content=json.dumps(anthropic_error).encode("utf-8"),
-                    status_code=resp.status_code,
-                    headers={"Content-Type": "application/json"},
-                )
-            return Response(
-                content=body_bytes,
-                status_code=resp.status_code,
-                headers=dict(resp.headers),
+        if needs_translation:
+            logger.info(
+                "🌉 Anthropic→OpenAI bridge: translating /v1/messages for provider '%s'",
+                provider.name,
             )
 
-        usage_totals = {"prompt_tokens": 0, "completion_tokens": 0}
+        forward_headers = ProviderRegistry.build_forward_headers(provider)
+        forward_url = ProviderRegistry.build_forward_url(provider, effective_path)
+        timeout = httpx.Timeout(provider.timeout_seconds, connect=15.0)
 
-        async def _read_sse_lines():
-            """Yield raw SSE lines from the upstream response with watchdog."""
-            watchdog = StreamProgressWatchdog(provider.timeout_seconds)
-            async for line in _iter_sse_lines_with_watchdog(
-                resp,
-                watchdog,
-                request_id=str(uuid.uuid4()),
-                route=f"/v1/{path}",
-                client_id=client_id,
-                model_name=effective_model_name,
-            ):
-                yield line
+        if failover_group is not None:
+            logger.info(
+                "🔀 Failover group '%s': attempt %d/%d via '%s'",
+                failover_group,
+                attempt_index + 1,
+                len(attempts),
+                provider.name,
+            )
+        logger.info(
+            "☁️  Cloud route: client '%s' → %s /v1/%s (model: %s, stream: %s)",
+            client_id,
+            provider.name,
+            path,
+            model_name,
+            is_stream,
+        )
 
-        async def cloud_stream():
+        if is_stream:
+            client = httpx.AsyncClient(timeout=timeout)
+            req = client.build_request(
+                "POST",
+                forward_url,
+                content=candidate_body,
+                headers=forward_headers,
+            )
             try:
-                if needs_translation:
-                    # ── Anthropic streaming translation ───────────────
-                    # Translate OpenAI SSE chunks to Anthropic SSE events
-                    async for event_line in translate_openai_stream_to_anthropic(
-                        _read_sse_lines(),
-                        effective_model_name,
-                        request_stop_sequences=json_body.get("stop_sequences") if needs_translation else None,
-                    ):
-                        # Extract usage from the translated events
-                        if "message_delta" in event_line:
-                            try:
-                                # Parse the data line to get output_tokens
-                                for part in event_line.split("\n"):
-                                    if part.startswith("data: "):
-                                        data = json.loads(part[6:])
-                                        if data.get("type") == "message_delta":
-                                            usage_totals["completion_tokens"] = max(
-                                                usage_totals["completion_tokens"],
-                                                data.get("usage", {}).get("output_tokens", 0),
-                                            )
-                            except (json.JSONDecodeError, TypeError):
-                                pass
-                        encoded_line = event_line.encode("utf-8")
-                        _update_live_request_usage(
-                            request,
-                            response_bytes_delta=len(encoded_line),
-                        )
-                        yield encoded_line
-                else:
-                    # ── Pass-through (no translation needed) ──────────
-                    async for line in _read_sse_lines():
-                        if line.startswith("data: "):
-                            try:
-                                data = json.loads(line[6:])
-                                usage = data.get("usage") or {}
-                                if isinstance(usage, dict):
-                                    usage_totals["prompt_tokens"] = max(
-                                        usage_totals["prompt_tokens"],
-                                        _coerce_usage_int(usage.get("prompt_tokens", usage.get("input_tokens", 0))),
-                                    )
-                                    usage_totals["completion_tokens"] = max(
-                                        usage_totals["completion_tokens"],
-                                        _coerce_usage_int(
-                                            usage.get("completion_tokens", usage.get("output_tokens", 0))
-                                        ),
-                                    )
-                            except (TypeError, ValueError, json.JSONDecodeError):
-                                pass
-                        encoded_line = (line + "\n").encode("utf-8")
-                        _update_live_request_usage(
-                            request,
-                            response_bytes_delta=len(encoded_line),
-                        )
-                        yield encoded_line
-            except (asyncio.CancelledError, _GuardianRequestCancelled):
-                pass
-            finally:
+                resp = await client.send(req, stream=True)
+            except Exception as e:
+                await client.aclose()
+                failover_health.record_failure(provider.name, upstream_model)
+                logger.error(
+                    "☁️  Cloud provider '%s' request failed (attempt %d/%d): %s",
+                    provider.name, attempt_index + 1, len(attempts), e,
+                )
+                if not is_last_attempt:
+                    continue
+                _finish_live_request_usage(request, status_code=502, response_bytes=0)
+                raise HTTPException(status_code=502, detail=f"Cloud provider request failed: {e}")
+
+            # ── Error translation for Anthropic clients ───────────────────
+            # If the upstream provider returned an error (non-SSE body), translate
+            # it to Anthropic error format instead of trying to stream it.
+            if resp.status_code >= 400:
+                body_bytes = await resp.aread()
                 await resp.aclose()
                 await client.aclose()
-                _record_request_token_usage(
-                    client_id,
-                    f"/v1/{path}",
-                    effective_model_name,
-                    request=request,
-                    prompt_tokens=usage_totals["prompt_tokens"],
-                    completion_tokens=usage_totals["completion_tokens"],
-                )
-                _finish_live_request_usage(
-                    request,
-                    status_code=499 if False else resp.status_code,
+                if resp.status_code != 429:
+                    # 429 (rate limited) does not count against a provider's
+                    # health — Claude Code already retries these itself and
+                    # the provider is usually fine, just busy.
+                    failover_health.record_failure(provider.name, upstream_model)
+                if _is_retryable_cloud_error(resp.status_code, body_bytes.decode("utf-8", errors="replace")) and not is_last_attempt:
+                    logger.warning(
+                        "☁️  Cloud provider '%s' returned %s (attempt %d/%d); trying next candidate",
+                        provider.name, resp.status_code, attempt_index + 1, len(attempts),
+                    )
+                    continue
+                _finish_live_request_usage(request, status_code=resp.status_code, response_bytes=len(body_bytes))
+                if needs_translation:
+                    try:
+                        error_payload = json.loads(body_bytes)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        error_payload = body_bytes.decode("utf-8", errors="replace")
+                    anthropic_error = translate_openai_error_to_anthropic(resp.status_code, error_payload)
+                    logger.warning(
+                        "🌉 Anthropic bridge: translated %s error from %s: %s",
+                        resp.status_code,
+                        provider.name,
+                        anthropic_error["error"]["message"][:200],
+                    )
+                    return Response(
+                        content=json.dumps(anthropic_error).encode("utf-8"),
+                        status_code=resp.status_code,
+                        headers={"Content-Type": "application/json"},
+                    )
+                return Response(
+                    content=body_bytes,
+                    status_code=resp.status_code,
+                    headers={**dict(resp.headers), **_guardian_debug_headers(provider, upstream_model, failover_group)},
                 )
 
-        return StreamingResponse(
-            cloud_stream(),
-            status_code=resp.status_code,
-            media_type="text/event-stream",
-            headers={
+            # Success — this candidate wins. Bind the winning json_body and
+            # fall through to the streaming response construction below.
+            failover_health.record_success(provider.name, upstream_model)
+            json_body = candidate_json_body
+            break
+
+        # Non-streaming
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            try:
+                resp = await client.post(
+                    forward_url,
+                    content=candidate_body,
+                    headers=forward_headers,
+                )
+            except Exception as e:
+                failover_health.record_failure(provider.name, upstream_model)
+                logger.error(
+                    "☁️  Cloud provider '%s' request failed (attempt %d/%d): %s",
+                    provider.name, attempt_index + 1, len(attempts), e,
+                )
+                if not is_last_attempt:
+                    continue
+                _finish_live_request_usage(request, status_code=502, response_bytes=0)
+                raise HTTPException(status_code=502, detail=f"Cloud provider request failed: {e}")
+
+            if (
+                resp.status_code >= 400
+                and _is_retryable_cloud_error(resp.status_code, resp.text)
+                and not is_last_attempt
+            ):
+                failover_health.record_failure(provider.name, upstream_model)
+                logger.warning(
+                    "☁️  Cloud provider '%s' returned %s (attempt %d/%d); trying next candidate",
+                    provider.name, resp.status_code, attempt_index + 1, len(attempts),
+                )
+                continue
+
+            if resp.status_code < 400:
+                failover_health.record_success(provider.name, upstream_model)
+            elif resp.status_code != 429:
+                # 429 (rate limited) does not count against a provider's health
+                # — Claude Code already retries these itself and the provider is
+                # usually fine, just busy.
+                failover_health.record_failure(provider.name, upstream_model)
+
+            # Record token usage from response payload
+            try:
+                payload = resp.json()
+            except (TypeError, ValueError, json.JSONDecodeError):
+                payload = None
+            _record_usage_from_payload(client_id, f"/v1/{path}", model_name, payload, request=request)
+
+            debug_headers = _guardian_debug_headers(provider, upstream_model, failover_group)
+            # Suffix the client-visible model field with the winning provider on
+            # failover routes only, so an ambiguous "which provider answered?"
+            # is resolvable from the response body itself.
+            response_model_name = f"{model_name}@{provider.name}" if failover_group else model_name
+
+            # ── Anthropic response translation (non-streaming) ───────────
+            if needs_translation and payload and isinstance(payload, dict):
+                # Translate errors first
+                if resp.status_code >= 400:
+                    anthropic_error = translate_openai_error_to_anthropic(resp.status_code, payload)
+                    return Response(
+                        content=json.dumps(anthropic_error).encode("utf-8"),
+                        status_code=resp.status_code,
+                        headers={"Content-Type": "application/json", **debug_headers},
+                    )
+                anthropic_response = translate_openai_response_to_anthropic(
+                    payload,
+                    response_model_name,
+                    request_stop_sequences=candidate_json_body.get("stop_sequences"),
+                )
+                translated_content = json.dumps(anthropic_response).encode("utf-8")
+                return Response(
+                    content=translated_content,
+                    status_code=resp.status_code,
+                    headers={"Content-Type": "application/json", **debug_headers},
+                )
+
+            return Response(
+                content=resp.content,
+                status_code=resp.status_code,
+                headers={**dict(resp.headers), **debug_headers},
+            )
+
+    # ── Streaming response construction ─────────────────────────────────
+    # Only reached after a successful `break` in the streaming branch above —
+    # the non-streaming branch always returns from within the loop.
+    debug_headers = _guardian_debug_headers(provider, upstream_model, failover_group)
+    # Suffix the client-visible model field with the winning provider on
+    # failover routes only (see _guardian_debug_headers docstring).
+    response_model_name = f"{model_name}@{provider.name}" if failover_group else model_name
+    usage_totals = {"prompt_tokens": 0, "completion_tokens": 0}
+
+    async def _read_sse_lines():
+        """Yield raw SSE lines from the upstream response with watchdog."""
+        watchdog = StreamProgressWatchdog(provider.timeout_seconds)
+        async for line in _iter_sse_lines_with_watchdog(
+            resp,
+            watchdog,
+            request_id=str(uuid.uuid4()),
+            route=f"/v1/{path}",
+            client_id=client_id,
+            model_name=model_name,
+        ):
+            yield line
+
+    async def cloud_stream():
+        try:
+            if needs_translation:
+                # ── Anthropic streaming translation ───────────────
+                # Translate OpenAI SSE chunks to Anthropic SSE events
+                async for event_line in translate_openai_stream_to_anthropic(
+                    _read_sse_lines(),
+                    response_model_name,
+                    request_stop_sequences=json_body.get("stop_sequences") if needs_translation else None,
+                ):
+                    # Extract usage from the translated events
+                    if "message_delta" in event_line:
+                        try:
+                            # Parse the data line to get output_tokens
+                            for part in event_line.split("\n"):
+                                if part.startswith("data: "):
+                                    data = json.loads(part[6:])
+                                    if data.get("type") == "message_delta":
+                                        usage_totals["completion_tokens"] = max(
+                                            usage_totals["completion_tokens"],
+                                            data.get("usage", {}).get("output_tokens", 0),
+                                        )
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                    encoded_line = event_line.encode("utf-8")
+                    _update_live_request_usage(
+                        request,
+                        response_bytes_delta=len(encoded_line),
+                    )
+                    yield encoded_line
+            else:
+                # ── Pass-through (no translation needed) ──────────
+                async for line in _read_sse_lines():
+                    if line.startswith("data: "):
+                        try:
+                            data = json.loads(line[6:])
+                            usage = data.get("usage") or {}
+                            if isinstance(usage, dict):
+                                usage_totals["prompt_tokens"] = max(
+                                    usage_totals["prompt_tokens"],
+                                    _coerce_usage_int(usage.get("prompt_tokens", usage.get("input_tokens", 0))),
+                                )
+                                usage_totals["completion_tokens"] = max(
+                                    usage_totals["completion_tokens"],
+                                    _coerce_usage_int(
+                                        usage.get("completion_tokens", usage.get("output_tokens", 0))
+                                    ),
+                                )
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            pass
+                    encoded_line = (line + "\n").encode("utf-8")
+                    _update_live_request_usage(
+                        request,
+                        response_bytes_delta=len(encoded_line),
+                    )
+                    yield encoded_line
+        except (asyncio.CancelledError, _GuardianRequestCancelled):
+            pass
+        finally:
+            await resp.aclose()
+            await client.aclose()
+            _record_request_token_usage(
+                client_id,
+                f"/v1/{path}",
+                model_name,
+                request=request,
+                prompt_tokens=usage_totals["prompt_tokens"],
+                completion_tokens=usage_totals["completion_tokens"],
+            )
+            _finish_live_request_usage(
+                request,
+                status_code=resp.status_code,
+            )
+
+    return StreamingResponse(
+        cloud_stream(),
+        status_code=resp.status_code,
+        media_type="text/event-stream",
+        headers={
+            **{
                 k: v for k, v in resp.headers.items()
                 if k.lower() not in ("transfer-encoding", "content-length")
             },
-        )
-
-    # Non-streaming
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        try:
-            resp = await client.post(
-                forward_url,
-                content=body,
-                headers=forward_headers,
-            )
-        except Exception as e:
-            _finish_live_request_usage(request, status_code=502, response_bytes=0)
-            logger.error("☁️  Cloud provider '%s' request failed: %s", provider.name, e)
-            raise HTTPException(status_code=502, detail=f"Cloud provider request failed: {e}")
-
-        # Record token usage from response payload
-        try:
-            payload = resp.json()
-        except (TypeError, ValueError, json.JSONDecodeError):
-            payload = None
-        _record_usage_from_payload(client_id, f"/v1/{path}", effective_model_name, payload, request=request)
-
-        # ── Anthropic response translation (non-streaming) ───────────
-        if needs_translation and payload and isinstance(payload, dict):
-            # Translate errors first
-            if resp.status_code >= 400:
-                anthropic_error = translate_openai_error_to_anthropic(resp.status_code, payload)
-                return Response(
-                    content=json.dumps(anthropic_error).encode("utf-8"),
-                    status_code=resp.status_code,
-                    headers={"Content-Type": "application/json"},
-                )
-            anthropic_response = translate_openai_response_to_anthropic(
-                payload,
-                effective_model_name,
-                request_stop_sequences=json_body.get("stop_sequences"),
-            )
-            translated_content = json.dumps(anthropic_response).encode("utf-8")
-            return Response(
-                content=translated_content,
-                status_code=resp.status_code,
-                headers={"Content-Type": "application/json"},
-            )
-
-        return Response(
-            content=resp.content,
-            status_code=resp.status_code,
-            headers=dict(resp.headers),
-        )
+            **debug_headers,
+        },
+    )
 
 
 @app.post("/v1/{path:path}")
