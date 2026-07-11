@@ -231,14 +231,18 @@ class CloudCredentialStore:
 
         creds = data.get("credentials", {})
         links = data.get("links", {})
+        model_defaults = data.get("model_defaults", {})
         if not isinstance(creds, dict):
             logger.warning("⚠️  'credentials' in %s is not a dict; ignoring", self._path)
             creds = {}
         if not isinstance(links, dict):
             logger.warning("⚠️  'links' in %s is not a dict; ignoring", self._path)
             links = {}
+        if not isinstance(model_defaults, dict):
+            logger.warning("⚠️  'model_defaults' in %s is not a dict; ignoring", self._path)
+            model_defaults = {}
 
-        self._data: Dict[str, Any] = {"credentials": creds, "links": links}
+        self._data: Dict[str, Any] = {"credentials": creds, "links": links, "model_defaults": model_defaults}
         logger.debug(
             "☁️  Loaded %d credential(s) and %d link(s) from %s",
             len(creds),
@@ -498,6 +502,22 @@ class CloudCredentialStore:
             )
             return None
         return CloudCredential.from_dict(cred_id, raw)
+
+    def get_model_defaults(self, upstream_model: str) -> Dict[str, Any]:
+        """Return the configured default sampling params for *upstream_model*.
+
+        These come from the top-level ``model_defaults`` map in
+        ``cloud_keys.json`` (keyed by the bare upstream model name, e.g.
+        ``"minimaxai/minimax-m3"`` or ``"z-ai/glm-5.2"``). Callers should only
+        fill in fields the client did not already specify — this store never
+        overrides an explicit client-provided value. Returns an empty dict
+        when no defaults are configured for the model.
+        """
+        model_defaults = self._data.get("model_defaults", {})
+        raw = model_defaults.get(upstream_model)
+        if not isinstance(raw, dict):
+            return {}
+        return dict(raw)
 
     def get_linked_models_for_key(
         self,

@@ -67,14 +67,18 @@ models:
     ngl: 40
     kv_type: q4_0
     tensor_split: "0.45,0.55"
-  Nemotron-3-Nano-30B-A3B:
-    path: /home/flip/models/Nemotron-3-Nano-30B-A3B-Q4_K_M.gguf
-    total_layers: 52
-    benchmark_context_limit: 1048576
+  Ornith-1.0-35B:
+    path: /home/flip/models/Ornith-1.0-35B-Q4_K_M.gguf
+    total_layers: 40
+    benchmark_context_limit: 262144
     context: 262144
     ngl: 99
     kv_type: q4_0
     tensor_split: "0.42,0.58"
+    mmproj: /home/flip/models/mmproj-Ornith-1.0-35B-bf16.gguf
+    vision_context: 262144
+    vision_ngl: 40
+    vision_tensor_split: "0.42,0.58"
   Qwen3-VL-32B-Gemini-Heretic-Uncensored-Thinking:
     path: /home/flip/models/Qwen3-VL-32B-Gemini-Heretic-Uncensored-Thinking.Q4_K_M.gguf
     total_layers: 64
@@ -218,7 +222,7 @@ aliases:
   qwen3.6-35b-uncensored-q8kv: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Q8KV"
   qwen3.6-35b-heretic-mtp: "Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved"
   qwen3.6-35b-mtp: "Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved"
-  nemotron: "Nemotron-3-Nano-30B-A3B"
+  ornith: "Ornith-1.0-35B"
   phi4: "Phi-4-reasoning-plus"
   ministral: "Ministral-3-14B-Reasoning-2512"
   gemma4: "Huihui-gemma-4-26B-A4B-it-abliterated-Q8KV"
