@@ -20,7 +20,7 @@ from app.proxy.server import app as proxy_app, state as proxy_state, get_gpu_met
 from app.proxy.auth import load_api_keys, generate_api_key, _token_fingerprint
 from app.proxy.cloud_keys import CloudCredentialStore, parse_guardian_route, mask_api_key
 from app.proxy.providers import ProviderRegistry
-from app.proxy.server import provider_registry, cloud_cred_store
+from app.proxy.server import provider_registry, cloud_cred_store, cloud_rate_limiter
 from app.scheduler.manager import SchedulerManager
 
 # Configure logging
@@ -115,6 +115,7 @@ async def get_stats():
         "cached_models": cached_models,
         "records": [],
         "api_usage": api_usage,
+        "cloud_rate_limits": cloud_rate_limiter.get_summary(),
     }
 
 

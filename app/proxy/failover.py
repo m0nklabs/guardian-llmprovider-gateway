@@ -56,26 +56,50 @@ logger = logging.getLogger("Guardian.Failover")
 FAILOVER_CONFIG_FILE: Path = Path(__file__).parent.parent.parent / "config" / "cloud_keys.json"
 
 #: Consecutive failures before a (provider, model) candidate is tripped.
+#: Overridden by settings.yaml ``failover_health.failure_threshold`` at startup.
 FAILURE_THRESHOLD = 3
 
 #: How long a tripped candidate is skipped before being retried (half-open).
+#: Overridden by settings.yaml ``failover_health.cooldown_seconds`` at startup.
 COOLDOWN_SECONDS = 60.0
+
+#: How long a 429-rate-limited candidate is skipped before being probed again.
+#: Overridden by settings.yaml ``failover_health.rate_limit_cooldown_seconds``.
+RATE_LIMIT_COOLDOWN_SECONDS = 60.0
 
 
 @dataclass(frozen=True)
 class FailoverCandidate:
-    """A single ``(provider, model)`` candidate within a failover group."""
+    """A single ``(provider, model)`` candidate within a failover group.
+
+    ``modalities`` declares which input types the upstream model supports
+    (e.g. ``("text", "image")`` for a vision-capable cloud model, or just
+    ``("text",)`` for a text-only model). Defaults to text-only for
+    backwards compatibility with existing configs that don't specify it.
+    """
 
     provider: str
     model: str
+    modalities: Tuple[str, ...] = ("text",)
 
 
 @dataclass(frozen=True)
 class FailoverGroup:
-    """An ordered list of interchangeable provider candidates for one logical model."""
+    """An ordered list of interchangeable provider candidates for one logical model.
+
+    When all candidates are text-only (no ``"image"`` in their ``modalities``)
+    and a request contains image inputs, Guardian transparently redirects to
+    ``image_fallback_model`` — a local vision-capable model — instead of
+    forwarding the image to a cloud model that cannot handle it.
+    """
 
     name: str
     candidates: List[FailoverCandidate] = field(default_factory=list)
+    image_fallback_model: Optional[str] = None
+
+    def has_image_capable_candidate(self) -> bool:
+        """Return True if any candidate declares image input support."""
+        return any("image" in c.modalities for c in self.candidates)
 
 
 class ProviderHealthTracker:
@@ -91,19 +115,23 @@ class ProviderHealthTracker:
         self,
         failure_threshold: int = FAILURE_THRESHOLD,
         cooldown_seconds: float = COOLDOWN_SECONDS,
+        rate_limit_cooldown_seconds: float = RATE_LIMIT_COOLDOWN_SECONDS,
     ) -> None:
         self._failure_threshold = failure_threshold
         self._cooldown_seconds = cooldown_seconds
+        self._rate_limit_cooldown_seconds = rate_limit_cooldown_seconds
         self._lock = Lock()
         self._consecutive_failures: Dict[Tuple[str, str], int] = {}
         self._tripped_until: Dict[Tuple[str, str], float] = {}
+        self._rate_limited_until: Dict[Tuple[str, str], float] = {}
 
     def record_success(self, provider: str, model: str) -> None:
-        """Reset failure state for *provider*/*model* after a successful request."""
+        """Reset all failure and rate-limit state for *provider*/*model*."""
         key = (provider, model)
         with self._lock:
             self._consecutive_failures.pop(key, None)
             self._tripped_until.pop(key, None)
+            self._rate_limited_until.pop(key, None)
 
     def record_failure(self, provider: str, model: str) -> None:
         """Record a failed request and trip the breaker past the threshold."""
@@ -136,11 +164,73 @@ class ProviderHealthTracker:
                 return False
             return True
 
+    # ── 429 rate-limit tracking (separate from circuit breaker) ──────────
+    # When a cloud provider returns HTTP 429 (Too Many Requests), it's not
+    # broken — it's just busy.  Instead of retrying within the same request
+    # (which blocks the caller), Guardian marks the provider as rate-limited
+    # for a short cooldown.  Subsequent requests skip the provider and fall
+    # through to the next candidate immediately, keeping latency low.  After
+    # the cooldown, one request acts as a half-open probe: if the provider
+    # has recovered, it becomes healthy again; if it's still 429, the
+    # cooldown resets.
+
+    def record_rate_limited(self, provider: str, model: str) -> None:
+        """Mark *provider*/*model* as rate-limited (HTTP 429).
+
+        The candidate is temporarily skipped by :meth:`order_candidates`,
+        allowing concurrent requests to fall through to the next candidate
+        without waiting.  After ``rate_limit_cooldown_seconds`` the provider
+        gets a half-open probe.
+        """
+        key = (provider, model)
+        with self._lock:
+            self._rate_limited_until[key] = time.time() + self._rate_limit_cooldown_seconds
+            logger.info(
+                "🟡 Failover: '%s/%s' rate-limited (429); skipping for %.0fs "
+                "— concurrent requests use next candidate",
+                provider,
+                model,
+                self._rate_limit_cooldown_seconds,
+            )
+
+    def is_rate_limited(self, provider: str, model: str) -> bool:
+        """Return True if *provider*/*model* is in 429 rate-limit cooldown."""
+        key = (provider, model)
+        with self._lock:
+            until = self._rate_limited_until.get(key)
+            if until is None:
+                return False
+            if time.time() >= until:
+                # Cooldown expired — allow a half-open probe.
+                self._rate_limited_until.pop(key, None)
+                return False
+            return True
+
+    def clear_rate_limit(self, provider: str, model: str) -> None:
+        """Clear 429 rate-limit state so a half-open probe can proceed."""
+        key = (provider, model)
+        with self._lock:
+            self._rate_limited_until.pop(key, None)
+
     def order_candidates(self, candidates: List[FailoverCandidate]) -> List[FailoverCandidate]:
-        """Return *candidates* healthy-first, preserving configured priority within each bucket."""
-        healthy = [c for c in candidates if not self.is_tripped(c.provider, c.model)]
-        tripped = [c for c in candidates if self.is_tripped(c.provider, c.model)]
-        return healthy + tripped
+        """Return *candidates* healthy-first, then rate-limited, then tripped.
+
+        Healthy candidates are tried first (in configured priority order).
+        Rate-limited candidates (429 cooldown) come next — they're skipped
+        normally but included so the failover loop can use them if they're
+        the only option.  Tripped candidates (circuit breaker) come last.
+        """
+        healthy: List[FailoverCandidate] = []
+        rate_limited: List[FailoverCandidate] = []
+        tripped: List[FailoverCandidate] = []
+        for c in candidates:
+            if self.is_tripped(c.provider, c.model):
+                tripped.append(c)
+            elif self.is_rate_limited(c.provider, c.model):
+                rate_limited.append(c)
+            else:
+                healthy.append(c)
+        return healthy + rate_limited + tripped
 
 
 class FailoverRegistry:
@@ -181,13 +271,35 @@ class FailoverRegistry:
             raw_candidates = raw_group.get("candidates")
             if not isinstance(raw_candidates, list):
                 continue
-            candidates = [
-                FailoverCandidate(provider=str(c["provider"]), model=str(c["model"]))
-                for c in raw_candidates
-                if isinstance(c, dict) and c.get("provider") and c.get("model")
-            ]
-            if candidates:
-                self._groups[str(group_name)] = FailoverGroup(name=str(group_name), candidates=candidates)
+            candidates: List[FailoverCandidate] = []
+            for c in raw_candidates:
+                if not isinstance(c, dict) or not c.get("provider") or not c.get("model"):
+                    continue
+                raw_mods = c.get("modalities")
+                if isinstance(raw_mods, list):
+                    modalities = tuple(str(m) for m in raw_mods)
+                else:
+                    modalities = ("text",)  # default: text-only (backwards compat)
+                candidates.append(FailoverCandidate(
+                    provider=str(c["provider"]),
+                    model=str(c["model"]),
+                    modalities=modalities,
+                ))
+            if not candidates:
+                continue
+            # Optional: local vision model to use when all candidates are
+            # text-only and the request contains image inputs.
+            raw_fallback = raw_group.get("image_fallback", {})
+            image_fallback_model = None
+            if isinstance(raw_fallback, dict):
+                m = str(raw_fallback.get("local_model", "")).strip()
+                if m:
+                    image_fallback_model = m
+            self._groups[str(group_name)] = FailoverGroup(
+                name=str(group_name),
+                candidates=candidates,
+                image_fallback_model=image_fallback_model,
+            )
 
         if self._groups:
             logger.info(

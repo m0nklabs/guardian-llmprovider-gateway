@@ -30,7 +30,8 @@ from app.engine.manager import ModelManager, ModelLoadError
 from app.proxy.auth import build_request_auth_context, get_request_auth_context, set_request_auth_context, verify_api_key, generate_api_key, load_api_keys, _token_fingerprint
 from app.proxy.providers import CloudProvider, ProviderRegistry
 from app.proxy.cloud_keys import CloudCredentialStore, parse_guardian_route, mask_api_key
-from app.proxy.failover import FailoverRegistry, ProviderHealthTracker
+from app.proxy.failover import FailoverRegistry, ProviderHealthTracker, FAILURE_THRESHOLD, COOLDOWN_SECONDS, RATE_LIMIT_COOLDOWN_SECONDS
+from app.proxy.ratelimit import RateLimitConfig, RateLimitRetryManager
 from app.proxy.usage import ApiUsageTracker
 from app.proxy.anthropic_bridge import (
     _format_sse_event,
@@ -65,6 +66,7 @@ def load_config() -> dict:
             "stream_heartbeat_seconds": 15,
             "stream_close_timeout_seconds": 5,
         },
+        "cloud_retry": RateLimitConfig().to_dict(),
         "timeouts": {
             "tiers": {
                 "tier_70b": {"min_size_mb": 40000, "timeout_seconds": 900},
@@ -84,8 +86,12 @@ def load_config() -> dict:
             # Merge with defaults (file config takes precedence)
             if "proxy" in file_config:
                 default_config["proxy"].update(file_config["proxy"])
+            if "cloud_retry" in file_config:
+                default_config["cloud_retry"].update(file_config["cloud_retry"])
             if "timeouts" in file_config:
                 default_config["timeouts"].update(file_config["timeouts"])
+            if "failover_health" in file_config:
+                default_config["failover_health"] = file_config["failover_health"]
             return default_config
     except Exception as e:
         logging.warning(f"Failed to load config from {config_path}: {e}. Using defaults.")
@@ -108,7 +114,15 @@ cloud_cred_store = CloudCredentialStore()
 # served by multiple cloud providers via guardian/failover/{group} routes,
 # automatically skipping a provider that is currently erroring/degraded.
 failover_registry = FailoverRegistry()
-failover_health = ProviderHealthTracker()
+_failover_health_cfg = CONFIG.get("failover_health", {}) or {}
+failover_health = ProviderHealthTracker(
+    failure_threshold=int(_failover_health_cfg.get("failure_threshold", FAILURE_THRESHOLD)),
+    cooldown_seconds=float(_failover_health_cfg.get("cooldown_seconds", COOLDOWN_SECONDS)),
+    rate_limit_cooldown_seconds=float(_failover_health_cfg.get("rate_limit_cooldown_seconds", RATE_LIMIT_COOLDOWN_SECONDS)),
+)
+cloud_rate_limiter = RateLimitRetryManager(
+    RateLimitConfig.from_mapping(CONFIG.get("cloud_retry", {}))
+)
 
 # Configuration
 LLAMA_SERVER_URL = "http://127.0.0.1:11440"
@@ -1866,6 +1880,15 @@ def _get_queue_owner_id(request: Request, client_id: Optional[str]) -> Optional[
     return None
 
 
+def _get_cloud_key_fingerprint(request: Request, client_id: Optional[str]) -> str:
+    """Return the stable Guardian-key identity used for cloud rate limiting."""
+    auth_context = get_request_auth_context(request) or {}
+    fingerprint = auth_context.get("key_fingerprint")
+    if isinstance(fingerprint, str) and fingerprint.strip():
+        return fingerprint.strip()
+    return str(client_id or "unknown-client")
+
+
 def _get_live_usage_request_id(request: Request) -> Optional[str]:
     """Return the dashboard request id bound to the current FastAPI request."""
     state_obj = getattr(request, "state", None)
@@ -2837,12 +2860,49 @@ async def list_models(request: Request, client_id: str = Depends(verify_api_key)
     except Exception as e:
         logger.error(f"Failed to list per-key cloud models: {e}")
 
+    # Append failover groups as synthetic model entries (guardian/failover/{group}).
+    # A failover group spans multiple providers; surface it so discovery clients
+    # (Goose, Open WebUI, etc.) can offer cross-provider failover routes without
+    # the caller needing to know the underlying (provider, model) candidates.
+    try:
+        for group_name in failover_registry._groups.keys():
+            models_list.append({
+                "id": f"guardian/failover/{group_name}",
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "failover",
+                "permission": [],
+                "served_by": "failover",
+                "provider": "failover",
+                "failover_group": group_name,
+            })
+    except Exception as e:
+        logger.error(f"Failed to list failover groups: {e}")
+
     return {"object": "list", "data": models_list}
 
 
 @app.get("/v1/models/{model_id:path}")
 async def get_model_metadata(model_id: str, client_id: str = Depends(verify_api_key)):
     """Return metadata for a configured canonical model, public alias, or cloud model."""
+    # Failover groups surface as guardian/failover/{group}; resolve them here so
+    # /v1/models/<id> returns a stable shape rather than 404'ing on the discovery
+    # entry the list endpoint just advertised.
+    if model_id.startswith("guardian/failover/"):
+        group_name = model_id[len("guardian/failover/"):]
+        if failover_registry.get_group(group_name) is not None:
+            return {
+                "id": model_id,
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": "failover",
+                "permission": [],
+                "served_by": "failover",
+                "provider": "failover",
+                "failover_group": group_name,
+            }
+        raise HTTPException(status_code=404, detail=f"Failover group '{group_name}' not found")
+
     # Cloud-provider models first (they may contain slashes like "openai/gpt-4o")
     if provider_registry.is_cloud_model(model_id):
         entry = provider_registry.build_model_metadata_entry(model_id)
@@ -3039,6 +3099,13 @@ async def remove_model_from_credential(cred_id: str, model_name: str, client_id:
 async def list_cloud_links(client_id: str = Depends(verify_api_key)):
     """List all Guardian key → cloud credential links."""
     return {"links": cloud_cred_store.list_links()}
+
+
+@app.get("/api/cloud/ratelimit-stats")
+async def get_cloud_ratelimit_stats(request: Request, client_id: str = Depends(verify_api_key)):
+    """Return current per-key cloud 429 counters and provider hints."""
+    key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
+    return cloud_rate_limiter.get_stats(key_fingerprint)
 
 
 @app.post("/api/cloud/links")
@@ -3397,14 +3464,10 @@ def _cloud_provider_unavailable_error(provider: CloudProvider) -> HTTPException:
 
 
 #: Upstream status codes worth retrying against the next failover candidate.
-#: 429 is deliberately excluded: Claude Code already retries 429s itself with
-#: its own exponential backoff (up to ~10 attempts), and a provider being
-#: rate-limited for a moment does not mean it is unhealthy — it usually
-#: clears up within those retries. Failing over on every 429 would burn
-#: OpenRouter quota/cost for a transient NVIDIA rate limit instead of just
-#: letting the client's own retry ride it out. A 429 is passed straight
-#: through to the client unmodified and does NOT count against the health
-#: tracker (see the ``status_code == 429`` special case at each call site).
+#: A 429 is handled first by the per-key retry manager. If that local hold
+#: budget is exhausted, the failover route may try its next candidate. A 429
+#: never counts against the provider health tracker because rate limiting does
+#: not by itself indicate a broken provider.
 _RETRYABLE_STATUS_CODES = {408, 409, 425, 500, 502, 503, 504}
 
 #: Some providers (observed on NVIDIA NIM) report a degraded/unavailable
@@ -3425,14 +3488,15 @@ _DEGRADED_ERROR_MARKERS = (
 def _is_retryable_cloud_error(status_code: int, error_body_text: str) -> bool:
     """Return True if a failover candidate's error is worth retrying on the next one.
 
-    429 never qualifies (see :data:`_RETRYABLE_STATUS_CODES`). Standard
-    retryable status codes (5xx/408/409/425) always qualify. A 400 also
-    qualifies when its body matches a known "provider is degraded" pattern —
-    other 400s (malformed request, bad schema) are left alone since they would
-    fail identically on every candidate.
+    A final 429 qualifies after the per-key retry manager has exhausted its
+    local hold budget, allowing a failover group to try its next provider.
+    Standard retryable status codes (5xx/408/409/425) always qualify. A 400
+    also qualifies when its body matches a known "provider is degraded"
+    pattern — other 400s (malformed request, bad schema) are left alone since
+    they would fail identically on every candidate.
     """
     if status_code == 429:
-        return False
+        return True
     if status_code in _RETRYABLE_STATUS_CODES:
         return True
     if status_code == 400 and error_body_text:
@@ -3562,6 +3626,35 @@ def _resolve_cloud_attempts(
     return [(provider, model_path)], None
 
 
+def _resolve_cloud_vision_fallback(model_name: str) -> Optional[str]:
+    """Check if a cloud route needs local vision fallback for image requests.
+
+    Returns the name of a local vision model to redirect to, or ``None`` when:
+    - *model_name* is not a ``guardian/failover/{group}`` route, or
+    - the failover group has at least one image-capable cloud candidate, or
+    - no ``image_fallback`` is configured for the group.
+
+    This lets Guardian transparently handle image inputs for text-only cloud
+    models (e.g. ``glm-5.2``) by routing them to a local VL model, while
+    image-capable cloud models (e.g. ``minimax-m3``) continue to use their
+    native cloud image support without intervention.
+    """
+    guardian_route = parse_guardian_route(model_name)
+    if guardian_route is None:
+        return None
+    provider_name, model_path = guardian_route
+    if provider_name != "failover":
+        return None
+    group = failover_registry.get_group(model_path)
+    if group is None:
+        return None
+    # If any candidate supports images natively, cloud handles it — no fallback.
+    if group.has_image_capable_candidate():
+        return None
+    # All candidates are text-only — use configured local fallback if available.
+    return group.image_fallback_model
+
+
 def _prepare_cloud_candidate_request(
     provider: CloudProvider,
     upstream_model: str,
@@ -3635,10 +3728,12 @@ async def _forward_to_cloud_provider(
       health so Guardian prefers it again once it recovers.
     """
     attempts, failover_group = _resolve_cloud_attempts(model_name, request, client_id)
+    cloud_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
 
     is_stream = bool(json_body.get("stream", False))
     _set_request_usage_metadata(request, model=model_name, streamed=is_stream)
     _start_live_request_usage(request)
+    stream_http_client: Optional[httpx.AsyncClient] = None
 
     for attempt_index, (provider, upstream_model) in enumerate(attempts):
         is_last_attempt = attempt_index == len(attempts) - 1
@@ -3674,17 +3769,43 @@ async def _forward_to_cloud_provider(
         )
 
         if is_stream:
-            client = httpx.AsyncClient(timeout=timeout)
-            req = client.build_request(
-                "POST",
-                forward_url,
-                content=candidate_body,
-                headers=forward_headers,
-            )
+            stream_client: Optional[httpx.AsyncClient] = None
+
+            async def send_stream_request() -> httpx.Response:
+                nonlocal stream_client
+                stream_client = httpx.AsyncClient(timeout=timeout)
+                req = stream_client.build_request(
+                    "POST",
+                    forward_url,
+                    content=candidate_body,
+                    headers=forward_headers,
+                )
+                return await stream_client.send(req, stream=True)
+
+            async def read_stream_rate_limit(response: httpx.Response) -> str:
+                nonlocal stream_client
+                try:
+                    body_bytes = await response.aread()
+                finally:
+                    try:
+                        await response.aclose()
+                    finally:
+                        if stream_client is not None:
+                            await stream_client.aclose()
+                            stream_client = None
+                return body_bytes.decode("utf-8", errors="replace")
+
             try:
-                resp = await client.send(req, stream=True)
+                resp = await cloud_rate_limiter.execute_with_retry(
+                    cloud_key_fingerprint,
+                    provider.name,
+                    send_stream_request,
+                    on_429=read_stream_rate_limit,
+                    retry_429=failover_group is None,
+                )
             except Exception as e:
-                await client.aclose()
+                if stream_client is not None:
+                    await stream_client.aclose()
                 failover_health.record_failure(provider.name, upstream_model)
                 logger.error(
                     "☁️  Cloud provider '%s' request failed (attempt %d/%d): %s",
@@ -3695,21 +3816,55 @@ async def _forward_to_cloud_provider(
                 _finish_live_request_usage(request, status_code=502, response_bytes=0)
                 raise HTTPException(status_code=502, detail=f"Cloud provider request failed: {e}")
 
+            # ── Failover 429 probe: wait and retry once before falling through ──
+            # When a failover candidate returns HTTP 429, the priority source
+            # (e.g. NVIDIA's free tier) gets one more chance after a 60s wait.
+            # Concurrent requests skip the rate-limited candidate and go
+            # directly to the next one (OR), keeping them responsive.
+            if (
+                getattr(resp, "status_code", 0) == 429
+                and failover_group is not None
+                and not is_last_attempt
+            ):
+                _probe_wait = failover_health._rate_limit_cooldown_seconds
+                logger.info(
+                    "⏳ Failover 429: '%s' rate-limited; waiting %.0fs before one retry...",
+                    provider.name, _probe_wait,
+                )
+                failover_health.record_rate_limited(provider.name, upstream_model)
+                await asyncio.sleep(_probe_wait)
+                failover_health.clear_rate_limit(provider.name, upstream_model)
+                resp = await cloud_rate_limiter.execute_with_retry(
+                    cloud_key_fingerprint,
+                    provider.name,
+                    send_stream_request,
+                    on_429=read_stream_rate_limit,
+                    retry_429=False,
+                )
+
+            stream_http_client = stream_client
+
             # ── Error translation for Anthropic clients ───────────────────
             # If the upstream provider returned an error (non-SSE body), translate
             # it to Anthropic error format instead of trying to stream it.
             if resp.status_code >= 400:
                 body_bytes = await resp.aread()
                 await resp.aclose()
-                await client.aclose()
+                if stream_http_client is not None:
+                    await stream_http_client.aclose()
                 if resp.status_code != 429:
                     # 429 (rate limited) does not count against a provider's
                     # health — Claude Code already retries these itself and
                     # the provider is usually fine, just busy.
                     failover_health.record_failure(provider.name, upstream_model)
+                else:
+                    # Mark provider as rate-limited so concurrent requests
+                    # skip it and fall through to the next candidate directly.
+                    failover_health.record_rate_limited(provider.name, upstream_model)
                 if _is_retryable_cloud_error(resp.status_code, body_bytes.decode("utf-8", errors="replace")) and not is_last_attempt:
                     logger.warning(
-                        "☁️  Cloud provider '%s' returned %s (attempt %d/%d); trying next candidate",
+                        "☁️  Cloud provider '%s' returned %s after local retry budget "
+                        "(attempt %d/%d); trying next candidate",
                         provider.name, resp.status_code, attempt_index + 1, len(attempts),
                     )
                     continue
@@ -3744,12 +3899,20 @@ async def _forward_to_cloud_provider(
             break
 
         # Non-streaming
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            try:
-                resp = await client.post(
+        async with httpx.AsyncClient(timeout=timeout) as non_stream_http_client:
+            async def send_non_stream_request() -> httpx.Response:
+                return await non_stream_http_client.post(
                     forward_url,
                     content=candidate_body,
                     headers=forward_headers,
+                )
+
+            try:
+                resp = await cloud_rate_limiter.execute_with_retry(
+                    cloud_key_fingerprint,
+                    provider.name,
+                    send_non_stream_request,
+                    retry_429=failover_group is None,
                 )
             except Exception as e:
                 failover_health.record_failure(provider.name, upstream_model)
@@ -3762,14 +3925,39 @@ async def _forward_to_cloud_provider(
                 _finish_live_request_usage(request, status_code=502, response_bytes=0)
                 raise HTTPException(status_code=502, detail=f"Cloud provider request failed: {e}")
 
+            # ── Failover 429 probe: wait and retry once before falling through ──
+            if (
+                getattr(resp, "status_code", 0) == 429
+                and failover_group is not None
+                and not is_last_attempt
+            ):
+                _probe_wait = failover_health._rate_limit_cooldown_seconds
+                logger.info(
+                    "⏳ Failover 429: '%s' rate-limited; waiting %.0fs before one retry...",
+                    provider.name, _probe_wait,
+                )
+                failover_health.record_rate_limited(provider.name, upstream_model)
+                await asyncio.sleep(_probe_wait)
+                failover_health.clear_rate_limit(provider.name, upstream_model)
+                resp = await cloud_rate_limiter.execute_with_retry(
+                    cloud_key_fingerprint,
+                    provider.name,
+                    send_non_stream_request,
+                    retry_429=False,
+                )
+
             if (
                 resp.status_code >= 400
                 and _is_retryable_cloud_error(resp.status_code, resp.text)
                 and not is_last_attempt
             ):
-                failover_health.record_failure(provider.name, upstream_model)
+                if resp.status_code != 429:
+                    failover_health.record_failure(provider.name, upstream_model)
+                else:
+                    failover_health.record_rate_limited(provider.name, upstream_model)
                 logger.warning(
-                    "☁️  Cloud provider '%s' returned %s (attempt %d/%d); trying next candidate",
+                    "☁️  Cloud provider '%s' returned %s after local retry budget "
+                    "(attempt %d/%d); trying next candidate",
                     provider.name, resp.status_code, attempt_index + 1, len(attempts),
                 )
                 continue
@@ -3822,6 +4010,11 @@ async def _forward_to_cloud_provider(
                 status_code=resp.status_code,
                 headers={**dict(resp.headers), **debug_headers},
             )
+
+    if stream_http_client is None:
+        _finish_live_request_usage(request, status_code=502, response_bytes=0)
+        raise HTTPException(status_code=502, detail="Cloud streaming client was not initialized")
+    stream_response_client = stream_http_client
 
     # ── Streaming response construction ─────────────────────────────────
     # Only reached after a successful `break` in the streaming branch above —
@@ -3905,7 +4098,7 @@ async def _forward_to_cloud_provider(
             pass
         finally:
             await resp.aclose()
-            await client.aclose()
+            await stream_response_client.aclose()
             _record_request_token_usage(
                 client_id,
                 f"/v1/{path}",
@@ -3989,21 +4182,56 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
     requested_model = _resolve_or_reject_inference_model(requested_model, current_model)
     json_body["model"] = requested_model
 
+    # ── Detect image inputs early (needed for cloud vision fallback + local path) ──
+    has_image_inputs = False
+    if path in ("chat/completions", "messages"):
+        has_image_inputs = _messages_contain_image_input(json_body.get("messages", []))
+
     # ── Cloud LLM router: forward to OpenRouter / NVIDIA / … ─────────
     # Cloud models bypass the VRAM scheduler, model switch logic, and inference
     # queue entirely — the cloud API handles its own rate limiting.
+    #
+    # When a cloud failover route is text-only but the request contains image
+    # inputs, Guardian transparently redirects to a local vision model
+    # configured via the group's ``image_fallback`` setting. Image-capable
+    # cloud models (e.g. minimax-m3) continue to use their native cloud image
+    # support without intervention.
     if _is_cloud_or_guardian_route(requested_model):
-        # Cloud models don't need Qwen message sanitization or reasoning defaults
-        # — those are llama-server-specific workarounds.
-        body = json.dumps(json_body).encode("utf-8")
-        return await _forward_to_cloud_provider(
-            path=path,
-            body=body,
-            json_body=json_body,
-            model_name=requested_model,
-            request=request,
-            client_id=client_id,
-        )
+        if has_image_inputs:
+            vision_fallback = _resolve_cloud_vision_fallback(requested_model)
+            if vision_fallback:
+                logger.info(
+                    "🖼️  Cloud route '%s' is text-only with image input — "
+                    "redirecting to local vision model '%s'",
+                    requested_model, vision_fallback,
+                )
+                # Resolve alias → canonical model name so the local inference
+                # path (model switch, vision preflight, mmproj loading) works.
+                requested_model = _resolve_inference_model(vision_fallback, current_model)
+                json_body["model"] = requested_model
+                # Fall through to local inference path below.
+            else:
+                body = json.dumps(json_body).encode("utf-8")
+                return await _forward_to_cloud_provider(
+                    path=path,
+                    body=body,
+                    json_body=json_body,
+                    model_name=requested_model,
+                    request=request,
+                    client_id=client_id,
+                )
+        else:
+            # Cloud models don't need Qwen message sanitization or reasoning
+            # defaults — those are llama-server-specific workarounds.
+            body = json.dumps(json_body).encode("utf-8")
+            return await _forward_to_cloud_provider(
+                path=path,
+                body=body,
+                json_body=json_body,
+                model_name=requested_model,
+                request=request,
+                client_id=client_id,
+            )
 
     _apply_anthropic_thinking_to_llama_params(json_body)
     _apply_request_reasoning_defaults(path, json_body, requested_model)
@@ -4012,9 +4240,7 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
             json_body.get("messages", [])
         )
     body = json.dumps(json_body).encode("utf-8")
-    has_image_inputs = False
-    if path in ("chat/completions", "messages"):
-        has_image_inputs = _messages_contain_image_input(json_body.get("messages", []))
+    # has_image_inputs already computed above
 
     try:
         request_id, disconnect_task = await _begin_queued_request(request, client_id, requested_model)

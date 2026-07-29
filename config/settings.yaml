@@ -16,6 +16,25 @@ proxy:
   target: http://localhost:11440
   vram_limit_mb: 27000
   stream_heartbeat_seconds: 15
+cloud_retry:
+  enabled: true
+  max_retries: 30
+  max_hold_seconds: 600
+  base_backoff_seconds: 1
+  max_backoff_seconds: 60
+  jitter_factor: 0.25
+  respect_retry_after: true
+
+# Circuit breaker for failover health tracking. When a provider candidate
+# accumulates this many consecutive non-429 failures it is "tripped" and
+# skipped for cooldown_seconds. 429s never count (rate limiting ≠ broken).
+# NVIDIA (free tier) is the priority source — keep the threshold high so
+# transient failures don't trip it, and the cooldown short so it recovers
+# quickly and can be tried again before falling through to OpenRouter.
+failover_health:
+  failure_threshold: 5
+  cooldown_seconds: 30
+  rate_limit_cooldown_seconds: 60
 # === Cloud LLM Providers (LLM Router) ===
 # When a requested model matches a provider entry below, Guardian forwards
 # the request directly to that cloud API instead of the local llama-server.

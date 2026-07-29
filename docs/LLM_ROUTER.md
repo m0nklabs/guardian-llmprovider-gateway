@@ -132,6 +132,40 @@ The Guardian dashboard at `http://localhost:11437` now includes:
 - **🔗 Key Links** — link cloud credentials to Guardian API keys
 - **🧭 Available Cloud Models** — shows all cloud models (global + per-key routes)
 
+### Intelligent 429 handling
+
+Cloud inference requests are held by Guardian when an upstream provider returns
+HTTP 429. The retry policy is per Guardian API key and provider, so one key's
+rate limit does not delay another key. Guardian first honors `Retry-After`, then
+provider `X-RateLimit-Reset` hints, and otherwise uses bounded exponential
+backoff with jitter. The defaults are configured in `settings.yaml`:
+
+```yaml
+cloud_retry:
+  enabled: true
+  max_retries: 3
+  max_hold_seconds: 90
+  base_backoff_seconds: 1
+  max_backoff_seconds: 30
+  jitter_factor: 0.25
+  respect_retry_after: true
+```
+
+The current in-memory counters and safe provider details can be read with:
+
+```bash
+curl http://localhost:11434/api/cloud/ratelimit-stats \
+  -H "Authorization: Bearer flip_..."
+```
+
+The response includes total 429s, retries, retry successes, exhausted retry
+budgets, current cooldown, remaining/limit hints, reset time, and the latest
+provider error message per Guardian-key fingerprint and provider. A final 429
+is returned only after the retry count or hold-time budget is exhausted. For
+`guardian/failover/{group}` routes, Guardian then tries the next configured
+provider before returning 429 to clients that do not implement retries. A 429
+does not trip cross-provider failover health.
+
 ## Configuration
 
 Cloud providers are configured in [`config/settings.yaml`](../config/settings.yaml)

@@ -1253,3 +1253,59 @@ async def test_get_model_metadata_returns_cloud_model():
     assert result["id"] == "openai/gpt-4o"
     assert result["owned_by"] == "openrouter"
     assert result["served_by"] == "cloud"
+
+
+@pytest.mark.asyncio
+async def test_list_models_includes_failover_groups():
+    """/v1/models must surface failover groups as guardian/failover/{name} entries."""
+    fake_group = SimpleNamespace(name="glm-5.2")
+
+    with (
+        patch.object(server, "model_manager") as mm_mock,
+        patch.object(server, "provider_registry") as pr_mock,
+        patch.object(server, "cloud_cred_store") as cc_mock,
+        patch.object(server, "failover_registry") as fr_mock,
+        patch.object(server, "_build_model_metadata_entry", return_value={"id": "local", "object": "model"}),
+    ):
+        mm_mock.get_public_model_map.return_value = {}
+        pr_mock.get_all_cloud_models.return_value = []
+        cc_mock.get_linked_models_for_key.return_value = []
+        fr_mock._groups = {"glm-5.2": fake_group}
+
+        result = await server.list_models(
+            request=SimpleNamespace(headers={}, state=SimpleNamespace(), url=SimpleNamespace(path="/v1/models"), method="GET"),
+            client_id="test-user",
+        )
+
+    ids = [m["id"] for m in result["data"]]
+    assert "guardian/failover/glm-5.2" in ids
+    failover_entry = next(m for m in result["data"] if m["id"] == "guardian/failover/glm-5.2")
+    assert failover_entry["served_by"] == "failover"
+    assert failover_entry["provider"] == "failover"
+    assert failover_entry["owned_by"] == "failover"
+    assert failover_entry["failover_group"] == "glm-5.2"
+
+
+@pytest.mark.asyncio
+async def test_get_model_metadata_returns_failover_group():
+    """GET /v1/models/guardian/failover/{name} must resolve the failover entry."""
+    fake_group = SimpleNamespace(name="glm-5.2")
+
+    with patch.object(server, "failover_registry") as fr_mock:
+        fr_mock.get_group.return_value = fake_group
+        result = await server.get_model_metadata("guardian/failover/glm-5.2", client_id="test-user")
+
+    assert result["id"] == "guardian/failover/glm-5.2"
+    assert result["served_by"] == "failover"
+    assert result["failover_group"] == "glm-5.2"
+    fr_mock.get_group.assert_called_once_with("glm-5.2")
+
+
+@pytest.mark.asyncio
+async def test_get_model_metadata_returns_404_for_unknown_failover_group():
+    """GET /v1/models/guardian/failover/{unknown} must 404, not 500."""
+    with patch.object(server, "failover_registry") as fr_mock:
+        fr_mock.get_group.return_value = None
+        with pytest.raises(Exception) as excinfo:
+            await server.get_model_metadata("guardian/failover/does-not-exist", client_id="test-user")
+    assert excinfo.value.status_code == 404
