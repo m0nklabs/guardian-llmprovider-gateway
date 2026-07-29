@@ -1154,7 +1154,8 @@ class ModelManager:
 
         Supported config keys (from models.yaml):
             path, context, ngl, kv_type, tensor_split, mmproj, extra_args,
-            cuda_visible_devices
+            cuda_visible_devices, draft_model_path, spec_type,
+            spec_draft_n_max, spec_draft_n_min, draft_cache_type_k, draft_cache_type_v
         """
         args_file = CURRENT_MODEL_ARGS_FILE
         env_file = CURRENT_MODEL_ENV_FILE
@@ -1166,13 +1167,20 @@ class ModelManager:
         mmproj = config.get("mmproj", "")
         extra_args = config.get("extra_args", "")
         cuda_visible_devices = config.get("cuda_visible_devices", "")
+        # DFlash / speculative-decoding draft model (llama-server b2111+)
+        draft_model_path = str(config.get("draft_model_path", "")).strip()
+        spec_type = str(config.get("spec_type", "draft-dflash")).strip()
+        spec_draft_n_max = config.get("spec_draft_n_max", 8)
+        spec_draft_n_min = config.get("spec_draft_n_min", 1)
+        draft_cache_type_k = str(config.get("draft_cache_type_k", "f16")).strip()
+        draft_cache_type_v = str(config.get("draft_cache_type_v", "f16")).strip()
 
         logger.info(f"Using official llama.cpp binary: {OFFICIAL_LLAMA_SERVER_BIN}")
 
         # Build args string
         args_content = (
             f"-m {path} -c {ctx} -ngl {ngl} -ctk {kv_type} -ctv {kv_type} "
-            f"--host 127.0.0.1 --port 11440 --slot-save-path {LLAMA_SLOTS_DIR} --no-mmap"
+            f"--host 127.0.0.1 --port 11440 --slot-save-path {LLAMA_SLOTS_DIR} --load-mode none"
         )
 
         # Multi-GPU weight distribution (e.g. "0.55,0.45" for 2 GPUs)
@@ -1188,6 +1196,30 @@ class ModelManager:
             else:
                 args_content += f" --mmproj {mmproj}"
                 logger.info(f"🖼️  mmproj: {mmproj}")
+
+        # DFlash / speculative-decoding draft model (llama.cpp b2111+).
+        # If draft_model_path is set and exists, llama-server will use --spec-type
+        # with --model-draft to draft N tokens at a time before main-model verification.
+        if draft_model_path:
+            draft_path = Path(draft_model_path)
+            if not draft_path.exists():
+                logger.warning(
+                    f"⚠️  draft_model_path set but file missing: {draft_model_path} — "
+                    "speculative decoding will be DISABLED"
+                )
+            else:
+                args_content += (
+                    f" --spec-type {spec_type}"
+                    f" --model-draft {draft_model_path}"
+                    f" --spec-draft-n-max {spec_draft_n_max}"
+                    f" --spec-draft-n-min {spec_draft_n_min}"
+                    f" --cache-type-k-draft {draft_cache_type_k}"
+                    f" --cache-type-v-draft {draft_cache_type_v}"
+                )
+                logger.info(
+                    f"⚡ Speculative decoding enabled: spec_type={spec_type}, "
+                    f"draft={draft_path.name}, n_max={spec_draft_n_max}, n_min={spec_draft_n_min}"
+                )
 
         # Pass-through for any extra flags not covered above
         if extra_args:

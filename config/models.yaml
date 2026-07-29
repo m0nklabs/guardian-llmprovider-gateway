@@ -210,6 +210,48 @@ models:
     vision_ngl: 39
     vision_tensor_split: "0.46,0.54"
     extra_args: "--spec-type draft-mtp --spec-draft-n-max 3 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
+
+  # === poolside Laguna-S-2.1 (118B MoE, 48 layers, 256 experts / 10 active) ===
+  # Main: UD-IQ4_XS split, 57.6 GB. LIVE-VERIFIED op b2111 (bac23a3f9), CUDA 12.8:
+  #   antwoord coherent, gen ~4.5 tok/s — traag door CPU-offload (28/48 layers op
+  #   CPU; 57GB model past niet op 27GB VRAM -> ngl=20, ts 0.42/0.58).
+  # DFlash draft = MAINLINE-GEBLOKKEERD: laguna-s-2.1-DFlash-BF16.gguf declareert
+  #   76 tensors waarvan 7 (attn_gate x6 + enc.aux_norm) NIET in mainline dflash.cpp
+  #   schema zitten (HEAD bac23a3f9 kent ze niet) -> "expected 76, got 69".
+  #   Geen fork-schema op mainline -> velden bewaard als commentaar tot attn_gate
+  #   upstream ondersteund wordt.
+  # Context gecapped op 32768: 160k/256k KV past niet naast 57GB model op 27GB VRAM.
+  # TurboQuant tq4_0 niet in b2111 -> q4_0 KV cache.
+  laguna-s-2.1-ud-iq4_xs-160k-tq4:
+    path: /home/flip/models/Laguna-S-2.1-UD-IQ4_XS-00001-of-00003.gguf
+    total_layers: 48
+    benchmark_context_limit: 262144
+    context: 32768        # gecapped van 163840 i.v.m. VRAM-budget (zie header)
+    ngl: 20
+    kv_type: q4_0
+    tensor_split: "0.42,0.58"
+    # --- DFlash speculative decoding (mainline-geblokkeerd, zie header) ---
+    # draft_model_path: /home/flip/models/laguna-s-2.1-DFlash-BF16.gguf
+    # spec_type: draft-dflash
+    # spec_draft_n_max: 8
+    # spec_draft_n_min: 1
+    # draft_cache_type_k: f16
+    # draft_cache_type_v: f16
+  laguna-s-2.1-ud-iq4_xs-256k-tq4:
+    path: /home/flip/models/Laguna-S-2.1-UD-IQ4_XS-00001-of-00003.gguf
+    total_layers: 48
+    benchmark_context_limit: 262144
+    context: 32768        # gecapped van 262144 i.v.m. VRAM-budget (zie header)
+    ngl: 20
+    kv_type: q4_0
+    tensor_split: "0.42,0.58"
+    # --- DFlash speculative decoding (mainline-geblokkeerd, zie header) ---
+    # draft_model_path: /home/flip/models/laguna-s-2.1-DFlash-BF16.gguf
+    # spec_type: draft-dflash
+    # spec_draft_n_max: 8
+    # spec_draft_n_min: 1
+    # draft_cache_type_k: f16
+    # draft_cache_type_v: f16
 # === Model Aliases ===
 # Short names that resolve to full model names above.
 # Use in API requests: {"model": "qwen3.6-35b-uncensored"}
@@ -239,6 +281,11 @@ aliases:
   gemma4-e4b: "gemma-4-E4B-it-uncensored"
   step3-vl: "Step3-VL-10B"
   llama3: "llama3.2-3b"
+  # poolside Laguna-S-2.1 with DFlash speculative decoding + TurboQuant KV cache
+  laguna-s-2.1-160k: "laguna-s-2.1-ud-iq4_xs-160k-tq4"
+  laguna-s-2.1-256k: "laguna-s-2.1-ud-iq4_xs-256k-tq4"
+  laguna-s-2.1: "laguna-s-2.1-ud-iq4_xs-160k-tq4"
+  laguna: "laguna-s-2.1-ud-iq4_xs-160k-tq4"
 
 # === Guardian Security Config ===
 # Controls model switching behavior and access control
