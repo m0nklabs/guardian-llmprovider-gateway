@@ -3766,7 +3766,7 @@ async def _forward_to_cloud_provider(
                 provider.name,
             )
 
-        forward_headers = ProviderRegistry.build_forward_headers(provider, cloud_key_fingerprint)
+        forward_headers = ProviderRegistry.build_forward_headers(provider, cloud_key_fingerprint, app_name=client_id)
         forward_url = ProviderRegistry.build_forward_url(provider, effective_path)
         timeout = httpx.Timeout(provider.timeout_seconds, connect=15.0)
 

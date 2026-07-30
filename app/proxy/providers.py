@@ -221,8 +221,13 @@ class ProviderRegistry:
     def build_forward_headers(
         provider: CloudProvider,
         client_user_id: Optional[str] = None,
+        app_name: Optional[str] = None,
     ) -> Dict[str, str]:
         """Build the HTTP headers for forwarding a request to *provider*.
+
+        When *app_name* is provided, it is used for OpenRouter attribution
+        (``X-Title`` and ``HTTP-Referer``) so each app appears separately in
+        OpenRouter analytics/rankings instead of all showing as "Guardian".
 
         When *client_user_id* is provided and the provider is OpenRouter, it is
         **not** sent as a header — OpenRouter expects the per-user identifier
@@ -236,8 +241,12 @@ class ProviderRegistry:
         }
         # OpenRouter benefits from attribution headers for ranking/leaderboards.
         if provider.name == "openrouter":
-            headers.setdefault("HTTP-Referer", "https://guardian.local")
-            headers.setdefault("X-Title", "Guardian")
+            # Per-app attribution: show the actual app name (e.g. "goose")
+            # instead of a generic "Guardian" so analytics/rankings on
+            # OpenRouter distinguish between apps.
+            display_name = f"Guardian/{app_name}" if app_name else "Guardian"
+            headers.setdefault("HTTP-Referer", f"https://guardian.local/{app_name}" if app_name else "https://guardian.local")
+            headers.setdefault("X-Title", display_name)
             # Enable response caching so identical requests from the same app
             # get zero-cost cache hits.  The cache key includes a SHA-256 of
             # the request body, and the per-client ``user`` field injected by

@@ -289,10 +289,19 @@ class TestForwardingHelpers:
         headers = ProviderRegistry.build_forward_headers(p)
         assert headers["Authorization"] == "Bearer sk-or-test-key"
         assert headers["Content-Type"] == "application/json"
-        # OpenRouter-specific attribution headers
+        # OpenRouter-specific attribution headers (default, no app_name)
         assert headers["HTTP-Referer"] == "https://guardian.local"
         assert headers["X-Title"] == "Guardian"
         # Response caching is enabled by default for OpenRouter
+        assert headers["X-OpenRouter-Cache"] == "true"
+
+    def test_build_forward_headers_openrouter_with_app_name(self, settings_with_providers: Path):
+        """When app_name is provided, attribution headers reflect the app name."""
+        reg = ProviderRegistry(settings_path=settings_with_providers)
+        p = reg.get_provider_for_model("openai/gpt-4o")
+        headers = ProviderRegistry.build_forward_headers(p, app_name="goose")
+        assert headers["X-Title"] == "Guardian/goose"
+        assert headers["HTTP-Referer"] == "https://guardian.local/goose"
         assert headers["X-OpenRouter-Cache"] == "true"
 
     def test_build_forward_headers_nvidia(self, settings_with_providers: Path):
