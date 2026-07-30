@@ -128,7 +128,7 @@ class InferenceQueue:
         self,
         max_concurrent: int = 1,
         queue_timeout: float = 300.0,
-        history_ttl: float = 900.0,
+        history_ttl: float = 300.0,  # more aggressive pruning (was 900); overridable via settings.yaml queue.history_ttl
     ):
         self.max_concurrent = max_concurrent
         self.queue_timeout = queue_timeout

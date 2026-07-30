@@ -73,13 +73,14 @@ providers:
 queue:
   max_concurrent: 1
   queue_timeout_seconds: 300  # advisory queue wait budget for clients/status, not an internal 429 drop timer
+  history_ttl: 300            # seconds; prune completed-request history more aggressively (was default 900)
 services:
   comfyui_url: http://127.0.0.1:8188
 timeouts:
   tiers:
     tier_70b:
       min_size_mb: 40000
-      timeout_seconds: 1800
+      timeout_seconds: 3600   # 256K-context 70B+ models need long generation budgets (was 1800)
     tier_32b:
       min_size_mb: 20000
       timeout_seconds: 1200

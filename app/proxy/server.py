@@ -69,7 +69,7 @@ def load_config() -> dict:
         "cloud_retry": RateLimitConfig().to_dict(),
         "timeouts": {
             "tiers": {
-                "tier_70b": {"min_size_mb": 40000, "timeout_seconds": 900},
+                "tier_70b": {"min_size_mb": 40000, "timeout_seconds": 3600},
                 "tier_32b": {"min_size_mb": 20000, "timeout_seconds": 600},
                 "tier_13b": {"min_size_mb": 10000, "timeout_seconds": 300},
                 "tier_8b": {"min_size_mb": 5000, "timeout_seconds": 180},
@@ -2084,6 +2084,7 @@ _queue_cfg = _load_queue_config()
 inference_queue = InferenceQueue(
     max_concurrent=_queue_cfg.get("max_concurrent", 1),
     queue_timeout=_queue_cfg.get("queue_timeout_seconds", 300),
+    history_ttl=_queue_cfg.get("history_ttl", 300),
 )
 
 

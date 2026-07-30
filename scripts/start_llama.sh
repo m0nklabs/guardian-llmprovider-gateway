@@ -32,9 +32,11 @@ echo "CUDA_DEVICE_ORDER=$CUDA_DEVICE_ORDER"
 DEFAULT_BINARY="$OFFICIAL_ROOT/build/bin/llama-server"
 BINARY="${LLAMA_SERVER_BINARY:-$DEFAULT_BINARY}"
 
-# Default fallback if config missing — MUST match manager.py default_model
-# SECURITY: This fallback should match the pinned/default model in Guardian config
-DEFAULT_MODEL="$MODELS_DIR/glm-4.7-flash-claude-4.5-opus.q4_k_m.gguf"
+# Default fallback if config missing. SECURITY: must point at a model that EXISTS
+# in $MODELS_DIR so a missing current_model.args degrades gracefully instead of
+# crashing llama-server on a nonexistent file (the previous glm-4.7-flash target
+# was absent from $MODELS_DIR). Maps to alias qwen3.6-35b-uncensored in models.yaml.
+DEFAULT_MODEL="$MODELS_DIR/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf"
 ARGS="-m $DEFAULT_MODEL -c 262144 -ngl 99 -ctk q4_0 -ctv q4_0 --host 127.0.0.1 --port 11440 --slot-save-path $SLOTS_DIR --no-mmap --tensor-split 0.57,0.43 -nkvo --parallel 4"
 
 if [ -f "$CONFIG_FILE" ]; then

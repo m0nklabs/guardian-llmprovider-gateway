@@ -89,3 +89,19 @@ Workflow: one task at a time → minimal fix → test → commit → append here
 **Commit message:** used an honest `docs:` message, NOT the prescribed `feat: enable Laguna S 2.1 160K/256K tq4_0 + DFlash` — no feature was enabled (premise false; enabling it crashes Laguna); only the blocking status was re-documented.
 
 ---
+
+## TASK 7: Fix Fallback Model + Timeouts — STABILITY — start_llama.sh + settings.yaml + server.py + queue.py
+**Status:** ✅ COMPLETE (commit pending — this task)
+**What changed (4 files):**
+- `scripts/start_llama.sh` L35-39: `DEFAULT_MODEL` pointed at `glm-4.7-flash-claude-4.5-opus.q4_k_m.gguf`, which **does not exist** in `$MODELS_DIR` — a missing `current_model.args` would hand llama-server a nonexistent `-m` file and crash on boot instead of degrading gracefully. Repointed to `Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf` (verified present; maps to alias `qwen3.6-35b-uncensored` in `models.yaml`). Added a security comment explaining the existence requirement.
+- `config/settings.yaml`: (a) `queue.history_ttl: 300` added — completed-request history pruned 3× sooner (was default 900s), bounding memory growth under sustained 256K-context traffic. (b) `timeouts.tiers.tier_70b.timeout_seconds: 1800 → 3600` — 256K-context 70B+ models on a CPU-offloaded split (ngl 20/48) generate slowly; the old 1800s budget clipped legitimate long completions.
+- `app/proxy/server.py`: (a) L2084-2087 — `InferenceQueue(...)` now passes `history_ttl=_queue_cfg.get("history_ttl", 300)` so the YAML value is actually consumed (previously the `history_ttl` key was unread, falling back to the constructor default). (b) L72 — bumped the hardcoded fallback `default_config` `tier_70b` from `900 → 3600` for parity with `settings.yaml` (this fallback tier only takes effect if `settings.yaml` is absent; the YAML value wins via the `load_config()` merge at L91-92).
+- `app/proxy/queue.py` L131: `__init__` default `history_ttl: float = 900.0 → 300.0` to match the new effective default (still overridable via `settings.yaml queue.history_ttl`).
+**Tests:**
+- Effective-config assertions against the real loaded `CONFIG` + real `inference_queue` instance: `CONFIG["timeouts"]["tiers"]["tier_70b"]["timeout_seconds"] == 3600` ✓; `inference_queue.history_ttl == 300` ✓ (proves the merge + the new wiring both work).
+- `bash -n scripts/start_llama.sh` clean ✓; `settings.yaml` parses (YAML round-trips `history_ttl=300`, `tier_70b.timeout_seconds=3600`) ✓.
+- Fallback-model resolution check: with `$ROOT_DIR=/home/flip/llama_cpp_guardian`, the script's `MODELS_DIR` resolves to `/home/flip/models` and `DEFAULT_MODEL` → `…/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf` exists on disk ✓ (the earlier "MISSING" was a false negative from running the extractor with `ROOT_DIR` unset).
+- Full regression: `tests/unit/test_queue.py + test_manager.py + test_auth.py + test_session_filename_sanitize.py` → **148 passed** in 2.95s (no regressions).
+**Commit message:** `fix: correct fallback model and timeouts for 256K` (matches the prescribed TASK 7 message).
+
+---
