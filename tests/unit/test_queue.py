@@ -362,3 +362,62 @@ class TestGetStatus:
         assert status["request_id"] == rid
         assert status["status"] == "queued"
         assert status["position"] == 1
+
+
+# ── Concurrency / race-condition regression ────────────────────────────
+# Guards the async reserve path in wait_for_turn(): two parallel waiters must
+# never both grab a slot past max_concurrent (would double-load a model in VRAM
+# -> CUDA OOM). Lock added in __init__ as self._lock wraps the reserve block.
+
+
+class TestRaceGuard:
+    @pytest.mark.asyncio
+    async def test_concurrent_acquire_never_exceeds_cap_one(self):
+        """cap=1: 20 parallel acquire calls must peak at exactly 1 active slot."""
+        cap = 1
+        n = 20
+        q = InferenceQueue(max_concurrent=cap, queue_timeout=120.0, history_ttl=0)
+        peak = 0
+        guard = asyncio.Lock()
+
+        async def one(i: int) -> str:
+            nonlocal peak
+            rid = await q.acquire(f"client{i}", "m", owner_id=f"owner{i}")
+            async with guard:
+                if q.active_count > peak:
+                    peak = q.active_count
+            await asyncio.sleep(0.01)
+            q.finish(rid, outcome="completed")
+            return rid
+
+        res = await asyncio.gather(*(one(i) for i in range(n)), return_exceptions=True)
+
+        assert all(not isinstance(r, Exception) for r in res)
+        assert peak <= cap, f"race: active_count peaked at {peak} > cap {cap}"
+        assert q.active_count == 0
+
+    @pytest.mark.asyncio
+    async def test_concurrent_acquire_respects_higher_cap_without_over_serializing(self):
+        """cap=3: lock must cap at 3 yet permit legitimate concurrency (peak >= 2)."""
+        cap = 3
+        n = 20
+        q = InferenceQueue(max_concurrent=cap, queue_timeout=120.0, history_ttl=0)
+        peak = 0
+        guard = asyncio.Lock()
+
+        async def one(i: int) -> str:
+            nonlocal peak
+            rid = await q.acquire(f"client{i}", "m", owner_id=f"owner{i}")
+            async with guard:
+                if q.active_count > peak:
+                    peak = q.active_count
+            await asyncio.sleep(0.01)
+            q.finish(rid, outcome="completed")
+            return rid
+
+        res = await asyncio.gather(*(one(i) for i in range(n)), return_exceptions=True)
+
+        assert all(not isinstance(r, Exception) for r in res)
+        assert peak <= cap, f"race: active_count peaked at {peak} > cap {cap}"
+        assert peak >= 2, f"over-serialize: peak {peak} with cap {cap} blocks legit concurrency"
+        assert q.active_count == 0

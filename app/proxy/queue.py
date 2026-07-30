@@ -138,6 +138,11 @@ class InferenceQueue:
         self._active: List[str] = []
         self._entries: Dict[str, QueueEntry] = {}
         self._change_event = asyncio.Event()
+        # Guards the async reserve path in wait_for_turn() so two parallel waiters
+        # cannot both cross len(_active) < max_concurrent and grab a slot (double
+        # GPU model load -> CUDA OOM). Sync mutators (submit/cancel/finish/release)
+        # are inherently atomic (no await = no interleaving) and need no lock.
+        self._lock = asyncio.Lock()
 
         self._total_queued = 0
         self._total_completed = 0
@@ -242,22 +247,23 @@ class InferenceQueue:
                 self.cancel(request_id, reason=entry.cancel_reason or "cancelled")
                 raise QueueRequestCancelled(request_id, entry.cancel_reason or "cancelled")
 
-            if (
-                entry.status == "queued"
-                and self._waiting
-                and self._waiting[0] == request_id
-                and len(self._active) < self.max_concurrent
-                and not self._owner_has_active_request(entry.owner_id)
-            ):
-                self._waiting.pop(0)
-                entry.status = "running"
-                entry.started_at = time.time()
-                self._active.append(request_id)
-                wait_time = entry.started_at - entry.enqueued_at
-                if wait_time > 0.1:
-                    logger.info("🟢 [%s] Slot acquired after %.1fs wait", request_id[:8], wait_time)
-                self._signal_change()
-                return request_id
+            async with self._lock:
+                if (
+                    entry.status == "queued"
+                    and self._waiting
+                    and self._waiting[0] == request_id
+                    and len(self._active) < self.max_concurrent
+                    and not self._owner_has_active_request(entry.owner_id)
+                ):
+                    self._waiting.pop(0)
+                    entry.status = "running"
+                    entry.started_at = time.time()
+                    self._active.append(request_id)
+                    wait_time = entry.started_at - entry.enqueued_at
+                    if wait_time > 0.1:
+                        logger.info("🟢 [%s] Slot acquired after %.1fs wait", request_id[:8], wait_time)
+                    self._signal_change()
+                    return request_id
 
             wait_event = self._change_event
             wait_task = asyncio.create_task(wait_event.wait())
