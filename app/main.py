@@ -6,7 +6,7 @@ import pathlib
 import signal
 import sys
 import time
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, Request
 from fastapi import HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 load_dotenv(pathlib.Path(__file__).parent.parent / ".env")
 
 from app.proxy.server import app as proxy_app, state as proxy_state, get_gpu_metrics, get_model_size, inference_queue
-from app.proxy.auth import load_api_keys, generate_api_key, _token_fingerprint
+from app.proxy.auth import load_api_keys, generate_api_key, _token_fingerprint, verify_api_key
 from app.proxy.cloud_keys import CloudCredentialStore, parse_guardian_route, mask_api_key
 from app.proxy.providers import ProviderRegistry
 from app.proxy.server import provider_registry, cloud_cred_store, cloud_rate_limiter
@@ -60,7 +60,7 @@ async def favicon():
     return Response(content=b'\x47\x49\x46\x38\x39\x61\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff\x21\xf9\x04\x01\x00\x00\x00\x00\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\x44\x01\x00\x3b', media_type="image/gif")
 
 @app.get("/api/stats")
-async def get_stats():
+async def get_stats(_client_id: str = Depends(verify_api_key)):
     # VRAM
     vram = get_gpu_metrics()
     queue_status = inference_queue.get_status()
@@ -145,7 +145,7 @@ def _read_benchmark_state(data_dir: str = "data") -> dict:
 
 
 @app.get("/api/benchmark")
-async def get_benchmark_summary():
+async def get_benchmark_summary(_client_id: str = Depends(verify_api_key)):
     state = _read_benchmark_state("data")
     completed = state.get("completed", [])
     queue = state.get("queue", [])
@@ -209,20 +209,20 @@ async def get_benchmark_summary():
 
 
 @app.post("/api/benchmark/start")
-async def start_benchmark():
+async def start_benchmark(_client_id: str = Depends(verify_api_key)):
     raise HTTPException(status_code=410, detail="Legacy BenchmarkSuite is disabled")
 
 
 @app.post("/api/benchmark/stop")
-async def stop_benchmark():
+async def stop_benchmark(_client_id: str = Depends(verify_api_key)):
     raise HTTPException(status_code=410, detail="Legacy BenchmarkSuite is disabled")
 
 
-# ── Cloud LLM Router Admin API (no auth — LAN dashboard) ─────────────
+# ── Cloud LLM Router Admin API (Bearer-auth required — dashboard bound to 127.0.0.1) ───
 
 
 @app.get("/api/keys")
-async def list_api_keys_ui():
+async def list_api_keys_ui(_client_id: str = Depends(verify_api_key)):
     """List all Guardian API keys."""
     keys = load_api_keys()
     result = []
@@ -237,7 +237,7 @@ async def list_api_keys_ui():
 
 
 @app.post("/api/keys")
-async def create_api_key_ui(request: Request):
+async def create_api_key_ui(request: Request, _client_id: str = Depends(verify_api_key)):
     """Generate a new Guardian API key. Body: {"name": "my-app"}"""
     body = await request.json()
     name = str(body.get("name", "")).strip()
@@ -253,12 +253,12 @@ async def create_api_key_ui(request: Request):
 
 
 @app.get("/api/cloud/credentials")
-async def list_cloud_creds_ui():
+async def list_cloud_creds_ui(_client_id: str = Depends(verify_api_key)):
     return {"credentials": cloud_cred_store.list_credentials()}
 
 
 @app.post("/api/cloud/credentials")
-async def add_cloud_cred_ui(request: Request):
+async def add_cloud_cred_ui(request: Request, _client_id: str = Depends(verify_api_key)):
     body = await request.json()
     provider = str(body.get("provider", "")).strip().lower()
     name = str(body.get("name", "")).strip()
@@ -272,7 +272,7 @@ async def add_cloud_cred_ui(request: Request):
 
 
 @app.delete("/api/cloud/credentials/{cred_id}")
-async def delete_cloud_cred_ui(cred_id: str):
+async def delete_cloud_cred_ui(cred_id: str, _client_id: str = Depends(verify_api_key)):
     deleted = await cloud_cred_store.delete_credential(cred_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="not found")
@@ -280,12 +280,12 @@ async def delete_cloud_cred_ui(cred_id: str):
 
 
 @app.get("/api/cloud/links")
-async def list_cloud_links_ui():
+async def list_cloud_links_ui(_client_id: str = Depends(verify_api_key)):
     return {"links": cloud_cred_store.list_links()}
 
 
 @app.post("/api/cloud/links")
-async def link_cloud_cred_ui(request: Request):
+async def link_cloud_cred_ui(request: Request, _client_id: str = Depends(verify_api_key)):
     body = await request.json()
     key_fp = str(body.get("guardian_key_fingerprint", "")).strip()
     provider = str(body.get("provider", "")).strip().lower()
@@ -299,7 +299,7 @@ async def link_cloud_cred_ui(request: Request):
 
 
 @app.delete("/api/cloud/links")
-async def unlink_cloud_cred_ui(request: Request):
+async def unlink_cloud_cred_ui(request: Request, _client_id: str = Depends(verify_api_key)):
     body = await request.json()
     key_fp = str(body.get("guardian_key_fingerprint", "")).strip()
     provider = str(body.get("provider", "")).strip().lower()
@@ -310,7 +310,7 @@ async def unlink_cloud_cred_ui(request: Request):
 
 
 @app.get("/api/cloud/providers")
-async def list_providers_ui():
+async def list_providers_ui(_client_id: str = Depends(verify_api_key)):
     providers = []
     for p in provider_registry.get_enabled_providers():
         providers.append({"name": p.name, "configured": p.is_configured, "models": p.models})
@@ -318,7 +318,7 @@ async def list_providers_ui():
 
 
 @app.get("/api/cloud/models")
-async def list_cloud_models_ui():
+async def list_cloud_models_ui(_client_id: str = Depends(verify_api_key)):
     """All cloud models — global + all per-key routes."""
     models = []
     for model_name in provider_registry.get_all_cloud_models():
@@ -358,7 +358,7 @@ class GuardianService:
         self.scheduler_task = asyncio.create_task(self.scheduler.run_loop())
         
         # Start UI Server (on port 11437)
-        ui_config = uvicorn.Config(app, host="0.0.0.0", port=11437, log_level="info")
+        ui_config = uvicorn.Config(app, host="127.0.0.1", port=11437, log_level="info")
         ui_server = uvicorn.Server(ui_config)
         
         await asyncio.gather(
