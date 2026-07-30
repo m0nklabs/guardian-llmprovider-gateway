@@ -292,6 +292,8 @@ class TestForwardingHelpers:
         # OpenRouter-specific attribution headers
         assert headers["HTTP-Referer"] == "https://guardian.local"
         assert headers["X-Title"] == "Guardian"
+        # Response caching is enabled by default for OpenRouter
+        assert headers["X-OpenRouter-Cache"] == "true"
 
     def test_build_forward_headers_nvidia(self, settings_with_providers: Path):
         reg = ProviderRegistry(settings_path=settings_with_providers)
@@ -302,6 +304,38 @@ class TestForwardingHelpers:
         # NVIDIA doesn't get OpenRouter-specific headers
         assert "HTTP-Referer" not in headers
         assert "X-Title" not in headers
+        assert "X-OpenRouter-Cache" not in headers
+
+    def test_build_forward_headers_accepts_client_user_id(self, settings_with_providers: Path):
+        """The client_user_id parameter is accepted but not sent as a header
+        for OpenRouter — it goes in the request body ``user`` field instead."""
+        reg = ProviderRegistry(settings_path=settings_with_providers)
+        p = reg.get_provider_for_model("openai/gpt-4o")
+        headers = ProviderRegistry.build_forward_headers(p, client_user_id="fp_abc123")
+        assert headers["Authorization"] == "Bearer sk-or-test-key"
+        # No X-User-Id header — OpenRouter uses the body `user` field
+        assert "X-User-Id" not in headers
+
+    def test_build_forward_headers_cache_overridable_via_extra_headers(self, tmp_path: Path):
+        """Provider extra_headers can override the default cache setting."""
+        settings = _write_settings(
+            tmp_path,
+            """\
+            providers:
+              openrouter:
+                enabled: true
+                base_url: https://openrouter.ai/api/v1
+                api_key: sk-or-key
+                models:
+                  - openai/gpt-4o
+                extra_headers:
+                  X-OpenRouter-Cache: "false"
+            """,
+        )
+        reg = ProviderRegistry(settings_path=settings)
+        p = reg.get_provider_for_model("openai/gpt-4o")
+        headers = ProviderRegistry.build_forward_headers(p)
+        assert headers["X-OpenRouter-Cache"] == "false"
 
     def test_build_forward_url(self, settings_with_providers: Path):
         reg = ProviderRegistry(settings_path=settings_with_providers)

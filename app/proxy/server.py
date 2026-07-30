@@ -3661,6 +3661,7 @@ def _prepare_cloud_candidate_request(
     upstream_model: str,
     path: str,
     base_json_body: Dict[str, Any],
+    client_user_id: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any], bytes, bool]:
     """Build the request body/path for one failover candidate.
 
@@ -3669,9 +3670,26 @@ def _prepare_cloud_candidate_request(
     in any per-model default sampling params the client did not already
     specify.
 
+    When *client_user_id* is provided, it is injected as the ``user`` field
+    in the request body (only for OpenRouter).  This gives OpenRouter a stable
+    per-end-user identifier so that:
+
+    - **Abuse isolation** — a provider policy block triggered by one app does
+      not affect other apps sharing the same OpenRouter API key.
+    - **Cache correctness** — the ``user`` field is part of the SHA-256 cache
+      key, so different apps get separate cache entries while the same app
+      benefits from cache hits.
+
     Returns ``(effective_path, json_body, body_bytes, needs_translation)``.
     """
     candidate_json_body = {**base_json_body, "model": upstream_model}
+
+    # Inject a stable per-client identifier for OpenRouter.  OpenRouter folds
+    # this into a hashed identity sent upstream and never forwards it raw,
+    # so using the Guardian key fingerprint (a 12-char SHA-256 prefix) is
+    # privacy-safe.  We never override a ``user`` value the client already set.
+    if client_user_id and provider.name == "openrouter" and "user" not in candidate_json_body:
+        candidate_json_body["user"] = client_user_id
 
     # When the client sends a /v1/messages (Anthropic) request but the target
     # provider only speaks OpenAI format (e.g. NVIDIA NIM), translate the
@@ -3739,7 +3757,7 @@ async def _forward_to_cloud_provider(
     for attempt_index, (provider, upstream_model) in enumerate(attempts):
         is_last_attempt = attempt_index == len(attempts) - 1
         effective_path, candidate_json_body, candidate_body, needs_translation = (
-            _prepare_cloud_candidate_request(provider, upstream_model, path, json_body)
+            _prepare_cloud_candidate_request(provider, upstream_model, path, json_body, cloud_key_fingerprint)
         )
 
         if needs_translation:
@@ -3748,7 +3766,7 @@ async def _forward_to_cloud_provider(
                 provider.name,
             )
 
-        forward_headers = ProviderRegistry.build_forward_headers(provider)
+        forward_headers = ProviderRegistry.build_forward_headers(provider, cloud_key_fingerprint)
         forward_url = ProviderRegistry.build_forward_url(provider, effective_path)
         timeout = httpx.Timeout(provider.timeout_seconds, connect=15.0)
 

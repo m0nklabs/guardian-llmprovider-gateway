@@ -1309,3 +1309,71 @@ async def test_get_model_metadata_returns_404_for_unknown_failover_group():
         with pytest.raises(Exception) as excinfo:
             await server.get_model_metadata("guardian/failover/does-not-exist", client_id="test-user")
     assert excinfo.value.status_code == 404
+
+
+# ── _prepare_cloud_candidate_request: user field injection ────────────
+
+
+def test_prepare_cloud_candidate_injects_user_for_openrouter():
+    """The client_user_id must be injected as ``user`` in the body for OpenRouter."""
+    provider = CloudProvider(
+        name="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-or-test",
+        models=["z-ai/glm-5.2"],
+    )
+    base_body = {"model": "guardian/openrouter/z-ai/glm-5.2", "messages": [{"role": "user", "content": "hi"}]}
+    _path, json_body, _body, _needs_tr = server._prepare_cloud_candidate_request(
+        provider, "z-ai/glm-5.2", "chat/completions", base_body, client_user_id="fp_abc123def456",
+    )
+    assert json_body["user"] == "fp_abc123def456"
+    assert json_body["model"] == "z-ai/glm-5.2"
+
+
+def test_prepare_cloud_candidate_no_user_for_nvidia():
+    """Non-OpenRouter providers must NOT get a ``user`` field injected."""
+    provider = CloudProvider(
+        name="nvidia",
+        base_url="https://integrate.api.nvidia.com/v1",
+        api_key="nvapi-test",
+        models=["minimaxai/minimax-m3"],
+    )
+    base_body = {"model": "guardian/nvidia/minimaxai/minimax-m3", "messages": [{"role": "user", "content": "hi"}]}
+    _path, json_body, _body, _needs_tr = server._prepare_cloud_candidate_request(
+        provider, "minimaxai/minimax-m3", "chat/completions", base_body, client_user_id="fp_abc123def456",
+    )
+    assert "user" not in json_body
+
+
+def test_prepare_cloud_candidate_respects_existing_user():
+    """An existing ``user`` field from the client must not be overridden."""
+    provider = CloudProvider(
+        name="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-or-test",
+        models=["z-ai/glm-5.2"],
+    )
+    base_body = {
+        "model": "guardian/openrouter/z-ai/glm-5.2",
+        "messages": [{"role": "user", "content": "hi"}],
+        "user": "client_set_user",
+    }
+    _path, json_body, _body, _needs_tr = server._prepare_cloud_candidate_request(
+        provider, "z-ai/glm-5.2", "chat/completions", base_body, client_user_id="fp_abc123def456",
+    )
+    assert json_body["user"] == "client_set_user"
+
+
+def test_prepare_cloud_candidate_no_user_without_client_id():
+    """When no client_user_id is provided, no ``user`` field is injected."""
+    provider = CloudProvider(
+        name="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-or-test",
+        models=["z-ai/glm-5.2"],
+    )
+    base_body = {"model": "guardian/openrouter/z-ai/glm-5.2", "messages": [{"role": "user", "content": "hi"}]}
+    _path, json_body, _body, _needs_tr = server._prepare_cloud_candidate_request(
+        provider, "z-ai/glm-5.2", "chat/completions", base_body,
+    )
+    assert "user" not in json_body

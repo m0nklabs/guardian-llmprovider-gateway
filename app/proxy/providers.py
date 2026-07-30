@@ -218,8 +218,18 @@ class ProviderRegistry:
     # ── Request forwarding helpers ───────────────────────────────────
 
     @staticmethod
-    def build_forward_headers(provider: CloudProvider) -> Dict[str, str]:
-        """Build the HTTP headers for forwarding a request to *provider*."""
+    def build_forward_headers(
+        provider: CloudProvider,
+        client_user_id: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """Build the HTTP headers for forwarding a request to *provider*.
+
+        When *client_user_id* is provided and the provider is OpenRouter, it is
+        **not** sent as a header — OpenRouter expects the per-user identifier
+        in the request body ``user`` field (see :mod:`app.proxy.server`).
+        This parameter is accepted here for future providers that may use a
+        header-based approach.
+        """
         headers: Dict[str, str] = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {provider.api_key}",
@@ -228,6 +238,11 @@ class ProviderRegistry:
         if provider.name == "openrouter":
             headers.setdefault("HTTP-Referer", "https://guardian.local")
             headers.setdefault("X-Title", "Guardian")
+            # Enable response caching so identical requests from the same app
+            # get zero-cost cache hits.  The cache key includes a SHA-256 of
+            # the request body, and the per-client ``user`` field injected by
+            # the proxy ensures different apps get separate cache entries.
+            headers.setdefault("X-OpenRouter-Cache", "true")
         headers.update(provider.extra_headers)
         return headers
 
