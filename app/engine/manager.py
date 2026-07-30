@@ -1241,17 +1241,19 @@ class ModelManager:
             logger.info("Cleared model environment file (no CUDA_VISIBLE_DEVICES override)")
 
     async def _stop_server(self):
-        # Use simple os.system or subprocess to handle sudo if needed
-        proc = await asyncio.create_subprocess_shell(
-            "sudo systemctl stop llama-server",
+        # Use create_subprocess_exec (no shell) — the command is static, but
+        # avoiding shell=True closes the injection surface if this ever gains
+        # parameters sourced from config/user input.
+        proc = await asyncio.create_subprocess_exec(
+            "sudo", "systemctl", "stop", "llama-server",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
         await proc.communicate()
 
     async def _start_server(self):
-        proc = await asyncio.create_subprocess_shell(
-            "sudo systemctl start llama-server",
+        proc = await asyncio.create_subprocess_exec(
+            "sudo", "systemctl", "start", "llama-server",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )

@@ -11,12 +11,16 @@ SLOTS_DIR="${LLAMA_CPP_GUARDIAN_SLOTS_DIR:-$HOME/llama_slots}"
 CONFIG_FILE="$CONFIG_DIR/current_model.args"
 ENV_FILE="$CONFIG_DIR/current_model.env"
 
-# Source optional per-model environment (e.g. CUDA_VISIBLE_DEVICES)
+# Source only CUDA_VISIBLE_DEVICES from the optional per-model env file.
+# SECURITY: never `source` the file wholesale — it could set/export arbitrary
+# env (PATH hijack, LD_PRELOAD, etc.). Extract just the one known-safe key.
 if [ -f "$ENV_FILE" ]; then
-    echo "Sourcing model environment: $ENV_FILE"
-    set -a
-    source "$ENV_FILE"
-    set +a
+    echo "Reading CUDA_VISIBLE_DEVICES from: $ENV_FILE"
+    CUDA_VISIBLE_DEVICES=$(grep -E '^export CUDA_VISIBLE_DEVICES=' "$ENV_FILE" | cut -d= -f2- | tr -d '"')
+    if [ -n "$CUDA_VISIBLE_DEVICES" ]; then
+        export CUDA_VISIBLE_DEVICES
+        echo "CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"
+    fi
 fi
 
 # Keep llama CUDA ordinals stable across reboots; v2 telemetry maps nvidia-smi
