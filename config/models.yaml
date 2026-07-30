@@ -227,11 +227,14 @@ models:
   #   CPU; 57GB model past niet op 27GB VRAM -> ngl=20, ts 0.42/0.58).
   # DFlash draft = MAINLINE-GEBLOKKEERD: laguna-s-2.1-DFlash-BF16.gguf declareert
   #   76 tensors waarvan 7 (attn_gate x6 + enc.aux_norm) NIET in mainline dflash.cpp
-  #   schema zitten (HEAD bac23a3f9 kent ze niet) -> "expected 76, got 69".
-  #   Geen fork-schema op mainline -> velden bewaard als commentaar tot attn_gate
-  #   upstream ondersteund wordt.
+  #   schema zitten -> "expected 76, got 69". RE-VERIFIED tegen nieuwste upstream
+  #   9b2a08881 (build 2115, 2026-07-30): attn_gate nog steeds afwezig op elke
+  #   gecheckte commit -> velden bewaard als commentaar tot attn_gate upstream
+  #   ondersteund wordt.
   # Context gecapped op 32768: 160k/256k KV past niet naast 57GB model op 27GB VRAM.
-  # TurboQuant tq4_0 niet in b2111 -> q4_0 KV cache.
+  # TurboQuant tq4_0 is geen echte ggml-type (ggml.h kent alleen BitNet TQ1_0/TQ2_0;
+  #   ook absent op nieuwste 9b2a08881) -> q4_0 KV cache. kv_cache_type_from_str()
+  #   weigert onbekende typen, dus tq4_0 zou Laguna laten crashen.
   laguna-s-2.1-ud-iq4_xs-160k-tq4:
     path: /home/flip/models/Laguna-S-2.1-UD-IQ4_XS-00001-of-00003.gguf
     total_layers: 48
