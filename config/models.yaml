@@ -1,3 +1,13 @@
+# === Build / Runtime Pin (guardian hardening TASK 5) ===
+# CUDA 12.8 locked (NOT 13.x). llama-server built GGML_CUDA=ON, GGML_CUDA_FA=ON,
+#   CMAKE_CUDA_ARCHITECTURES=86;120 (RTX 3060 sm_86 + RTX 5060 Ti sm_120).
+#   systemd llama-server.service pins LLAMA_SERVER_BINARY + LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64.
+# PREMISE STATUS — re-verified against newest upstream 9b2a08881 (2026-07-30):
+#   * TurboQuant tq4_0 / tq8_0 do NOT exist in ggml.h (only BitNet TQ1_0/TQ2_0 ternary).
+#       -> Laguna KV cache stays q4_0 (best valid compressed type for the VRAM budget).
+#   * attn_gate absent from src/models/dflash.cpp on EVERY checked commit incl. 9b2a08881.
+#       -> DFlash draft load fails "expected 76, got 69"; draft fields stay commented.
+# See the Laguna section header below for the live-verified config.
 models:
   Step3-VL-10B:
     path: /home/flip/models/Step3-VL-10B-F16.gguf
