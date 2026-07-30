@@ -4724,14 +4724,37 @@ async def start_proxy():
     await server.serve()
 
 
+# ── Session slot filename sanitization ─────────────────────────────────
+# Slots are written by llama-server under --slot-save-path ($HOME/llama_slots).
+# Block path traversal: strip directory components, allow only
+# [A-Za-z0-9_-]+.bin, then confirm the resolved path stays inside the slots
+# dir (defense in depth — redundant after basename + regex, but explicit).
+_SESSION_SLOTS_DIR = Path("/home/flip/llama_slots")
+_SESSION_FILENAME_RE = re.compile(r"^[A-Za-z0-9_-]+\.bin$")
+
+
+def _sanitize_session_filename(raw: object) -> str:
+    """Return a safe basename for a session slot, or raise HTTP 400."""
+    if not isinstance(raw, str) or not raw:
+        raise HTTPException(status_code=400, detail="Filename required")
+    basename = Path(raw).name  # drop any directory components
+    if not _SESSION_FILENAME_RE.fullmatch(basename):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid filename: use letters, digits, '_' or '-' with a .bin suffix",
+        )
+    resolved = (_SESSION_SLOTS_DIR / basename).resolve()
+    if resolved.parent != _SESSION_SLOTS_DIR.resolve():
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    return basename
+
+
 @app.post("/api/session/save")
 async def save_session(request: Request, client_id: str = Depends(verify_api_key)):
     logger.info(f"💾 Session SAVE request from {client_id}")
     try:
         data = await request.json()
-        filename = data.get("filename")
-        if not filename:
-            raise HTTPException(status_code=400, detail="Filename required")
+        filename = _sanitize_session_filename(data.get("filename"))
         
         async with httpx.AsyncClient() as client:
             resp = await client.post(
@@ -4744,6 +4767,9 @@ async def save_session(request: Request, client_id: str = Depends(verify_api_key
                 raise HTTPException(status_code=resp.status_code, detail=f"Llama save failed: {resp.text}")
                 
             return resp.json()
+    except HTTPException:
+        # Let client-facing 4xx (e.g. filename-sanitization 400) propagate unchanged.
+        raise
     except Exception as e:
         logger.error(f"Save session failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -4753,9 +4779,7 @@ async def load_session(request: Request, client_id: str = Depends(verify_api_key
     logger.info(f"📂 Session LOAD request from {client_id}")
     try:
         data = await request.json()
-        filename = data.get("filename")
-        if not filename:
-            raise HTTPException(status_code=400, detail="Filename required")
+        filename = _sanitize_session_filename(data.get("filename"))
             
         async with httpx.AsyncClient() as client:
             resp = await client.post(
@@ -4768,6 +4792,9 @@ async def load_session(request: Request, client_id: str = Depends(verify_api_key
                 raise HTTPException(status_code=resp.status_code, detail=f"Llama load failed: {resp.text}")
                 
             return resp.json()
+    except HTTPException:
+        # Let client-facing 4xx (e.g. filename-sanitization 400) propagate unchanged.
+        raise
     except Exception as e:
         logger.error(f"Load session failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
