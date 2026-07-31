@@ -50,6 +50,40 @@ Client (OpenAI-compatible)
 | **Usage tracking** | Token usage from llama-server response | Token usage from cloud API response |
 | **Streaming** | SSE passthrough with watchdog | SSE passthrough with watchdog |
 
+## Namespace-based cloud recognition (key-independent)
+
+Guardian recognises a request as a **cloud** model vs. a **local** model purely
+from the `model` name in the request — independently of which Guardian API key
+made the request. A model is treated as cloud-hosted when it matches either:
+
+1. **an explicit entry** in a provider's `models:` list (exact match wins, so a
+   model listed under more than one provider is disambiguated), or
+2. **a namespace prefix** in that provider's `model_prefixes:` list (e.g.
+   `nvidia/`, `anthropic/`, `openai/`).
+
+This lets a client send a raw upstream model name that is *not* explicitly
+listed (e.g. `anthropic/claude-opus-4.1`) and have Guardian forward it to the
+matching provider using that provider's **global** API key from `settings.yaml`
+— no `guardian/{provider}/{model}` per-key route required.
+
+```yaml
+providers:
+  nvidia:
+    model_prefixes: [nvidia/, deepseek-ai/, minimaxai/]
+    models: [...]
+  openrouter:
+    model_prefixes: [anthropic/, openai/, google/, meta-llama/, deepseek/, qwen/, mistralai/]
+    models: [...]
+```
+
+Prefixes match whole namespace segments (a trailing `/` is enforced, so `nvidia`
+matches `nvidia/...` but not `nvidia-foo`). Provider declaration order in
+`settings.yaml` breaks ties between overlapping prefixes; keep provider
+namespace sets disjoint to avoid ambiguity. Prefix-matched models are routable
+on every inference endpoint (`/v1/chat/completions`, `/v1/messages`,
+`/v1/completions`, `/api/chat`, `/api/generate`) even though they do not appear
+in `GET /v1/models` (discovery lists only explicitly configured models).
+
 ## Per-Key Cloud Credential Routing
 
 In addition to the global provider config in `settings.yaml`, Guardian supports
@@ -222,9 +256,13 @@ providers:
 
 ### Hot Reload
 
-The provider registry hot-reloads from `settings.yaml` on every model
-resolution. Edit the file and the changes take effect immediately — no
-Guardian restart needed.
+The provider registry loads its provider/model configuration from
+`settings.yaml` at startup. To apply changes to a provider's `models` or
+`model_prefixes`, restart Guardian — the registry is not re-read per request:
+
+```bash
+sudo systemctl restart llama-guardian
+```
 
 ## Usage
 

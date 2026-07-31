@@ -104,14 +104,31 @@ translated back to Ollama-style responses.
 
 ### Model resolution
 
-`ModelManager.resolve_model()` hot-reloads `../config/models.yaml` and resolves:
+Guardian has two resolution layers:
+
+**Local model resolution** — `ModelManager.resolve_model()` hot-reloads
+`../config/models.yaml` aliases on each call (reads from disk, no restart
+needed for alias changes). It resolves:
 
 - exact model names
 - configured aliases
 - case-insensitive matches
 
-That makes `/admin/load` and `/v1/models` reflect config edits without a
-Guardian restart.
+**Cloud model resolution** — `ProviderRegistry.is_cloud_model()` checks
+whether a model name belongs to a cloud provider. A model is cloud-hosted
+when it matches:
+
+1. **an explicit entry** in a provider's `models:` list (exact match wins)
+2. **a namespace prefix** in that provider's `model_prefixes:` list (e.g.
+   `anthropic/`, `nvidia/`, `openai/`)
+
+This makes unlisted upstream model names routable without configuration —
+`anthropic/claude-sonnet-4.5` is forwarded to OpenRouter even if it's not
+in the explicit `models:` list. Prefix-based routing is **key-independent**:
+no per-key credential linking is required. See `@docs/LLM_ROUTER.md`.
+
+The `ProviderRegistry` does **not** hot-reload — it loads at startup, so
+adding cloud models or prefixes to `settings.yaml` requires a restart.
 
 ### Runtime mode selection
 
@@ -127,6 +144,23 @@ Guardian treats text and vision as separate runtime shapes.
 Guardian also has an internal `model: auto` path that can prefer a
 tool-friendly sibling profile when a model family ships both deep reasoning and
 tool-oriented variants.
+
+### Cloud routing
+
+When a model is recognised as cloud-hosted (see model resolution above),
+Guardian bypasses the local llama-server backend entirely and forwards the
+request to the upstream provider (OpenRouter or NVIDIA NIM). This applies
+uniformly across all inference endpoints (`/v1/chat/completions`,
+`/v1/messages`, `/api/chat`, `/api/generate`).
+
+Cloud streaming responses use the same `StreamProgressWatchdog` and
+`_iter_sse_lines_with_watchdog` infrastructure as local streams, including
+15-second SSE keepalive comments (`: guardian-keepalive`) to prevent client
+idle timeouts on reasoning models. The Anthropic bridge path additionally
+emits `event: ping` events for Claude Code's 5-minute idle window.
+
+See `@docs/LLM_ROUTER.md` for routing details and `@docs/ANTHROPIC_BRIDGE.md`
+for the Anthropic↔OpenAI translation layer.
 
 ## 3. Backend Ownership and Model Lifecycle
 
@@ -389,7 +423,7 @@ These are intentional or current-state limits that docs should not overclaim:
 
 - Guardian runs one inference slot at a time by design.
 - There is no built-in token-bucket or per-client rate limiter.
-- The dashboard port is not auth-gated in current code.
+- The dashboard is auth-gated and bound to `127.0.0.1` (commit `7472d61`).
 - ComfyUI integration is cooperative VRAM release, not full cross-service job
   orchestration.
 - Historical benchmark helpers still exist, but they are not the live runtime

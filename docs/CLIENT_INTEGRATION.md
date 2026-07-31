@@ -45,10 +45,11 @@ If you maintain a Guardian client, treat this as the minimum contract:
 
 1. Send a valid API key on every `:11434` request.
 2. Populate model selectors from `GET /v1/models` or `GET /api/tags`; do not assume a model is served just because a client config mentions it.
-3. Treat only GPU-backed inference routes as queued; metadata and queue-status routes remain directly callable.
-4. Capture `X-Request-Id` and `X-Queue-Wait-Ms` from inference responses.
-5. Handle `404 model_not_served` as a first-class client state, not a generic retryable failure.
-6. If a client needs independent running GPU concurrency, give it a separate API key instead of reusing a shared key.
+3. Cloud models can be requested by raw upstream name (e.g. `anthropic/claude-sonnet-4.5`, `nvidia/nemotron-4-nano-30b`) — Guardian recognises them by namespace prefix, key-independently. These do **not** appear in `GET /v1/models` (only explicitly configured models are listed). See `@docs/LLM_ROUTER.md`.
+4. Treat only GPU-backed inference routes as queued; metadata and queue-status routes remain directly callable. Cloud requests bypass the local GPU queue.
+5. Capture `X-Request-Id` and `X-Queue-Wait-Ms` from inference responses.
+6. Handle `404 model_not_served` as a first-class client state, not a generic retryable failure.
+7. If a client needs independent running GPU concurrency, give it a separate API key instead of reusing a shared key.
 
 ---
 
@@ -178,6 +179,35 @@ Client action:
 - refresh the local model catalog from `GET /v1/models` or `GET /api/tags`
 - show the rejection message to the user or operator
 - do not blindly retry the same unknown model name
+
+#### Cloud model naming
+
+Cloud models can be requested without explicit configuration. Guardian
+recognises them by namespace prefix:
+
+| Prefix | Provider | Example |
+|--------|----------|---------|
+| `anthropic/` | OpenRouter | `anthropic/claude-sonnet-4.5` |
+| `openai/` | OpenRouter | `openai/gpt-5` |
+| `google/` | OpenRouter | `google/gemini-2.5-pro` |
+| `meta-llama/` | OpenRouter | `meta-llama/Llama-4-70B` |
+| `deepseek/` | OpenRouter | `deepseek/deepseek-r1` |
+| `qwen/` | OpenRouter | `qwen/qwen3-235b` |
+| `mistralai/` | OpenRouter | `mistralai/mistral-large` |
+| `nvidia/` | NVIDIA NIM | `nvidia/nemotron-4-nano-30b` |
+| `deepseek-ai/` | NVIDIA NIM | `deepseek-ai/deepseek-r1` |
+| `minimaxai/` | NVIDIA NIM | `minimaxai/minimax-m4` |
+
+Key points:
+
+- **Key-independent**: no per-key credential linking needed — the global
+  provider API key is used.
+- **Not in discovery list**: prefix-matched models do not appear in
+  `GET /v1/models` (only explicitly configured `models:` entries are listed).
+- **Per-key routes still work**: `guardian/openrouter/<model>` and
+  `guardian/nvidia/<model>` routes use a per-key linked credential if one
+  exists, but fall back to prefix routing for unrecognised names.
+- See `@docs/LLM_ROUTER.md` for full routing details.
 
 #### Same-key queueing
 

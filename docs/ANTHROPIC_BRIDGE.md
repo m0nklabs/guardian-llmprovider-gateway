@@ -125,9 +125,15 @@ llama-server doesn't emit Anthropic `ping` SSE events. Claude Code has a 5-minut
 idle timeout (`API_FORCE_IDLE_TIMEOUT`) that aborts streaming connections when no
 data arrives.
 
-**Fix**: Guardian's existing keepalive mechanism (SSE comments) is extended for
-`/v1/messages` paths — keepalive comments are converted to proper Anthropic
-`event: ping` with `{"type": "ping"}` data.
+**Fix**: Guardian's keepalive mechanism (SSE `: guardian-keepalive` comments,
+emitted every 15s via `_iter_sse_lines_with_watchdog`) is applied on **all
+streaming paths** — local models, cloud pass-through (OpenAI format), and the
+Anthropic bridge. On `/v1/messages` paths, keepalive comments are converted to
+proper Anthropic `event: ping` with `{"type": "ping"}` data.
+
+For cloud pass-through streams (e.g. `z-ai/glm-5.2` via OpenRouter), the raw
+keepalive comments reach the client directly — this is what prevents
+client-side idle timeouts on reasoning models with long inter-token gaps.
 
 ### 5. Prefill Workaround Fix
 
@@ -270,14 +276,30 @@ providers:
     base_url: https://openrouter.ai/api/v1
     api_key: ${OPENROUTER_API_KEY}
     timeout_seconds: 600
+    model_prefixes:
+      - anthropic/
+      - openai/
+      - google/
+      - meta-llama/
+      - deepseek/
+      - qwen/
+      - mistralai/
   nvidia:
     enabled: true
     base_url: https://integrate.api.nvidia.com/v1
     api_key: ${NVIDIA_API_KEY}
+    model_prefixes:
+      - nvidia/
+      - deepseek-ai/
+      - minimaxai/
     models:
       - minimaxai/minimax-m3
       - nvidia/llama-3.1-nemotron-70b-instruct
 ```
+
+The `model_prefixes` list enables key-independent namespace routing —
+any model name starting with a listed prefix is forwarded to that provider
+without needing an explicit `models:` entry. See `@docs/LLM_ROUTER.md`.
 
 ### Per-Key Credentials (`config/cloud_keys.json`)
 

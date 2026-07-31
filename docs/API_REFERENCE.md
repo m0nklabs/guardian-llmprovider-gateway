@@ -133,6 +133,9 @@ Notes:
   `advertised_context` value as `max_context` so Claude compacts earlier.
 - `vision.status` comes from Guardian's runtime validation state, not just the
   presence of an `mmproj` path.
+- cloud models matched by namespace prefix (e.g. `anthropic/claude-...`) are
+  routable but do **not** appear in this list — only explicitly configured
+  models and local aliases are listed. See `@docs/LLM_ROUTER.md`.
 
 #### `GET /api/tags`
 
@@ -200,6 +203,8 @@ Representative multimodal request:
 Runtime behavior:
 
 - the requested `model` is resolved against Guardian's configured registry before queue admission; unknown or unserved values fail with `404 model_not_served`
+- cloud models are recognised by explicit `models:` entries or namespace prefixes (e.g. `anthropic/`, `nvidia/`) — see `@docs/LLM_ROUTER.md`
+- cloud requests bypass the local queue slots and are forwarded directly to the upstream provider
 - requests from the same API key may queue behind each other, but Guardian only
   grants one running GPU slot per key at a time
 - if the requested model differs from the active model and the client is
@@ -207,6 +212,7 @@ Runtime behavior:
 - if the same model needs a text-to-vision or vision-to-text runtime flip,
   Guardian reloads that same model with the new runtime mode
 - streaming holds the queue slot until the SSE stream closes
+- all streaming paths (local + cloud) emit `: guardian-keepalive` SSE comments every 15s during upstream silence to prevent client idle timeouts; the Anthropic bridge path additionally emits `event: ping` events
 
 #### `POST /api/chat`
 
