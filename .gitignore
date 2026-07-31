@@ -58,3 +58,6 @@ node_modules/
 
 # Cloud credentials (contains API keys)
 config/cloud_keys.json
+
+# Terminal Paste Image folder
+/.cp-images

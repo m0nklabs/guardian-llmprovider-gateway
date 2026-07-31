@@ -39,7 +39,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
 
@@ -96,6 +96,11 @@ class ProviderRegistry:
         self._settings_path = settings_path
         self._providers: Dict[str, CloudProvider] = {}
         self._model_to_provider: Dict[str, CloudProvider] = {}
+        # Ordered (prefix, provider) pairs for namespace-based cloud
+        # recognition; populated in :meth:`reload` from each provider's
+        # ``model_prefixes`` config.  Exact ``models`` entries always win
+        # over prefix matches (see :meth:`get_provider_for_model`).
+        self._prefix_to_provider: List[Tuple[str, CloudProvider]] = []
         self.reload()
 
     # ── Loading ──────────────────────────────────────────────────────
@@ -104,6 +109,7 @@ class ProviderRegistry:
         """Re-read provider configuration from ``settings.yaml``."""
         self._providers.clear()
         self._model_to_provider.clear()
+        self._prefix_to_provider.clear()
 
         raw_providers = self._load_providers_config()
         for provider_name, cfg in raw_providers.items():
@@ -115,6 +121,15 @@ class ProviderRegistry:
             base_url = str(cfg.get("base_url", "")).rstrip("/")
             api_key = _expand_env(str(cfg.get("api_key", "")))
             models = [str(m) for m in (cfg.get("models") or []) if m]
+            # Namespace prefixes (e.g. ``nvidia/``) let Guardian recognise a
+            # cloud model by its raw upstream name without an explicit listing
+            # or a per-key ``guardian/...`` route.  A trailing ``/`` is enforced
+            # so prefixes match whole namespace segments, not partial names.
+            prefixes = [
+                (p if p.endswith("/") else p + "/")
+                for p in (cfg.get("model_prefixes") or [])
+                if isinstance(p, str) and p.strip()
+            ]
             timeout = float(cfg.get("timeout_seconds", 600.0))
             extra_headers: Dict[str, str] = {}
             if isinstance(cfg.get("extra_headers"), dict):
@@ -156,12 +171,25 @@ class ProviderRegistry:
                     continue
                 self._model_to_provider[model_name] = provider
 
+            # Register namespace prefixes for this enabled provider.  Exact
+            # ``models`` entries above take priority at lookup time; prefixes
+            # provide key-independent recognition for unlisted cloud models
+            # that share a namespace with a configured model.
+            for prefix in prefixes:
+                self._prefix_to_provider.append((prefix, provider))
+
         if self._model_to_provider:
             logger.info(
                 "☁️  Loaded %d cloud model(s) across %d provider(s): %s",
                 len(self._model_to_provider),
                 sum(1 for p in self._providers.values() if p.enabled),
                 ", ".join(sorted(self._model_to_provider.keys())),
+            )
+        if self._prefix_to_provider:
+            logger.info(
+                "☁️  Loaded %d cloud namespace prefix(es): %s",
+                len(self._prefix_to_provider),
+                ", ".join(sorted(p for p, _ in self._prefix_to_provider)),
             )
 
     def _load_providers_config(self) -> Dict[str, Any]:
@@ -183,12 +211,33 @@ class ProviderRegistry:
     # ── Public API ───────────────────────────────────────────────────
 
     def is_cloud_model(self, model_name: str) -> bool:
-        """Return True if *model_name* is served by a cloud provider."""
-        return model_name in self._model_to_provider
+        """Return True if *model_name* is served by a cloud provider.
+
+        A model counts as cloud-hosted when it is either explicitly listed in
+        a provider's ``models`` config **or** matches one of that provider's
+        ``model_prefixes`` namespace patterns (e.g. ``nvidia/...``).  This
+        recognition is purely name-based and independent of the requesting
+        client's API key — Guardian classifies cloud vs. local before any
+        per-key credential lookup happens.
+        """
+        return self.get_provider_for_model(model_name) is not None
 
     def get_provider_for_model(self, model_name: str) -> Optional[CloudProvider]:
-        """Return the :class:`CloudProvider` that serves *model_name*."""
-        return self._model_to_provider.get(model_name)
+        """Return the :class:`CloudProvider` that serves *model_name*.
+
+        Resolution order: an exact ``models`` entry wins (this preserves
+        explicit disambiguation when a model is listed on more than one
+        provider); otherwise the first matching ``model_prefixes`` entry in
+        provider declaration order is used, so a cloud model can be reached by
+        its raw upstream name without a per-key ``guardian/...`` route.
+        """
+        provider = self._model_to_provider.get(model_name)
+        if provider is not None:
+            return provider
+        for prefix, candidate in self._prefix_to_provider:
+            if model_name.startswith(prefix):
+                return candidate
+        return None
 
     def get_all_cloud_models(self) -> List[str]:
         """Return all cloud model names across all enabled providers."""
@@ -202,7 +251,7 @@ class ProviderRegistry:
 
     def build_model_metadata_entry(self, model_name: str) -> Optional[Dict[str, Any]]:
         """Build an OpenAI-style ``/v1/models`` entry for a cloud model."""
-        provider = self._model_to_provider.get(model_name)
+        provider = self.get_provider_for_model(model_name)
         if provider is None:
             return None
         return {

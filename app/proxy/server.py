@@ -4054,6 +4054,7 @@ async def _forward_to_cloud_provider(
             route=f"/v1/{path}",
             client_id=client_id,
             model_name=model_name,
+            heartbeat_interval_s=STREAM_HEARTBEAT_INTERVAL_S,
         ):
             yield line
 

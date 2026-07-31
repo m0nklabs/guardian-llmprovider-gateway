@@ -49,6 +49,17 @@ providers:
     base_url: https://openrouter.ai/api/v1
     api_key: ${OPENROUTER_API_KEY}
     timeout_seconds: 600
+    # Any model whose name starts with one of these namespaces is recognised
+    # as an OpenRouter cloud model — key-independent, using the global key
+    # above — so clients can send raw upstream names not listed in `models:`.
+    model_prefixes:
+      - anthropic/
+      - openai/
+      - google/
+      - meta-llama/
+      - deepseek/
+      - qwen/
+      - mistralai/
     models:
       - anthropic/claude-3.5-sonnet
       - openai/gpt-4o
@@ -63,6 +74,11 @@ providers:
     base_url: https://integrate.api.nvidia.com/v1
     api_key: ${NVIDIA_API_KEY}
     timeout_seconds: 600
+    # NVIDIA NIM namespaces — recognised key-independently via the global key.
+    model_prefixes:
+      - nvidia/
+      - deepseek-ai/
+      - minimaxai/
     models:
       - minimaxai/minimax-m3
       - nvidia/llama-3.1-nemotron-70b-instruct
