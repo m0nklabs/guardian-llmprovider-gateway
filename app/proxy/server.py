@@ -2360,7 +2360,7 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
                             "prompt_eval_count": 0,
                             "eval_count": 0
                         }) + "\n"
-                except (asyncio.CancelledError, _GuardianRequestCancelled):
+                except (asyncio.CancelledError, _GuardianRequestCancelled, httpx.StreamClosed, httpx.ReadError, httpx.RemoteProtocolError):
                     pass
                 finally:
                     cancel_cleanup_task.cancel()
@@ -2649,7 +2649,7 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
                             "prompt_eval_count": 0,
                             "eval_count": 0
                         }) + "\n"
-                except (asyncio.CancelledError, _GuardianRequestCancelled):
+                except (asyncio.CancelledError, _GuardianRequestCancelled, httpx.StreamClosed, httpx.ReadError, httpx.RemoteProtocolError):
                     pass
                 finally:
                     cancel_cleanup_task.cancel()
@@ -4113,7 +4113,7 @@ async def _forward_to_cloud_provider(
                         response_bytes_delta=len(encoded_line),
                     )
                     yield encoded_line
-        except (asyncio.CancelledError, _GuardianRequestCancelled, httpx.StreamClosed):
+        except (asyncio.CancelledError, _GuardianRequestCancelled, httpx.StreamClosed, httpx.ReadError, httpx.RemoteProtocolError):
             pass
         finally:
             await resp.aclose()
@@ -4642,7 +4642,7 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                             encoded_line = (line + "\n").encode("utf-8")
                             _update_live_request_usage(request, response_bytes_delta=len(encoded_line))
                         yield encoded_line
-                except (asyncio.CancelledError, _GuardianRequestCancelled):
+                except (asyncio.CancelledError, _GuardianRequestCancelled, httpx.StreamClosed, httpx.ReadError, httpx.RemoteProtocolError):
                     pass
                 finally:
                     cancel_cleanup_task.cancel()
