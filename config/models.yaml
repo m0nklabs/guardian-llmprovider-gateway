@@ -225,46 +225,46 @@ models:
   # Main: UD-IQ4_XS split, 57.6 GB. LIVE-VERIFIED op b2111 (bac23a3f9), CUDA 12.8:
   #   antwoord coherent, gen ~4.5 tok/s — traag door CPU-offload (28/48 layers op
   #   CPU; 57GB model past niet op 27GB VRAM -> ngl=20, ts 0.42/0.58).
-  # DFlash draft = MAINLINE-GEBLOKKEERD: laguna-s-2.1-DFlash-BF16.gguf declareert
-  #   76 tensors waarvan 7 (attn_gate x6 + enc.aux_norm) NIET in mainline dflash.cpp
-  #   schema zitten -> "expected 76, got 69". RE-VERIFIED tegen nieuwste upstream
-  #   9b2a08881 (build 2115, 2026-07-30): attn_gate nog steeds afwezig op elke
-  #   gecheckte commit -> velden bewaard als commentaar tot attn_gate upstream
-  #   ondersteund wordt.
-  # Context gecapped op 32768: 160k/256k KV past niet naast 57GB model op 27GB VRAM.
-  # TurboQuant tq4_0 is geen echte ggml-type (ggml.h kent alleen BitNet TQ1_0/TQ2_0;
-  #   ook absent op nieuwste 9b2a08881) -> q4_0 KV cache. kv_cache_type_from_str()
-  #   weigert onbekende typen, dus tq4_0 zou Laguna laten crashen.
+  # DFlash draft = INGESCHAKELD op de cuda128-laguna-tq-full fork-binary. De
+  #   poolside/laguna-merge bracht attn_gate (x6) + enc.aux_norm in
+  #   src/models/dflash.cpp -> de 76-tensor draft (laguna-s-2.1-DFlash-BF16.gguf,
+  #   2.23 GB) laadt nu (vroeger mainline-blocked: "expected 76, got 69").
+  # Context gecapped op 32768: 57GB model > 27GB VRAM -> 28/48 layers CPU-offload;
+  #   160k/256k KV past er niet naast. STAP8 test #2 draait -c 160000 manueel op
+  #   :11440 om de limiet te testen.
+  # TurboQuant: de fork-binary kent turbo2/3/4 (GGML_TYPE_TURBO2_0/3_0/4_0, ggml.c).
+  #   CLI-token is "turbo4" (ggml_type_name()) — NIET tq4_0 of turbo4_0 (vallen
+  #   stilletjes terug op f16). STAP8 test #3 draait Qwen3.6+turbo4 via runtime-override.
   laguna-s-2.1-ud-iq4_xs-160k-tq4:
     path: /home/flip/models/Laguna-S-2.1-UD-IQ4_XS-00001-of-00003.gguf
     total_layers: 48
     benchmark_context_limit: 262144
-    context: 32768        # gecapped van 163840 i.v.m. VRAM-budget (zie header)
+    context: 32768        # gecapped i.v.m. VRAM-budget (57GB model op 27GB VRAM)
     ngl: 20
-    kv_type: q4_0
+    kv_type: turbo4
     tensor_split: "0.42,0.58"
-    # --- DFlash speculative decoding (mainline-geblokkeerd, zie header) ---
-    # draft_model_path: /home/flip/models/laguna-s-2.1-DFlash-BF16.gguf
-    # spec_type: draft-dflash
-    # spec_draft_n_max: 8
-    # spec_draft_n_min: 1
-    # draft_cache_type_k: f16
-    # draft_cache_type_v: f16
+    # --- DFlash speculative decoding (attn_gate aanwezig in fork dflash.cpp) ---
+    draft_model_path: /home/flip/models/laguna-s-2.1-DFlash-BF16.gguf
+    spec_type: draft-dflash
+    spec_draft_n_max: 12
+    spec_draft_n_min: 2
+    draft_cache_type_k: f16
+    draft_cache_type_v: f16
   laguna-s-2.1-ud-iq4_xs-256k-tq4:
     path: /home/flip/models/Laguna-S-2.1-UD-IQ4_XS-00001-of-00003.gguf
     total_layers: 48
     benchmark_context_limit: 262144
-    context: 32768        # gecapped van 262144 i.v.m. VRAM-budget (zie header)
+    context: 32768        # gecapped i.v.m. VRAM-budget (57GB model op 27GB VRAM)
     ngl: 20
-    kv_type: q4_0
+    kv_type: turbo4
     tensor_split: "0.42,0.58"
-    # --- DFlash speculative decoding (mainline-geblokkeerd, zie header) ---
-    # draft_model_path: /home/flip/models/laguna-s-2.1-DFlash-BF16.gguf
-    # spec_type: draft-dflash
-    # spec_draft_n_max: 8
-    # spec_draft_n_min: 1
-    # draft_cache_type_k: f16
-    # draft_cache_type_v: f16
+    # --- DFlash speculative decoding (attn_gate aanwezig in fork dflash.cpp) ---
+    draft_model_path: /home/flip/models/laguna-s-2.1-DFlash-BF16.gguf
+    spec_type: draft-dflash
+    spec_draft_n_max: 12
+    spec_draft_n_min: 2
+    draft_cache_type_k: f16
+    draft_cache_type_v: f16
 # === Model Aliases ===
 # Short names that resolve to full model names above.
 # Use in API requests: {"model": "qwen3.6-35b-uncensored"}

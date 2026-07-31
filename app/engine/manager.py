@@ -997,6 +997,13 @@ class ModelManager:
                 "iq4_nl",
                 "q5_0",
                 "q5_1",
+                # TurboQuant KV-cache types supported by the cuda128-laguna-tq-full
+                # fork-binary (GGML_TYPE_TURBO2_0/3_0/4_0); CLI token via ggml_type_name().
+                # Added STAP7 so runtime_overrides.kv_type can select turbo4 (e.g. STAP8
+                # test #3 Qwen3.6+turbo4); base-config kv_type is read unvalidated anyway.
+                "turbo2",
+                "turbo3",
+                "turbo4",
             }
             unknown_keys = set(runtime_overrides) - allowed_keys
             if unknown_keys:
