@@ -222,25 +222,33 @@ models:
     extra_args: "--spec-type draft-mtp --spec-draft-n-max 3 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
 
   # === poolside Laguna-S-2.1 (118B MoE, 48 layers, 256 experts / 10 active) ===
-  # Main: UD-IQ4_XS split, 57.6 GB. LIVE-VERIFIED op b2111 (bac23a3f9), CUDA 12.8:
-  #   antwoord coherent, gen ~4.5 tok/s — traag door CPU-offload (28/48 layers op
-  #   CPU; 57GB model past niet op 27GB VRAM -> ngl=20, ts 0.42/0.58).
-  # DFlash draft = INGESCHAKELD op de cuda128-laguna-tq-full fork-binary. De
-  #   poolside/laguna-merge bracht attn_gate (x6) + enc.aux_norm in
-  #   src/models/dflash.cpp -> de 76-tensor draft (laguna-s-2.1-DFlash-BF16.gguf,
-  #   2.23 GB) laadt nu (vroeger mainline-blocked: "expected 76, got 69").
-  # Context gecapped op 32768: 57GB model > 27GB VRAM -> 28/48 layers CPU-offload;
-  #   160k/256k KV past er niet naast. STAP8 test #2 draait -c 160000 manueel op
-  #   :11440 om de limiet te testen.
-  # TurboQuant: de fork-binary kent turbo2/3/4 (GGML_TYPE_TURBO2_0/3_0/4_0, ggml.c).
-  #   CLI-token is "turbo4" (ggml_type_name()) — NIET tq4_0 of turbo4_0 (vallen
-  #   stilletjes terug op f16). STAP8 test #3 draait Qwen3.6+turbo4 via runtime-override.
+  # Main: UD-IQ4_XS split, 57.6 GB, 3 shards (00001=3.6MB header, 00002=49.8GB,
+  #   00003=7.7GB). STAP8-VALIDATED op de cuda128-laguna-tq-full fork-binary (CUDA 12.8).
+  # VRAM: 57GB model > 27GB VRAM -> ngl=16 (32/48 layers CPU-offload). LET OP: ngl=20
+  #   OOMt op GPU0 (12GB) — de turbo4 compute-graph reserveert een VASTEN ~565 MiB
+  #   "compute pp buffer" (schaalt NIET met -c / -b, vast per turbo4-pad) die er niet
+  #   bij past naast 20 GPU-lagen; ngl=16 past wel, ook met de DFlash-draft erbij.
+  #   Perf: 0.12 tok/s gen (CPU-offload-bound, ~290ms/CPU-laag). Het oude "4.5 tok/s op
+  #   b2111" reproduceert NIET op deze VRAM (57GB/27GB). Diagnostiek STAP8: turbo4 vs
+  #   q4_0 KV = identiek 0.12 tok/s -> turbo4 KV is NIET de bottleneck, CPU-offload wel.
+  # DFlash draft = AAN + WINST. STAP8 test #2: de 76-tensor draft laadt nu (attn_gate x6
+  #   + enc.aux_norm uit de poolside/laguna-merge in src/models/dflash.cpp -> geen
+  #   "expected 76, got 69" meer), spec acceptance 0.167 (6/36), en DFlash VERDUBBELT
+  #   de gen-snelheid: 0.24 vs 0.12 tok/s. Drafmodel = laguna-s-2.1-DFlash-BF16.gguf.
+  #   ("dflash requires ctx_other" / "[spec] failed to measure draft model memory" tijdens
+  #   memory-fitting = benign, de warning zegt het zelf; echte draft-load daarna OK.)
+  # Context gecapped op 32768: 160k/256k KV past er niet naast op 27GB VRAM ( directive's
+  #   STAP8 -c 160000 niet gedraaid — zou OOM'en; 32k is de echte ceiling op ngl 16+DFlash).
+  # TurboQuant KV: turbo2/3/4 (GGML_TYPE_TURBO2_0/3_0/4_0). CLI-token = "turbo4"
+  #   (ggml_type_name, ggml.c) — NIET tq4_0 / turbo4_0 (vallen stilletjes terug op f16).
+  #   .env: TURBO_AUTO_ASYMMETRIC=0 -> pure turbo4 (voorkomt auto-upgrade K->q8_0 op GQA
+  #   6:1; bespaart K-VRAM). Zonder die flag wordt K auto q8_0 (quality safeguard, +~17MiB).
   laguna-s-2.1-ud-iq4_xs-160k-tq4:
     path: /home/flip/models/Laguna-S-2.1-UD-IQ4_XS-00001-of-00003.gguf
     total_layers: 48
     benchmark_context_limit: 262144
     context: 32768        # gecapped i.v.m. VRAM-budget (57GB model op 27GB VRAM)
-    ngl: 20
+    ngl: 16
     kv_type: turbo4
     tensor_split: "0.42,0.58"
     # --- DFlash speculative decoding (attn_gate aanwezig in fork dflash.cpp) ---
@@ -255,7 +263,7 @@ models:
     total_layers: 48
     benchmark_context_limit: 262144
     context: 32768        # gecapped i.v.m. VRAM-budget (57GB model op 27GB VRAM)
-    ngl: 20
+    ngl: 16
     kv_type: turbo4
     tensor_split: "0.42,0.58"
     # --- DFlash speculative decoding (attn_gate aanwezig in fork dflash.cpp) ---
