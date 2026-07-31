@@ -4113,7 +4113,7 @@ async def _forward_to_cloud_provider(
                         response_bytes_delta=len(encoded_line),
                     )
                     yield encoded_line
-        except (asyncio.CancelledError, _GuardianRequestCancelled):
+        except (asyncio.CancelledError, _GuardianRequestCancelled, httpx.StreamClosed):
             pass
         finally:
             await resp.aclose()
@@ -4149,6 +4149,39 @@ async def _forward_to_cloud_provider(
 async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(verify_api_key)):
     body = await request.body()
     _set_request_usage_metadata(request, streamed=False)
+
+    # Intercept count_tokens locally — no cloud/local model needed.
+    # Claude Code uses this for context window management; a rough estimate
+    # is sufficient.  Without this, the request would be forwarded to the
+    # local llama-server which is down in cloud-only setups → 500 error.
+    if path == "messages/count_tokens" or path.startswith("messages/count_tokens"):
+        try:
+            ct_body = json.loads(body)
+        except (json.JSONDecodeError, TypeError):
+            ct_body = {}
+        # Estimate tokens from message content (~4 chars per token)
+        total_chars = 0
+        for msg in ct_body.get("messages", []):
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                total_chars += len(content)
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        total_chars += len(block.get("text", ""))
+        system_field = ct_body.get("system", "")
+        if isinstance(system_field, str):
+            total_chars += len(system_field)
+        elif isinstance(system_field, list):
+            for block in system_field:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    total_chars += len(block.get("text", ""))
+        estimated_tokens = max(1, total_chars // 4)
+        return Response(
+            content=json.dumps({"input_tokens": estimated_tokens}).encode("utf-8"),
+            status_code=200,
+            headers={"Content-Type": "application/json", "X-Token-Count-Estimate": "true"},
+        )
 
     # Only queue inference endpoints; everything else passes through directly
     is_inference = path in ("chat/completions", "completions", "embeddings", "messages")
