@@ -2,12 +2,13 @@
 # CUDA 12.8 locked (NOT 13.x). llama-server built GGML_CUDA=ON, GGML_CUDA_FA=ON,
 #   CMAKE_CUDA_ARCHITECTURES=86;120 (RTX 3060 sm_86 + RTX 5060 Ti sm_120).
 #   systemd llama-server.service pins LLAMA_SERVER_BINARY + LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64.
-# PREMISE STATUS — re-verified against newest upstream 9b2a08881 (2026-07-30):
+# UPSTREAM PREMISE STATUS - re-verified against newest upstream 9b2a08881 (2026-07-30):
 #   * TurboQuant tq4_0 / tq8_0 do NOT exist in ggml.h (only BitNet TQ1_0/TQ2_0 ternary).
 #       -> Laguna KV cache stays q4_0 (best valid compressed type for the VRAM budget).
 #   * attn_gate absent from src/models/dflash.cpp on EVERY checked commit incl. 9b2a08881.
-#       -> DFlash draft load fails "expected 76, got 69"; draft fields stay commented.
-# See the Laguna section header below for the live-verified config.
+#       -> DFlash draft load fails "expected 76, got 69" on upstream builds.
+# The active cuda128-laguna-tq-full fork adds TurboQuant KV types and DFlash attn_gate support.
+# See the Laguna section header below for the live-verified fork configuration.
 models:
   Step3-VL-10B:
     path: /home/flip/models/Step3-VL-10B-F16.gguf
@@ -194,6 +195,25 @@ models:
     vision_ngl: 40
     vision_tensor_split: "0.36,0.64"
     extra_args: "--reasoning on --reasoning-format deepseek --reasoning-budget -1 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
+  Qwen3.6-35B-A3B-HauhauCS-Aggressive-DFlash-Turbo4:
+    path: "/home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf"
+    total_layers: 40
+    benchmark_context_limit: 262144
+    context: 262144
+    ngl: 40
+    kv_type: turbo4
+    tensor_split: "0.38,0.62"
+    mmproj: "/home/flip/models/Qwen3.6-35B-A3B-mmproj-BF16.gguf"
+    vision_context: 262144
+    vision_ngl: 36
+    vision_tensor_split: "0.36,0.64"
+    draft_model_path: "/home/flip/models/Qwen3.6-35B-A3B-DFlash-BF16.gguf"
+    spec_type: draft-dflash
+    spec_draft_n_max: 8
+    spec_draft_n_min: 1
+    draft_cache_type_k: f16
+    draft_cache_type_v: f16
+    extra_args: "--flash-attn on --parallel 1 --batch-size 256 --ubatch-size 128 --reasoning on --reasoning-format deepseek --reasoning-budget -1 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
   Qwen3.6-35B-A3B-HauhauCS-Aggressive-Q8KV:
     path: "/home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf"
     total_layers: 40
@@ -201,11 +221,11 @@ models:
     context: 262144
     ngl: 99
     kv_type: "q8_0"
-    tensor_split: "0.39,0.61"
+    tensor_split: "0.36,0.64"
     mmproj: "/home/flip/models/Qwen3.6-35B-A3B-mmproj-BF16.gguf"
     vision_context: 262144
-    vision_ngl: 40
-    vision_tensor_split: "0.40,0.60"
+    vision_ngl: 45
+    vision_tensor_split: "0.36,0.64"
     extra_args: "--reasoning on --reasoning-format deepseek --reasoning-budget -1 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
   Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved:
     path: "/home/flip/models/Qwen3.6-35B-A3B-uncensored-heretic-Native-MTP-Preserved-Q4_K_M.gguf"
@@ -280,6 +300,7 @@ aliases:
   qwen3.6-35b: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
   qwen3.6-35b-uncensored: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Q8KV"
   qwen3.6-35b-fast: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
+  qwen3.6-35b-dflash-turbo4: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-DFlash-Turbo4"
   qwen3.6-35b-uncensored-fast: "Qwen3.6-35B-A3B-HauhauCS-Aggressive"
   qwen3.6-35b-q8kv: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Q8KV"
   qwen3.6-35b-uncensored-q8kv: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Q8KV"

@@ -16,13 +16,28 @@ proxy:
   target: http://localhost:11440
   vram_limit_mb: 27000
   stream_heartbeat_seconds: 15
+# Model discovery always advertises a positive context window. These values
+# override upstream catalogs for every equivalent raw, openrouter/, or
+# guardian/{provider}/ model ID. Add entries when a provider catalog omits a
+# context size or when a verified provider value must take precedence.
+context_overrides:
+  moonshotai/kimi-k3: 1048576
+  gpt-4.1: 1047576
+  deepseek/deepseek-chat: 1000000
+# Cloud retry policy for upstream 429 (rate-limited) responses.
+# NVIDIA's free tier and Poolside's direct API both have aggressive per-minute
+# rate limits.  The failover system (cloud_keys.json failover_groups) handles
+# cross-provider fallback, while this retry policy handles same-provider
+# in-request 429 retries with exponential backoff.
+# max_hold_seconds=600 (10 min): reasoning models like GLM-5.2 can take minutes
+# to generate; a too-short hold budget causes premature failover to paid OR.
 cloud_retry:
   enabled: true
-  max_retries: 30
-  max_hold_seconds: 600
-  base_backoff_seconds: 1
-  max_backoff_seconds: 60
-  jitter_factor: 0.25
+  max_retries: 10            # was 30 — 10 is plenty with failover as the real backstop
+  max_hold_seconds: 120      # was 600 — 2 min hold, then failover to next candidate
+  base_backoff_seconds: 2    # was 1 — start slightly higher to let rate limit clear
+  max_backoff_seconds: 30    # was 60 — cap at 30s, failover handles the rest
+  jitter_factor: 0.3         # was 0.25 — more jitter to spread concurrent requests
   respect_retry_after: true
 
 # Circuit breaker for failover health tracking. When a provider candidate
@@ -52,6 +67,8 @@ providers:
     # Any model whose name starts with one of these namespaces is recognised
     # as an OpenRouter cloud model — key-independent, using the global key
     # above — so clients can send raw upstream names not listed in `models:`.
+    # z-ai/, minimax/, poolside/, moonshotai/, nvidia/ added for failover
+    # fallback models (free + paid) that mirror NVIDIA NIM / Poolside direct.
     model_prefixes:
       - anthropic/
       - openai/
@@ -60,6 +77,11 @@ providers:
       - deepseek/
       - qwen/
       - mistralai/
+      - z-ai/
+      - minimax/
+      - poolside/
+      - moonshotai/
+      - nvidia/
     models:
       - anthropic/claude-3.5-sonnet
       - openai/gpt-4o
@@ -69,16 +91,30 @@ providers:
       - deepseek/deepseek-chat
       - qwen/qwen-2.5-72b-instruct
       - mistralai/mistral-large
+      # ── Failover mirror models (also on NVIDIA NIM / Poolside direct) ──
+      - z-ai/glm-5.2
+      - minimax/minimax-m3
+      # ── OpenRouter-exclusive free models (no NVIDIA equivalent) ──
+      - poolside/laguna-s-2.1:free
+      - poolside/laguna-xs-2.1:free
+      - nvidia/nemotron-3-nano-30b-a3b:free
+      - nvidia/nemotron-3-super-120b-a12b:free
+      - nvidia/nemotron-3-ultra-550b-a55b:free
+      # ── Paid high-end models ──
+      - moonshotai/kimi-k3
   nvidia:
     enabled: true
     base_url: https://integrate.api.nvidia.com/v1
     api_key: ${NVIDIA_API_KEY}
     timeout_seconds: 600
     # NVIDIA NIM namespaces — recognised key-independently via the global key.
+    # z-ai/ added: NVIDIA NIM hosts glm-5.2 (z-ai/glm-5.2) — recognised via
+    # prefix so clients can send the raw upstream name without a guardian/ route.
     model_prefixes:
       - nvidia/
       - deepseek-ai/
       - minimaxai/
+      - z-ai/
     models:
       - minimaxai/minimax-m3
       - nvidia/llama-3.1-nemotron-70b-instruct
@@ -86,6 +122,66 @@ providers:
       - deepseek-ai/deepseek-v4-pro
       - nvidia/nemotron-3-nano-30b-a3b
       - nvidia/nemotron-3-super-120b-a12b
+      - z-ai/glm-5.2
+  poolside:
+    enabled: true
+    base_url: https://inference.poolside.ai/v1
+    api_key: ${POOLSIDE_API_KEY}
+    timeout_seconds: 600
+    # Poolside Platform models use their own namespace, kept disjoint from
+    # OpenRouter so direct Poolside requests never consume OpenRouter quota.
+    model_prefixes:
+      - poolside/
+    models:
+      - poolside/laguna-xs-2.1
+      - poolside/laguna-s-2.1
+  openai:
+    enabled: true
+    base_url: https://api.openai.com/v1
+    api_key: ${OPENAI_API_KEY}
+    timeout_seconds: 600
+    # Direct OpenAI access via a service-account key.  OpenAI uses BARE model
+    # names (no namespace), so there is no ``model_prefixes`` entry — only the
+    # chat/reasoning models explicitly listed below are recognised globally.
+    # Send any other OpenAI model (dated snapshots, etc.) via the per-key
+    # ``guardian/openai/{model}`` route, which does not require listing.
+    # NB: while OpenRouter serves the ``openai/{model}`` SLUG (e.g.
+    # openai/gpt-4o), this direct provider answers the BARE name (gpt-4o).
+    # Models verified against GET https://api.openai.com/v1/models on 2026-08-01.
+    models:
+      - gpt-4o
+      - gpt-4o-mini
+      - gpt-4.1
+      - gpt-4.1-mini
+      - gpt-4.1-nano
+      - gpt-4-turbo
+      - gpt-3.5-turbo
+      - gpt-5
+      - gpt-5-mini
+      - gpt-5-nano
+      - gpt-5-pro
+      - gpt-5-codex
+      - gpt-5.1
+      - gpt-5.1-codex
+      - gpt-5.1-codex-max
+      - gpt-5.1-codex-mini
+      - gpt-5.2
+      - gpt-5.2-codex
+      - gpt-5.2-pro
+      - gpt-5.3-codex
+      - gpt-5.4
+      - gpt-5.4-mini
+      - gpt-5.4-nano
+      - gpt-5.4-pro
+      - gpt-5.5
+      - gpt-5.5-pro
+      - gpt-5.6-luna
+      - gpt-5.6-sol
+      - gpt-5.6-terra
+      - o3
+      - o3-mini
+      - o4-mini
+      - chat-latest
 queue:
   max_concurrent: 1
   queue_timeout_seconds: 300  # advisory queue wait budget for clients/status, not an internal 429 drop timer
@@ -144,3 +240,59 @@ scaler:
     heavy_thinking_factor: 0.25
     moderate_max_tokens_factor: 0.75
     heavy_max_tokens_factor: 0.5
+
+# === Guardian Capture Subsystem (Phase 0-2) ===
+# Privacy-aware, non-blocking capture boundary between Guardian and Keanu Factory.
+# Captures eligible request/response data as append-only JSONL for dataset construction.
+# Default posture: DISABLED.  Capture failure never blocks inference (fail-open).
+# See docs/GUARDIAN_KEANU_CAPTURE_PLAN.json for the full contract.
+capture:
+  enabled: false                    # Global kill switch — must be true to capture anything
+  local_capture: false              # Capture local (llama-server) inference
+  cloud_capture: false              # Capture cloud provider responses (requires terms review)
+  cloud_allowlist_enabled: true      # Only capture cloud models matching allowlist/prefixes
+  allowed_cloud_models: []           # Explicit cloud models permitted for capture
+  cloud_model_prefixes:              # Namespace prefixes that permit capture
+    - "openai/"                        # e.g. openai/gpt-4o
+    - "anthropic/"
+    - "google/"
+    - "meta-llama/"
+    - "deepseek/"
+    - "qwen/"
+    - "mistralai/"
+    - "z-ai/"
+    - "minimax/"
+    - "poolside/"
+    - "moonshotai/"
+    - "nvidia/"
+  per_client_opt_in: true           # When true, only listed client_refs are captured
+  allowed_client_refs: []           # HMAC-SHA-256 refs of opted-in clients
+  # Field policies: "strip" = never persist, "capture" = persist with redaction
+  system_prompts: strip             # Never persist system prompt content
+  reasoning: strip                  # Never persist reasoning/thinking content
+  tool_definitions: capture         # Persist tool definitions (structurally sanitized)
+  tool_calls: capture               # Persist tool calls (structurally sanitized)
+  tool_results: strip               # Never persist tool results
+  images: hash_and_metadata         # Replace raw image data with SHA-256 + metadata
+  unknown_content_blocks: strip     # Never persist unknown block types
+  # Storage and lifecycle
+  capture_root: data/capture         # Root directory for capture files
+  retention_days: 7                 # Auto-remove files older than N days
+  max_capture_bytes: 10737418240    # 10 GB total disk budget for capture files
+  max_pending_events: 10000         # Bounded event queue size (drop on overflow)
+  max_file_bytes: 268435456         # Rotate active file at 256 MB
+  max_file_age_seconds: 3600        # Rotate active file after 1 hour
+  file_mode: "0640"                 # owner rw, group r (never world-accessible)
+  directory_mode: "0750"            # owner rwx, group rx (never world-accessible)
+  policy_version: "1.0.0"           # Capture policy version (recorded on every event)
+  # instance_id is generated at first startup; set explicitly to pin a stable identity
+  # ── Secret rotation (Decision 1A: multi-secret overlap) ──────────────
+  # GUARDIAN_CAPTURE_CLIENT_REF_SECRET: Current HMAC key for client_ref computation.
+  #   .env only — never inline in YAML.
+  # GUARDIAN_CAPTURE_CLIENT_REF_SECRET_PREVIOUS: Legacy HMAC keys (comma-separated)
+  #   for seamless rotation.  Old opt-in client_refs remain valid until migrated.
+  # ── Per-record HMAC (Decision 2A) ────────────────────────────────────
+  # GUARDIAN_CAPTURE_RECORD_AUTH_SECRET: HMAC key for per-record WAL authentication.
+  #   Each JSONL line gets a record_auth field with {alg, key_id, mac}.
+  #   Keanu verifies individual record authenticity with a verification-only copy.
+  #   .env only — never inline in YAML.
