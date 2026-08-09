@@ -424,9 +424,16 @@ class ModelManager:
         return max(1024, runtime_context - headroom)
 
     def get_runtime_context_window(self, model_name: str) -> Optional[int]:
-        """Return the configured runtime context for a model, if set."""
+        """Return the active runtime profile context for a model, if set."""
         config = self.models.get(model_name, {})
-        configured_context = config.get("context", config.get("ctx"))
+        vision_enabled = model_name == self.current_model and self.current_vision_enabled
+        configured_context = self._resolve_runtime_value(
+            config,
+            "context",
+            enable_vision=vision_enabled,
+        )
+        if configured_context is None:
+            configured_context = config.get("ctx")
         if isinstance(configured_context, int) and configured_context > 0:
             return configured_context
         return None

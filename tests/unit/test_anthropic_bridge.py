@@ -28,6 +28,9 @@ class TestProviderNeedsTranslation:
     def test_nvidia_needs_translation(self):
         assert provider_needs_anthropic_translation("nvidia", "messages") is True
 
+    def test_poolside_needs_translation(self):
+        assert provider_needs_anthropic_translation("poolside", "messages") is True
+
     def test_openrouter_does_not_need_translation(self):
         assert provider_needs_anthropic_translation("openrouter", "messages") is False
 

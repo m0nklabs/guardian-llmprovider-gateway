@@ -2,7 +2,8 @@
 
 Guardian traditionally proxies every inference request to a single local
 ``llama-server`` backend.  This module adds support for *cloud* providers —
-currently OpenRouter and NVIDIA — so Guardian can act as a unified LLM router.
+currently OpenRouter, NVIDIA, and Poolside — so Guardian can act as a unified
+LLM router.
 
 A provider is configured in ``config/settings.yaml`` under the top-level
 ``providers`` key::
@@ -33,6 +34,8 @@ rate limiting and concurrency.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import logging
 import os
 import re
@@ -41,12 +44,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import httpx
 import yaml
+
+from app.proxy.cloud_keys import parse_guardian_route
 
 logger = logging.getLogger("Guardian.Providers")
 
 # Matches ``${ENV_VAR}`` or ``$ENV_VAR`` in config strings.
 _ENV_VAR_PATTERN = re.compile(r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)\}")
+
+CONTEXT_CATALOG_TTL_SECONDS = 3600.0
+
+
+@dataclass(frozen=True)
+class ContextCatalog:
+    """A timestamped upstream model catalog reduced to context windows."""
+
+    fetched_at: float
+    context_windows: Dict[str, int]
 
 
 def _expand_env(value: str) -> str:
@@ -101,6 +117,9 @@ class ProviderRegistry:
         # ``model_prefixes`` config.  Exact ``models`` entries always win
         # over prefix matches (see :meth:`get_provider_for_model`).
         self._prefix_to_provider: List[Tuple[str, CloudProvider]] = []
+        self._context_overrides: Dict[str, int] = {}
+        self._context_catalogs: Dict[str, ContextCatalog] = {}
+        self._context_catalog_locks: Dict[str, asyncio.Lock] = {}
         self.reload()
 
     # ── Loading ──────────────────────────────────────────────────────
@@ -110,8 +129,16 @@ class ProviderRegistry:
         self._providers.clear()
         self._model_to_provider.clear()
         self._prefix_to_provider.clear()
+        self._context_catalogs.clear()
+        self._context_catalog_locks.clear()
 
-        raw_providers = self._load_providers_config()
+        raw_config = self._load_settings_config()
+        raw_overrides = raw_config.get("context_overrides", {})
+        self._context_overrides = self._parse_context_overrides(raw_overrides)
+        raw_providers = raw_config.get("providers", {})
+        if not isinstance(raw_providers, dict):
+            logger.warning("⚠️  'providers' in settings.yaml is not a dict; ignoring")
+            raw_providers = {}
         for provider_name, cfg in raw_providers.items():
             if not isinstance(cfg, dict):
                 logger.warning("⚠️  Provider '%s' config is not a dict; skipping", provider_name)
@@ -154,7 +181,7 @@ class ProviderRegistry:
                 continue
             if not provider.is_configured:
                 logger.warning(
-                    "⚠️  Provider '%s' has no API key — cloud models will return 503",
+                    "⚠️  Provider '%s' has no API key — global cloud models will not be advertised",
                     provider_name,
                 )
             for model_name in models:
@@ -192,21 +219,57 @@ class ProviderRegistry:
                 ", ".join(sorted(p for p, _ in self._prefix_to_provider)),
             )
 
-    def _load_providers_config(self) -> Dict[str, Any]:
-        """Read the ``providers`` section from settings.yaml."""
+    def _load_settings_config(self) -> Dict[str, Any]:
+        """Read the complete Guardian settings document."""
         try:
             if not self._settings_path.exists():
                 return {}
-            with open(self._settings_path, "r") as f:
+            with open(self._settings_path, "r", encoding="utf-8") as f:
                 cfg = yaml.safe_load(f) or {}
-            providers = cfg.get("providers", {})
-            if not isinstance(providers, dict):
-                logger.warning("⚠️  'providers' in settings.yaml is not a dict; ignoring")
-                return {}
-            return providers
+            return cfg if isinstance(cfg, dict) else {}
         except Exception as e:
             logger.warning("Failed to load providers config from %s: %s", self._settings_path, e)
             return {}
+
+    @staticmethod
+    def _parse_positive_integer(value: Any) -> Optional[int]:
+        """Return *value* as a positive integer, or ``None`` when invalid."""
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value if value > 0 else None
+        if isinstance(value, str) and value.isdigit():
+            parsed = int(value)
+            return parsed if parsed > 0 else None
+        return None
+
+    @classmethod
+    def canonical_model_id(cls, model_name: str) -> str:
+        """Normalize supported OpenRouter and Guardian route prefixes."""
+        if not isinstance(model_name, str):
+            return ""
+        route = parse_guardian_route(model_name)
+        canonical = route[1] if route is not None else model_name
+        if canonical.startswith("openrouter/"):
+            canonical = canonical[len("openrouter/"):]
+        return canonical
+
+    @classmethod
+    def _parse_context_overrides(cls, raw_overrides: Any) -> Dict[str, int]:
+        """Normalize configured context override values by canonical model ID."""
+        if not isinstance(raw_overrides, dict):
+            logger.warning("⚠️  'context_overrides' in settings.yaml is not a map; ignoring")
+            return {}
+
+        overrides: Dict[str, int] = {}
+        for model_name, value in raw_overrides.items():
+            context_window = cls._parse_positive_integer(value)
+            canonical_name = cls.canonical_model_id(str(model_name))
+            if context_window is None or not canonical_name:
+                logger.warning("⚠️  Ignoring invalid context override for '%s'", model_name)
+                continue
+            overrides[canonical_name] = context_window
+        return overrides
 
     # ── Public API ───────────────────────────────────────────────────
 
@@ -231,6 +294,19 @@ class ProviderRegistry:
         provider declaration order is used, so a cloud model can be reached by
         its raw upstream name without a per-key ``guardian/...`` route.
         """
+        if model_name.startswith("openrouter/"):
+            canonical_name = self.canonical_model_id(model_name)
+            if canonical_name.startswith("openrouter/"):
+                return None
+            provider = self._get_configured_provider_for_model(canonical_name)
+            if provider is not None and provider.name == "openrouter":
+                return provider
+            return None
+
+        return self._get_configured_provider_for_model(model_name)
+
+    def _get_configured_provider_for_model(self, model_name: str) -> Optional[CloudProvider]:
+        """Resolve an unprefixed model against configured exact names and namespaces."""
         provider = self._model_to_provider.get(model_name)
         if provider is not None:
             return provider
@@ -240,12 +316,118 @@ class ProviderRegistry:
         return None
 
     def get_all_cloud_models(self) -> List[str]:
-        """Return all cloud model names across all enabled providers."""
-        return list(self._model_to_provider.keys())
+        """Return global cloud models backed by configured provider keys."""
+        return [
+            model_name
+            for model_name, provider in self._model_to_provider.items()
+            if provider.is_configured
+        ]
 
     def get_enabled_providers(self) -> List[CloudProvider]:
         """Return all enabled providers (regardless of API-key presence)."""
         return [p for p in self._providers.values() if p.enabled]
+
+    def get_context_override(self, model_name: str) -> Optional[int]:
+        """Return a configured context override for any supported ID variant."""
+        return self._context_overrides.get(self.canonical_model_id(model_name))
+
+    @staticmethod
+    def _catalog_cache_key(provider: CloudProvider) -> str:
+        """Return a non-secret cache key scoped to the effective credential."""
+        credential_fingerprint = hashlib.sha256(provider.api_key.encode("utf-8")).hexdigest()[:16]
+        return f"{provider.name}:{provider.base_url}:{credential_fingerprint}"
+
+    def _get_cloud_context_target(
+        self,
+        model_name: str,
+    ) -> Tuple[Optional[CloudProvider], str]:
+        """Return the upstream provider and canonical model ID for a cloud route."""
+        route = parse_guardian_route(model_name)
+        if route is not None:
+            provider = self._providers.get(route[0])
+            return provider, self.canonical_model_id(model_name)
+
+        canonical_name = self.canonical_model_id(model_name)
+        if model_name.startswith("openrouter/"):
+            return self._providers.get("openrouter"), canonical_name
+        return self.get_provider_for_model(model_name), canonical_name
+
+    @classmethod
+    def _extract_context_windows(cls, payload: Any) -> Dict[str, int]:
+        """Extract valid context sizes from OpenAI-compatible model catalogs."""
+        if not isinstance(payload, dict):
+            return {}
+        entries = payload.get("data", payload.get("models", []))
+        if not isinstance(entries, list):
+            return {}
+
+        context_windows: Dict[str, int] = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            model_id = entry.get("id") or entry.get("name")
+            if not isinstance(model_id, str) or not model_id:
+                continue
+            context_window = cls._parse_positive_integer(entry.get("context_length"))
+            if context_window is None:
+                context_window = cls._parse_positive_integer(entry.get("max_input_tokens"))
+            if context_window is not None:
+                context_windows[cls.canonical_model_id(model_id)] = context_window
+        return context_windows
+
+    async def _get_context_catalog(self, provider: CloudProvider) -> ContextCatalog:
+        """Fetch a provider catalog at most once per configured TTL window."""
+        cache_key = self._catalog_cache_key(provider)
+        now = time.monotonic()
+        cached = self._context_catalogs.get(cache_key)
+        if cached is not None and now - cached.fetched_at < CONTEXT_CATALOG_TTL_SECONDS:
+            return cached
+
+        lock = self._context_catalog_locks.setdefault(cache_key, asyncio.Lock())
+        async with lock:
+            now = time.monotonic()
+            cached = self._context_catalogs.get(cache_key)
+            if cached is not None and now - cached.fetched_at < CONTEXT_CATALOG_TTL_SECONDS:
+                return cached
+
+            context_windows: Dict[str, int] = {}
+            catalog_url = f"{provider.base_url}/models"
+            try:
+                headers = self.build_forward_headers(provider)
+                timeout_seconds = min(max(provider.timeout_seconds, 1.0), 10.0)
+                async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+                    response = await client.get(catalog_url, headers=headers)
+                response.raise_for_status()
+                context_windows = self._extract_context_windows(response.json())
+            except (httpx.HTTPError, ValueError, TypeError) as exc:
+                logger.warning(
+                    "⚠️  Unable to refresh context catalog for provider '%s'; preserving last known context data: %s",
+                    provider.name,
+                    exc,
+                )
+                if cached is not None:
+                    context_windows = cached.context_windows
+
+            catalog = ContextCatalog(fetched_at=now, context_windows=context_windows)
+            self._context_catalogs[cache_key] = catalog
+            return catalog
+
+    async def get_cloud_context_window(
+        self,
+        model_name: str,
+        provider: Optional[CloudProvider] = None,
+    ) -> Optional[int]:
+        """Return the configured or upstream-catalog context size for a cloud model."""
+        override = self.get_context_override(model_name)
+        if override is not None:
+            return override
+
+        resolved_provider, canonical_name = self._get_cloud_context_target(model_name)
+        effective_provider = provider or resolved_provider
+        if effective_provider is None or not canonical_name:
+            return None
+        catalog = await self._get_context_catalog(effective_provider)
+        return catalog.context_windows.get(canonical_name)
 
     # ── Model metadata ───────────────────────────────────────────────
 

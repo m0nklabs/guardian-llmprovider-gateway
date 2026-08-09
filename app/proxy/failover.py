@@ -311,3 +311,14 @@ class FailoverRegistry:
     def get_group(self, name: str) -> Optional[FailoverGroup]:
         """Return the :class:`FailoverGroup` named *name*, or ``None``."""
         return self._groups.get(name)
+
+    def get_image_fallback_for_model(self, model_name: str) -> Optional[str]:
+        """Return the local image fallback configured for an upstream model."""
+        for group in self._groups.values():
+            for candidate in group.candidates:
+                if candidate.model != model_name:
+                    continue
+                if "image" in candidate.modalities:
+                    return None
+                return group.image_fallback_model
+        return None

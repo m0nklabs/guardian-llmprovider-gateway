@@ -9,7 +9,13 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from app.proxy.failover import FailoverCandidate, FailoverGroup, FailoverRegistry
 from app.proxy import server
+
+
+def _metadata_request(key_fingerprint: str = "test-key") -> SimpleNamespace:
+    """Build the minimal authenticated request shape used by metadata routes."""
+    return SimpleNamespace(state=SimpleNamespace(auth_context={"key_fingerprint": key_fingerprint}))
 
 
 @pytest.mark.asyncio
@@ -892,6 +898,203 @@ def test_messages_contain_image_input_detects_openai_parts():
     assert server._messages_contain_image_input(messages) is True
 
 
+def test_messages_contain_image_input_detects_anthropic_image_blocks():
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "describe this"},
+                {
+                    "type": "image",
+                    "source": {"type": "base64", "media_type": "image/png", "data": "abc"},
+                },
+            ],
+        }
+    ]
+
+    assert server._messages_contain_image_input(messages) is True
+
+
+@pytest.mark.parametrize("messages", [None, {}, "not a message list", [{"content": None}], [None]])
+def test_messages_contain_image_input_ignores_malformed_messages(messages):
+    assert server._messages_contain_image_input(messages) is False
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    [
+        "guardian/openrouter/z-ai/glm-5.2",
+        "guardian/nvidia/z-ai/glm-5.2",
+        "guardian/failover/glm-5.2",
+        "z-ai/glm-5.2",
+    ],
+)
+def test_cloud_vision_fallback_resolves_by_underlying_model(tmp_path: Path, model_name: str):
+    config_path = tmp_path / "cloud_keys.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "failover_groups": {
+                    "glm-5.2": {
+                        "candidates": [
+                            {"provider": "nvidia", "model": "z-ai/glm-5.2"},
+                            {"provider": "openrouter", "model": "z-ai/glm-5.2"},
+                        ],
+                        "image_fallback": {
+                            "local_model": "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Q8KV"
+                        },
+                    }
+                }
+            }
+        )
+    )
+    registry = FailoverRegistry(config_path)
+
+    with patch.object(server, "failover_registry", registry):
+        fallback = server._resolve_cloud_vision_fallback(model_name)
+
+    assert fallback == "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Q8KV"
+
+
+def test_cloud_vision_fallback_ignores_unconfigured_models(tmp_path: Path):
+    registry = FailoverRegistry(tmp_path / "cloud_keys.json")
+
+    with patch.object(server, "failover_registry", registry):
+        fallback = server._resolve_cloud_vision_fallback("guardian/openrouter/openai/gpt-4o")
+
+    assert fallback is None
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    [
+        "guardian/openrouter/acme/vision-model",
+        "guardian/failover/vision-model",
+        "acme/vision-model",
+    ],
+)
+def test_cloud_vision_fallback_skips_image_capable_models(tmp_path: Path, model_name: str):
+    config_path = tmp_path / "cloud_keys.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "failover_groups": {
+                    "vision-model": {
+                        "candidates": [
+                            {
+                                "provider": "openrouter",
+                                "model": "acme/vision-model",
+                                "modalities": ["text", "image"],
+                            }
+                        ],
+                        "image_fallback": {"local_model": "local-vision-model"},
+                    }
+                }
+            }
+        )
+    )
+    registry = FailoverRegistry(config_path)
+
+    with patch.object(server, "failover_registry", registry):
+        fallback = server._resolve_cloud_vision_fallback(model_name)
+
+    assert fallback is None
+
+
+def test_cloud_attempts_for_images_skip_text_only_failover_candidates():
+    group = FailoverGroup(
+        name="mixed-capabilities",
+        candidates=[
+            FailoverCandidate("nvidia", "acme/text-model"),
+            FailoverCandidate("openrouter", "acme/vision-model", ("text", "image")),
+        ],
+    )
+    request = SimpleNamespace(state=SimpleNamespace(auth_context={"key_fingerprint": "abc123"}))
+
+    with (
+        patch.object(server.failover_registry, "get_group", return_value=group),
+        patch.object(server.failover_health, "order_candidates", return_value=group.candidates),
+        patch.object(server.cloud_cred_store, "get_credential_for_key", return_value=SimpleNamespace(api_key="test")),
+    ):
+        attempts, failover_group = server._resolve_cloud_attempts(
+            "guardian/failover/mixed-capabilities",
+            request,
+            "goose",
+            requires_vision=True,
+        )
+
+    assert failover_group == "mixed-capabilities"
+    assert [(provider.name, model) for provider, model in attempts] == [
+        ("openrouter", "acme/vision-model")
+    ]
+
+
+def test_cloud_attempts_normalize_openrouter_model_alias():
+    request = SimpleNamespace(state=SimpleNamespace(auth_context={"key_fingerprint": "abc123"}))
+    provider = CloudProvider(
+        name="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-or-test",
+    )
+
+    with patch.object(server, "_cloud_provider_for_request", return_value=provider):
+        attempts, failover_group = server._resolve_cloud_attempts(
+            "openrouter/moonshotai/kimi-k3",
+            request,
+            "goose",
+        )
+
+    assert failover_group is None
+    assert [(attempt.name, upstream_model) for attempt, upstream_model in attempts] == [
+        ("openrouter", "moonshotai/kimi-k3")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_image_fallback_validates_cloud_route_before_local_model_resolution():
+    class _FakeRequest:
+        headers = {"Content-Type": "application/json"}
+        state = SimpleNamespace(auth_context={"key_fingerprint": "abc123"})
+        url = SimpleNamespace(path="/v1/chat/completions")
+        method = "POST"
+
+        async def body(self) -> bytes:
+            return json.dumps(
+                {
+                    "model": "guardian/openrouter/z-ai/glm-5.2",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "describe this"},
+                                {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+                            ],
+                        }
+                    ],
+                }
+            ).encode("utf-8")
+
+    with (
+        patch.object(server.model_manager, "get_current_model", AsyncMock(return_value="local-model")),
+        patch.object(server, "_resolve_or_reject_inference_model", return_value="guardian/openrouter/z-ai/glm-5.2"),
+        patch.object(server, "_resolve_cloud_vision_fallback", return_value="vision-model"),
+        patch.object(
+            server,
+            "_resolve_cloud_attempts",
+            side_effect=server.HTTPException(status_code=403, detail="cloud credential not linked"),
+        ),
+        patch.object(
+            server,
+            "_resolve_inference_model",
+            side_effect=AssertionError("local fallback must not run before cloud route validation"),
+        ),
+    ):
+        with pytest.raises(server.HTTPException) as exc_info:
+            await server.proxy_v1_post("chat/completions", _FakeRequest(), client_id="goose")
+
+    assert exc_info.value.status_code == 403
+
+
 def test_map_multimodal_backend_error_returns_clean_422():
     with patch.object(server.model_manager, "mark_vision_validation") as mark_validation:
         response = server._map_multimodal_backend_error(
@@ -987,11 +1190,264 @@ async def test_get_model_metadata_resolves_public_alias():
             },
         ),
     ):
-        payload = await server.get_model_metadata("qwen3.6-35b-uncensored", client_id="test-user")
+        payload = await server.get_model_metadata(
+            "qwen3.6-35b-uncensored",
+            _metadata_request(),
+            client_id="test-user",
+        )
 
     assert payload["id"] == "qwen3.6-35b-uncensored"
     assert payload["context"] == 262144
     assert payload["input_modalities"] == ["text", "image"]
+
+
+@pytest.mark.asyncio
+async def test_list_models_adds_context_aliases_to_every_served_model():
+    request = SimpleNamespace(
+        headers={},
+        state=SimpleNamespace(),
+        url=SimpleNamespace(path="/v1/models"),
+        method="GET",
+    )
+    cloud_entry = {"id": "moonshotai/kimi-k3", "object": "model", "served_by": "cloud"}
+
+    with (
+        patch.object(server.model_manager, "get_public_model_map", return_value={"local": "Local"}),
+        patch.object(server.model_manager, "get_benchmark_context_limit", return_value=None),
+        patch.object(server.model_manager, "get_runtime_context_window", return_value=32768),
+        patch.object(server.model_manager, "get_advertised_context_window", return_value=31744),
+        patch.object(
+            server.model_manager,
+            "get_vision_capability",
+            return_value={"configured": False, "status": "text_only", "validated": False},
+        ),
+        patch.object(server.provider_registry, "get_all_cloud_models", return_value=["moonshotai/kimi-k3"]),
+        patch.object(server.provider_registry, "build_model_metadata_entry", return_value=cloud_entry),
+        patch.object(
+            server.provider_registry,
+            "get_provider_for_model",
+            return_value=CloudProvider("openrouter", "https://example.test/v1", "test-key"),
+        ),
+        patch.object(
+            server.cloud_cred_store,
+            "get_linked_models_for_key",
+            return_value=[
+                {
+                    "id": "guardian/openrouter/moonshotai/kimi-k3",
+                    "provider": "openrouter",
+                    "model": "moonshotai/kimi-k3",
+                    "credential_id": "cred_test",
+                }
+            ],
+        ),
+        patch.object(
+            server.cloud_cred_store,
+            "get_credential_for_key",
+            return_value=SimpleNamespace(api_key="per-key-credential"),
+        ),
+        patch.object(
+            server.failover_registry,
+            "_groups",
+            {"kimi-k3": FailoverGroup(name="kimi-k3")},
+        ),
+        patch.object(server, "_resolve_cloud_attempts", return_value=([], "kimi-k3")),
+        patch.object(server, "_resolve_context_window", new=AsyncMock(return_value=1048576)),
+    ):
+        payload = await server.list_models(request=request, client_id="test-user")
+
+    assert len(payload["data"]) == 5
+    assert {model["id"] for model in payload["data"]} >= {
+        "moonshotai/kimi-k3",
+        "openrouter/moonshotai/kimi-k3",
+        "guardian/openrouter/moonshotai/kimi-k3",
+    }
+    for model in payload["data"]:
+        assert model["context_length"] == 1048576
+        assert model["max_input_tokens"] == 1048576
+        assert model["meta"]["n_ctx"] == 1048576
+
+
+@pytest.mark.asyncio
+async def test_ollama_show_reports_context_for_cloud_model():
+    class Request:
+        async def json(self):
+            return {"model": "guardian/openrouter/moonshotai/kimi-k3"}
+
+    with (
+        patch.object(server.provider_registry, "is_cloud_model", return_value=True),
+        patch.object(server, "_resolve_context_window", new=AsyncMock(return_value=1048576)),
+        patch.object(server, "_resolve_cloud_attempts", return_value=([], None)),
+    ):
+        payload = await server.show_model_ollama(Request(), client_id="test-user")
+
+    assert payload["model"] == "guardian/openrouter/moonshotai/kimi-k3"
+    assert payload["model_info"]["general.context_length"] == 1048576
+    assert payload["model_info"]["guardian.context_length"] == 1048576
+    assert payload["parameters"] == "num_ctx 1048576"
+
+
+@pytest.mark.asyncio
+async def test_model_metadata_rejects_unlinked_guardian_route():
+    request = _metadata_request("unlinked-key")
+    expected_error = server.HTTPException(
+        status_code=403,
+        detail={"error": "cloud_credential_not_linked"},
+    )
+
+    with patch.object(server, "_resolve_cloud_attempts", side_effect=expected_error):
+        with pytest.raises(server.HTTPException) as exc_info:
+            await server.get_model_metadata(
+                "guardian/openrouter/moonshotai/kimi-k3",
+                request,
+                client_id="test-user",
+            )
+
+    assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_resolve_context_uses_loaded_backend_props_before_configured_value():
+    server._backend_context_cache.clear()
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"default_generation_settings": {"n_ctx": 65536}}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def get(self, url):
+            assert url == f"{server.LLAMA_SERVER_URL}/props"
+            return FakeResponse()
+
+    with (
+        patch.object(server.provider_registry, "get_context_override", return_value=None),
+        patch.object(server.model_manager, "get_current_model", new=AsyncMock(return_value="Local")),
+        patch.object(server.model_manager, "get_runtime_context_window", return_value=32768),
+        patch.object(server.httpx, "AsyncClient", FakeAsyncClient),
+    ):
+        context_window = await server._resolve_context_window("local", "Local")
+
+    assert context_window == 65536
+
+
+@pytest.mark.asyncio
+async def test_resolve_context_does_not_cache_props_after_backend_switches():
+    server._backend_context_cache.clear()
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"default_generation_settings": {"n_ctx": 65536}}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def get(self, url):
+            return FakeResponse()
+
+    with (
+        patch.object(server.provider_registry, "get_context_override", return_value=None),
+        patch.object(
+            server.model_manager,
+            "get_current_model",
+            new=AsyncMock(side_effect=["Local", "Other"]),
+        ),
+        patch.object(server.model_manager, "get_runtime_context_window", return_value=32768),
+        patch.object(server.httpx, "AsyncClient", FakeAsyncClient),
+    ):
+        context_window = await server._resolve_context_window("local", "Local")
+
+    assert context_window == 32768
+    assert "Local" not in server._backend_context_cache
+
+
+@pytest.mark.asyncio
+async def test_resolve_context_uses_logged_default_when_no_source_has_a_value(caplog):
+    server._context_fallback_warnings.discard("unknown/cloud-model")
+
+    with (
+        patch.object(server.provider_registry, "get_context_override", return_value=None),
+        patch.object(server.provider_registry, "get_cloud_context_window", new=AsyncMock(return_value=None)),
+    ):
+        context_window = await server._resolve_context_window("unknown/cloud-model")
+
+    assert context_window == server.DEFAULT_CONTEXT_WINDOW
+    assert "unknown/cloud-model" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_resolve_context_uses_safe_minimum_for_failover_candidates():
+    group = FailoverGroup(
+        name="kimi-k3",
+        candidates=[
+            FailoverCandidate("nvidia", "moonshotai/kimi-k3"),
+            FailoverCandidate("openrouter", "moonshotai/kimi-k3"),
+        ],
+    )
+
+    with (
+        patch.object(server.provider_registry, "get_context_override", return_value=None),
+        patch.object(server.failover_registry, "get_group", return_value=group),
+        patch.object(
+            server.provider_registry,
+            "get_cloud_context_window",
+            new=AsyncMock(side_effect=[1048576, None]),
+        ) as context_mock,
+    ):
+        context_window = await server._resolve_context_window("guardian/failover/kimi-k3")
+
+    assert context_window == server.DEFAULT_CONTEXT_WINDOW
+    assert context_mock.await_args_list[0].args == ("guardian/nvidia/moonshotai/kimi-k3",)
+    assert context_mock.await_args_list[1].args == ("guardian/openrouter/moonshotai/kimi-k3",)
+
+
+@pytest.mark.asyncio
+async def test_resolve_context_uses_safe_minimum_for_authorized_failover_attempts():
+    attempts = [
+        (
+            CloudProvider("nvidia", "https://example.test/v1", "nvidia-key"),
+            "moonshotai/kimi-k3",
+        ),
+        (
+            CloudProvider("openrouter", "https://example.test/v1", "openrouter-key"),
+            "moonshotai/kimi-k3",
+        ),
+    ]
+
+    with (
+        patch.object(server.provider_registry, "get_context_override", return_value=None),
+        patch.object(
+            server.provider_registry,
+            "get_cloud_context_window",
+            new=AsyncMock(side_effect=[1048576, 131072]),
+        ),
+    ):
+        context_window = await server._resolve_context_window(
+            "guardian/failover/kimi-k3",
+            cloud_attempts=attempts,
+        )
+
+    assert context_window == 131072
 
 
 @pytest.mark.asyncio
@@ -1248,7 +1704,11 @@ async def test_get_model_metadata_returns_cloud_model():
         patch.object(server.provider_registry, "build_model_metadata_entry") as build_mock,
     ):
         build_mock.return_value = {"id": "openai/gpt-4o", "object": "model", "owned_by": "openrouter", "served_by": "cloud"}
-        result = await server.get_model_metadata("openai/gpt-4o", client_id="test-user")
+        result = await server.get_model_metadata(
+            "openai/gpt-4o",
+            _metadata_request(),
+            client_id="test-user",
+        )
 
     assert result["id"] == "openai/gpt-4o"
     assert result["owned_by"] == "openrouter"
@@ -1266,6 +1726,7 @@ async def test_list_models_includes_failover_groups():
         patch.object(server, "cloud_cred_store") as cc_mock,
         patch.object(server, "failover_registry") as fr_mock,
         patch.object(server, "_build_model_metadata_entry", return_value={"id": "local", "object": "model"}),
+        patch.object(server, "_resolve_cloud_attempts", return_value=([], "glm-5.2")),
     ):
         mm_mock.get_public_model_map.return_value = {}
         pr_mock.get_all_cloud_models.return_value = []
@@ -1291,14 +1752,21 @@ async def test_get_model_metadata_returns_failover_group():
     """GET /v1/models/guardian/failover/{name} must resolve the failover entry."""
     fake_group = SimpleNamespace(name="glm-5.2")
 
-    with patch.object(server, "failover_registry") as fr_mock:
+    with (
+        patch.object(server, "failover_registry") as fr_mock,
+        patch.object(server, "_resolve_cloud_attempts", return_value=([], "glm-5.2")),
+    ):
         fr_mock.get_group.return_value = fake_group
-        result = await server.get_model_metadata("guardian/failover/glm-5.2", client_id="test-user")
+        result = await server.get_model_metadata(
+            "guardian/failover/glm-5.2",
+            _metadata_request(),
+            client_id="test-user",
+        )
 
     assert result["id"] == "guardian/failover/glm-5.2"
     assert result["served_by"] == "failover"
     assert result["failover_group"] == "glm-5.2"
-    fr_mock.get_group.assert_called_once_with("glm-5.2")
+    fr_mock.get_group.assert_called_with("glm-5.2")
 
 
 @pytest.mark.asyncio
@@ -1307,11 +1775,19 @@ async def test_get_model_metadata_returns_404_for_unknown_failover_group():
     with patch.object(server, "failover_registry") as fr_mock:
         fr_mock.get_group.return_value = None
         with pytest.raises(Exception) as excinfo:
-            await server.get_model_metadata("guardian/failover/does-not-exist", client_id="test-user")
+            await server.get_model_metadata(
+                "guardian/failover/does-not-exist",
+                _metadata_request(),
+                client_id="test-user",
+            )
     assert excinfo.value.status_code == 404
 
 
 # ── _prepare_cloud_candidate_request: user field injection ────────────
+
+
+def test_provider_base_url_includes_poolside():
+    assert server._provider_base_url("poolside") == "https://inference.poolside.ai/v1"
 
 
 def test_prepare_cloud_candidate_injects_user_for_openrouter():
@@ -1377,3 +1853,196 @@ def test_prepare_cloud_candidate_no_user_without_client_id():
         provider, "z-ai/glm-5.2", "chat/completions", base_body,
     )
     assert "user" not in json_body
+
+
+# ── OpenAI reasoning-model parameter adaptation ───────────────────────
+
+
+def test_provider_base_url_includes_openai():
+    """The OpenAI base URL must be registered for guardian/openai/ routes."""
+    assert server._provider_base_url("openai") == "https://api.openai.com/v1"
+
+
+def test_adapt_openai_reasoning_converts_max_tokens_for_o3():
+    """o3-mini must get max_tokens renamed to max_completion_tokens."""
+    provider = CloudProvider(
+        name="openai", base_url="https://api.openai.com/v1",
+        api_key="sk-test", models=["o3-mini"],
+    )
+    body = {"model": "o3-mini", "messages": [], "max_tokens": 100, "temperature": 0.5}
+    adapted = server._adapt_openai_reasoning_params(provider, "o3-mini", body)
+    assert "max_tokens" not in adapted
+    assert adapted.get("max_completion_tokens") == 100
+
+
+def test_adapt_openai_reasoning_strips_temperature_for_o3():
+    """o-series models must have temperature stripped entirely."""
+    provider = CloudProvider(
+        name="openai", base_url="https://api.openai.com/v1",
+        api_key="sk-test", models=["o3-mini"],
+    )
+    body = {"model": "o3-mini", "messages": [], "temperature": 0.5}
+    adapted = server._adapt_openai_reasoning_params(provider, "o3-mini", body)
+    assert "temperature" not in adapted
+
+
+def test_adapt_openai_reasoning_converts_max_tokens_for_gpt5():
+    """gpt-5* must also get max_tokens renamed to max_completion_tokens."""
+    provider = CloudProvider(
+        name="openai", base_url="https://api.openai.com/v1",
+        api_key="sk-test", models=["gpt-5-mini"],
+    )
+    body = {"model": "gpt-5-mini", "messages": [], "max_tokens": 200}
+    adapted = server._adapt_openai_reasoning_params(provider, "gpt-5-mini", body)
+    assert "max_tokens" not in adapted
+    assert adapted.get("max_completion_tokens") == 200
+
+
+def test_adapt_openai_reasoning_fixes_temperature_for_gpt5():
+    """gpt-5* must have temperature forced to 1 when set to anything else."""
+    provider = CloudProvider(
+        name="openai", base_url="https://api.openai.com/v1",
+        api_key="sk-test", models=["gpt-5-mini"],
+    )
+    body = {"model": "gpt-5-mini", "messages": [], "temperature": 0}
+    adapted = server._adapt_openai_reasoning_params(provider, "gpt-5-mini", body)
+    assert adapted.get("temperature") == 1
+
+
+def test_adapt_openai_reasoning_does_not_touch_temperature_1_for_gpt5():
+    """temperature=1 is the only accepted value for gpt-5*; leave it alone."""
+    provider = CloudProvider(
+        name="openai", base_url="https://api.openai.com/v1",
+        api_key="sk-test", models=["gpt-5-mini"],
+    )
+    body = {"model": "gpt-5-mini", "messages": [], "temperature": 1}
+    adapted = server._adapt_openai_reasoning_params(provider, "gpt-5-mini", body)
+    assert adapted.get("temperature") == 1
+
+
+def test_adapt_openai_reasoning_passes_through_non_reasoning():
+    """gpt-4o is NOT a reasoning model; params must be untouched."""
+    provider = CloudProvider(
+        name="openai", base_url="https://api.openai.com/v1",
+        api_key="sk-test", models=["gpt-4o"],
+    )
+    body = {"model": "gpt-4o", "messages": [], "max_tokens": 100, "temperature": 0.7}
+    adapted = server._adapt_openai_reasoning_params(provider, "gpt-4o", body)
+    assert adapted is body or adapted == body  # may be same or equal
+    assert adapted.get("max_tokens") == 100
+    assert adapted.get("temperature") == 0.7
+    assert "max_completion_tokens" not in adapted
+
+
+def test_adapt_openai_reasoning_skips_non_openai_provider():
+    """OpenRouter has its own param handling; adaptation must NOT apply."""
+    provider = CloudProvider(
+        name="openrouter", base_url="https://openrouter.ai/api/v1",
+        api_key="sk-or-test", models=["openai/gpt-5"],
+    )
+    body = {"model": "openai/gpt-5", "messages": [], "max_tokens": 100, "temperature": 0.5}
+    adapted = server._adapt_openai_reasoning_params(provider, "openai/gpt-5", body)
+    assert adapted.get("max_tokens") == 100
+    assert adapted.get("temperature") == 0.5
+    assert "max_completion_tokens" not in adapted
+
+
+def test_adapt_openai_reasoning_keeps_explicit_max_completion_tokens():
+    """If client already set max_completion_tokens, don't override — only drop max_tokens."""
+    provider = CloudProvider(
+        name="openai", base_url="https://api.openai.com/v1",
+        api_key="sk-test", models=["o3-mini"],
+    )
+    body = {"model": "o3-mini", "messages": [], "max_tokens": 50, "max_completion_tokens": 200}
+    adapted = server._adapt_openai_reasoning_params(provider, "o3-mini", body)
+    assert "max_tokens" not in adapted
+    assert adapted.get("max_completion_tokens") == 200
+
+
+def test_prepare_cloud_adapts_openai_reasoning_end_to_end():
+    """_prepare_cloud_candidate_request must apply adaptation for direct OpenAI o3-mini."""
+    provider = CloudProvider(
+        name="openai", base_url="https://api.openai.com/v1",
+        api_key="sk-test", models=["o3-mini"],
+    )
+    base_body = {"model": "guardian/openai/o3-mini", "messages": [], "max_tokens": 64, "temperature": 0}
+    _path, json_body, _body, _needs_tr = server._prepare_cloud_candidate_request(
+        provider, "o3-mini", "chat/completions", base_body,
+    )
+    assert "max_tokens" not in json_body
+    assert json_body.get("max_completion_tokens") == 64
+    assert "temperature" not in json_body
+
+
+# ── Capture: cloud response content extraction ──────────────────────────
+
+class TestExtractCloudResponseContent:
+    """Tests for _extract_cloud_response_content helper."""
+
+    def test_extracts_openai_text_content(self):
+        payload = {"choices": [{"message": {"content": "Hello world"}}]}
+        content, tool_calls = server._extract_cloud_response_content(payload)
+        assert content == "Hello world"
+        assert tool_calls is None
+
+    def test_extracts_openai_tool_calls(self):
+        tcs = [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "SF"}'}}]
+        payload = {"choices": [{"message": {"content": None, "tool_calls": tcs}}]}
+        content, tool_calls = server._extract_cloud_response_content(payload)
+        assert content is None
+        assert tool_calls == tcs
+
+    def test_extracts_openai_reasoning_fallback(self):
+        payload = {"choices": [{"message": {"content": None, "reasoning_content": "Thinking..."}}]}
+        content, tool_calls = server._extract_cloud_response_content(payload)
+        assert content == "Thinking..."
+
+    def test_extracts_openai_content_block_list(self):
+        payload = {"choices": [{"message": {"content": [{"type": "text", "text": "Part 1"}, {"type": "text", "text": "Part 2"}]}}]}
+        content, tool_calls = server._extract_cloud_response_content(payload)
+        assert content == "Part 1\nPart 2"
+
+    def test_extracts_anthropic_text_block(self):
+        payload = {"content": [{"type": "text", "text": "Hello from Claude"}]}
+        content, tool_calls = server._extract_cloud_response_content(payload)
+        assert content == "Hello from Claude"
+        assert tool_calls is None
+
+    def test_extracts_anthropic_tool_use_block(self):
+        payload = {"content": [{"type": "text", "text": "Let me check"}, {"type": "tool_use", "id": "tool_1", "name": "search", "input": {"q": "test"}}]}
+        content, tool_calls = server._extract_cloud_response_content(payload)
+        assert content == "Let me check"
+        assert tool_calls is not None
+        assert len(tool_calls) == 1
+        assert tool_calls[0]["id"] == "tool_1"
+        assert tool_calls[0]["function"]["name"] == "search"
+        assert json.loads(tool_calls[0]["function"]["arguments"]) == {"q": "test"}
+
+    def test_returns_none_for_empty_payload(self):
+        content, tool_calls = server._extract_cloud_response_content(None)
+        assert content is None
+        assert tool_calls is None
+
+    def test_returns_none_for_missing_choices(self):
+        payload = {"model": "gpt-4o"}
+        content, tool_calls = server._extract_cloud_response_content(payload)
+        assert content is None
+        assert tool_calls is None
+
+    def test_returns_none_for_empty_choices(self):
+        payload = {"choices": []}
+        content, tool_calls = server._extract_cloud_response_content(payload)
+        assert content is None
+        assert tool_calls is None
+
+    def test_handles_mixed_text_and_tool_use_anthropic(self):
+        payload = {"content": [
+            {"type": "text", "text": "I'll search for that"},
+            {"type": "tool_use", "id": "tu1", "name": "lookup", "input": {"id": 42}},
+            {"type": "text", "text": "and show results"},
+        ]}
+        content, tool_calls = server._extract_cloud_response_content(payload)
+        assert content == "I'll search for that\nand show results"
+        assert tool_calls is not None
+        assert len(tool_calls) == 1
+        assert tool_calls[0]["function"]["name"] == "lookup"

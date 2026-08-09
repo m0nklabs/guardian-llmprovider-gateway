@@ -339,8 +339,41 @@ async def list_cloud_models_ui(_client_id: str = Depends(verify_api_key)):
 class GuardianService:
     def __init__(self):
         self.scheduler = SchedulerManager()
-        # Proxy listens on 11434 (Direct Entry, Nginx disabled)
-        self.proxy_config = uvicorn.Config(proxy_app, host="0.0.0.0", port=11434, log_level="info")
+        # The listener defaults to 11434; TLS deployments can bind a private port.
+        tls_certfile = os.environ.get("GUARDIAN_TLS_CERTFILE")
+        tls_keyfile = os.environ.get("GUARDIAN_TLS_KEYFILE")
+        if bool(tls_certfile) != bool(tls_keyfile):
+            raise RuntimeError(
+                "GUARDIAN_TLS_CERTFILE and GUARDIAN_TLS_KEYFILE must be set together"
+            )
+
+        proxy_host = "0.0.0.0"
+        proxy_port = 11434
+        if tls_certfile and tls_keyfile:
+            proxy_host = os.environ.get("GUARDIAN_TLS_HOST", proxy_host).strip()
+            if not proxy_host:
+                raise RuntimeError("GUARDIAN_TLS_HOST must not be empty when TLS is enabled")
+            tls_port_value = os.environ.get("GUARDIAN_TLS_PORT", str(proxy_port))
+            try:
+                proxy_port = int(tls_port_value)
+            except ValueError as exc:
+                raise RuntimeError("GUARDIAN_TLS_PORT must be a valid TCP port") from exc
+            if not 1 <= proxy_port <= 65535:
+                raise RuntimeError("GUARDIAN_TLS_PORT must be between 1 and 65535")
+
+        proxy_config_options = {
+            "host": proxy_host,
+            "port": proxy_port,
+            "log_level": "info",
+        }
+        if tls_certfile and tls_keyfile:
+            proxy_config_options.update(
+                ssl_certfile=tls_certfile,
+                ssl_keyfile=tls_keyfile,
+            )
+            logger.info("Guardian API TLS enabled on %s:%s", proxy_host, proxy_port)
+
+        self.proxy_config = uvicorn.Config(proxy_app, **proxy_config_options)
         self.proxy_server = uvicorn.Server(self.proxy_config)
         self.scheduler_task = None
         self.proxy_task = None

@@ -121,6 +121,68 @@ AUTH_FAILURES = Counter(
 )
 
 
+# === Capture Metrics ===
+
+CAPTURE_EVENTS_TOTAL = Counter(
+    "guardian_capture_events_total",
+    "Total capture events enqueued",
+    ["event_type", "route_type"],
+)
+
+CAPTURE_EVENTS_DROPPED_TOTAL = Counter(
+    "guardian_capture_events_dropped_total",
+    "Total capture events dropped due to queue overflow",
+)
+
+CAPTURE_WRITE_FAILURES_TOTAL = Counter(
+    "guardian_capture_write_failures_total",
+    "Total capture write failures (fail-open, inference continues)",
+)
+
+CAPTURE_QUEUE_DEPTH = Gauge(
+    "guardian_capture_queue_depth",
+    "Number of capture events waiting in the sink queue",
+)
+
+CAPTURE_BYTES_TOTAL = Counter(
+    "guardian_capture_bytes_total",
+    "Total bytes written to capture files",
+)
+
+CAPTURE_DISK_BYTES = Gauge(
+    "guardian_capture_disk_bytes",
+    "Total disk usage of capture files (bytes)",
+)
+
+CAPTURE_FILES_ROTATED = Counter(
+    "guardian_capture_files_rotated_total",
+    "Total number of capture files rotated (closed + compressed)",
+)
+
+CAPTURE_FILES_RETIRED = Counter(
+    "guardian_capture_files_retired_total",
+    "Total number of capture files removed by retention",
+)
+
+
+def update_capture_metrics(snap: Optional[Dict[str, Any]] = None) -> None:
+    """Sync capture subsystem gauges from the sink/writer snapshot."""
+    if snap is None:
+        return
+    sink_m = snap.get("metrics", {}).get("metrics", {})
+    writer_m = snap.get("writer", {})
+
+    queue_depth = sink_m.get("guardian_capture_queue_depth", 0)
+    CAPTURE_QUEUE_DEPTH.set(queue_depth)
+
+    disk_bytes = snap.get("disk_bytes", snap.get("capture_disk_bytes", 0))
+    CAPTURE_DISK_BYTES.set(disk_bytes)
+
+    # Counters are only incremented, never decremented — but we can sync
+    # the dropped/write_failure gauges from the snapshot if available.
+    # Prometheus counters are monotonic; we rely on the writer to maintain them.
+
+
 @contextmanager
 def track_request(endpoint: str, model: str):
     """Context manager to track request metrics (duration, count, active gauge).

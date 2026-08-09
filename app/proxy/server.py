@@ -47,6 +47,7 @@ from app.proxy.metrics import (
     update_queue_metrics,
     update_gpu_metrics,
     update_system_metrics,
+    update_capture_metrics,
     get_metrics_output,
     MODEL_SWITCHES,
     MODEL_CRASHES,
@@ -55,6 +56,17 @@ from app.proxy.metrics import (
     QUEUE_TOTAL_TIMEOUTS,
     AUTH_FAILURES,
 )
+
+# ── Capture subsystem (opt-in, fail-open, disabled by default) ───────
+from app.capture.integration import (
+    capture_controller,
+    get_capture_controller,
+    get_capture_sink_snapshot,
+)
+from app.capture.config import PROTOCOL_OPENAI, PROTOCOL_ANTHROPIC, PROTOCOL_OLLAMA, ROUTE_LOCAL
+from app.capture.redactor import anthropic_messages_to_openai
+from app.capture.schema import BuildContext
+from app.capture.stream_assembler import StreamResponseAssembler
 
 # Load configuration from settings.yaml
 def load_config() -> dict:
@@ -1113,15 +1125,345 @@ def _request_outcome(request_id: str) -> str:
     return "cancelled" if inference_queue.is_cancel_requested(request_id) else "completed"
 
 
-def _messages_contain_image_input(messages: List[Dict[str, Any]]) -> bool:
+# ── Capture helpers (fail-open, never block inference) ──────────────────
+
+def _capture_client_fingerprint(request: Request, client_id: str) -> Optional[str]:
+    """Extract the key fingerprint from the request's auth context for capture."""
+    try:
+        auth_context = get_request_auth_context(request) or {}
+        fingerprint = auth_context.get("key_fingerprint")
+        if isinstance(fingerprint, str) and fingerprint.strip():
+            return fingerprint.strip()
+    except Exception:
+        pass
+    return None
+
+
+def _capture_ingress_protocol(path: str, endpoint: str) -> str:
+    """Determine the ingress protocol for capture based on the route."""
+    if endpoint.startswith("/v1/"):
+        # Check if it's an Anthropic-style /v1/messages path
+        if path == "messages" or endpoint == "/v1/messages":
+            return "anthropic"
+        return PROTOCOL_OPENAI
+    elif endpoint.startswith("/api/chat"):
+        return PROTOCOL_OLLAMA
+    return PROTOCOL_OPENAI
+
+
+def _capture_endpoint_from_request(request: Request) -> str:
+    """Extract the canonical endpoint path from a request."""
+    url_path = request.url.path if hasattr(request, "url") else ""
+    if "/v1/" in url_path:
+        # Strip the /v1/ prefix for canonical form
+        return "/v1/" + url_path.split("/v1/", 1)[-1]
+    return url_path or ""
+
+
+def _dispatch_capture_request_received(
+    request: Request,
+    client_id: str,
+    *,
+    request_id: str,
+    endpoint: str,
+    ingress_protocol: str,
+    route_type: str,
+    requested_model: Optional[str],
+    resolved_model: Optional[str] = None,
+    request_messages: Optional[List[Dict[str, Any]]] = None,
+    request_parameters: Optional[Dict[str, Any]] = None,
+    queue_wait_ms: Optional[float] = None,
+) -> Optional["PolicyResult"]:
+    """Dispatch a request_received capture event (fail-open).
+
+    Returns the PolicyResult so the caller can skip completed-event capture
+    when the request was not captured.
+    """
+    try:
+        controller = get_capture_controller()
+        client_fingerprint = _capture_client_fingerprint(request, client_id)
+        return controller.maybe_capture_request_received(
+            request_id=request_id,
+            client_fingerprint=client_fingerprint,
+            endpoint=endpoint,
+            ingress_protocol=ingress_protocol,
+            route_type=route_type,
+            requested_model=requested_model,
+            resolved_model=resolved_model,
+            request_messages=request_messages,
+            request_parameters=request_parameters,
+            queue_wait_ms=queue_wait_ms,
+        )
+    except Exception:
+        return None
+
+
+def _dispatch_capture_request_completed(
+    ctx: BuildContext,
+    *,
+    policy_result: Optional["PolicyResult"] = None,
+    response_content: Optional[str] = None,
+    tool_calls: Optional[list] = None,
+    tool_results: Optional[list] = None,
+    reasoning_content: Optional[str] = None,
+    finish_reason: Optional[str] = None,
+    prompt_tokens: Optional[int] = None,
+    completion_tokens: Optional[int] = None,
+    queue_wait_ms: Optional[float] = None,
+    duration_ms: Optional[float] = None,
+    http_status: Optional[int] = None,
+    streamed: Optional[bool] = None,
+    incomplete: Optional[bool] = None,
+    attempts: Optional[int] = None,
+) -> None:
+    """Dispatch a request_completed capture event (fail-open)."""
+    try:
+        controller = get_capture_controller()
+        controller.capture_request_completed(
+            ctx,
+            policy_result=policy_result,
+            response_content=response_content,
+            tool_calls=tool_calls,
+            tool_results=tool_results,
+            reasoning_content=reasoning_content,
+            finish_reason=finish_reason,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            queue_wait_ms=queue_wait_ms,
+            duration_ms=duration_ms,
+            http_status=http_status,
+            streamed=streamed,
+            incomplete=incomplete,
+            attempts=attempts,
+        )
+    except Exception:
+        pass
+
+
+def _dispatch_capture_request_failed(
+    ctx: BuildContext,
+    *,
+    error_code: str,
+    http_status: Optional[int] = None,
+    sanitized_message: Optional[str] = None,
+    queue_wait_ms: Optional[float] = None,
+    duration_ms: Optional[float] = None,
+    attempts: Optional[int] = None,
+    policy_result: Optional["PolicyResult"] = None,
+) -> None:
+    """Dispatch a request_failed capture event (fail-open)."""
+    try:
+        controller = get_capture_controller()
+        controller.capture_request_failed(
+            ctx,
+            error_code=error_code,
+            http_status=http_status,
+            sanitized_message=sanitized_message,
+            queue_wait_ms=queue_wait_ms,
+            duration_ms=duration_ms,
+            attempts=attempts,
+        )
+    except Exception:
+        pass
+
+
+def _dispatch_capture_request_cancelled(
+    ctx: BuildContext,
+    *,
+    cancel_reason: str,
+    queue_wait_ms: Optional[float] = None,
+    duration_ms: Optional[float] = None,
+    attempts: Optional[int] = None,
+    policy_result: Optional["PolicyResult"] = None,
+) -> None:
+    """Dispatch a request_cancelled capture event (fail-open)."""
+    try:
+        controller = get_capture_controller()
+        controller.capture_request_cancelled(
+            ctx,
+            cancel_reason=cancel_reason,
+            queue_wait_ms=queue_wait_ms,
+            duration_ms=duration_ms,
+            attempts=attempts,
+        )
+    except Exception:
+        pass
+
+
+def _dispatch_capture_stream_completed(
+    request: Request,
+    request_id: str,
+    client_id: str,
+    model_name: str,
+    ctx: Optional[BuildContext],
+    policy_result: Optional["PolicyResult"],
+    assembler: Optional[StreamResponseAssembler],
+    usage_totals: Dict[str, Any],
+    path: str,
+    status_code: int,
+) -> None:
+    """Dispatch request_completed for the streaming path (fail-open).
+
+    Uses the StreamResponseAssembler to reconstruct the full semantic response.
+    """
+    if ctx is None or policy_result is None or not policy_result.should_capture:
+        return
+    try:
+        assembled = assembler.assemble() if assembler is not None else {"content": None}
+        _dispatch_capture_request_completed(
+            ctx,
+            policy_result=policy_result,
+            response_content=assembled.get("content"),
+            tool_calls=assembled.get("tool_calls"),
+            finish_reason=assembled.get("finish_reason"),
+            prompt_tokens=usage_totals.get("prompt_tokens") or None,
+            completion_tokens=usage_totals.get("completion_tokens") or None,
+            http_status=status_code,
+            streamed=True,
+            incomplete=assembled.get("incomplete"),
+        )
+    except Exception:
+        pass
+
+
+def _dispatch_capture_nonstream_completed(
+    request: Request,
+    request_id: str,
+    client_id: str,
+    model_name: str,
+    ctx: Optional[BuildContext],
+    policy_result: Optional["PolicyResult"],
+    payload: Optional[Dict[str, Any]],
+    status_code: int,
+    request_start_time: float,
+) -> None:
+    """Dispatch request_completed for the non-streaming path (fail-open)."""
+    if ctx is None or policy_result is None or not policy_result.should_capture:
+        return
+    try:
+        response_content = None
+        finish_reason = None
+        prompt_tokens = None
+        completion_tokens = None
+        tool_calls = None
+
+        if isinstance(payload, dict):
+            # Check if this is an Anthropic-style response (has 'content' array, not 'choices')
+            if "choices" not in payload and "content" in payload:
+                # Anthropic /v1/messages response format
+                # content is a list of content blocks
+                response_content_parts: list[str] = []
+                content_blocks = payload.get("content", [])
+                if isinstance(content_blocks, list):
+                    for block in content_blocks:
+                        if isinstance(block, dict):
+                            block_type = block.get("type", "")
+                            if block_type == "text":
+                                text = block.get("text", "")
+                                if isinstance(text, str) and text:
+                                    response_content_parts.append(text)
+                            elif block_type == "tool_use":
+                                # Tool use content — extract as a tool call
+                                if "tool_calls" not in locals() or tool_calls is None:
+                                    tool_calls = []
+                                tool_calls.append({
+                                    "id": block.get("id", ""),
+                                    "type": "function",
+                                    "function": {
+                                        "name": block.get("name", ""),
+                                        "arguments": json.dumps(block.get("input", {})) if isinstance(block.get("input"), dict) else str(block.get("input", "")),
+                                    },
+                                })
+                if response_content_parts:
+                    response_content = "\n".join(response_content_parts)
+                finish_reason = payload.get("stop_reason")
+
+                # Anthropic usage is at top-level 'usage' field
+                usage = payload.get("usage", {})
+                if isinstance(usage, dict):
+                    prompt_tokens = _coerce_usage_int(usage.get("input_tokens", 0))
+                    completion_tokens = _coerce_usage_int(usage.get("output_tokens", 0))
+
+            else:
+                # OpenAI chat/completions response format
+                choices = payload.get("choices", [])
+                if isinstance(choices, list) and choices:
+                    first = choices[0] if isinstance(choices[0], dict) else {}
+                    message = first.get("message", first)
+                    if isinstance(message, dict):
+                        content = message.get("content")
+                        if isinstance(content, str):
+                            response_content = content
+                        finish_reason = message.get("finish_reason")
+                        tc = message.get("tool_calls")
+                        if isinstance(tc, list):
+                            tool_calls = tc
+                    delta = first.get("delta", {})
+                    if isinstance(delta, dict):
+                        content = delta.get("content")
+                        if isinstance(content, str) and not response_content:
+                            response_content = content
+
+                # Extract usage
+                usage = payload.get("usage")
+                if isinstance(usage, dict):
+                    prompt_tokens = _coerce_usage_int(usage.get("prompt_tokens", usage.get("input_tokens", 0)))
+                    completion_tokens = _coerce_usage_int(usage.get("completion_tokens", usage.get("output_tokens", 0)))
+
+        _dispatch_capture_request_completed(
+            ctx,
+            policy_result=policy_result,
+            response_content=response_content,
+            finish_reason=finish_reason,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            tool_calls=tool_calls,
+            http_status=status_code,
+            streamed=False,
+            incomplete=False,
+            duration_ms=(time.monotonic() - request_start_time) * 1000,
+        )
+    except Exception:
+        pass
+
+
+def _classify_capture_error(exc: Exception) -> str:
+    """Map an exception to a stable capture error code (never leaks internals)."""
+    exc_name = type(exc).__name__
+    mapping = {
+        "ConnectError": "connection_error",
+        "ConnectTimeout": "connection_timeout",
+        "ReadTimeout": "read_timeout",
+        "WriteTimeout": "write_timeout",
+        "PoolTimeout": "pool_timeout",
+        "TimeoutException": "timeout",
+        "HTTPStatusError": "http_error",
+        "ModelLoadError": "model_load_error",
+        "HTTPException": "http_exception",
+    }
+    return mapping.get(exc_name, "internal_error")
+
+
+def _sanitize_capture_error_message(exc: Exception) -> str:
+    """Produce a sanitized error message for capture (no credentials/paths)."""
+    exc_name = type(exc).__name__
+    # Only return a generic description — never str(exc) which may contain paths
+    return f"{exc_name}: request to backend failed"
+
+
+def _messages_contain_image_input(messages: Any) -> bool:
+    if not isinstance(messages, list):
+        return False
     for message in messages:
+        if not isinstance(message, dict):
+            continue
         content = message.get("content", "")
         if not isinstance(content, list):
             continue
         for part in content:
             if not isinstance(part, dict):
                 continue
-            if part.get("type") in {"image_url", "input_image"}:
+            if part.get("type") in {"image_url", "input_image", "image"}:
                 return True
     return False
 
@@ -1600,6 +1942,19 @@ async def lifespan(app: FastAPI):
     logger.info("🔄 Scheduling startup model verification in background")
     _startup_check_task = asyncio.create_task(_run_startup_check_in_background(generation, startup_target))
 
+    # Start capture writer (fail-open: disabled by default, errors are logged not raised)
+    capture_writer_task: Optional[asyncio.Task] = None
+    try:
+        capture_controller.initialize_writer()
+        if capture_controller.config.is_active:
+            await capture_controller.start_writer()
+            logger.info("📸 Capture writer started (instance_id=%s)",
+                        capture_controller.config.instance_id)
+        else:
+            logger.info("📸 Capture subsystem is disabled (enabled=false)")
+    except Exception as exc:
+        logger.warning("Capture writer initialization failed (fail-open): %s", exc)
+
     # Start idle-unload background watcher
     idle_task = asyncio.create_task(_idle_unload_watcher())
 
@@ -1616,7 +1971,13 @@ async def lifespan(app: FastAPI):
         with suppress(asyncio.CancelledError):
             await _startup_check_task
         _startup_check_task = None
-    
+
+    # Shutdown: Stop capture writer
+    try:
+        await capture_controller.stop_writer()
+    except Exception as exc:
+        logger.warning("Capture writer shutdown error: %s", exc)
+
     # Shutdown: Remove PID file
     if pid_path.exists():
         try:
@@ -1640,6 +2001,12 @@ app.add_middleware(
 )
 
 model_manager = ModelManager()
+
+DEFAULT_CONTEXT_WINDOW = 131072
+BACKEND_CONTEXT_CACHE_SECONDS = 5.0
+_backend_context_cache: Dict[str, Tuple[float, int]] = {}
+_backend_context_lock = asyncio.Lock()
+_context_fallback_warnings: set[str] = set()
 
 
 async def _idle_unload_watcher():
@@ -2174,10 +2541,43 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
             client_id=client_id,
         )
 
+    _ollama_request_start_time = time.monotonic()
+
     try:
         request_id, disconnect_task = await _begin_queued_request(request, client_id, model)
     except _GuardianRequestCancelled as exc:
         raise _request_cancel_http_exception(exc.request_id, exc.reason)
+
+    # ── Capture: request_received event (fail-open, disabled by default) ──
+    _capture_endpoint = "/api/chat"
+    _capture_client_fp = _capture_client_fingerprint(request, client_id)
+    _capture_policy_result = _dispatch_capture_request_received(
+        request, client_id,
+        request_id=request_id,
+        endpoint=_capture_endpoint,
+        ingress_protocol=PROTOCOL_OLLAMA,
+        route_type=ROUTE_LOCAL,
+        requested_model=model,
+        resolved_model=model,
+        request_messages=body.get("messages"),
+        request_parameters={k: v for k, v in body.items() if k != "messages"},
+        queue_wait_ms=inference_queue.get_queue_wait_ms(request_id),
+    )
+    _capture_ctx: Optional[BuildContext] = None
+    if _capture_policy_result is not None and _capture_policy_result.should_capture:
+        _capture_ctx = BuildContext(
+            request_id=request_id,
+            endpoint=_capture_endpoint,
+            ingress_protocol=PROTOCOL_OLLAMA,
+            route_type=ROUTE_LOCAL,
+            requested_model=model,
+            resolved_model=model,
+            capture_policy_version=capture_controller.config.policy_version
+            if capture_controller is not None else "1.0.0",
+            instance_id=capture_controller.config.instance_id
+            if capture_controller is not None else "unknown",
+            client_fingerprint=_capture_client_fp,
+        )
 
     _release_in_finally = True
     try:
@@ -2294,6 +2694,9 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
 
         if stream:
             usage_totals = {"prompt_tokens": 0, "completion_tokens": 0}
+            _ollama_capture_assembler: Optional[StreamResponseAssembler] = None
+            if _capture_ctx is not None and _capture_policy_result is not None and _capture_policy_result.should_capture:
+                _ollama_capture_assembler = StreamResponseAssembler()
 
             async def stream_adapter():
                 cancel_cleanup_task = asyncio.create_task(
@@ -2340,6 +2743,12 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
                                             "done": False
                                         }
                                         payload = json.dumps(ollama_chunk) + "\n"
+                                        # ── Capture: feed SSE line to stream assembler ──
+                                        if _ollama_capture_assembler is not None:
+                                            try:
+                                                _ollama_capture_assembler.add_sse_line(chunk)
+                                            except Exception:
+                                                pass
                                         _update_live_request_usage(
                                             request,
                                             prompt_tokens=usage_totals["prompt_tokens"],
@@ -2382,6 +2791,17 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
                     )
                     model_manager.active_requests = max(0, model_manager.active_requests - 1)
                     model_manager.last_request_time = time.time()
+                    # ── Capture: request_completed (streaming) ──
+                    if _capture_ctx is not None and _capture_policy_result is not None and _capture_policy_result.should_capture and _ollama_capture_assembler is not None:
+                        try:
+                            _dispatch_capture_stream_completed(
+                                request, request_id, client_id,
+                                model, _capture_ctx,
+                                _capture_policy_result, _ollama_capture_assembler,
+                                usage_totals, "chat/completions", r.status_code,
+                            )
+                        except Exception:
+                            pass
                     inference_queue.finish(request_id, outcome=_request_outcome(request_id))
                     await _stop_background_task(disconnect_task)
 
@@ -2420,12 +2840,38 @@ async def proxy_chat_ollama(request: Request, client_id: str = Depends(verify_ap
                 model_manager.last_request_time = time.time()
                 return ollama_resp
             except _GuardianRequestCancelled as exc:
+                # ── Capture: request_cancelled (Ollama non-streaming) ──
+                if _capture_ctx is not None:
+                    _dispatch_capture_request_cancelled(
+                        _capture_ctx, cancel_reason=exc.reason,
+                        queue_wait_ms=inference_queue.get_queue_wait_ms(request_id) if request_id else None,
+                        duration_ms=(time.monotonic() - _ollama_request_start_time) * 1000,
+                    )
                 raise _request_cancel_http_exception(exc.request_id, exc.reason)
             except Exception as e:
+                # ── Capture: request_failed (Ollama non-streaming) ──
+                if _capture_ctx is not None:
+                    _dispatch_capture_request_failed(
+                        _capture_ctx,
+                        error_code=_classify_capture_error(e),
+                        http_status=500,
+                        sanitized_message=_sanitize_capture_error_message(e),
+                        queue_wait_ms=inference_queue.get_queue_wait_ms(request_id) if request_id else None,
+                        duration_ms=(time.monotonic() - _ollama_request_start_time) * 1000,
+                    )
                 await r.aclose()
                 await client.aclose()
                 model_manager.active_requests = max(0, model_manager.active_requests - 1)
                 raise e
+            else:
+                # ── Capture: request_completed (Ollama non-streaming) ──
+                if _capture_ctx is not None and _capture_policy_result is not None and _capture_policy_result.should_capture:
+                    _dispatch_capture_nonstream_completed(
+                        request, request_id, client_id,
+                        model, _capture_ctx,
+                        _capture_policy_result, data, r.status_code,
+                        _ollama_request_start_time,
+                    )
     finally:
         await _stop_background_task(locals().get("disconnect_task"))
         if _release_in_finally:
@@ -2470,10 +2916,43 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
             client_id=client_id,
         )
 
+    _generate_request_start_time = time.monotonic()
+
     try:
         request_id, disconnect_task = await _begin_queued_request(request, client_id, model)
     except _GuardianRequestCancelled as exc:
         raise _request_cancel_http_exception(exc.request_id, exc.reason)
+
+    # ── Capture: request_received event (fail-open, disabled by default) ──
+    _capture_endpoint = "/api/chat"
+    _capture_client_fp = _capture_client_fingerprint(request, client_id)
+    _capture_policy_result = _dispatch_capture_request_received(
+        request, client_id,
+        request_id=request_id,
+        endpoint=_capture_endpoint,
+        ingress_protocol=PROTOCOL_OLLAMA,
+        route_type=ROUTE_LOCAL,
+        requested_model=model,
+        resolved_model=model,
+        request_messages=body.get("messages"),
+        request_parameters={k: v for k, v in body.items() if k != "messages"},
+        queue_wait_ms=inference_queue.get_queue_wait_ms(request_id),
+    )
+    _capture_ctx: Optional[BuildContext] = None
+    if _capture_policy_result is not None and _capture_policy_result.should_capture:
+        _capture_ctx = BuildContext(
+            request_id=request_id,
+            endpoint=_capture_endpoint,
+            ingress_protocol=PROTOCOL_OLLAMA,
+            route_type=ROUTE_LOCAL,
+            requested_model=model,
+            resolved_model=model,
+            capture_policy_version=capture_controller.config.policy_version
+            if capture_controller is not None else "1.0.0",
+            instance_id=capture_controller.config.instance_id
+            if capture_controller is not None else "unknown",
+            client_fingerprint=_capture_client_fp,
+        )
 
     _release_in_finally = True
     try:
@@ -2628,6 +3107,12 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
                                             "done": False
                                         }
                                         payload = json.dumps(ollama_chunk) + "\n"
+                                        # ── Capture: feed SSE line to stream assembler ──
+                                        if _ollama_capture_assembler is not None:
+                                            try:
+                                                _ollama_capture_assembler.add_sse_line(chunk)
+                                            except Exception:
+                                                pass
                                         _update_live_request_usage(
                                             request,
                                             prompt_tokens=usage_totals["prompt_tokens"],
@@ -2671,6 +3156,17 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
                     )
                     model_manager.active_requests = max(0, model_manager.active_requests - 1)
                     model_manager.last_request_time = time.time()
+                    # ── Capture: request_completed (streaming) ──
+                    if _capture_ctx is not None and _capture_policy_result is not None and _capture_policy_result.should_capture and _ollama_capture_assembler is not None:
+                        try:
+                            _dispatch_capture_stream_completed(
+                                request, request_id, client_id,
+                                model, _capture_ctx,
+                                _capture_policy_result, _ollama_capture_assembler,
+                                usage_totals, "chat/completions", r.status_code,
+                            )
+                        except Exception:
+                            pass
                     inference_queue.finish(request_id, outcome=_request_outcome(request_id))
                     await _stop_background_task(disconnect_task)
 
@@ -2709,12 +3205,38 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
                 model_manager.last_request_time = time.time()
                 return ollama_resp
             except _GuardianRequestCancelled as exc:
+                # ── Capture: request_cancelled (Ollama non-streaming) ──
+                if _capture_ctx is not None:
+                    _dispatch_capture_request_cancelled(
+                        _capture_ctx, cancel_reason=exc.reason,
+                        queue_wait_ms=inference_queue.get_queue_wait_ms(request_id) if request_id else None,
+                        duration_ms=(time.monotonic() - _generate_request_start_time) * 1000,
+                    )
                 raise _request_cancel_http_exception(exc.request_id, exc.reason)
             except Exception as e:
+                # ── Capture: request_failed (Ollama non-streaming) ──
+                if _capture_ctx is not None:
+                    _dispatch_capture_request_failed(
+                        _capture_ctx,
+                        error_code=_classify_capture_error(e),
+                        http_status=500,
+                        sanitized_message=_sanitize_capture_error_message(e),
+                        queue_wait_ms=inference_queue.get_queue_wait_ms(request_id) if request_id else None,
+                        duration_ms=(time.monotonic() - _generate_request_start_time) * 1000,
+                    )
                 await r.aclose()
                 await client.aclose()
                 model_manager.active_requests = max(0, model_manager.active_requests - 1)
                 raise e
+            else:
+                # ── Capture: request_completed (Ollama non-streaming) ──
+                if _capture_ctx is not None and _capture_policy_result is not None and _capture_policy_result.should_capture:
+                    _dispatch_capture_nonstream_completed(
+                        request, request_id, client_id,
+                        model, _capture_ctx,
+                        _capture_policy_result, data, r.status_code,
+                        _generate_request_start_time,
+                    )
     finally:
         await _stop_background_task(locals().get("disconnect_task"))
         if _release_in_finally:
@@ -2771,7 +3293,144 @@ async def healthz():
 
 
 # Model listing endpoint (Before catch-all)
-def _build_model_metadata_entry(public_name: str, canonical_name: str, client_id: str) -> Dict[str, Any]:
+def _apply_context_metadata(model_entry: Dict[str, Any], context_window: int) -> Dict[str, Any]:
+    """Add stable context aliases used by OpenAI, llama.cpp, and LiteLLM clients."""
+    model_entry["context"] = context_window
+    model_entry["context_length"] = context_window
+    model_entry["max_input_tokens"] = context_window
+    # Ensure max_context and benchmark_context_limit are always present so
+    # every /v1/models entry — including cloud models — advertises a cap.
+    if "max_context" not in model_entry:
+        model_entry["max_context"] = context_window
+    if "benchmark_context_limit" not in model_entry:
+        model_entry["benchmark_context_limit"] = context_window
+    metadata = model_entry.get("meta")
+    if not isinstance(metadata, dict):
+        metadata = {}
+        model_entry["meta"] = metadata
+    metadata["n_ctx"] = context_window
+    return model_entry
+
+
+async def _get_loaded_backend_context_window(canonical_name: str) -> Optional[int]:
+    """Read llama.cpp's actual configured context for the currently loaded model."""
+    try:
+        current_model = await model_manager.get_current_model()
+    except Exception:
+        current_model = getattr(model_manager, "current_model", None)
+    if current_model != canonical_name:
+        return None
+
+    now = time.monotonic()
+    cached = _backend_context_cache.get(canonical_name)
+    if cached is not None and now - cached[0] < BACKEND_CONTEXT_CACHE_SECONDS:
+        return cached[1]
+
+    async with _backend_context_lock:
+        now = time.monotonic()
+        cached = _backend_context_cache.get(canonical_name)
+        if cached is not None and now - cached[0] < BACKEND_CONTEXT_CACHE_SECONDS:
+            return cached[1]
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                response = await client.get(f"{LLAMA_SERVER_URL}/props")
+            response.raise_for_status()
+            payload = response.json()
+            raw_context = payload.get("default_generation_settings", {}).get("n_ctx")
+            if isinstance(raw_context, int) and not isinstance(raw_context, bool) and raw_context > 0:
+                if await model_manager.get_current_model() != canonical_name:
+                    return None
+                _backend_context_cache[canonical_name] = (now, raw_context)
+                return raw_context
+        except (httpx.HTTPError, ValueError, TypeError, AttributeError) as exc:
+            logger.debug("Unable to read llama.cpp context from /props: %s", exc)
+    return None
+
+
+async def _resolve_context_window(
+    public_name: str,
+    canonical_name: Optional[str] = None,
+    cloud_attempts: Optional[List[Tuple[CloudProvider, str]]] = None,
+) -> int:
+    """Resolve a positive context size for every locally served or cloud-routed model."""
+    override = provider_registry.get_context_override(public_name)
+    if override is None and canonical_name is not None:
+        override = provider_registry.get_context_override(canonical_name)
+    if override is not None:
+        return override
+
+    if canonical_name is not None:
+        backend_context = await _get_loaded_backend_context_window(canonical_name)
+        if backend_context is not None:
+            return backend_context
+        configured_context = model_manager.get_runtime_context_window(canonical_name)
+        if configured_context is not None and configured_context > 0:
+            return configured_context
+    else:
+        if cloud_attempts is not None:
+            attempt_contexts: List[int] = []
+            for provider, upstream_model in cloud_attempts:
+                candidate_context = await provider_registry.get_cloud_context_window(
+                    f"guardian/{provider.name}/{upstream_model}",
+                    provider=provider,
+                )
+                if candidate_context is None:
+                    _warn_context_fallback(f"guardian/{provider.name}/{upstream_model}")
+                    candidate_context = DEFAULT_CONTEXT_WINDOW
+                attempt_contexts.append(candidate_context)
+            if attempt_contexts:
+                return min(attempt_contexts)
+
+        failover_route = parse_guardian_route(public_name)
+        if failover_route is not None and failover_route[0] == "failover":
+            group = failover_registry.get_group(failover_route[1])
+            if group is not None:
+                candidate_contexts: List[int] = []
+                for candidate in getattr(group, "candidates", ()):
+                    candidate_context = await provider_registry.get_cloud_context_window(
+                        f"guardian/{candidate.provider}/{candidate.model}"
+                    )
+                    if candidate_context is None:
+                        _warn_context_fallback(f"guardian/{candidate.provider}/{candidate.model}")
+                        candidate_context = DEFAULT_CONTEXT_WINDOW
+                    candidate_contexts.append(candidate_context)
+                if candidate_contexts:
+                    return min(candidate_contexts)
+        cloud_context = await provider_registry.get_cloud_context_window(public_name)
+        if cloud_context is not None:
+            return cloud_context
+
+    _warn_context_fallback(canonical_name or public_name)
+    return DEFAULT_CONTEXT_WINDOW
+
+
+def _warn_context_fallback(model_name: str) -> None:
+    """Log each missing context source once while retaining a safe fallback."""
+    if model_name in _context_fallback_warnings:
+        return
+    _context_fallback_warnings.add(model_name)
+    logger.warning(
+        "⚠️  Context size for model '%s' could not be resolved; using fallback %d",
+        model_name,
+        DEFAULT_CONTEXT_WINDOW,
+    )
+
+
+async def _enrich_model_context_metadata(
+    model_entry: Dict[str, Any],
+    canonical_name: Optional[str] = None,
+    cloud_attempts: Optional[List[Tuple[CloudProvider, str]]] = None,
+) -> Dict[str, Any]:
+    """Attach context metadata without changing the entry's existing shape."""
+    context_window = await _resolve_context_window(
+        model_entry["id"],
+        canonical_name,
+        cloud_attempts,
+    )
+    return _apply_context_metadata(model_entry, context_window)
+
+
+async def _build_model_metadata_entry(public_name: str, canonical_name: str, client_id: str) -> Dict[str, Any]:
     model_entry: Dict[str, Any] = {
         "id": public_name,
         "object": "model",
@@ -2816,7 +3475,7 @@ def _build_model_metadata_entry(public_name: str, canonical_name: str, client_id
         if benchmark_context_limit is not None:
             model_entry["benchmark_context_limit"] = benchmark_context_limit
         model_entry["max_context"] = advertised_context
-    return model_entry
+    return await _enrich_model_context_metadata(model_entry, canonical_name)
 
 
 @app.get("/v1/models")
@@ -2830,7 +3489,7 @@ async def list_models(request: Request, client_id: str = Depends(verify_api_key)
     models_list = []
     try:
         for public_name, canonical_name in model_manager.get_public_model_map().items():
-            models_list.append(_build_model_metadata_entry(public_name, canonical_name, client_id))
+            models_list.append(await _build_model_metadata_entry(public_name, canonical_name, client_id))
     except Exception as e:
         logger.error(f"Failed to list models: {e}")
 
@@ -2839,7 +3498,12 @@ async def list_models(request: Request, client_id: str = Depends(verify_api_key)
         for cloud_model in provider_registry.get_all_cloud_models():
             entry = provider_registry.build_model_metadata_entry(cloud_model)
             if entry is not None:
-                models_list.append(entry)
+                models_list.append(await _enrich_model_context_metadata(entry))
+                provider = provider_registry.get_provider_for_model(cloud_model)
+                if provider is not None and provider.name == "openrouter":
+                    alias_entry = dict(entry)
+                    alias_entry["id"] = f"openrouter/{cloud_model}"
+                    models_list.append(await _enrich_model_context_metadata(alias_entry))
     except Exception as e:
         logger.error(f"Failed to list cloud models: {e}")
 
@@ -2848,7 +3512,7 @@ async def list_models(request: Request, client_id: str = Depends(verify_api_key)
         auth_ctx = get_request_auth_context(request) or {}
         key_fp = auth_ctx.get("key_fingerprint") or client_id
         for cloud_model in cloud_cred_store.get_linked_models_for_key(key_fp):
-            models_list.append({
+            entry = {
                 "id": cloud_model["id"],
                 "object": "model",
                 "created": int(time.time()),
@@ -2857,7 +3521,22 @@ async def list_models(request: Request, client_id: str = Depends(verify_api_key)
                 "served_by": "cloud",
                 "provider": cloud_model["provider"],
                 "credential_id": cloud_model["credential_id"],
-            })
+            }
+            credential = cloud_cred_store.get_credential_for_key(key_fp, cloud_model["provider"])
+            cloud_attempts = None
+            if credential is not None:
+                cloud_attempts = [
+                    (
+                        CloudProvider(
+                            name=cloud_model["provider"],
+                            base_url=_provider_base_url(cloud_model["provider"]),
+                            api_key=credential.api_key,
+                            models=[cloud_model["model"]],
+                        ),
+                        cloud_model["model"],
+                    )
+                ]
+            models_list.append(await _enrich_model_context_metadata(entry, cloud_attempts=cloud_attempts))
     except Exception as e:
         logger.error(f"Failed to list per-key cloud models: {e}")
 
@@ -2867,7 +3546,18 @@ async def list_models(request: Request, client_id: str = Depends(verify_api_key)
     # the caller needing to know the underlying (provider, model) candidates.
     try:
         for group_name in failover_registry._groups.keys():
-            models_list.append({
+            try:
+                cloud_attempts, _ = _resolve_cloud_attempts(
+                    f"guardian/failover/{group_name}",
+                    request,
+                    client_id,
+                )
+            except HTTPException as exc:
+                if exc.status_code == 403:
+                    logger.debug("Skipping unauthorized failover group '%s' from discovery", group_name)
+                    continue
+                raise
+            entry = {
                 "id": f"guardian/failover/{group_name}",
                 "object": "model",
                 "created": int(time.time()),
@@ -2876,7 +3566,10 @@ async def list_models(request: Request, client_id: str = Depends(verify_api_key)
                 "served_by": "failover",
                 "provider": "failover",
                 "failover_group": group_name,
-            })
+            }
+            models_list.append(
+                await _enrich_model_context_metadata(entry, cloud_attempts=cloud_attempts)
+            )
     except Exception as e:
         logger.error(f"Failed to list failover groups: {e}")
 
@@ -2884,7 +3577,11 @@ async def list_models(request: Request, client_id: str = Depends(verify_api_key)
 
 
 @app.get("/v1/models/{model_id:path}")
-async def get_model_metadata(model_id: str, client_id: str = Depends(verify_api_key)):
+async def get_model_metadata(
+    model_id: str,
+    request: Request,
+    client_id: str = Depends(verify_api_key),
+):
     """Return metadata for a configured canonical model, public alias, or cloud model."""
     # Failover groups surface as guardian/failover/{group}; resolve them here so
     # /v1/models/<id> returns a stable shape rather than 404'ing on the discovery
@@ -2892,7 +3589,8 @@ async def get_model_metadata(model_id: str, client_id: str = Depends(verify_api_
     if model_id.startswith("guardian/failover/"):
         group_name = model_id[len("guardian/failover/"):]
         if failover_registry.get_group(group_name) is not None:
-            return {
+            cloud_attempts, _ = _resolve_cloud_attempts(model_id, request, client_id)
+            return await _enrich_model_context_metadata({
                 "id": model_id,
                 "object": "model",
                 "created": int(time.time()),
@@ -2901,14 +3599,28 @@ async def get_model_metadata(model_id: str, client_id: str = Depends(verify_api_
                 "served_by": "failover",
                 "provider": "failover",
                 "failover_group": group_name,
-            }
+            }, cloud_attempts=cloud_attempts)
         raise HTTPException(status_code=404, detail=f"Failover group '{group_name}' not found")
 
     # Cloud-provider models first (they may contain slashes like "openai/gpt-4o")
     if provider_registry.is_cloud_model(model_id):
         entry = provider_registry.build_model_metadata_entry(model_id)
         if entry is not None:
-            return entry
+            return await _enrich_model_context_metadata(entry)
+
+    guardian_route = parse_guardian_route(model_id)
+    if guardian_route is not None:
+        provider_name, _ = guardian_route
+        cloud_attempts, _ = _resolve_cloud_attempts(model_id, request, client_id)
+        return await _enrich_model_context_metadata({
+            "id": model_id,
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": provider_name,
+            "permission": [],
+            "served_by": "cloud",
+            "provider": provider_name,
+        }, cloud_attempts=cloud_attempts)
 
     public_models = model_manager.get_public_model_map()
     canonical_name = public_models.get(model_id)
@@ -2917,7 +3629,57 @@ async def get_model_metadata(model_id: str, client_id: str = Depends(verify_api_
             canonical_name = model_manager.resolve_model(model_id)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return _build_model_metadata_entry(model_id, canonical_name, client_id)
+    return await _build_model_metadata_entry(model_id, canonical_name, client_id)
+
+
+@app.post("/api/show")
+async def show_model_ollama(request: Request, client_id: str = Depends(verify_api_key)):
+    """Return Ollama-compatible metadata with an always-present context size."""
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Request body must be valid JSON") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Request body must be a JSON object")
+
+    model_name = body.get("model", body.get("name"))
+    if not isinstance(model_name, str) or not model_name.strip():
+        raise HTTPException(status_code=400, detail="'model' must be a non-empty string")
+    model_name = model_name.strip()
+
+    canonical_name: Optional[str] = None
+    cloud_attempts: Optional[List[Tuple[CloudProvider, str]]] = None
+    guardian_route = parse_guardian_route(model_name)
+    if model_name.startswith("guardian/failover/"):
+        group_name = model_name[len("guardian/failover/"):]
+        if failover_registry.get_group(group_name) is None:
+            raise HTTPException(status_code=404, detail=f"Failover group '{group_name}' not found")
+        cloud_attempts, _ = _resolve_cloud_attempts(model_name, request, client_id)
+    elif guardian_route is not None:
+        cloud_attempts, _ = _resolve_cloud_attempts(model_name, request, client_id)
+    elif not provider_registry.is_cloud_model(model_name):
+        try:
+            canonical_name = model_manager.resolve_model(model_name)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    context_window = await _resolve_context_window(
+        model_name,
+        canonical_name,
+        cloud_attempts,
+    )
+    return {
+        "modelfile": "",
+        "parameters": f"num_ctx {context_window}",
+        "template": "",
+        "details": {"family": "guardian"},
+        "model_info": {
+            "general.context_length": context_window,
+            "guardian.context_length": context_window,
+        },
+        "model": model_name,
+        "context_window": context_window,
+    }
 
 
 # --- Crash history & status endpoints ---
@@ -3288,6 +4050,120 @@ async def get_server_status(client_id: str = Depends(verify_api_key)):
     }
 
 
+# --- Capture status endpoint (admin) ---
+
+@app.get("/api/capture/status")
+async def get_capture_status(client_id: str = Depends(verify_api_key)):
+    """Return capture subsystem status, config, and runtime metrics.
+
+    Requires an API key.  Shows whether capture is enabled, the kill switch
+    state, queue depth, writer status, and disk usage.
+    """
+    controller = get_capture_controller()
+    cfg = controller.config
+
+    # Build config summary (without secrets)
+    config_summary = {
+        "enabled": cfg.enabled,
+        "active": cfg.is_active,
+        "local_capture": cfg.local_capture,
+        "cloud_capture": cfg.cloud_capture,
+        "per_client_opt_in": cfg.per_client_opt_in,
+        "allowed_client_refs_count": len(cfg.allowed_client_refs),
+        "policy_version": cfg.policy_version,
+        "instance_id": cfg.instance_id,
+        "capture_root": cfg.capture_root,
+        "retention_days": cfg.retention_days,
+        "max_capture_bytes": cfg.max_capture_bytes,
+        "max_pending_events": cfg.max_pending_events,
+        "max_file_bytes": cfg.max_file_bytes,
+        "max_file_age_seconds": cfg.max_file_age_seconds,
+        "file_mode": oct(cfg.file_mode),
+        "directory_mode": oct(cfg.directory_mode),
+        "field_policies": {
+            "system_prompts": cfg.system_prompts,
+            "reasoning": cfg.reasoning,
+            "tool_definitions": cfg.tool_definitions,
+            "tool_calls": cfg.tool_calls,
+            "tool_results": cfg.tool_results,
+            "images": cfg.images,
+            "unknown_content_blocks": cfg.unknown_content_blocks,
+        },
+    }
+
+    # Sink snapshot (queue depth, dropped events, etc.)
+    sink_snap = controller.sink.snapshot()
+
+    # Writer snapshot (if writer exists)
+    writer_snap = {}
+    if controller.writer is not None:
+        writer_snap = controller.writer.snapshot()
+        writer_snap["running"] = controller._writer_started
+    else:
+        writer_snap = {"running": False, "reason": "writer_not_initialized"}
+
+    # Disk usage
+    disk_bytes = 0
+    capture_root_path = None
+    if controller.writer is not None:
+        disk_bytes = writer_snap.get("capture_disk_bytes", 0) or 0
+        capture_root_path = str(controller.writer.get_write_path())
+    else:
+        try:
+            root = __import__("pathlib").Path(cfg.capture_root).resolve()
+            if root.exists():
+                capture_root_path = str(root)
+                disk_bytes = sum(
+                    f.stat().st_size for f in root.rglob("*") if f.is_file()
+                )
+        except OSError:
+            pass
+
+    return {
+        "config": config_summary,
+        "sink": sink_snap,
+        "writer": writer_snap,
+        "disk": {
+            "bytes_used": disk_bytes,
+            "bytes_budget": cfg.max_capture_bytes,
+            "root": capture_root_path,
+            "retention_days": cfg.retention_days,
+        },
+    }
+
+
+@app.post("/api/capture/rotate")
+async def rotate_capture_file(client_id: str = Depends(verify_api_key)):
+    """Force rotation of the active capture WAL file.
+
+    Requires an API key.  The current active file is closed (and gzipped
+    if compression is configured), and a new active file is opened for
+    subsequent events.
+    """
+    controller = get_capture_controller()
+    if not controller.config.is_active:
+        return {"message": "Capture is not active", "rotated": False}
+
+    writer = controller.writer
+    if writer is None:
+        return {"message": "Capture writer is not initialized", "rotated": False}
+
+    rotated_path = None
+    active_path = None
+    try:
+        rotated_path = writer.rotate()
+        active_path = str(writer.get_write_path())
+    except Exception as e:
+        return {"message": f"Rotation failed: {e}", "rotated": False}
+
+    return {
+        "message": "Rotation complete",
+        "rotated": True,
+        "rotated_file": rotated_path,
+        "active_file": active_path,
+    }
+
+
 # --- Prometheus metrics endpoint (no auth — standard for scraping) ---
 
 @app.get("/metrics")
@@ -3299,6 +4175,7 @@ async def prometheus_metrics():
     update_queue_metrics(inference_queue)
     update_gpu_metrics()
     update_system_metrics(model_manager)
+    update_capture_metrics(get_capture_sink_snapshot())
     body, content_type = get_metrics_output()
     return Response(content=body, media_type=content_type)
 
@@ -3427,6 +4304,12 @@ async def proxy_v1_get(path: str, request: Request, client_id: str = Depends(ver
 _PROVIDER_BASE_URLS = {
     "openrouter": "https://openrouter.ai/api/v1",
     "nvidia": "https://integrate.api.nvidia.com/v1",
+    "poolside": "https://inference.poolside.ai/v1",
+    # Direct OpenAI (service-account key stored in ${OPENAI_API_KEY}).  OpenAI
+    # uses BARE model names — no namespace — so global recognition comes from
+    # the explicit ``models:`` list in settings.yaml, and per-key routes use
+    # the guardian/openai/{model} convention (any model, no listing required).
+    "openai": "https://api.openai.com/v1",
 }
 
 
@@ -3535,6 +4418,8 @@ def _resolve_cloud_attempts(
     model_name: str,
     request: Request,
     client_id: str,
+    *,
+    requires_vision: bool = False,
 ) -> Tuple[List[Tuple[CloudProvider, str]], Optional[str]]:
     """Resolve the ordered list of ``(provider, upstream_model)`` attempts.
 
@@ -3553,7 +4438,7 @@ def _resolve_cloud_attempts(
             raise HTTPException(status_code=404, detail=f"Model '{model_name}' is not a cloud model")
         if not provider.is_configured:
             raise _cloud_provider_unavailable_error(provider)
-        return [(provider, model_name)], None
+        return [(provider, ProviderRegistry.canonical_model_id(model_name))], None
 
     provider_name, model_path = guardian_route
     auth_ctx = get_request_auth_context(request) or {}
@@ -3575,6 +4460,8 @@ def _resolve_cloud_attempts(
         ordered = failover_health.order_candidates(group.candidates)
         attempts: List[Tuple[CloudProvider, str]] = []
         for candidate in ordered:
+            if requires_vision and "image" not in candidate.modalities:
+                continue
             cred = cloud_cred_store.get_credential_for_key(key_fingerprint, candidate.provider)
             if cred is None:
                 continue
@@ -3628,32 +4515,100 @@ def _resolve_cloud_attempts(
 
 
 def _resolve_cloud_vision_fallback(model_name: str) -> Optional[str]:
-    """Check if a cloud route needs local vision fallback for image requests.
+    """Return a local vision fallback for a text-only cloud model.
 
-    Returns the name of a local vision model to redirect to, or ``None`` when:
-    - *model_name* is not a ``guardian/failover/{group}`` route, or
-    - the failover group has at least one image-capable cloud candidate, or
-    - no ``image_fallback`` is configured for the group.
-
-    This lets Guardian transparently handle image inputs for text-only cloud
-    models (e.g. ``glm-5.2``) by routing them to a local VL model, while
-    image-capable cloud models (e.g. ``minimax-m3``) continue to use their
-    native cloud image support without intervention.
+    Direct provider routes and global cloud model routes resolve the fallback
+    from their upstream model name. Failover routes retain their group-level
+    behavior: if any candidate accepts images, the cloud group handles them.
     """
     guardian_route = parse_guardian_route(model_name)
     if guardian_route is None:
-        return None
+        return failover_registry.get_image_fallback_for_model(
+            ProviderRegistry.canonical_model_id(model_name)
+        )
     provider_name, model_path = guardian_route
     if provider_name != "failover":
-        return None
+        return failover_registry.get_image_fallback_for_model(model_path)
     group = failover_registry.get_group(model_path)
-    if group is None:
+    if group is None or group.has_image_capable_candidate():
         return None
-    # If any candidate supports images natively, cloud handles it — no fallback.
-    if group.has_image_capable_candidate():
-        return None
-    # All candidates are text-only — use configured local fallback if available.
     return group.image_fallback_model
+
+
+# ── OpenAI reasoning-model parameter adaptation ───────────────────────
+
+#: OpenAI model prefixes whose API rejects ``max_tokens`` in favour of
+#: ``max_completion_tokens``.  This covers the entire ``o1``/``o3``/``o4``
+#: reasoning family and the ``gpt-5*`` generation.
+_OPENAI_REASONING_MODEL_PREFIXES: Tuple[str, ...] = (
+    "o1", "o3", "o4", "gpt-5",
+)
+
+#: Models that reject ``temperature`` entirely (o-series) or only accept the
+#: default value of 1 (gpt-5*).
+_OPENAI_TEMP_RESTRICTED_PREFIXES: Tuple[str, ...] = (
+    "o1", "o3", "o4", "gpt-5",
+)
+
+
+def _is_openai_reasoning_model(model_name: str) -> bool:
+    """Return True for the OpenAI reasoning models that reject ``max_tokens``."""
+    return model_name.startswith(_OPENAI_REASONING_MODEL_PREFIXES)
+
+
+def _adapt_openai_reasoning_params(
+    provider: CloudProvider,
+    upstream_model: str,
+    body: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Translate client params for direct-OpenAI reasoning models.
+
+    Many OpenAI-compatible clients (Claude Code, OpenWebUI, Aider, …) send
+    ``max_tokens`` and ``temperature`` unconditionally.  OpenAI's reasoning
+    models reject both:
+
+    - **``max_tokens``** → rejected; must be ``max_completion_tokens``.
+    - **``temperature``** on the o-series → rejected entirely.
+    - **``temperature`` on the gpt-5 family → only the value ``1`` is accepted.
+
+    This function silently adapts the body so the request succeeds without
+    the client needing to know about per-model API differences.  Only applied
+    to the direct ``openai`` provider — OpenRouter handles its own param
+    translation, and other providers are unaffected.
+
+    Rules:
+    - If the client already set ``max_completion_tokens``, the stray
+      ``max_tokens`` is simply dropped (never overrides the explicit value).
+    - A client-supplied ``max_completion_tokens`` always wins over
+      ``max_tokens``.
+    - For o-series, ``temperature`` is stripped unconditionally.
+    - For gpt-5*, ``temperature`` is forced to ``1`` when set to anything
+      else; omitted is left omitted (OpenAI defaults to 1).
+    """
+    if provider.name != "openai":
+        return body
+    if not _is_openai_reasoning_model(upstream_model):
+        return body
+
+    adapted = dict(body)
+
+    # max_tokens → max_completion_tokens (original dropped if both present)
+    if "max_tokens" in adapted:
+        if "max_completion_tokens" not in adapted:
+            adapted["max_completion_tokens"] = adapted["max_tokens"]
+        adapted.pop("max_tokens", None)
+
+    # Temperature handling
+    if upstream_model.startswith(_OPENAI_TEMP_RESTRICTED_PREFIXES):
+        temp = adapted.get("temperature")
+        if temp is not None:
+            # o-series: strip entirely. gpt-5*: force to 1 (only accepted value).
+            if upstream_model.startswith(("o1", "o3", "o4")):
+                adapted.pop("temperature", None)
+            elif temp != 1:
+                adapted["temperature"] = 1
+
+    return adapted
 
 
 def _prepare_cloud_candidate_request(
@@ -3713,8 +4668,160 @@ def _prepare_cloud_candidate_request(
             candidate_json_body = {**candidate_json_body, **missing}
             logger.info("☁️  Applied model defaults for '%s': %s", upstream_model, missing)
 
+    # Translate params for direct OpenAI reasoning models (o-series, gpt-5*).
+    # Many clients send max_tokens + temperature unconditionally; OpenAI rejects
+    # both for reasoning models.  OpenRouter handles this itself, so this only
+    # applies to the direct openai provider.
+    candidate_json_body = _adapt_openai_reasoning_params(
+        provider, upstream_model, candidate_json_body
+    )
+
     candidate_body = json.dumps(candidate_json_body).encode("utf-8")
     return effective_path, candidate_json_body, candidate_body, needs_translation
+
+
+def _extract_cloud_response_content(
+    payload: Optional[Dict[str, Any]],
+) -> Tuple[Optional[str], Optional[list]]:
+    """Extract text content and tool_calls from a non-streaming cloud response.
+
+    Handles both OpenAI-format (choices[0].message) and Anthropic-format
+    (content blocks) responses.
+    """
+    if not isinstance(payload, dict):
+        return None, None
+
+    content_parts: list[str] = []
+    tool_calls: Optional[list] = None
+
+    # OpenAI format: choices[0].message
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices:
+        msg = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+        if isinstance(msg, dict):
+            text = msg.get("content")
+            if isinstance(text, str) and text:
+                content_parts.append(text)
+            elif isinstance(text, list):
+                # OpenAI content blocks (vision)
+                for block in text:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        content_parts.append(block.get("text", ""))
+            tc = msg.get("tool_calls")
+            if isinstance(tc, list) and tc:
+                tool_calls = tc
+            reasoning = msg.get("reasoning_content")
+            if isinstance(reasoning, str) and reasoning and not content_parts:
+                content_parts.append(reasoning)
+
+    # Anthropic format: content blocks at top level
+    if not content_parts and tool_calls is None:
+        anthropic_content = payload.get("content")
+        if isinstance(anthropic_content, list):
+            for block in anthropic_content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "text":
+                    content_parts.append(block.get("text", ""))
+                elif btype == "tool_use":
+                    if tool_calls is None:
+                        tool_calls = []
+                    tool_calls.append({
+                        "id": block.get("id"),
+                        "type": "function",
+                        "function": {
+                            "name": block.get("name"),
+                            "arguments": json.dumps(block.get("input", {})),
+                        },
+                    })
+
+    content = "\n".join(content_parts) if content_parts else None
+    return content, tool_calls
+
+
+def _setup_cloud_capture(
+    request: Request,
+    client_id: str,
+    *,
+    model_name: str,
+    json_body: Dict[str, Any],
+    path: str,
+) -> Tuple[Optional[BuildContext], Optional["PolicyResult"], Optional[str], Optional[float]]:
+    """Set up capture context for a cloud route.
+
+    Cloud routes bypass the inference queue, so we generate a request_id
+    and start a timer here.  Returns (ctx, policy_result, request_id, start_time).
+    All values may be None when capture is disabled or evaluation fails.
+    """
+    try:
+        controller = get_capture_controller()
+        client_fp = _capture_client_fingerprint(request, client_id)
+        endpoint = _capture_endpoint_from_request(request)
+        # For cloud routes via proxy_v1_post, path is "chat/completions" or "messages"
+        # For cloud routes via Ollama bridge, path is "chat/completions"
+        # Determine protocol from the endpoint/route
+        if endpoint.startswith("/v1/messages"):
+            protocol = PROTOCOL_ANTHROPIC
+        elif endpoint.startswith("/api/chat") or endpoint.startswith("/api/generate"):
+            protocol = PROTOCOL_OLLAMA
+        else:
+            protocol = PROTOCOL_OPENAI
+
+        # Generate a unique request_id for cloud routes (not from queue)
+        cloud_request_id = str(uuid.uuid4())
+
+        # Build capture messages
+        capture_messages = None
+        capture_params = None
+        if isinstance(json_body, dict):
+            if protocol == PROTOCOL_ANTHROPIC:
+                capture_messages = anthropic_messages_to_openai(
+                    messages=json_body.get("messages", []),
+                    system=json_body.get("system"),
+                )
+                capture_params = {
+                    k: v for k, v in json_body.items()
+                    if k not in ("messages", "system")
+                }
+            else:
+                capture_messages = json_body.get("messages")
+                capture_params = {
+                    k: v for k, v in json_body.items() if k != "messages"
+                }
+
+        policy_result = _dispatch_capture_request_received(
+            request, client_id,
+            request_id=cloud_request_id,
+            endpoint=endpoint,
+            ingress_protocol=protocol,
+            route_type=ROUTE_CLOUD,
+            requested_model=model_name,
+            resolved_model=model_name,
+            request_messages=capture_messages,
+            request_parameters=capture_params,
+            queue_wait_ms=0,
+        )
+
+        if policy_result is not None and policy_result.should_capture:
+            ctx = BuildContext(
+                request_id=cloud_request_id,
+                endpoint=endpoint,
+                ingress_protocol=protocol,
+                route_type=ROUTE_CLOUD,
+                requested_model=model_name,
+                resolved_model=model_name,
+                capture_policy_version=capture_controller.config.policy_version,
+                instance_id=capture_controller.config.instance_id,
+                client_fingerprint=client_fp,
+            )
+            start_time = time.monotonic()
+            return ctx, policy_result, cloud_request_id, start_time
+
+    except Exception:
+        pass
+
+    return None, None, None, None
 
 
 async def _forward_to_cloud_provider(
@@ -3724,6 +4831,11 @@ async def _forward_to_cloud_provider(
     model_name: str,
     request: Request,
     client_id: str,
+    *,
+    capture_ctx: Optional[BuildContext] = None,
+    capture_policy_result: Optional["PolicyResult"] = None,
+    cloud_request_id: Optional[str] = None,
+    cloud_capture_start_time: Optional[float] = None,
 ) -> Response:
     """Forward an inference request to a cloud LLM provider.
 
@@ -3746,13 +4858,22 @@ async def _forward_to_cloud_provider(
       upstream error (429/5xx). A successful response resets that candidate's
       health so Guardian prefers it again once it recovers.
     """
-    attempts, failover_group = _resolve_cloud_attempts(model_name, request, client_id)
+    requires_vision = _messages_contain_image_input(json_body.get("messages", []))
+    attempts, failover_group = _resolve_cloud_attempts(
+        model_name,
+        request,
+        client_id,
+        requires_vision=requires_vision,
+    )
     cloud_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
 
     is_stream = bool(json_body.get("stream", False))
     _set_request_usage_metadata(request, model=model_name, streamed=is_stream)
     _start_live_request_usage(request)
     stream_http_client: Optional[httpx.AsyncClient] = None
+
+    # Track cloud capture metadata
+    _cloud_capture_attempts = 0
 
     for attempt_index, (provider, upstream_model) in enumerate(attempts):
         is_last_attempt = attempt_index == len(attempts) - 1
@@ -3831,8 +4952,19 @@ async def _forward_to_cloud_provider(
                     provider.name, attempt_index + 1, len(attempts), e,
                 )
                 if not is_last_attempt:
+                    _cloud_capture_attempts = attempt_index + 1
                     continue
                 _finish_live_request_usage(request, status_code=502, response_bytes=0)
+                _dispatch_capture_request_failed(
+                    capture_ctx,
+                    error_code=_classify_capture_error(e),
+                    http_status=502,
+                    sanitized_message=_sanitize_capture_error_message(e),
+                    queue_wait_ms=0,
+                    duration_ms=(time.monotonic() - cloud_capture_start_time) * 1000 if cloud_capture_start_time else None,
+                    attempts=_cloud_capture_attempts,
+                    policy_result=capture_policy_result,
+                ) if capture_ctx is not None else None
                 raise HTTPException(status_code=502, detail=f"Cloud provider request failed: {e}")
 
             # ── Failover 429 probe: wait and retry once before falling through ──
@@ -3888,6 +5020,17 @@ async def _forward_to_cloud_provider(
                     )
                     continue
                 _finish_live_request_usage(request, status_code=resp.status_code, response_bytes=len(body_bytes))
+                # ── Capture: request_failed (streaming HTTP error) ──
+                _dispatch_capture_request_failed(
+                    capture_ctx,
+                    error_code=f"cloud_http_{resp.status_code}",
+                    http_status=resp.status_code,
+                    sanitized_message=f"Cloud provider returned HTTP {resp.status_code}",
+                    queue_wait_ms=0,
+                    duration_ms=(time.monotonic() - cloud_capture_start_time) * 1000 if cloud_capture_start_time else None,
+                    attempts=_cloud_capture_attempts,
+                    policy_result=capture_policy_result,
+                ) if capture_ctx is not None else None
                 if needs_translation:
                     try:
                         error_payload = json.loads(body_bytes)
@@ -3940,8 +5083,19 @@ async def _forward_to_cloud_provider(
                     provider.name, attempt_index + 1, len(attempts), e,
                 )
                 if not is_last_attempt:
+                    _cloud_capture_attempts = attempt_index + 1
                     continue
                 _finish_live_request_usage(request, status_code=502, response_bytes=0)
+                _dispatch_capture_request_failed(
+                    capture_ctx,
+                    error_code=_classify_capture_error(e),
+                    http_status=502,
+                    sanitized_message=_sanitize_capture_error_message(e),
+                    queue_wait_ms=0,
+                    duration_ms=(time.monotonic() - cloud_capture_start_time) * 1000 if cloud_capture_start_time else None,
+                    attempts=_cloud_capture_attempts,
+                    policy_result=capture_policy_result,
+                ) if capture_ctx is not None else None
                 raise HTTPException(status_code=502, detail=f"Cloud provider request failed: {e}")
 
             # ── Failover 429 probe: wait and retry once before falling through ──
@@ -3996,6 +5150,39 @@ async def _forward_to_cloud_provider(
                 payload = None
             _record_usage_from_payload(client_id, f"/v1/{path}", model_name, payload, request=request)
 
+            # ── Capture: request_completed or request_failed (non-streaming) ──
+            _cloud_capture_attempts = attempt_index + 1
+            _cloud_capture_duration_ms = (
+                (time.monotonic() - cloud_capture_start_time) * 1000
+                if cloud_capture_start_time else None
+            )
+            if resp.status_code >= 400:
+                _dispatch_capture_request_failed(
+                    capture_ctx,
+                    error_code=f"cloud_http_{resp.status_code}",
+                    http_status=resp.status_code,
+                    sanitized_message=f"Cloud provider returned HTTP {resp.status_code}",
+                    queue_wait_ms=0,
+                    duration_ms=_cloud_capture_duration_ms,
+                    attempts=_cloud_capture_attempts,
+                    policy_result=capture_policy_result,
+                ) if capture_ctx is not None else None
+            else:
+                _cloud_content, _cloud_tool_calls = _extract_cloud_response_content(payload)
+                _dispatch_capture_request_completed(
+                    capture_ctx,
+                    policy_result=capture_policy_result,
+                    response_content=_cloud_content,
+                    tool_calls=_cloud_tool_calls,
+                    prompt_tokens=payload.get("usage", {}).get("prompt_tokens", payload.get("usage", {}).get("input_tokens", 0)) if isinstance(payload, dict) else None,
+                    completion_tokens=payload.get("usage", {}).get("completion_tokens", payload.get("usage", {}).get("output_tokens", 0)) if isinstance(payload, dict) else None,
+                    http_status=resp.status_code,
+                    streamed=False,
+                    incomplete=False,
+                    attempts=_cloud_capture_attempts,
+                    duration_ms=_cloud_capture_duration_ms,
+                ) if capture_ctx is not None else None
+
             debug_headers = _guardian_debug_headers(provider, upstream_model, failover_group)
             # Suffix the client-visible model field with the winning provider on
             # failover routes only, so an ambiguous "which provider answered?"
@@ -4044,6 +5231,13 @@ async def _forward_to_cloud_provider(
     response_model_name = f"{model_name}@{provider.name}" if failover_group else model_name
     usage_totals = {"prompt_tokens": 0, "completion_tokens": 0}
 
+    # ── Capture: streaming assembler for cloud route ──
+    _cloud_assembler: Optional[StreamResponseAssembler] = None
+    if capture_ctx is not None:
+        _cloud_assembler = StreamResponseAssembler(
+            protocol=PROTOCOL_ANTHROPIC if needs_translation else PROTOCOL_OPENAI,
+        )
+
     async def _read_sse_lines():
         """Yield raw SSE lines from the upstream response with watchdog."""
         watchdog = StreamProgressWatchdog(provider.timeout_seconds)
@@ -4057,6 +5251,8 @@ async def _forward_to_cloud_provider(
             heartbeat_interval_s=STREAM_HEARTBEAT_INTERVAL_S,
         ):
             yield line
+
+    _cloud_stream_cancelled = False
 
     async def cloud_stream():
         try:
@@ -4080,6 +5276,9 @@ async def _forward_to_cloud_provider(
                                             usage_totals["completion_tokens"],
                                             data.get("usage", {}).get("output_tokens", 0),
                                         )
+                                    # ── Capture: feed translated Anthropic event to assembler ──
+                                    if _cloud_assembler is not None:
+                                        _cloud_assembler.feed(data)
                         except (json.JSONDecodeError, TypeError):
                             pass
                     encoded_line = event_line.encode("utf-8")
@@ -4106,6 +5305,9 @@ async def _forward_to_cloud_provider(
                                         usage.get("completion_tokens", usage.get("output_tokens", 0))
                                     ),
                                 )
+                            # ── Capture: feed chunk to assembler ──
+                            if _cloud_assembler is not None:
+                                _cloud_assembler.feed(data)
                         except (TypeError, ValueError, json.JSONDecodeError):
                             pass
                     encoded_line = (line + "\n").encode("utf-8")
@@ -4115,7 +5317,7 @@ async def _forward_to_cloud_provider(
                     )
                     yield encoded_line
         except (asyncio.CancelledError, _GuardianRequestCancelled, httpx.StreamClosed, httpx.ReadError, httpx.RemoteProtocolError):
-            pass
+            _cloud_stream_cancelled = True
         finally:
             await resp.aclose()
             await stream_response_client.aclose()
@@ -4131,6 +5333,36 @@ async def _forward_to_cloud_provider(
                 request,
                 status_code=resp.status_code,
             )
+            # ── Capture: request_completed or request_cancelled (streaming, cloud) ──
+            if capture_ctx is not None:
+                if _cloud_stream_cancelled:
+                    _dispatch_capture_request_cancelled(
+                        capture_ctx,
+                        cancel_reason="client_disconnect",
+                        duration_ms=(time.monotonic() - cloud_capture_start_time) * 1000 if cloud_capture_start_time else None,
+                        attempts=_cloud_capture_attempts,
+                        policy_result=capture_policy_result,
+                    )
+                else:
+                    _cloud_stream_content = None
+                    _cloud_stream_tool_calls = None
+                    if _cloud_assembler is not None:
+                        _cloud_assembled = _cloud_assembler.assemble()
+                        _cloud_stream_content = _cloud_assembled.get("content")
+                        _cloud_stream_tool_calls = _cloud_assembled.get("tool_calls")
+                    _dispatch_capture_request_completed(
+                        capture_ctx,
+                        policy_result=capture_policy_result,
+                        response_content=_cloud_stream_content,
+                        tool_calls=_cloud_stream_tool_calls,
+                        prompt_tokens=usage_totals["prompt_tokens"],
+                        completion_tokens=usage_totals["completion_tokens"],
+                        http_status=resp.status_code,
+                        streamed=True,
+                        incomplete=resp.status_code != 200,
+                        attempts=_cloud_capture_attempts,
+                        duration_ms=(time.monotonic() - cloud_capture_start_time) * 1000 if cloud_capture_start_time else None,
+                    )
 
     return StreamingResponse(
         cloud_stream(),
@@ -4244,15 +5476,17 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
     # Cloud models bypass the VRAM scheduler, model switch logic, and inference
     # queue entirely — the cloud API handles its own rate limiting.
     #
-    # When a cloud failover route is text-only but the request contains image
-    # inputs, Guardian transparently redirects to a local vision model
-    # configured via the group's ``image_fallback`` setting. Image-capable
-    # cloud models (e.g. minimax-m3) continue to use their native cloud image
-    # support without intervention.
+    # When a text-only cloud model receives image input, Guardian transparently
+    # redirects to its configured local vision fallback. Image-capable cloud
+    # models continue to use their native cloud image support.
     if _is_cloud_or_guardian_route(requested_model):
         if has_image_inputs:
             vision_fallback = _resolve_cloud_vision_fallback(requested_model)
             if vision_fallback:
+                # Preserve cloud-route authorization even though the image is
+                # handled locally. This prevents arbitrary guardian/* routes
+                # from using a local model fallback.
+                _resolve_cloud_attempts(requested_model, request, client_id)
                 logger.info(
                     "🖼️  Cloud route '%s' is text-only with image input — "
                     "redirecting to local vision model '%s'",
@@ -4265,6 +5499,13 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                 # Fall through to local inference path below.
             else:
                 body = json.dumps(json_body).encode("utf-8")
+                # ── Capture: cloud request_received (fail-open) ──
+                _cloud_ctx, _cloud_policy, _cloud_req_id, _cloud_start = _setup_cloud_capture(
+                    request, client_id,
+                    model_name=requested_model,
+                    json_body=json_body,
+                    path=path,
+                )
                 return await _forward_to_cloud_provider(
                     path=path,
                     body=body,
@@ -4272,11 +5513,20 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                     model_name=requested_model,
                     request=request,
                     client_id=client_id,
+                    capture_ctx=_cloud_ctx,
+                    capture_policy_result=_cloud_policy,
+                    cloud_request_id=_cloud_req_id,
+                    cloud_capture_start_time=_cloud_start,
                 )
         else:
-            # Cloud models don't need Qwen message sanitization or reasoning
-            # defaults — those are llama-server-specific workarounds.
+            # ── Capture: cloud request_received (fail-open, no image) ──
             body = json.dumps(json_body).encode("utf-8")
+            _cloud_ctx2, _cloud_policy2, _cloud_req_id2, _cloud_start2 = _setup_cloud_capture(
+                request, client_id,
+                model_name=requested_model,
+                json_body=json_body,
+                path=path,
+            )
             return await _forward_to_cloud_provider(
                 path=path,
                 body=body,
@@ -4284,6 +5534,10 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                 model_name=requested_model,
                 request=request,
                 client_id=client_id,
+                capture_ctx=_cloud_ctx2,
+                capture_policy_result=_cloud_policy2,
+                cloud_request_id=_cloud_req_id2,
+                cloud_capture_start_time=_cloud_start2,
             )
 
     _apply_anthropic_thinking_to_llama_params(json_body)
@@ -4295,12 +5549,85 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
     body = json.dumps(json_body).encode("utf-8")
     # has_image_inputs already computed above
 
+    request_start_time = time.monotonic()
+    _capture_policy_result: Optional["PolicyResult"] = None
+    _capture_ctx: Optional[BuildContext] = None
+
     try:
         request_id, disconnect_task = await _begin_queued_request(request, client_id, requested_model)
     except _GuardianRequestCancelled as exc:
+        # Capture: request_cancelled before queue admission
+        _capture_ctx = BuildContext(
+            request_id=exc.request_id,
+            endpoint=_capture_endpoint_from_request(request),
+            ingress_protocol=PROTOCOL_OPENAI,
+            route_type=ROUTE_LOCAL,
+            requested_model=requested_model,
+            resolved_model=requested_model,
+            capture_policy_version=capture_controller.config.policy_version,
+            instance_id=capture_controller.config.instance_id,
+            client_fingerprint=_capture_client_fingerprint(request, client_id),
+        )
+        _dispatch_capture_request_cancelled(
+            _capture_ctx, cancel_reason=exc.reason,
+            duration_ms=(time.monotonic() - request_start_time) * 1000,
+        )
         raise _request_cancel_http_exception(exc.request_id, exc.reason)
 
+    # ── Capture: request_received event (fail-open, disabled by default) ──
+    # Dispatch only for local OpenAI chat/completions — the first delivery slice.
+    # The hook is wrapped in try/except so capture failures never block inference.
+    _capture_client_fp = _capture_client_fingerprint(request, client_id)
+    _capture_endpoint = _capture_endpoint_from_request(request)
+    _capture_protocol = _capture_ingress_protocol(path, _capture_endpoint)
+
+    # Translate request messages to OpenAI format for capture if Anthropic
+    _capture_request_messages = None
+    _capture_request_params = None
+    if isinstance(json_body, dict):
+        if _capture_protocol == PROTOCOL_ANTHROPIC:
+            # Anthropic /v1/messages: content is [messages, system, ...]
+            _capture_request_messages = anthropic_messages_to_openai(
+                messages=json_body.get("messages", []),
+                system=json_body.get("system"),
+            )
+            _capture_request_params = {
+                k: v for k, v in json_body.items()
+                if k not in ("messages", "system")
+            }
+        else:
+            _capture_request_messages = json_body.get("messages")
+            _capture_request_params = {
+                k: v for k, v in json_body.items() if k != "messages"
+            }
+
+    _capture_policy_result = _dispatch_capture_request_received(
+        request, client_id,
+        request_id=request_id,
+        endpoint=_capture_endpoint,
+        ingress_protocol=_capture_protocol,
+        route_type=ROUTE_LOCAL,
+        requested_model=requested_model,
+        resolved_model=requested_model,
+        request_messages=_capture_request_messages,
+        request_parameters=_capture_request_params,
+        queue_wait_ms=inference_queue.get_queue_wait_ms(request_id),
+    )
+    if _capture_policy_result is not None and _capture_policy_result.should_capture:
+        _capture_ctx = BuildContext(
+            request_id=request_id,
+            endpoint=_capture_endpoint,
+            ingress_protocol=_capture_protocol,
+            route_type=ROUTE_LOCAL,
+            requested_model=requested_model,
+            resolved_model=requested_model,
+            capture_policy_version=capture_controller.config.policy_version,
+            instance_id=capture_controller.config.instance_id,
+            client_fingerprint=_capture_client_fp,
+        )
+
     _release_in_finally = True
+    capture_dispatched = False
     try:
         # If llama-server was unloaded, auto-reload before forwarding
         if model_manager.is_unloaded:
@@ -4523,15 +5850,49 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                         cleanup=client.aclose,
                     )
                 except _GuardianRequestCancelled as exc:
+                    # ── Capture: request_cancelled (streaming, pre-stream) ──
+                    if _capture_ctx is not None:
+                        _dispatch_capture_request_cancelled(
+                            _capture_ctx, cancel_reason=exc.reason,
+                            queue_wait_ms=inference_queue.get_queue_wait_ms(request_id),
+                            duration_ms=(time.monotonic() - request_start_time) * 1000,
+                        )
                     await client.aclose()
                     raise _request_cancel_http_exception(exc.request_id, exc.reason)
                 except Exception as retry_error:
+                    # ── Capture: request_failed (streaming, pre-stream) ──
+                    if _capture_ctx is not None:
+                        _dispatch_capture_request_failed(
+                            _capture_ctx,
+                            error_code="backend_reload_failed",
+                            http_status=502,
+                            sanitized_message="Backend request failed after reload",
+                            queue_wait_ms=inference_queue.get_queue_wait_ms(request_id),
+                            duration_ms=(time.monotonic() - request_start_time) * 1000,
+                        )
                     await client.aclose()
                     raise HTTPException(status_code=502, detail=f"Backend request failed after reload: {retry_error}")
             except _GuardianRequestCancelled as exc:
+                # ── Capture: request_cancelled (streaming, pre-stream outer) ──
+                if _capture_ctx is not None:
+                    _dispatch_capture_request_cancelled(
+                        _capture_ctx, cancel_reason=exc.reason,
+                        queue_wait_ms=inference_queue.get_queue_wait_ms(request_id),
+                        duration_ms=(time.monotonic() - request_start_time) * 1000,
+                    )
                 await client.aclose()
                 raise _request_cancel_http_exception(exc.request_id, exc.reason)
             except Exception as e:
+                # ── Capture: request_failed (streaming, pre-stream outer) ──
+                if _capture_ctx is not None:
+                    _dispatch_capture_request_failed(
+                        _capture_ctx,
+                        error_code="backend_request_failed",
+                        http_status=502,
+                        sanitized_message="Backend request failed",
+                        queue_wait_ms=inference_queue.get_queue_wait_ms(request_id),
+                        duration_ms=(time.monotonic() - request_start_time) * 1000,
+                    )
                 await client.aclose()
                 raise HTTPException(status_code=502, detail=f"Backend request failed: {e}")
 
@@ -4564,6 +5925,11 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                     )
 
             usage_totals = {"prompt_tokens": 0, "completion_tokens": 0}
+
+            # ── Capture: per-request stream assembler (fail-open) ──────
+            _local_capture_assembler: Optional[StreamResponseAssembler] = None
+            if _capture_ctx is not None and _capture_policy_result is not None and _capture_policy_result.should_capture:
+                _local_capture_assembler = StreamResponseAssembler()
 
             async def stream_passthrough():
                 cancel_cleanup_task = asyncio.create_task(
@@ -4642,6 +6008,12 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                         else:
                             encoded_line = (line + "\n").encode("utf-8")
                             _update_live_request_usage(request, response_bytes_delta=len(encoded_line))
+                        # ── Capture: feed SSE line to stream assembler ──
+                        if _local_capture_assembler is not None:
+                            try:
+                                _local_capture_assembler.add_sse_line(line)
+                            except Exception:
+                                pass
                         yield encoded_line
                 except (asyncio.CancelledError, _GuardianRequestCancelled, httpx.StreamClosed, httpx.ReadError, httpx.RemoteProtocolError):
                     pass
@@ -4664,6 +6036,16 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                         status_code=499 if inference_queue.is_cancel_requested(request_id) else resp.status_code,
                     )
                     model_manager.active_requests = max(0, model_manager.active_requests - 1)
+
+                    # ── Capture: request_completed or request_cancelled ──
+                    _dispatch_capture_stream_completed(
+                        request, request_id, client_id,
+                        active_model_for_request, _capture_ctx,
+                        _capture_policy_result, _local_capture_assembler,
+                        usage_totals, path, resp.status_code,
+                    )
+                    capture_dispatched = True
+
                     model_manager.last_request_time = time.time()
                     inference_queue.finish(request_id, outcome=_request_outcome(request_id))
                     await _stop_background_task(disconnect_task)
@@ -4713,7 +6095,25 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                     except Exception as retry_error:
                         raise HTTPException(status_code=502, detail=f"Backend request failed after reload: {retry_error}")
                 except _GuardianRequestCancelled as exc:
+                    # ── Capture: request_cancelled (non-streaming) ──
+                    _dispatch_capture_request_cancelled(
+                        _capture_ctx, cancel_reason=exc.reason,
+                        queue_wait_ms=inference_queue.get_queue_wait_ms(request_id),
+                        duration_ms=(time.monotonic() - request_start_time) * 1000,
+                    ) if _capture_ctx is not None else None
                     raise _request_cancel_http_exception(exc.request_id, exc.reason)
+                except Exception as e:
+                    # ── Capture: request_failed ──
+                    _capture_error_code = _classify_capture_error(e)
+                    _dispatch_capture_request_failed(
+                        _capture_ctx,
+                        error_code=_capture_error_code,
+                        http_status=502,
+                        sanitized_message=_sanitize_capture_error_message(e),
+                        queue_wait_ms=inference_queue.get_queue_wait_ms(request_id) if request_id else None,
+                        duration_ms=(time.monotonic() - request_start_time) * 1000,
+                    ) if _capture_ctx is not None else None
+                    raise HTTPException(status_code=502, detail=f"Backend request failed: {e}")
                 model_manager.active_requests = max(0, model_manager.active_requests - 1)
                 model_manager.last_request_time = time.time()
                 queue_wait_ms = inference_queue.get_queue_wait_ms(request_id)
@@ -4723,6 +6123,15 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
                     except (TypeError, ValueError, json.JSONDecodeError):
                         payload = None
                     _record_usage_from_payload(client_id, f"/v1/{path}", active_model_for_request, payload, request=request)
+                # ── Capture: request_completed (non-streaming) ──
+                if path in ("chat/completions", "messages") and not capture_dispatched:
+                    _dispatch_capture_nonstream_completed(
+                        request, request_id, client_id,
+                        active_model_for_request, _capture_ctx,
+                        _capture_policy_result, payload, resp.status_code,
+                        request_start_time,
+                    )
+                    capture_dispatched = True
                 if has_image_inputs:
                     if 200 <= resp.status_code < 400:
                         model_manager.mark_vision_validation(active_model_for_request, "supported")

@@ -9,11 +9,14 @@ missing API keys, and environment-variable expansion.
 import os
 import textwrap
 from pathlib import Path
+from unittest.mock import patch
 
+import httpx
 import pytest
 
 from app.proxy.providers import (
     CloudProvider,
+    ContextCatalog,
     ProviderRegistry,
     _expand_env,
 )
@@ -97,6 +100,32 @@ providers:
       - nvidia/llama-3.1-nemotron-70b-instruct
 """
 
+POOLSIDE_PROVIDER_YAML = """\
+providers:
+    poolside:
+        enabled: true
+        base_url: https://inference.poolside.ai/v1
+        api_key: poolside-test-key
+        timeout_seconds: 600
+        model_prefixes:
+            - poolside/
+        models:
+            - poolside/laguna-xs-2.1
+            - poolside/laguna-s-2.1
+"""
+
+CONTEXT_OVERRIDE_PROVIDER_YAML = """\
+context_overrides:
+    moonshotai/kimi-k3: 1048576
+providers:
+    openrouter:
+        enabled: true
+        base_url: https://openrouter.ai/api/v1
+        api_key: sk-or-test-key
+        models:
+            - moonshotai/kimi-k3
+"""
+
 
 def _write_settings(tmp_path: Path, content: str) -> Path:
     """Write a settings.yaml snippet to a temp file and return its path."""
@@ -128,6 +157,11 @@ def settings_env_var(tmp_path: Path) -> Path:
 @pytest.fixture
 def settings_duplicate(tmp_path: Path) -> Path:
     return _write_settings(tmp_path, DUPLICATE_MODEL_YAML)
+
+
+@pytest.fixture
+def settings_with_poolside(tmp_path: Path) -> Path:
+    return _write_settings(tmp_path, POOLSIDE_PROVIDER_YAML)
 
 
 # ── _expand_env ────────────────────────────────────────────────────────
@@ -191,9 +225,181 @@ class TestRegistryLoading:
         assert p.api_key == "sk-or-test-key"
         assert p.is_configured
 
+    def test_openrouter_prefixed_model_alias_uses_openrouter_provider(self, settings_with_providers: Path):
+        reg = ProviderRegistry(settings_path=settings_with_providers)
+
+        provider = reg.get_provider_for_model("openrouter/openai/gpt-4o")
+
+        assert provider is not None
+        assert provider.name == "openrouter"
+        assert reg.is_cloud_model("openrouter/openai/gpt-4o")
+        assert not reg.is_cloud_model("openrouter/xai/grok-4")
+        assert not reg.is_cloud_model("openrouter/openrouter/openai/gpt-4o")
+
     def test_get_provider_returns_none_for_unknown(self, settings_with_providers: Path):
         reg = ProviderRegistry(settings_path=settings_with_providers)
         assert reg.get_provider_for_model("unknown/model") is None
+
+
+class TestPoolsideProvider:
+    def test_poolside_catalog_contains_live_models(self, settings_with_poolside: Path):
+        reg = ProviderRegistry(settings_path=settings_with_poolside)
+
+        assert set(reg.get_all_cloud_models()) == {
+            "poolside/laguna-xs-2.1",
+            "poolside/laguna-s-2.1",
+        }
+
+    def test_poolside_namespace_routes_to_poolside(self, settings_with_poolside: Path):
+        reg = ProviderRegistry(settings_path=settings_with_poolside)
+
+        provider = reg.get_provider_for_model("poolside/future-model")
+
+        assert provider is not None
+        assert provider.name == "poolside"
+
+    def test_poolside_builds_official_chat_completions_url(self, settings_with_poolside: Path):
+        reg = ProviderRegistry(settings_path=settings_with_poolside)
+        provider = reg.get_provider_for_model("poolside/laguna-s-2.1")
+
+        url = ProviderRegistry.build_forward_url(provider, "chat/completions")
+
+        assert url == "https://inference.poolside.ai/v1/chat/completions"
+
+    def test_poolside_uses_bearer_auth_without_openrouter_headers(self, settings_with_poolside: Path):
+        reg = ProviderRegistry(settings_path=settings_with_poolside)
+        provider = reg.get_provider_for_model("poolside/laguna-s-2.1")
+
+        headers = ProviderRegistry.build_forward_headers(provider)
+
+        assert headers == {
+            "Authorization": "Bearer poolside-test-key",
+            "Content-Type": "application/json",
+        }
+
+
+class TestCloudContextMetadata:
+    def test_context_override_matches_cloud_route_variants(self, tmp_path: Path):
+        registry = ProviderRegistry(
+            settings_path=_write_settings(tmp_path, CONTEXT_OVERRIDE_PROVIDER_YAML)
+        )
+
+        assert registry.get_context_override("moonshotai/kimi-k3") == 1048576
+        assert registry.get_context_override("openrouter/moonshotai/kimi-k3") == 1048576
+        assert registry.get_context_override("guardian/openrouter/moonshotai/kimi-k3") == 1048576
+
+    @pytest.mark.asyncio
+    async def test_cloud_context_catalog_is_cached_by_provider(self, settings_with_providers: Path):
+        registry = ProviderRegistry(settings_path=settings_with_providers)
+        requested_urls = []
+
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "data": [
+                        {
+                            "id": "openai/gpt-4o",
+                            "context_length": None,
+                            "max_input_tokens": 128000,
+                        },
+                    ]
+                }
+
+        class FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+            async def get(self, url, headers):
+                requested_urls.append(url)
+                return FakeResponse()
+
+        with patch("app.proxy.providers.httpx.AsyncClient", FakeAsyncClient):
+            first = await registry.get_cloud_context_window("openai/gpt-4o")
+            second = await registry.get_cloud_context_window("openai/gpt-4o")
+
+        assert first == 128000
+        assert second == 128000
+        assert requested_urls == ["https://openrouter.ai/api/v1/models"]
+
+    @pytest.mark.asyncio
+    async def test_cloud_catalog_uses_effective_per_key_credential(self, settings_with_providers: Path):
+        registry = ProviderRegistry(settings_path=settings_with_providers)
+        effective_provider = CloudProvider(
+            name="openrouter",
+            base_url="https://openrouter.ai/api/v1",
+            api_key="per-key-credential",
+        )
+        captured_headers = {}
+
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"data": [{"id": "moonshotai/kimi-k3", "context_length": 1048576}]}
+
+        class FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+            async def get(self, url, headers):
+                captured_headers.update(headers)
+                return FakeResponse()
+
+        with patch("app.proxy.providers.httpx.AsyncClient", FakeAsyncClient):
+            context_window = await registry.get_cloud_context_window(
+                "guardian/openrouter/moonshotai/kimi-k3",
+                provider=effective_provider,
+            )
+
+        assert context_window == 1048576
+        assert captured_headers["Authorization"] == "Bearer per-key-credential"
+
+    @pytest.mark.asyncio
+    async def test_cloud_catalog_preserves_last_successful_value_after_refresh_error(
+        self,
+        settings_with_providers: Path,
+    ):
+        registry = ProviderRegistry(settings_path=settings_with_providers)
+        provider = registry.get_provider_for_model("openai/gpt-4o")
+        assert provider is not None
+        registry._context_catalogs[registry._catalog_cache_key(provider)] = ContextCatalog(
+            fetched_at=0.0,
+            context_windows={"openai/gpt-4o": 128000},
+        )
+
+        class FailingAsyncClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+            async def get(self, url, headers):
+                raise httpx.ConnectError("temporary catalog outage")
+
+        with patch("app.proxy.providers.httpx.AsyncClient", FailingAsyncClient):
+            context_window = await registry.get_cloud_context_window("openai/gpt-4o")
+
+        assert context_window == 128000
 
 
 # ── Disabled providers ─────────────────────────────────────────────────
@@ -223,6 +429,11 @@ class TestMissingApiKey:
         assert p is not None
         assert not p.is_configured
         assert p.api_key == ""
+
+    def test_provider_with_empty_key_models_not_advertised(self, settings_no_key: Path):
+        reg = ProviderRegistry(settings_path=settings_no_key)
+
+        assert reg.get_all_cloud_models() == []
 
 
 # ── Environment variable expansion ─────────────────────────────────────
