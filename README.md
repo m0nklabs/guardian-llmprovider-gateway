@@ -118,7 +118,8 @@ Edit these files before the first load:
 - [config/models.yaml](config/models.yaml): model paths, aliases, runtime
   fields, pinning, switch allowlist, idle unload
 - [config/settings.yaml](config/settings.yaml): queue wait budget telemetry,
-  VRAM budget, timeout tiers, ComfyUI URL, maintenance window
+  VRAM budget, timeout tiers, cloud routing, context overrides, ComfyUI URL,
+  maintenance window
 - [config/api_keys.json](config/api_keys.json): API keys used by clients
 
 Create the first key with the bundled helper:
@@ -126,6 +127,27 @@ Create the first key with the bundled helper:
 ```bash
 python scripts/generate_key.py local-dev --prefix flip
 ```
+
+### Model context metadata
+
+Guardian always returns a positive context window for every model it lists or
+routes. OpenAI-compatible discovery exposes `context_length`, `meta.n_ctx`,
+and `max_input_tokens`; Ollama-compatible `POST /api/show` exposes
+`model_info.general.context_length`.
+
+Use the top-level `context_overrides` map in
+[config/settings.yaml](config/settings.yaml) when an upstream catalog omits a
+verified value. Keys use the canonical upstream model ID, so one entry applies
+to raw, `openrouter/`, and `guardian/{provider}/` route forms:
+
+```yaml
+context_overrides:
+  moonshotai/kimi-k3: 1048576
+```
+
+Guardian otherwise caches cloud-provider catalogs for one hour, reads the
+active local backend's `/props` `n_ctx`, and finally reports a conservative
+`131072` fallback with a warning when no source is available.
 
 ### 4. Start Guardian
 

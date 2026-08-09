@@ -44,7 +44,7 @@ environment or secret storage, never hardcode them.
 If you maintain a Guardian client, treat this as the minimum contract:
 
 1. Send a valid API key on every `:11434` request.
-2. Populate model selectors from `GET /v1/models` or `GET /api/tags`; do not assume a model is served just because a client config mentions it.
+2. Populate model selectors from `GET /v1/models` or `GET /api/tags`; do not assume a model is served just because a client config mentions it. Use the positive `context_length` or `meta.n_ctx` from `/v1/models` for each model's context budget.
 3. Cloud models can be requested by raw upstream name (e.g. `anthropic/claude-sonnet-4.5`, `nvidia/nemotron-4-nano-30b`) — Guardian recognises them by namespace prefix, key-independently. These do **not** appear in `GET /v1/models` (only explicitly configured models are listed). See `@docs/LLM_ROUTER.md`.
 4. Treat only GPU-backed inference routes as queued; metadata and queue-status routes remain directly callable. Cloud requests bypass the local GPU queue.
 5. Capture `X-Request-Id` and `X-Queue-Wait-Ms` from inference responses.
@@ -105,11 +105,12 @@ curl -N http://guardian:11434/v1/chat/completions \
 POST /api/chat
 POST /api/generate
 GET  /api/tags
+POST /api/show
 GET  /api/version
 ```
 
-Only `POST /api/chat` and `POST /api/generate` are queued. `GET /api/tags` and
-`GET /api/version` are direct metadata endpoints.
+Only `POST /api/chat` and `POST /api/generate` are queued. `GET /api/tags`,
+`POST /api/show`, and `GET /api/version` are direct metadata endpoints.
 
 Standard Ollama request/response format. Existing Ollama clients work without modification.
 

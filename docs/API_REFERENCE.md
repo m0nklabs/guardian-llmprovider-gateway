@@ -97,6 +97,7 @@ Notes:
 | `GET` | `/v1/models` | No | List configured canonical models and aliases |
 | `GET` | `/v1/models/{model_id}` | No | Return metadata for one model or alias |
 | `GET` | `/api/tags` | No | Ollama-compatible model list |
+| `POST` | `/api/show` | No | Ollama-compatible metadata for one model |
 | `GET` | `/api/version` | No | Ollama-compatible version endpoint |
 
 #### `GET /v1/models`
@@ -115,6 +116,9 @@ Representative item:
   "max_context": 262144,
   "benchmark_context_limit": 262144,
   "context": 262144,
+  "context_length": 262144,
+  "max_input_tokens": 262144,
+  "meta": {"n_ctx": 262144},
   "advertised_context": 258048,
   "input_modalities": ["text", "image"],
   "configured_input_modalities": ["text", "image"],
@@ -133,6 +137,10 @@ Notes:
   `advertised_context` value as `max_context` so Claude compacts earlier.
 - `vision.status` comes from Guardian's runtime validation state, not just the
   presence of an `mmproj` path.
+- Every entry has a positive `context_length`, `meta.n_ctx`, and
+  `max_input_tokens`. Guardian resolves manual `context_overrides`, then a
+  cached cloud catalog or the active local backend's `/props`, before using a
+  conservative `131072` fallback.
 - cloud models matched by namespace prefix (e.g. `anthropic/claude-...`) are
   routable but do **not** appear in this list — only explicitly configured
   models and local aliases are listed. See `@docs/LLM_ROUTER.md`.
@@ -147,6 +155,14 @@ Compatibility notes:
 - `size` is derived from Guardian's `get_model_size()` heuristic
 - `details.family`, `details.parameter_size`, and related fields are generic
   compatibility placeholders, not authoritative GGUF introspection
+
+#### `POST /api/show`
+
+Accepts `{"model": "<model-id>"}` (or Ollama's `name` alias) and returns
+model metadata for local, cloud, per-key Guardian, and failover routes. The
+response always includes a positive context window in
+`model_info.general.context_length`, `model_info.guardian.context_length`, and
+the `num_ctx` parameter.
 
 #### `GET /api/version`
 
@@ -203,7 +219,7 @@ Representative multimodal request:
 Runtime behavior:
 
 - the requested `model` is resolved against Guardian's configured registry before queue admission; unknown or unserved values fail with `404 model_not_served`
-- cloud models are recognised by explicit `models:` entries or namespace prefixes (e.g. `anthropic/`, `nvidia/`) — see `@docs/LLM_ROUTER.md`
+- cloud models are recognised by explicit `models:` entries or namespace prefixes (e.g. `anthropic/`, `nvidia/`, `poolside/`) — see `@docs/LLM_ROUTER.md`
 - cloud requests bypass the local queue slots and are forwarded directly to the upstream provider
 - requests from the same API key may queue behind each other, but Guardian only
   grants one running GPU slot per key at a time

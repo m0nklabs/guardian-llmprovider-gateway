@@ -2,7 +2,73 @@
 
 ## [Unreleased]
 
+### Architecture Decisions (2026-08-07)
+- Resolved all 6 open capture design decisions:
+  1. **Multi-secret rotation**: support `GUARDIAN_CAPTURE_CLIENT_REF_SECRET` (current) + `GUARDIAN_CAPTURE_CLIENT_REF_SECRET_PREVIOUS` (legacy) overlap period.
+  2. **Per-record HMAC**: each WAL JSONL line carries `record_auth` (hmac-sha256, key_id, mac) for per-record authenticity verification by Keanu.
+  3. **Same Unix user**: Guardian and Keanu both run as `flip` on the same host; no dedicated shared group needed.
+  4. **Global cloud capture toggle**: existing `cloud_capture` boolean + allowlist namespace filter is sufficient; no per-provider flags.
+  5. **No truncation**: Guardian delivers raw data; data processing (truncation, transformation) is Keanu's responsibility.
+  6. **YAML-only operator control**: no audit log or runtime confirmation for field policy changes; conservative defaults protect against accidents.
+
+### Implementation
+- `compute_client_ref()` now accepts `allowed_refs` parameter and tries current + legacy secrets for seamless rotation (Decision 1A)
+- New env var `GUARDIAN_CAPTURE_CLIENT_REF_SECRET_PREVIOUS` for comma-separated legacy secrets
+- New `compute_record_auth()` function computes per-record HMAC-SHA-256 (Decision 2A)
+- New env var `GUARDIAN_CAPTURE_RECORD_AUTH_SECRET` for per-record signing
+- WAL writer adds `record_auth` field to every JSONL line when secret is set
+- `settings.yaml` updated with documentation comments for all new env vars
+- Keanu capture contract updated: `record_auth` added to `optional_fields` and `compatibility_rules`
+- 23 new unit tests (13 multi-secret rotation + 10 per-record HMAC)
+- Total: 836 Guardian unit tests passing, 0 regressions
+
+### Changed
+- Guardian now supports both HTTP and TLS on public `192.168.1.G:11434`.
+  nginx stream TLS preread dispatches encrypted traffic unchanged to Guardian's
+  private TLS listener at `127.0.0.1:11435`, while HTTP reaches the same
+  Guardian service through a private nginx proxy at `127.0.0.1:11436`.
+  The HTTP proxy disables response buffering, allows five seconds to connect,
+  and allows one hour to send or read model traffic so slow model loads and
+  long-lived streams are not cut off after nginx's default 60 seconds.
+  The stream multiplexer writes protocol-level connection diagnostics to
+  `/var/log/nginx/guardian-stream.log` without recording request content.
+  `GUARDIAN_TLS_PORT` makes the private TLS listener explicit. The host trust
+  store includes the Guardian certificate, so
+  `https://192.168.1.G:11434/v1` verifies without an insecure client override.
+- Model discovery now always publishes a positive context window for local,
+  cloud, per-key cloud, and failover routes. `/v1/models` exposes
+  `context_length`, `meta.n_ctx`, and `max_input_tokens`; Ollama-compatible
+  `POST /api/show` exposes matching `model_info` and `num_ctx` values. Context
+  resolves from `context_overrides`, cached cloud catalogs, or local
+  llama.cpp `/props`, with a logged `131072` fallback.
+- Cloud vision routing is now capability-based: only image requests for explicitly text-only cloud models use a configured local vision fallback. Image-capable cloud candidates remain cloud-routed, and mixed failover groups exclude text-only candidates for image requests.
+- Added the `Qwen3.6-35B-A3B-HauhauCS-Aggressive-DFlash-Turbo4` runtime profile and `qwen3.6-35b-dflash-turbo4` alias, pairing the existing Qwen3.6 DFlash draft model with the valid `turbo4` KV cache mode at its full 262,144-token context. Four main-model layers remain on CPU and the single-slot, bounded batch configuration preserves VRAM for DFlash.
+- Added a `llama-server.service` systemd drop-in that selects the `cuda128-laguna-tq-full` build and disables automatic K-cache promotion so local Turbo4 and DFlash profiles can load as configured.
+- Clarified that the model configuration header's TurboQuant and DFlash limitations apply to upstream llama.cpp, not the active custom fork.
+
+### Phase 6 — guardianctl CLI + WAL rotation ✅ (2026-08-06)
+- **`guardianctl` CLI** (`scripts/guardianctl.py`): new command-line tool for capture subsystem control. Subcommands: `status` (API), `config` (settings.yaml), `files` (disk), `rotate` (API), `enable`/`disable` (settings.yaml), `test-event` (direct pipeline). Uses existing `scripts/_auth.py` and `scripts/_paths.py` patterns.
+- **`/api/capture/rotate` endpoint**: new admin API endpoint for manual WAL file rotation. Closes the active file, compresses, checksums, and opens a new active file.
+- **`CaptureWALWriter.rotate()` public method**: exposes the internal `_rotate_file()` + `_open_active_file()` sequence for manual rotation. 3 unit tests added.
+- **Cloud allowlist config in settings.yaml**: `cloud_allowlist_enabled`, `allowed_cloud_models`, and `cloud_model_prefixes` added explicitly to the YAML (were previously dataclass defaults only).
+- 789 Guardian unit tests, 833 Keanu tests — all passing.
+
+### Phase 4 — Protocol/Route Coverage Complete ✅ (2026-08-05)
+- **Anthropic Messages protocol capture**: full translation from Anthropic content blocks to OpenAI format for capture ingestion. Handles text, tool_use, tool_result, image (skipped), thinking, and unknown block types.
+- **Ollama protocol capture**: capture hooks added to both `/api/chat` and `/api/generate` endpoints, covering streaming and non-streaming paths.
+- **Policy engine updated**: `supported_protocols` now includes `("openai", "anthropic", "ollama")`. Anthropic endpoint gate (`/v1/messages`) and Ollama endpoint gates (`/api/chat`, `/api/generate`) added.
+- **Cloud response content extraction**: new `_extract_cloud_response_content()` helper extracts text content and tool_calls from both OpenAI-format (`choices[0].message`) and Anthropic-format (`content` blocks) cloud responses. 10 unit tests added.
+- **Cloud streaming capture with assembler**: `StreamResponseAssembler` integrated into `cloud_stream()` — both pass-through (OpenAI) and Anthropic translation paths feed SSE chunks. Completed event now includes assembled `response_content` and `tool_calls`.
+- **Cloud stream cancellation capture**: `_cloud_stream_cancelled` flag detects client disconnects during cloud streaming and dispatches `request_cancelled` instead of `request_completed`.
+- **Failover attempt tracking**: `_cloud_capture_attempts` tracks the attempt index across failover candidates and reports it in capture events.
+- **Tool call/result field policies**: policy engine defines `tool_calls: "capture"`, `tool_results: "strip"`. Stream assembler accumulates tool_calls from both OpenAI and Anthropic SSE formats.
+- **Cloud capture allowlists**: `cloud_capture` config flag (default: false, requires provider terms review), `cloud_allowlist_enabled` (default: true), `allowed_cloud_models` (explicit list), `cloud_model_prefixes` (namespace prefixes).
+- **Tests**: 786 Guardian unit tests, 833 Keanu tests, 191 capture-specific tests — all passing.
+- **Fixed**: syntax error in `proxy_v1_post` cloud route indentation (nested `else:` was at wrong level), added missing `body` initialization for no-image cloud path.
+
 ### Added
+- **Guardian to Keanu Factory capture architecture plan**: added `docs/GUARDIAN_KEANU_CAPTURE_PLAN.json`, a machine-readable plan covering the versioned capture contract, shared/local/cloud Guardian boundaries, privacy and security defaults, bounded JSONL handoff, Keanu ingestion responsibilities, phased delivery, tests, risks, and acceptance criteria. This is a proposed design; capture remains unimplemented and disabled.
+- **Poolside Platform cloud routing**: added the live-discovered `poolside/laguna-xs-2.1` and `poolside/laguna-s-2.1` models as a direct OpenAI-compatible provider at `https://inference.poolside.ai/v1`, with isolated `poolside/` namespace routing, global `${POOLSIDE_API_KEY}` configuration, per-key `guardian/poolside/...` support, Anthropic Messages translation, streaming/retry compatibility, operator documentation, and regression coverage. Per-key credentials remain in the gitignored `config/cloud_keys.json` store. Verified live that `guardian/poolside/poolside/laguna-s-2.1` is discoverable and returns a successful completion through Guardian.
 - **Fast failover on upstream 429s**: failover groups now move to the next provider immediately when a candidate is rate limited, instead of waiting through the full per-key retry budget. Direct cloud routes retain their existing bounded retry behavior.
 - **Intelligent per-key cloud 429 handling**: cloud requests now keep the client connection open while Guardian respects provider `Retry-After`/rate-limit reset hints, applies bounded exponential backoff, and retries up to the configured hold budget. Per-key/provider counters and current provider hints are available through `/api/cloud/ratelimit-stats` and the dashboard `/api/stats` payload; after that budget is exhausted, failover routes try the next provider before returning 429, while 429s still do not trip provider health.
 - **Hardened cloud rate-limit telemetry**: provider error messages are sanitized, numeric rate-limit hints are bounded, retry state snapshots are lock-protected, detailed stats are scoped to the authenticated Guardian key, and the public dashboard receives aggregate-only counters.
@@ -29,6 +95,7 @@
 - Ground-up documentation suite for the live Guardian runtime: rewritten `README.md` and `ARCHITECTURE.md`, plus new `HARDWARE_TUNING.md` and `API_REFERENCE.md`, all aligned to the current queue, model lifecycle, systemd-backed backend control, ComfyUI `/free` integration, and finetune v2 behavior.
 
 ### Changed
+- Cloud providers without a configured global API key no longer advertise their short model IDs through `/v1/models` or `/api/cloud/models`. Explicit short-route requests still return `503 provider_unavailable`, while usable per-key `guardian/{provider}/{model}` routes remain discoverable for Guardian keys linked in `config/cloud_keys.json`. The live OpenWebUI key fingerprint is now linked to the existing Poolside credential, matching Goose's key-scoped discovery behavior.
 - Installed `google/gemma-4-12B-it-qat-q4_0-gguf` (`gemma-4-12b-it-qat-q4_0.gguf` + matching `mmproj`) and added a dedicated Guardian profile `google-gemma-4-12B-it-qat-q4_0-GPU1` with single-GPU routing enforced via `CUDA_VISIBLE_DEVICES=1` plus `--main-gpu 1 -sm none`, exposed through aliases `gemma4-12b`, `gemma4-12b-qat`, and `gemma4-12b-gpu1`.
 - Added a dedicated Guardian runtime profile for `unsloth/gemma-4-26B-A4B-it-qat-GGUF` (`UD-Q4_K_XL`) with full `q8_0/q8_0` KV, multimodal projector wiring, no explicit batch-size limits, and new aliases `gemma4-26b-qat` plus `gemma4-26b-qat-q8kv`.
 - Replaced the redundant `gemma4-q8kv` / `gemma4-26b-q8kv` aliases with a single explicit `gemma4-26b` alias while keeping `gemma4` as the default 26B q8 route.

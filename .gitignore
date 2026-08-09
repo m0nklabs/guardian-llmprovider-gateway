@@ -47,6 +47,9 @@ scratch/
 data/
 llama_slots/
 
+# Capture data (Bronze dataset staging — must never reach source control)
+data/capture/
+
 # VS Code
 .vscode/
 

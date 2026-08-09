@@ -2,7 +2,7 @@
 
 Guardian acts as a **unified LLM router**: it serves local GPU-backed models via
 `llama-server` **and** transparently forwards requests for cloud-hosted models
-to upstream providers like **OpenRouter** and **NVIDIA NIM**.
+to upstream providers like **OpenRouter**, **NVIDIA NIM**, and **Poolside Platform**.
 
 Clients talk to a single endpoint (`http://guardian:11434/v1/chat/completions`)
 and just specify the model name. Guardian automatically routes to the right
@@ -42,7 +42,7 @@ Client (OpenAI-compatible)
 
 | Aspect | Local GPU models | Cloud provider models |
 | --- | --- | --- |
-| **Backend** | `llama-server` on `:11440` | OpenRouter / NVIDIA API |
+| **Backend** | `llama-server` on `:11440` | OpenRouter / NVIDIA / Poolside API |
 | **Queue** | Inference queue (serialized, single-slot) | Bypassed — cloud handles concurrency |
 | **VRAM** | VRAM scheduler, model switching, idle unload | Not applicable |
 | **Model switching** | Auto-switch with allowlist | Not needed — each request is independent |
@@ -200,6 +200,21 @@ is returned only after the retry count or hold-time budget is exhausted. For
 provider before returning 429 to clients that do not implement retries. A 429
 does not trip cross-provider failover health.
 
+## Vision-aware Cloud Routing
+
+Cloud candidates declare their supported input modalities in
+`config/cloud_keys.json`. Guardian leaves text requests on the selected cloud
+route. When a request includes an image, it only selects a local vision fallback
+when the resolved cloud model is explicitly text-only and has an
+`image_fallback.local_model` configured. This applies equally to direct
+`guardian/{provider}/{model}` routes, global cloud model names, and failover
+routes.
+
+For a failover group containing both text-only and image-capable candidates,
+Guardian forwards image requests only to image-capable candidates. It does not
+start a local vision runtime merely because an image is present. Restart
+`llama-guardian.service` after changing this capability configuration.
+
 ## Configuration
 
 Cloud providers are configured in [`config/settings.yaml`](../config/settings.yaml)
@@ -226,6 +241,16 @@ providers:
     models:
       - nvidia/llama-3.1-nemotron-70b-instruct
       - deepseek-ai/deepseek-r1
+
+  poolside:
+    enabled: true
+    base_url: https://inference.poolside.ai/v1
+    api_key: ${POOLSIDE_API_KEY}
+    timeout_seconds: 600
+    model_prefixes: [poolside/]
+    models:
+      - poolside/laguna-xs-2.1
+      - poolside/laguna-s-2.1
 ```
 
 ### API Key Security
@@ -237,11 +262,15 @@ syntax. This keeps secrets out of the repository:
 # Set environment variables before starting Guardian
 export OPENROUTER_API_KEY="sk-or-v1-..."
 export NVIDIA_API_KEY="nvapi-..."
+export POOLSIDE_API_KEY="<poolside-api-key>"
 ```
 
 If an environment variable is not set, the key expands to an empty string.
 Requests for that provider's models will return `503 provider_unavailable`
-until the key is configured.
+until the key is configured. Guardian does not advertise those unusable global
+model IDs through `GET /v1/models` or `GET /api/cloud/models`. Per-key
+`guardian/{provider}/{model}` routes backed by credentials in
+`config/cloud_keys.json` remain discoverable for linked Guardian keys.
 
 ### Enabling / Disabling Providers
 
@@ -292,6 +321,16 @@ Use cloud models exactly like local models — Guardian handles the routing
 transparently:
 
 ```bash
+# Cloud model (Poolside Platform)
+curl http://localhost:11434/v1/chat/completions \
+  -H "Authorization: Bearer flip_..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "poolside/laguna-s-2.1",
+    "messages": [{"role": "user", "content": "What are channels in Go?"}],
+    "stream": true
+  }'
+
 # Cloud model (OpenRouter)
 curl http://localhost:11434/v1/chat/completions \
   -H "Authorization: Bearer flip_..." \
@@ -348,6 +387,61 @@ curl http://localhost:11434/api/chat \
 - **Model names**: Use the NVIDIA model identifier (e.g.,
   `nvidia/llama-3.1-nemotron-70b-instruct`).
 - **Get an API key**: https://build.nvidia.com/
+
+### Poolside Platform
+
+- **Base URL**: `https://inference.poolside.ai/v1`
+- **Auth**: `Authorization: Bearer <key>`
+- **Model names**: `poolside/laguna-xs-2.1` and `poolside/laguna-s-2.1`
+- **Capabilities**: OpenAI Chat Completions, SSE streaming, tools, structured
+  output, and text-only input/output. Guardian translates Anthropic
+  `/v1/messages` requests through its existing OpenAI bridge.
+- **Context**: Laguna XS 2.1 supports 256K tokens; Laguna S 2.1 supports 1M
+  tokens. Poolside does not publish a fixed maximum output token value in the
+  accessible API reference; use `max_completion_tokens` to bound generation.
+- **Thinking**: max thinking is enabled by default. Direct Poolside requests can
+  disable it with `chat_template_kwargs: {enable_thinking: false}`; intermediate
+  effort levels are not available for Laguna S 2.1.
+- **Rate limits**: Poolside's rate-limit page is access restricted and the public
+  API reference does not state universal request/token quotas. Treat limits as
+  account-specific. Guardian honors upstream `429` responses and retry hints via
+  the configured `cloud_retry` policy; inspect `/api/cloud/ratelimit-stats` for
+  observed limits and cooldowns.
+- **Live discovery**: `GET https://inference.poolside.ai/v1/models` returned both
+  model IDs above for the configured account on 2026-08-01.
+- **Get an API key**: https://platform.poolside.ai/
+
+### OpenAI (direct)
+
+- **Base URL**: `https://api.openai.com/v1`
+- **Auth**: `Authorization: Bearer <key>` (service-account keys `sk-svcacct-…`
+  work for inference and are stored in `${OPENAI_API_KEY}` / `.env`).
+- **Model names**: BARE names (e.g. `gpt-4o`, `gpt-4o-mini`, `gpt-5.2`,
+  `o3`, `chat-latest`).  OpenAI has **no namespace**, so global recognition
+  is via the explicit `models:` list in `settings.yaml` only — there is no
+  `model_prefixes:` entry.  Send unlisted models (dated snapshots, etc.)
+  via the per-key `guardian/openai/{model}` route, which requires no listing.
+- **Naming caveat**: OpenRouter serves the **slug** `openai/{model}` (e.g.
+  `openai/gpt-4o`) and is unaffected; this direct provider answers the
+  **bare** name (`gpt-4o`).  `gpt-4o` → direct OpenAI; `openai/gpt-4o` →
+  OpenRouter.  Both work, to different backends.
+- **Added on**: 2026-08-01.  `https://api.openai.com/v1` is also registered in
+  `_PROVIDER_BASE_URLS` (`app/proxy/server.py`) so per-key
+  `guardian/openai/{model}` routes resolve a base URL.
+- **Reasoning-model parameter adaptation**: OpenAI's reasoning models (the
+  `o1`/`o3`/`o4` family and the entire `gpt-5*` generation) reject
+  `max_tokens` (must use `max_completion_tokens`) and restrict
+  `temperature` (o-series: unsupported; gpt-5*: only value `1`).  Many
+  OpenAI-compatible clients (Claude Code, OpenWebUI, Aider, …) send these
+  params unconditionally.  Guardian's `_adapt_openai_reasoning_params`
+  (called inside `_prepare_cloud_candidate_request`) silently adapts them
+  **only for the direct `openai` provider** — OpenRouter handles its own
+  param translation.  An explicit client-supplied `max_completion_tokens`
+  always wins; the stray `max_tokens` is dropped, not overridden.
+- **Failover groups**: `gpt-4o` and `gpt-4o-mini` are registered in
+  `failover_groups` (`config/cloud_keys.json`) so `guardian/failover/gpt-4o`
+  tries direct OpenAI first, then falls back to OpenRouter
+  (`openai/gpt-4o`) on 429/5xx.
 
 ### Adding Custom Providers
 

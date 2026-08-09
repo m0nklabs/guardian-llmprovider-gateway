@@ -88,7 +88,7 @@ call site (local model + cloud + ollama endpoints).
 
 A cloud provider's API key env var is unset or empty. Check `.env`:
 ```bash
-grep -E 'OPENROUTER_API_KEY|NVIDIA_API_KEY' .env
+grep -E 'OPENROUTER_API_KEY|NVIDIA_API_KEY|POOLSIDE_API_KEY' .env
 ```
 
 ## Config files

@@ -3,7 +3,7 @@
 
 This repo is **Llama-CPP Guardian** — a Python 3.14 FastAPI proxy that
 sits in front of `llama-server` (:11440) and provides auth, queueing,
-model switching, cloud routing (OpenRouter + NVIDIA), and an Anthropic
+model switching, cloud routing (OpenRouter + NVIDIA + Poolside), and an Anthropic
 API bridge. It runs as systemd service `llama-guardian.service` on
 `:11434`. Frontend dashboard on `:11437`.
 
