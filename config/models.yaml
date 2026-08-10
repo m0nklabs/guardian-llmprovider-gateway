@@ -161,6 +161,12 @@ models:
     vision_tensor_split: "0.36,0.64"
     extra_args: "--reasoning on --reasoning-format deepseek --reasoning-budget -1 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
   Qwen3.6-35B-A3B-HauhauCS-Aggressive-Turbo4:
+    # Text ctx extended past native 262144 via YaRN 1.5x (rope.freq_base=1e7
+    # handles it well). Requires the fork's yarn-ctx patch (server no longer
+    # caps slot ctx at n_ctx_train when rope scaling is active). Verified
+    # 2026-08-10: 292,959-token needle test passed, 811 tok/s prefill.
+    # batch 1024/ubatch 256 keeps the 1.6 GB compute buffer within VRAM at
+    # 393216 ctx (default 2048/512 OOMs GPU1 on pipeline-parallel reserve).
     # Vision profile: full 262144 ctx at ngl 99 (all layers on GPU) fits thanks
     # to turbo4 KV, but ONLY with split 0.34,0.66 -- 0.38,0.62 segfaults on the
     # first vision request (GPU0 compute-buffer OOM, 248 MiB short). Measured
@@ -168,7 +174,7 @@ models:
     path: /home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf
     total_layers: 40
     benchmark_context_limit: 262144
-    context: 262144
+    context: 393216
     ngl: 99
     kv_type: turbo4
     tensor_split: "0.38,0.62"
@@ -176,7 +182,7 @@ models:
     vision_context: 262144
     vision_ngl: 99
     vision_tensor_split: "0.34,0.66"
-    extra_args: "--flash-attn on --reasoning on --reasoning-format deepseek --reasoning-budget -1 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
+    extra_args: "--flash-attn on --batch-size 1024 --ubatch-size 256 --rope-scaling yarn --rope-scale 1.5 --yarn-orig-ctx 262144 --reasoning on --reasoning-format deepseek --reasoning-budget -1 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
   Qwen3.6-35B-A3B-HauhauCS-Aggressive-Q8KV:
     path: /home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf
     total_layers: 40

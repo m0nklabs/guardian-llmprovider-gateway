@@ -14,6 +14,15 @@
   0.34,0.66 (see Changed below).
 
 ### Changed
+- `Qwen3.6-35B-A3B-HauhauCS-Aggressive-Turbo4` text context extended to
+  393216 (1.5x native 262144) via YaRN (`--rope-scaling yarn --rope-scale 1.5
+  --yarn-orig-ctx 262144`) + `--batch-size 1024 --ubatch-size 256` (the 1.6 GB
+  393k compute buffer otherwise OOMs GPU1 on pipeline-parallel reserve).
+  Depends on a new fork patch: llama-server no longer caps slot ctx at
+  `n_ctx_train` when rope scaling is active (server-context.cpp yarn-ctx
+  graft). Verified: 292,959-token needle-in-haystack passed (811 tok/s
+  prefill, 17.2 tok/s decode at that depth, needle found). Vision profile
+  stays at 262144 (mmproj compute buffer leaves no room for 393k vision).
 - `config/models.yaml` sanitized: removed 6 dead entries whose model files no
   longer exist on disk (Qwen3-VL-30B-A3B-Thinking,
   Qwen3-VL-32B-Gemini-Heretic-Uncensored-Thinking, both
