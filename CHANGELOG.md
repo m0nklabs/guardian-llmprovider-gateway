@@ -3,6 +3,39 @@
 ## [Unreleased]
 
 ### Added
+- Qwen3.6 speed benchmark suite `scripts/bench_qwen36_variants.py` +
+  `data/bench-qwen36/results.json`: turbo4 KV cache is +11% gen speed
+  (80.3 -> 89.1 tok/s) over q4_0 on the cuda128-laguna-tq-full fork build;
+  the DFlash draft model LOSES speed on Qwen3.6-35B (draft acceptance ~0.21,
+  80.3 -> 54.6 tok/s), unlike Laguna-S-2.1 where DFlash doubled throughput.
+- New model entry `Qwen3.6-35B-A3B-HauhauCS-Aggressive-Turbo4` (turbo4 KV,
+  no DFlash draft) in `config/models.yaml`. Initial vision profile was copied
+  from the baseline (ngl 40); later the same day re-tuned to ngl 99 /
+  0.34,0.66 (see Changed below).
+
+### Changed
+- `config/models.yaml` sanitized: removed 6 dead entries whose model files no
+  longer exist on disk (Qwen3-VL-30B-A3B-Thinking,
+  Qwen3-VL-32B-Gemini-Heretic-Uncensored-Thinking, both
+  gemma-4-31B-it-uncensored-heretic variants,
+  Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved) plus their 6 aliases
+  (qwen3.6-35b-mtp/heretic-mtp, gemma4-heretic*, gemma4-31b-uncensored*).
+  Removed the duplicate Laguna 256k entry (byte-identical to the 160k one) and
+  its aliases; replaced inline tuning-log comment blocks with references to
+  this CHANGELOG / docs / fork notes (log text preserved in git history);
+  grouped models by role. 887 tests pass, live /v1/models verified.
+- `Qwen3.6-35B-A3B-HauhauCS-Aggressive-Turbo4` vision profile re-tuned: with
+  turbo4 KV the full 262144 vision window now runs at `vision_ngl: 99` (all
+  layers on GPU) with `vision_tensor_split: "0.34,0.66"`. Measured 99.7 tok/s
+  vision generation vs 9.5 tok/s at the old ngl-40 profile (~10.5x). The old
+  0.38,0.62 split segfaults on the first vision request (GPU0 compute-buffer
+  OOM, 248 MiB short); 0.34,0.66 leaves ~1.3 GB headroom on GPU0. Vision
+  answers verified correct (shape description + OCR) end-to-end via Guardian.
+- Aliases `qwen3.6-35b-fast` / `qwen3.6-35b-uncensored-fast` now point at the
+  new Turbo4-only entry (89.1 tok/s measured) instead of the q4_0 baseline
+  (80.3 tok/s); new alias `qwen3.6-35b-turbo4` added.
+
+### Added (earlier)
 - Google AI Studio per-key cloud routing: registering a `google` credential
   retrieves its OpenAI-compatible model catalog and exposes linked models as
   `guardian/google/<model>`. `POST /api/cloud/credentials/{credential_id}/refresh-models`
