@@ -3,6 +3,7 @@
 import json
 import logging
 from pathlib import Path
+from stat import S_IMODE
 from unittest.mock import AsyncMock, MagicMock, patch
 from types import SimpleNamespace
 
@@ -66,6 +67,7 @@ class TestSaveApiKeys:
         try:
             auth.save_api_keys({"test_key": {"name": "tester", "created_at": 0, "metadata": {}}})
             assert out.exists()
+            assert S_IMODE(out.stat().st_mode) == 0o600
             data = json.loads(out.read_text())
             assert "test_key" in data
             assert data["test_key"]["name"] == "tester"
@@ -169,7 +171,7 @@ class TestVerifyApiKey:
             auth.API_KEYS_FILE = orig
 
     @pytest.mark.asyncio
-    async def test_invalid_key_logs_full_token(self, api_keys_file: Path, caplog: pytest.LogCaptureFixture):
+    async def test_invalid_key_logs_only_token_fingerprint(self, api_keys_file: Path, caplog: pytest.LogCaptureFixture):
         from fastapi import HTTPException
 
         auth, orig = _load_auth_with_path(api_keys_file)
@@ -187,7 +189,8 @@ class TestVerifyApiKey:
                 with pytest.raises(HTTPException):
                     await auth.verify_api_key(request, creds)
 
-            assert "token=flip_0000000000000000000000000000dead" in caplog.text
+            assert "flip_0000000000000000000000000000dead" not in caplog.text
+            assert "token_fingerprint=" in caplog.text
             assert "reason=invalid_api_key" in caplog.text
         finally:
             auth.API_KEYS_FILE = orig
@@ -227,7 +230,7 @@ class TestVerifyApiKey:
 
             assert "reason=missing_api_key" in caplog.text
             assert "path=/api/chat" in caplog.text
-            assert "token=-" in caplog.text
+            assert "token_fingerprint=-" in caplog.text
         finally:
             auth.API_KEYS_FILE = orig
 

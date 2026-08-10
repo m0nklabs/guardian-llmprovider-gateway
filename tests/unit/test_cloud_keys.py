@@ -3,6 +3,7 @@
 import json
 import time
 from pathlib import Path
+from stat import S_IMODE
 from unittest.mock import patch
 
 import pytest
@@ -97,10 +98,19 @@ class TestCloudCredential:
         assert d["models"] == ["m1"]
 
     def test_to_masked_dict(self):
-        cred = CloudCredential(id="c1", provider="nvidia", name="T", api_key="nvapi-1234567890abcdef", created_at=1.0, models=[])
+        cred = CloudCredential(
+            id="c1",
+            provider="nvidia",
+            name="T",
+            api_key="nvapi-1234567890abcdef",
+            created_at=1.0,
+            models=[],
+            owner_key_fingerprint="owner-key",
+        )
         d = cred.to_masked_dict()
         assert "****" in d["api_key"]
         assert d["api_key"] != "nvapi-1234567890abcdef"
+        assert "owner_key_fingerprint" not in d
 
 
 # ── CloudCredentialStore lifecycle ────────────────────────────────────
@@ -176,6 +186,50 @@ class TestModelManagement:
         assert "m1" not in creds[0]["models"]
         assert "m2" in creds[0]["models"]
 
+    @pytest.mark.asyncio
+    async def test_replace_models_for_credential_replaces_entire_catalog(self, tmp_store: CloudCredentialStore):
+        cred = await tmp_store.add_credential("google", "Google AI Studio", "google-key", ["old-model"])
+
+        replaced = await tmp_store.replace_models_for_credential(
+            cred["id"],
+            ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash", "  "],
+        )
+
+        assert replaced is True
+        stored = tmp_store.get_credential_by_id(cred["id"])
+        assert stored is not None
+        assert stored.models == ["gemini-2.5-flash", "gemini-2.5-pro"]
+
+    @pytest.mark.asyncio
+    async def test_replace_models_for_missing_credential_returns_false(self, tmp_store: CloudCredentialStore):
+        replaced = await tmp_store.replace_models_for_credential("missing", ["gemini-2.5-flash"])
+
+        assert replaced is False
+
+    @pytest.mark.asyncio
+    async def test_replace_models_restores_memory_when_persistence_fails(self, tmp_store: CloudCredentialStore):
+        cred = await tmp_store.add_credential("google", "Google AI Studio", "google-key", ["old-model"])
+
+        with patch.object(tmp_store, "_save", side_effect=OSError("disk full")):
+            with pytest.raises(OSError, match="disk full"):
+                await tmp_store.replace_models_for_credential(cred["id"], ["gemini-2.5-flash"])
+
+        stored = tmp_store.get_credential_by_id(cred["id"])
+        assert stored is not None
+        assert stored.models == ["old-model"]
+
+    @pytest.mark.asyncio
+    async def test_save_secures_temporary_file_before_writing_credentials(self, tmp_store: CloudCredentialStore):
+        original_dump = json.dump
+        tmp_path = tmp_store._path.with_suffix(tmp_store._path.suffix + ".tmp")
+
+        def assert_secure_dump(data, stream, **kwargs):
+            assert S_IMODE(tmp_path.stat().st_mode) == 0o600
+            return original_dump(data, stream, **kwargs)
+
+        with patch("app.proxy.cloud_keys.json.dump", side_effect=assert_secure_dump):
+            await tmp_store.add_credential("google", "Google AI Studio", "google-key", ["gemini-2.5-flash"])
+
 
 # ── Linking ───────────────────────────────────────────────────────────
 
@@ -193,6 +247,26 @@ class TestLinking:
     async def test_link_nonexistent_credential(self, tmp_store: CloudCredentialStore):
         linked = await tmp_store.link_credential("key_fp_1", "nvidia", "nonexistent")
         assert linked is False
+
+    @pytest.mark.asyncio
+    async def test_link_credential_rejects_provider_mismatch(self, tmp_store: CloudCredentialStore):
+        cred = await tmp_store.add_credential("google", "Google AI Studio", "google-key", ["gemini-2.5-flash"])
+
+        linked = await tmp_store.link_credential("key_fp_1", "nvidia", cred["id"])
+
+        assert linked is False
+        assert tmp_store.list_links() == {}
+
+    @pytest.mark.asyncio
+    async def test_linking_legacy_credential_preserves_its_inferred_owner(self, tmp_store: CloudCredentialStore):
+        cred = await tmp_store.add_credential("google", "Google AI Studio", "google-key", ["gemini-2.5-flash"])
+        tmp_store._data["links"] = {"legacy-owner": {"google": cred["id"]}}
+
+        linked = await tmp_store.link_credential("shared-key", "google", cred["id"])
+
+        assert linked is True
+        assert tmp_store.is_credential_owned_by(cred["id"], "legacy-owner") is True
+        assert tmp_store.is_credential_owned_by(cred["id"], "shared-key") is False
 
     @pytest.mark.asyncio
     async def test_unlink_credential(self, tmp_store: CloudCredentialStore):
@@ -225,6 +299,31 @@ class TestPerKeyLookup:
     async def test_get_credential_no_link(self, tmp_store: CloudCredentialStore):
         result = tmp_store.get_credential_for_key("nonexistent", "nvidia")
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_credential_by_id(self, tmp_store: CloudCredentialStore):
+        cred = await tmp_store.add_credential("google", "Google AI Studio", "google-key", ["gemini-2.5-flash"])
+
+        result = tmp_store.get_credential_by_id(cred["id"])
+
+        assert result is not None
+        assert result.provider == "google"
+        assert result.api_key == "google-key"
+
+    @pytest.mark.asyncio
+    async def test_credential_owner_can_be_checked_without_exposing_it(self, tmp_store: CloudCredentialStore):
+        cred = await tmp_store.add_credential(
+            "google",
+            "Google AI Studio",
+            "google-key",
+            ["gemini-2.5-flash"],
+            owner_key_fingerprint="owner-key",
+        )
+
+        assert tmp_store.is_credential_owned_by(cred["id"], "owner-key") is True
+        assert tmp_store.is_credential_owned_by(cred["id"], "other-key") is False
+        assert [item["id"] for item in tmp_store.list_credentials_for_owner("owner-key")] == [cred["id"]]
+        assert tmp_store.list_credentials_for_owner("other-key") == []
 
     @pytest.mark.asyncio
     async def test_get_linked_models_for_key(self, tmp_store: CloudCredentialStore):
@@ -267,6 +366,7 @@ class TestPersistence:
         assert not path.exists()
         store = CloudCredentialStore(path=path)
         assert path.exists()
+        assert S_IMODE(path.stat().st_mode) == 0o600
         data = json.loads(path.read_text())
         assert "credentials" in data
         assert "links" in data

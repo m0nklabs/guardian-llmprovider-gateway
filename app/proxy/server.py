@@ -3789,9 +3789,10 @@ async def create_api_key(request: Request, client_id: str = Depends(verify_api_k
 
 
 @app.get("/api/cloud/credentials")
-async def list_cloud_credentials(client_id: str = Depends(verify_api_key)):
-    """List all stored cloud provider credentials (API keys masked)."""
-    return {"credentials": cloud_cred_store.list_credentials()}
+async def list_cloud_credentials(request: Request, client_id: str = Depends(verify_api_key)):
+    """List cloud credentials owned by the authenticated Guardian key."""
+    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
+    return {"credentials": cloud_cred_store.list_credentials_for_owner(owner_key_fingerprint)}
 
 
 @app.post("/api/cloud/credentials")
@@ -3813,19 +3814,65 @@ async def add_cloud_credential(request: Request, client_id: str = Depends(verify
         raise HTTPException(status_code=400, detail="api_key is required")
     if not isinstance(models, list):
         raise HTTPException(status_code=400, detail="models must be a list")
+    if provider == "google":
+        models = await _discover_google_models(api_key)
+    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
     cred = await cloud_cred_store.add_credential(
         provider=provider,
         name=name,
         api_key=api_key,
         models=[str(m) for m in models if m],
+        owner_key_fingerprint=owner_key_fingerprint,
     )
     logger.info("☁️  Admin '%s' added cloud credential '%s' for provider '%s'", client_id, cred["id"], provider)
     return cred
 
 
+@app.post("/api/cloud/credentials/{cred_id}/refresh-models")
+async def refresh_cloud_credential_models(
+    cred_id: str,
+    request: Request,
+    client_id: str = Depends(verify_api_key),
+):
+    """Refresh the Google model catalog stored for a cloud credential."""
+    credential = cloud_cred_store.get_credential_by_id(cred_id)
+    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
+    if credential is None or not cloud_cred_store.is_credential_owned_by(cred_id, owner_key_fingerprint):
+        raise HTTPException(status_code=404, detail=f"Credential '{cred_id}' not found")
+    if credential.provider != "google":
+        raise HTTPException(
+            status_code=400,
+            detail="Automatic model refresh is currently supported only for Google credentials",
+        )
+
+    models = await _discover_google_models(credential.api_key)
+    replaced = await cloud_cred_store.replace_models_for_credential(cred_id, models)
+    if not replaced:
+        raise HTTPException(status_code=404, detail=f"Credential '{cred_id}' not found")
+    logger.info(
+        "☁️  Admin '%s' refreshed %d Google model(s) for credential '%s'",
+        client_id,
+        len(models),
+        cred_id,
+    )
+    return {
+        "status": "refreshed",
+        "credential_id": cred_id,
+        "model_count": len(models),
+        "models": models,
+    }
+
+
 @app.delete("/api/cloud/credentials/{cred_id}")
-async def delete_cloud_credential(cred_id: str, client_id: str = Depends(verify_api_key)):
+async def delete_cloud_credential(
+    cred_id: str,
+    request: Request,
+    client_id: str = Depends(verify_api_key),
+):
     """Delete a cloud provider credential and all its links."""
+    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
+    if not cloud_cred_store.is_credential_owned_by(cred_id, owner_key_fingerprint):
+        raise HTTPException(status_code=404, detail=f"Credential '{cred_id}' not found")
     deleted = await cloud_cred_store.delete_credential(cred_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Credential '{cred_id}' not found")
@@ -3843,6 +3890,9 @@ async def add_model_to_credential(cred_id: str, request: Request, client_id: str
     model_name = str(body.get("model", "")).strip()
     if not model_name:
         raise HTTPException(status_code=400, detail="model is required")
+    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
+    if not cloud_cred_store.is_credential_owned_by(cred_id, owner_key_fingerprint):
+        raise HTTPException(status_code=404, detail=f"Credential '{cred_id}' not found")
     added = await cloud_cred_store.add_model_to_credential(cred_id, model_name)
     if not added:
         raise HTTPException(status_code=404, detail=f"Credential '{cred_id}' not found or model already present")
@@ -3850,8 +3900,16 @@ async def add_model_to_credential(cred_id: str, request: Request, client_id: str
 
 
 @app.delete("/api/cloud/credentials/{cred_id}/models/{model_name:path}")
-async def remove_model_from_credential(cred_id: str, model_name: str, client_id: str = Depends(verify_api_key)):
+async def remove_model_from_credential(
+    cred_id: str,
+    model_name: str,
+    request: Request,
+    client_id: str = Depends(verify_api_key),
+):
     """Remove a model from a credential's model list."""
+    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
+    if not cloud_cred_store.is_credential_owned_by(cred_id, owner_key_fingerprint):
+        raise HTTPException(status_code=404, detail="Credential or model not found")
     removed = await cloud_cred_store.remove_model_from_credential(cred_id, model_name)
     if not removed:
         raise HTTPException(status_code=404, detail="Credential or model not found")
@@ -3859,9 +3917,10 @@ async def remove_model_from_credential(cred_id: str, model_name: str, client_id:
 
 
 @app.get("/api/cloud/links")
-async def list_cloud_links(client_id: str = Depends(verify_api_key)):
-    """List all Guardian key → cloud credential links."""
-    return {"links": cloud_cred_store.list_links()}
+async def list_cloud_links(request: Request, client_id: str = Depends(verify_api_key)):
+    """List links for cloud credentials owned by the authenticated Guardian key."""
+    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
+    return {"links": cloud_cred_store.list_links_for_owner(owner_key_fingerprint)}
 
 
 @app.get("/api/cloud/ratelimit-stats")
@@ -3887,6 +3946,9 @@ async def link_credential(request: Request, client_id: str = Depends(verify_api_
         raise HTTPException(status_code=400, detail="provider is required")
     if not cred_id:
         raise HTTPException(status_code=400, detail="credential_id is required")
+    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
+    if not cloud_cred_store.is_credential_owned_by(cred_id, owner_key_fingerprint):
+        raise HTTPException(status_code=404, detail="Credential not found")
     linked = await cloud_cred_store.link_credential(key_fp, provider, cred_id)
     if not linked:
         raise HTTPException(status_code=404, detail="Credential not found")
@@ -3907,6 +3969,10 @@ async def unlink_credential(request: Request, client_id: str = Depends(verify_ap
         raise HTTPException(status_code=400, detail="guardian_key_fingerprint is required")
     if not provider:
         raise HTTPException(status_code=400, detail="provider is required")
+    credential = cloud_cred_store.get_credential_for_key(key_fp, provider)
+    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
+    if credential is None or not cloud_cred_store.is_credential_owned_by(credential.id, owner_key_fingerprint):
+        raise HTTPException(status_code=404, detail="Link not found")
     unlinked = await cloud_cred_store.unlink_credential(key_fp, provider)
     if not unlinked:
         raise HTTPException(status_code=404, detail="Link not found")
@@ -4310,7 +4376,66 @@ _PROVIDER_BASE_URLS = {
     # the explicit ``models:`` list in settings.yaml, and per-key routes use
     # the guardian/openai/{model} convention (any model, no listing required).
     "openai": "https://api.openai.com/v1",
+    "google": "https://generativelanguage.googleapis.com/v1beta/openai",
 }
+
+_GOOGLE_MODEL_CATALOG_URL = f"{_PROVIDER_BASE_URLS['google']}/models"
+_GOOGLE_MODEL_CATALOG_TIMEOUT_S = 30.0
+
+
+def _normalize_google_model_id(model_id: str) -> str:
+    """Normalize Google catalog IDs to bare OpenAI-compatible model names.
+
+    Google's ``/v1beta/openai/models`` listing may return resource-style IDs
+    such as ``models/gemini-2.5-flash``. Chat completions expect the bare name
+    (``gemini-2.5-flash``), so strip a single leading ``models/`` prefix.
+    """
+    normalized = model_id.strip()
+    if normalized.startswith("models/"):
+        normalized = normalized[len("models/") :].strip()
+    return normalized
+
+
+def _parse_google_model_catalog(payload: Any) -> List[str]:
+    """Validate and normalize Google OpenAI-compatible model catalog data."""
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        raise ValueError("Google model catalog response is missing model data")
+    models = sorted(
+        {
+            normalized
+            for entry in payload["data"]
+            if isinstance(entry, dict)
+            for model_id in [entry.get("id")]
+            if isinstance(model_id, str)
+            for normalized in [_normalize_google_model_id(model_id)]
+            if normalized
+        }
+    )
+    if not models:
+        raise ValueError("Google model catalog response has no model data")
+    return models
+
+
+async def _discover_google_models(api_key: str) -> List[str]:
+    """Fetch the current Google AI Studio OpenAI-compatible model catalog."""
+    try:
+        timeout = httpx.Timeout(_GOOGLE_MODEL_CATALOG_TIMEOUT_S, connect=5.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.get(
+                _GOOGLE_MODEL_CATALOG_URL,
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+        response.raise_for_status()
+        return _parse_google_model_catalog(response.json())
+    except (httpx.HTTPError, TypeError, ValueError) as exc:
+        logger.warning("Google model catalog discovery failed: %s", type(exc).__name__)
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "google_model_discovery_failed",
+                "message": "Google model catalog could not be retrieved.",
+            },
+        ) from exc
 
 
 def _provider_base_url(provider_name: str) -> str:
@@ -4389,6 +4514,36 @@ def _is_retryable_cloud_error(status_code: int, error_body_text: str) -> bool:
     return False
 
 
+_HOP_BY_HOP_RESPONSE_HEADERS = frozenset(
+    {
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailers",
+        "transfer-encoding",
+        "upgrade",
+        # Recompute body framing locally. Upstream providers (notably Google)
+        # may emit both Content-Length and Transfer-Encoding, which nginx
+        # rejects as 502 when Guardian is fronted by the loopback HTTP proxy.
+        "content-length",
+        # Body is already decompressed by httpx; forwarding content-encoding
+        # would lie about the bytes we return.
+        "content-encoding",
+    }
+)
+
+
+def _sanitize_proxied_response_headers(headers: Any) -> Dict[str, str]:
+    """Strip hop-by-hop and body-framing headers from an upstream response."""
+    return {
+        key: value
+        for key, value in dict(headers or {}).items()
+        if key.lower() not in _HOP_BY_HOP_RESPONSE_HEADERS
+    }
+
+
 def _guardian_debug_headers(
     provider: CloudProvider,
     upstream_model: str,
@@ -4465,6 +4620,8 @@ def _resolve_cloud_attempts(
             cred = cloud_cred_store.get_credential_for_key(key_fingerprint, candidate.provider)
             if cred is None:
                 continue
+            if candidate.provider == "google" and candidate.model not in cred.models:
+                continue
             attempts.append((
                 CloudProvider(
                     name=candidate.provider,
@@ -4504,6 +4661,11 @@ def _resolve_cloud_attempts(
                 "provider": provider_name,
                 "requested_route": model_name,
             },
+        )
+    if provider_name == "google" and model_path not in cred.models:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Google model '{model_path}' is not available for this credential",
         )
     provider = CloudProvider(
         name=provider_name,
@@ -5051,7 +5213,10 @@ async def _forward_to_cloud_provider(
                 return Response(
                     content=body_bytes,
                     status_code=resp.status_code,
-                    headers={**dict(resp.headers), **_guardian_debug_headers(provider, upstream_model, failover_group)},
+                    headers={
+                        **_sanitize_proxied_response_headers(resp.headers),
+                        **_guardian_debug_headers(provider, upstream_model, failover_group),
+                    },
                 )
 
             # Success — this candidate wins. Bind the winning json_body and
@@ -5214,7 +5379,7 @@ async def _forward_to_cloud_provider(
             return Response(
                 content=resp.content,
                 status_code=resp.status_code,
-                headers={**dict(resp.headers), **debug_headers},
+                headers={**_sanitize_proxied_response_headers(resp.headers), **debug_headers},
             )
 
     if stream_http_client is None:
@@ -5369,10 +5534,7 @@ async def _forward_to_cloud_provider(
         status_code=resp.status_code,
         media_type="text/event-stream",
         headers={
-            **{
-                k: v for k, v in resp.headers.items()
-                if k.lower() not in ("transfer-encoding", "content-length")
-            },
+            **_sanitize_proxied_response_headers(resp.headers),
             **debug_headers,
         },
     )

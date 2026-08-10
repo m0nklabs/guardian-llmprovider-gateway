@@ -119,6 +119,30 @@ Use the `guardian/{provider}/{model_path}` format:
 | `guardian/nvidia/deepseek-ai/deepseek-r1` | NVIDIA | `deepseek-ai/deepseek-r1` |
 | `guardian/openrouter/openai/gpt-4o` | OpenRouter | `openai/gpt-4o` |
 | `guardian/openrouter/anthropic/claude-3.5-sonnet` | OpenRouter | `anthropic/claude-3.5-sonnet` |
+| `guardian/google/gemini-2.5-flash` | Google AI Studio | `gemini-2.5-flash` |
+
+### Google AI Studio Catalogs
+
+Google AI Studio credentials use the OpenAI-compatible endpoint at
+`https://generativelanguage.googleapis.com/v1beta/openai`. When a `google`
+credential is added, Guardian requests its available models and stores the
+validated catalog with the credential. Every Guardian key linked to that
+credential discovers the resulting routes as `guardian/google/<model>`.
+
+The catalog is intentionally tied to the credential rather than a global
+provider setting, so an unlinked Guardian key cannot discover or use the
+credential's Google quota. Google publishes new models over time; refresh an
+existing credential to replace its stored catalog. If the upstream request
+fails or returns invalid data, Guardian keeps the last successful catalog.
+Guardian also rejects a Google route that is absent from the stored catalog.
+
+The Guardian key that creates a credential owns its management access. Only
+that key can list, refresh, modify, delete, or link the credential. An owner
+may explicitly share the credential with another Guardian key through the link
+endpoint; shared keys can use the linked routes but cannot manage the
+credential itself. Existing credentials with exactly one link retain that
+linked key as their owner; ambiguous legacy credentials remain inference-only
+until they are replaced.
 
 ### Managing Credentials
 
@@ -135,6 +159,20 @@ curl -X POST http://localhost:11434/api/cloud/credentials \
     "api_key": "nvapi-xxx",
     "models": ["minimax/minimax-m3", "deepseek-ai/deepseek-r1"]
   }'
+
+# Add a Google AI Studio credential. Google supplies the model list; omit models.
+curl -X POST http://localhost:11434/api/cloud/credentials \
+  -H "Authorization: Bearer flip_..." \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider": "google",
+    "name": "Google AI Studio",
+    "api_key": "${GOOGLE_API_KEY}"
+  }'
+
+# Refresh every discoverable guardian/google/<model> route for a credential.
+curl -X POST http://localhost:11434/api/cloud/credentials/cred_001/refresh-models \
+  -H "Authorization: Bearer flip_..."
 
 # Generate a Guardian API key
 curl -X POST http://localhost:11434/api/keys \
@@ -162,7 +200,7 @@ curl http://localhost:11434/api/cloud/models \
 The Guardian dashboard at `http://localhost:11437` now includes:
 
 - **🔑 Guardian API Keys** — generate new keys, list existing keys with fingerprints
-- **☁️ Cloud Credentials** — add/delete cloud provider credentials (NVIDIA, OpenRouter)
+- **☁️ Cloud Credentials** — add/delete cloud provider credentials (NVIDIA, OpenRouter, Google AI Studio)
 - **🔗 Key Links** — link cloud credentials to Guardian API keys
 - **🧭 Available Cloud Models** — shows all cloud models (global + per-key routes)
 

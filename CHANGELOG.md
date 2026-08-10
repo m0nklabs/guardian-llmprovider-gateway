@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+### Added
+- Google AI Studio per-key cloud routing: registering a `google` credential
+  retrieves its OpenAI-compatible model catalog and exposes linked models as
+  `guardian/google/<model>`. `POST /api/cloud/credentials/{credential_id}/refresh-models`
+  updates the saved catalog atomically; failed discovery preserves the prior
+  working model list. Google routes must be in that catalog, credentials are
+  owner-managed, cross-provider links are rejected, and the credential store
+  is mode `0600`. Google API keys remain solely in gitignored
+  `config/cloud_keys.json` and are never returned by the API.
+
+### Fixed
+- Google catalog discovery now strips a leading `models/` resource prefix from
+  OpenAI-compatible listing IDs (for example `models/gemini-2.5-flash` becomes
+  `gemini-2.5-flash`) so `guardian/google/<model>` chat completions use bare
+  upstream model names accepted by Google AI Studio.
+- Non-streaming cloud responses no longer forward upstream
+  `Content-Length`/`Transfer-Encoding`/`Content-Encoding` together. Google can
+  emit conflicting framing headers; nginx previously turned those into HTTP
+  502 on the loopback HTTP path while direct TLS still worked.
+
 ### Architecture Decisions (2026-08-07)
 - Resolved all 6 open capture design decisions:
   1. **Multi-secret rotation**: support `GUARDIAN_CAPTURE_CLIENT_REF_SECRET` (current) + `GUARDIAN_CAPTURE_CLIENT_REF_SECRET_PREVIOUS` (legacy) overlap period.

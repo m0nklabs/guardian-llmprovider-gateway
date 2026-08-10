@@ -1,5 +1,6 @@
 import json
 import hashlib
+import os
 import secrets
 import time
 import logging
@@ -16,6 +17,15 @@ logger = logging.getLogger("Auth")
 API_KEYS_FILE = Path(__file__).parent.parent.parent / "config" / "api_keys.json"
 DEFAULT_API_KEY_PREFIX = "flip"
 security_scheme = HTTPBearer(auto_error=False)
+
+
+def _ensure_api_keys_file_permissions() -> None:
+    """Restrict the plaintext Guardian API key store to its owner."""
+    try:
+        if API_KEYS_FILE.exists():
+            API_KEYS_FILE.chmod(0o600)
+    except OSError as exc:
+        logger.error("Failed to secure Guardian API key file permissions: %s", exc)
 
 
 def _normalize_api_key_prefix(prefix: Optional[str]) -> str:
@@ -228,16 +238,17 @@ def _log_unauthorized_attempt(
     local_process = None
     if source_ip in {"127.0.0.1", "::1"}:
         local_pid, local_process = _resolve_local_process_for_port(source_port)
+    token_fingerprint = _token_fingerprint(token) if token else "-"
 
     logger.warning(
-        "❌ Unauthorized API activity: reason=%s method=%s path=%s header=%s source_ip=%s source_port=%s token=%s local_pid=%s local_process=%s",
+        "❌ Unauthorized API activity: reason=%s method=%s path=%s header=%s source_ip=%s source_port=%s token_fingerprint=%s local_pid=%s local_process=%s",
         reason,
         _request_method(request) or "-",
         _request_path(request) or "-",
         header_name or "-",
         source_ip or "-",
         source_port if source_port is not None else "-",
-        token or "-",
+        token_fingerprint,
         local_pid if local_pid is not None else "-",
         local_process or "-",
     )
@@ -280,6 +291,7 @@ def load_api_keys() -> Dict[str, dict]:
     if not API_KEYS_FILE.exists():
         return {}
     try:
+        _ensure_api_keys_file_permissions()
         with open(API_KEYS_FILE, "r") as f:
             return json.load(f)
     except Exception as e:
@@ -288,8 +300,19 @@ def load_api_keys() -> Dict[str, dict]:
 
 def save_api_keys(keys: Dict[str, dict]):
     API_KEYS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(API_KEYS_FILE, "w") as f:
+    tmp_path = API_KEYS_FILE.with_suffix(API_KEYS_FILE.suffix + ".tmp")
+    file_descriptor = os.open(
+        tmp_path,
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        0o600,
+    )
+    os.fchmod(file_descriptor, 0o600)
+    with os.fdopen(file_descriptor, "w") as f:
         json.dump(keys, f, indent=2)
+    tmp_path.replace(API_KEYS_FILE)
+
+
+_ensure_api_keys_file_permissions()
 
 def generate_api_key(name: str, metadata: dict = None, prefix: Optional[str] = None) -> str:
     """Generate a new API key with a normalized prefix."""

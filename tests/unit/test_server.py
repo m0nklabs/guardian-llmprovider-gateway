@@ -5,8 +5,9 @@ import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
+import httpx
 import pytest
 
 from app.proxy.failover import FailoverCandidate, FailoverGroup, FailoverRegistry
@@ -1050,6 +1051,67 @@ def test_cloud_attempts_normalize_openrouter_model_alias():
     ]
 
 
+def test_cloud_attempts_resolve_google_per_key_route():
+    request = SimpleNamespace(state=SimpleNamespace(auth_context={"key_fingerprint": "abc123"}))
+
+    with patch.object(
+        server.cloud_cred_store,
+        "get_credential_for_key",
+        return_value=SimpleNamespace(api_key="google-test-key", models=["gemini-2.5-flash"]),
+    ) as get_credential:
+        attempts, failover_group = server._resolve_cloud_attempts(
+            "guardian/google/gemini-2.5-flash",
+            request,
+            "goose",
+        )
+
+    assert failover_group is None
+    assert get_credential.call_args.args == ("abc123", "google")
+    assert [(attempt.name, attempt.base_url, upstream_model) for attempt, upstream_model in attempts] == [
+        (
+            "google",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            "gemini-2.5-flash",
+        )
+    ]
+
+
+def test_cloud_attempts_reject_unlisted_google_model():
+    request = SimpleNamespace(state=SimpleNamespace(auth_context={"key_fingerprint": "abc123"}))
+    credential = SimpleNamespace(api_key="google-test-key", models=["gemini-2.5-flash"])
+
+    with (
+        patch.object(server.cloud_cred_store, "get_credential_for_key", return_value=credential),
+        pytest.raises(server.HTTPException) as exc_info,
+    ):
+        server._resolve_cloud_attempts(
+            "guardian/google/gemini-2.5-pro",
+            request,
+            "goose",
+        )
+
+    assert exc_info.value.status_code == 404
+
+
+def test_cloud_attempts_skip_unlisted_google_failover_candidate():
+    group = FailoverGroup(
+        name="google-catalog",
+        candidates=[FailoverCandidate("google", "gemini-2.5-pro")],
+    )
+    request = SimpleNamespace(state=SimpleNamespace(auth_context={"key_fingerprint": "abc123"}))
+    credential = SimpleNamespace(api_key="google-test-key", models=["gemini-2.5-flash"])
+
+    with (
+        patch.object(server.failover_registry, "get_group", return_value=group),
+        patch.object(server.failover_health, "order_candidates", return_value=group.candidates),
+        patch.object(server.cloud_cred_store, "get_credential_for_key", return_value=credential),
+        pytest.raises(server.HTTPException) as exc_info,
+    ):
+        server._resolve_cloud_attempts("guardian/failover/google-catalog", request, "goose")
+
+    assert exc_info.value.status_code == 403
+
+
 @pytest.mark.asyncio
 async def test_image_fallback_validates_cloud_route_before_local_model_resolution():
     class _FakeRequest:
@@ -1861,6 +1923,203 @@ def test_prepare_cloud_candidate_no_user_without_client_id():
 def test_provider_base_url_includes_openai():
     """The OpenAI base URL must be registered for guardian/openai/ routes."""
     assert server._provider_base_url("openai") == "https://api.openai.com/v1"
+
+
+def test_provider_base_url_includes_google():
+    """Google AI Studio must be registered for guardian/google/ routes."""
+    assert (
+        server._provider_base_url("google")
+        == "https://generativelanguage.googleapis.com/v1beta/openai"
+    )
+
+
+def test_parse_google_model_catalog_normalizes_unique_model_ids():
+    models = server._parse_google_model_catalog(
+        {
+            "data": [
+                {"id": "gemini-2.5-pro"},
+                {"id": "gemini-2.5-flash"},
+                {"id": "models/gemini-2.5-flash"},
+                {"id": "gemini-2.5-pro"},
+                {"id": " "},
+                {"id": "models/"},
+                {"name": "models/not-a-route"},
+            ]
+        }
+    )
+
+    assert models == ["gemini-2.5-flash", "gemini-2.5-pro"]
+
+
+def test_normalize_google_model_id_strips_resource_prefix():
+    assert server._normalize_google_model_id("models/gemini-2.5-flash") == "gemini-2.5-flash"
+    assert server._normalize_google_model_id("  gemini-2.5-pro  ") == "gemini-2.5-pro"
+    assert server._normalize_google_model_id("models/") == ""
+
+
+def test_sanitize_proxied_response_headers_strips_conflicting_framing():
+    headers = server._sanitize_proxied_response_headers(
+        {
+            "Content-Type": "application/json",
+            "Content-Length": "123",
+            "Transfer-Encoding": "chunked",
+            "Content-Encoding": "gzip",
+            "X-Request-Id": "abc",
+            "Set-Cookie": "NID=secret",
+        }
+    )
+
+    assert headers == {
+        "Content-Type": "application/json",
+        "X-Request-Id": "abc",
+        "Set-Cookie": "NID=secret",
+    }
+
+
+def test_parse_google_model_catalog_rejects_invalid_payload():
+    with pytest.raises(ValueError, match="model data"):
+        server._parse_google_model_catalog({"models": []})
+
+
+@pytest.mark.asyncio
+async def test_discover_google_models_uses_bearer_auth_without_exposing_key():
+    response = Mock()
+    response.json.return_value = {"data": [{"id": "gemini-2.5-flash"}]}
+    client = AsyncMock()
+    client.get.return_value = response
+    http_client = AsyncMock()
+    http_client.__aenter__.return_value = client
+    http_client.__aexit__.return_value = False
+
+    with patch.object(server.httpx, "AsyncClient", return_value=http_client):
+        models = await server._discover_google_models("google-test-key")
+
+    assert models == ["gemini-2.5-flash"]
+    response.raise_for_status.assert_called_once_with()
+    client.get.assert_awaited_once_with(
+        "https://generativelanguage.googleapis.com/v1beta/openai/models",
+        headers={"Authorization": "Bearer google-test-key"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_discover_google_models_converts_upstream_failure_to_generic_502():
+    response = Mock()
+    response.raise_for_status.side_effect = httpx.HTTPStatusError(
+        "unauthorized",
+        request=httpx.Request("GET", "https://generativelanguage.googleapis.com/v1beta/openai/models"),
+        response=httpx.Response(401),
+    )
+    client = AsyncMock()
+    client.get.return_value = response
+    http_client = AsyncMock()
+    http_client.__aenter__.return_value = client
+    http_client.__aexit__.return_value = False
+
+    with (
+        patch.object(server.httpx, "AsyncClient", return_value=http_client),
+        pytest.raises(server.HTTPException) as exc_info,
+    ):
+        await server._discover_google_models("google-test-key")
+
+    assert exc_info.value.status_code == 502
+    assert exc_info.value.detail == {
+        "error": "google_model_discovery_failed",
+        "message": "Google model catalog could not be retrieved.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_add_google_credential_discovers_models_before_storing():
+    class JsonRequest:
+        async def json(self):
+            return {
+                "provider": "google",
+                "name": "Google AI Studio",
+                "api_key": "google-test-key",
+            }
+
+    stored_credential = {"id": "cred_google", "provider": "google", "models": ["gemini-2.5-flash"]}
+    with (
+        patch.object(server, "_discover_google_models", AsyncMock(return_value=["gemini-2.5-flash"])) as discover,
+        patch.object(server.cloud_cred_store, "add_credential", AsyncMock(return_value=stored_credential)) as add_credential,
+    ):
+        result = await server.add_cloud_credential(JsonRequest(), "admin")
+
+    assert result == stored_credential
+    discover.assert_awaited_once_with("google-test-key")
+    assert add_credential.call_args.kwargs == {
+        "provider": "google",
+        "name": "Google AI Studio",
+        "api_key": "google-test-key",
+        "models": ["gemini-2.5-flash"],
+        "owner_key_fingerprint": "admin",
+    }
+
+
+@pytest.mark.asyncio
+async def test_refresh_google_credential_replaces_catalog():
+    credential = SimpleNamespace(provider="google", api_key="google-test-key")
+    with (
+        patch.object(server.cloud_cred_store, "get_credential_by_id", return_value=credential),
+        patch.object(server.cloud_cred_store, "is_credential_owned_by", return_value=True),
+        patch.object(server, "_discover_google_models", AsyncMock(return_value=["gemini-2.5-flash"])) as discover,
+        patch.object(server.cloud_cred_store, "replace_models_for_credential", AsyncMock(return_value=True)) as replace_models,
+    ):
+        result = await server.refresh_cloud_credential_models(
+            "cred_google",
+            _metadata_request("admin"),
+            "admin",
+        )
+
+    assert result == {
+        "status": "refreshed",
+        "credential_id": "cred_google",
+        "model_count": 1,
+        "models": ["gemini-2.5-flash"],
+    }
+    discover.assert_awaited_once_with("google-test-key")
+    replace_models.assert_awaited_once_with("cred_google", ["gemini-2.5-flash"])
+
+
+@pytest.mark.asyncio
+async def test_failed_google_catalog_refresh_preserves_existing_models():
+    credential = SimpleNamespace(provider="google", api_key="google-test-key")
+    discovery_error = server.HTTPException(status_code=502, detail="catalog unavailable")
+    with (
+        patch.object(server.cloud_cred_store, "get_credential_by_id", return_value=credential),
+        patch.object(server.cloud_cred_store, "is_credential_owned_by", return_value=True),
+        patch.object(server, "_discover_google_models", AsyncMock(side_effect=discovery_error)),
+        patch.object(server.cloud_cred_store, "replace_models_for_credential", AsyncMock()) as replace_models,
+        pytest.raises(server.HTTPException) as exc_info,
+    ):
+        await server.refresh_cloud_credential_models(
+            "cred_google",
+            _metadata_request("admin"),
+            "admin",
+        )
+
+    assert exc_info.value.status_code == 502
+    replace_models.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_foreign_owner_cannot_refresh_google_catalog():
+    credential = SimpleNamespace(provider="google", api_key="google-test-key")
+    with (
+        patch.object(server.cloud_cred_store, "get_credential_by_id", return_value=credential),
+        patch.object(server.cloud_cred_store, "is_credential_owned_by", return_value=False),
+        patch.object(server, "_discover_google_models", AsyncMock()) as discover,
+        pytest.raises(server.HTTPException) as exc_info,
+    ):
+        await server.refresh_cloud_credential_models(
+            "cred_google",
+            _metadata_request("foreign-owner"),
+            "foreign-owner",
+        )
+
+    assert exc_info.value.status_code == 404
+    discover.assert_not_awaited()
 
 
 def test_adapt_openai_reasoning_converts_max_tokens_for_o3():

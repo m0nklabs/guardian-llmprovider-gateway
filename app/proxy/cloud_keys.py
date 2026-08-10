@@ -49,6 +49,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -150,6 +151,7 @@ class CloudCredential:
     api_key: str
     created_at: float
     models: List[str] = field(default_factory=list)
+    owner_key_fingerprint: Optional[str] = None
 
     @classmethod
     def from_dict(cls, cred_id: str, raw: Dict[str, Any]) -> "CloudCredential":
@@ -161,17 +163,23 @@ class CloudCredential:
             api_key=str(raw.get("api_key", "")),
             created_at=float(raw.get("created_at", 0.0) or 0.0),
             models=[str(m) for m in (raw.get("models") or []) if m],
+            owner_key_fingerprint=str(raw["owner_key_fingerprint"]).strip() or None
+            if raw.get("owner_key_fingerprint")
+            else None,
         )
 
     def to_dict(self) -> Dict[str, Any]:
         """Return the serialisable representation written to disk."""
-        return {
+        result = {
             "provider": self.provider,
             "name": self.name,
             "api_key": self.api_key,
             "created_at": self.created_at,
             "models": list(self.models),
         }
+        if self.owner_key_fingerprint:
+            result["owner_key_fingerprint"] = self.owner_key_fingerprint
+        return result
 
     def to_masked_dict(self) -> Dict[str, Any]:
         """Return a display-safe dict with the API key masked.
@@ -181,6 +189,7 @@ class CloudCredential:
         result = self.to_dict()
         result["id"] = self.id
         result["api_key"] = mask_api_key(self.api_key)
+        result.pop("owner_key_fingerprint", None)
         return result
 
 
@@ -255,9 +264,15 @@ class CloudCredentialStore:
         try:
             if not self._path.exists():
                 self._path.parent.mkdir(parents=True, exist_ok=True)
-                with open(self._path, "w", encoding="utf-8") as f:
+                file_descriptor = os.open(
+                    self._path,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                )
+                with os.fdopen(file_descriptor, "w", encoding="utf-8") as f:
                     json.dump(_EMPTY_DOC, f, indent=2)
                 logger.info("☁️  Created empty cloud credential store at %s", self._path)
+            self._path.chmod(0o600)
         except OSError as e:
             logger.error("❌  Could not create cloud credential store %s: %s", self._path, e)
 
@@ -268,7 +283,13 @@ class CloudCredentialStore:
         """
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self._path.with_suffix(self._path.suffix + ".tmp")
-        with open(tmp_path, "w", encoding="utf-8") as f:
+        file_descriptor = os.open(
+            tmp_path,
+            os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+            0o600,
+        )
+        os.fchmod(file_descriptor, 0o600)
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as f:
             json.dump(self._data, f, indent=2)
         tmp_path.replace(self._path)
 
@@ -283,12 +304,22 @@ class CloudCredentialStore:
             if isinstance(raw, dict)
         ]
 
+    def list_credentials_for_owner(self, owner_key_fingerprint: str) -> List[Dict[str, Any]]:
+        """Return masked credentials owned by a Guardian key fingerprint."""
+        creds = self._data.get("credentials", {})
+        return [
+            CloudCredential.from_dict(cred_id, raw).to_masked_dict()
+            for cred_id, raw in sorted(creds.items())
+            if isinstance(raw, dict) and self.is_credential_owned_by(cred_id, owner_key_fingerprint)
+        ]
+
     async def add_credential(
         self,
         provider: str,
         name: str,
         api_key: str,
         models: Optional[List[str]] = None,
+        owner_key_fingerprint: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Register a new cloud credential and return its masked dict.
 
@@ -313,6 +344,9 @@ class CloudCredentialStore:
                 api_key=str(api_key),
                 created_at=time.time(),
                 models=[str(m) for m in (models or []) if m],
+                owner_key_fingerprint=str(owner_key_fingerprint).strip() or None
+                if owner_key_fingerprint
+                else None,
             )
             self._data.setdefault("credentials", {})[cred_id] = credential.to_dict()
             self._save()
@@ -404,6 +438,36 @@ class CloudCredentialStore:
             )
             return True
 
+    async def replace_models_for_credential(self, cred_id: str, models: List[str]) -> bool:
+        """Atomically replace a credential's complete model catalog.
+
+        Returns ``False`` when the credential does not exist. Model names are
+        normalized, deduplicated, and sorted before they are persisted.
+        """
+        normalized_models = sorted({str(model).strip() for model in models if str(model).strip()})
+        async with self._write_lock:
+            creds = self._data.get("credentials", {})
+            raw = creds.get(cred_id)
+            if not isinstance(raw, dict):
+                logger.warning("⚠️  replace_models_for_credential: '%s' not found", cred_id)
+                return False
+            previous_models = raw.get("models")
+            raw["models"] = normalized_models
+            try:
+                self._save()
+            except OSError:
+                if previous_models is None:
+                    raw.pop("models", None)
+                else:
+                    raw["models"] = previous_models
+                raise
+            logger.info(
+                "☁️  Replaced model catalog for credential '%s' with %d model(s)",
+                cred_id,
+                len(normalized_models),
+            )
+            return True
+
     # ── Links ─────────────────────────────────────────────────────────
 
     async def link_credential(
@@ -418,12 +482,28 @@ class CloudCredentialStore:
         """
         async with self._write_lock:
             creds = self._data.get("credentials", {})
-            if cred_id not in creds:
+            raw = creds.get(cred_id)
+            if not isinstance(raw, dict):
                 logger.warning(
                     "⚠️  link_credential: credential '%s' not found", cred_id
                 )
                 return False
+            if str(raw.get("provider", "")).strip().lower() != provider:
+                logger.warning(
+                    "⚠️  link_credential: provider '%s' does not match credential '%s'",
+                    provider,
+                    cred_id,
+                )
+                return False
             links = self._data.setdefault("links", {})
+            if not raw.get("owner_key_fingerprint"):
+                legacy_owners = {
+                    str(fingerprint)
+                    for fingerprint, provider_map in links.items()
+                    if isinstance(provider_map, dict) and cred_id in provider_map.values()
+                }
+                if len(legacy_owners) == 1:
+                    raw["owner_key_fingerprint"] = legacy_owners.pop()
             provider_map = links.setdefault(guardian_key_fingerprint, {})
             if not isinstance(provider_map, dict):
                 provider_map = {}
@@ -502,6 +582,50 @@ class CloudCredentialStore:
             )
             return None
         return CloudCredential.from_dict(cred_id, raw)
+
+    def get_credential_by_id(self, cred_id: str) -> Optional[CloudCredential]:
+        """Return a credential by ID, or ``None`` when it does not exist."""
+        creds = self._data.get("credentials", {})
+        raw = creds.get(cred_id)
+        if not isinstance(raw, dict):
+            return None
+        return CloudCredential.from_dict(cred_id, raw)
+
+    def is_credential_owned_by(self, cred_id: str, owner_key_fingerprint: str) -> bool:
+        """Return whether a Guardian key owns the requested credential.
+
+        Credentials created before ownership was recorded retain a single
+        existing link as their owner. Ambiguous or unlinked legacy credentials
+        remain usable for inference but cannot be managed through the API.
+        """
+        creds = self._data.get("credentials", {})
+        raw = creds.get(cred_id)
+        if not isinstance(raw, dict):
+            return False
+        owner = raw.get("owner_key_fingerprint")
+        if isinstance(owner, str) and owner.strip():
+            return owner.strip() == owner_key_fingerprint
+
+        links = self._data.get("links", {})
+        linked_owners = {
+            str(fingerprint)
+            for fingerprint, provider_map in links.items()
+            if isinstance(provider_map, dict) and cred_id in provider_map.values()
+        }
+        return len(linked_owners) == 1 and owner_key_fingerprint in linked_owners
+
+    def list_links_for_owner(self, owner_key_fingerprint: str) -> Dict[str, Dict[str, str]]:
+        """Return links for credentials owned by a Guardian key fingerprint."""
+        result: Dict[str, Dict[str, str]] = {}
+        for fingerprint, provider_map in self.list_links().items():
+            owned_links = {
+                provider: cred_id
+                for provider, cred_id in provider_map.items()
+                if self.is_credential_owned_by(cred_id, owner_key_fingerprint)
+            }
+            if owned_links:
+                result[fingerprint] = owned_links
+        return result
 
     def get_model_defaults(self, upstream_model: str) -> Dict[str, Any]:
         """Return the configured default sampling params for *upstream_model*.
