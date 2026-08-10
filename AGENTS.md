@@ -119,10 +119,11 @@ When touching these areas, read the referenced detail docs:
 - Failover attempt tracking in capture events
 - 836 Guardian unit tests, 833 Keanu tests, 222 capture-specific tests
 
-### Phase 5 — Guardian Structural Separation 📋 (Pending)
-- Extract `app/gateway/` (shared: auth, normalization, routing, metrics, capture dispatch)
-- Extract `app/local_inference/` (inference queue, model switching, llama-server transport)
-- Extract `app/cloud_inference/` (provider/credential resolution, retry, failover)
+### Phase 5 — Guardian Structural Separation 🔄 (In Progress)
+- ✅ Extract `app/gateway/context_metadata.py` (context window resolution + model metadata entry construction, 6 functions, dependency injection via `init()`)
+- 📋 Extract remaining `app/gateway/` (auth, normalization, routing, metrics, capture dispatch)
+- 📋 Extract `app/local_inference/` (inference queue, model switching, llama-server transport)
+- 📋 Extract `app/cloud_inference/` (provider/credential resolution, retry, failover)
 
 ### Phase 6 — Operational Hardening 🔄 (In Progress)
 - ✅ `guardianctl` CLI for capture control (`scripts/guardianctl.py`)

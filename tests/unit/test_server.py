@@ -540,7 +540,7 @@ async def test_non_gpu_v1_route_bypasses_queue_even_with_same_key_busy():
     with (
         patch.object(server, "_set_request_usage_metadata", lambda *args, **kwargs: None),
         patch.object(server, "_begin_queued_request", side_effect=AssertionError("queue should not be used")),
-        patch.object(server.httpx, "AsyncClient", _FakeAsyncClient),
+        patch.object(server._ctx_meta.httpx, "AsyncClient", _FakeAsyncClient),
     ):
         response = await server.proxy_v1_post("models", request, client_id="openclaw")
 
@@ -662,7 +662,7 @@ async def test_v1_chat_completions_sanitizes_late_system_messages_before_forward
         patch.object(server, "_resolve_or_reject_inference_model", return_value="Qwen-Agent"),
         patch.object(server.model_manager, "get_current_model", AsyncMock(return_value="Qwen-Agent")),
         patch.object(server.model_manager, "models", {"Qwen-Agent": {}, "auto": {}}),
-        patch.object(server.httpx, "AsyncClient", _FakeAsyncClient),
+        patch.object(server._ctx_meta.httpx, "AsyncClient", _FakeAsyncClient),
     ):
         response = await server.proxy_v1_post("chat/completions", request, client_id="openclaw")
 
@@ -754,7 +754,7 @@ async def test_v1_chat_completions_keeps_stream_flag_while_sanitizing_messages()
         patch.object(server, "_resolve_or_reject_inference_model", return_value="Qwen-Agent"),
         patch.object(server.model_manager, "get_current_model", AsyncMock(return_value="Qwen-Agent")),
         patch.object(server.model_manager, "models", {"Qwen-Agent": {}, "auto": {}}),
-        patch.object(server.httpx, "AsyncClient", _FakeAsyncClient),
+        patch.object(server._ctx_meta.httpx, "AsyncClient", _FakeAsyncClient),
     ):
         response = await server.proxy_v1_post("chat/completions", request, client_id="openclaw")
 
@@ -1313,7 +1313,7 @@ async def test_list_models_adds_context_aliases_to_every_served_model():
             {"kimi-k3": FailoverGroup(name="kimi-k3")},
         ),
         patch.object(server, "_resolve_cloud_attempts", return_value=([], "kimi-k3")),
-        patch.object(server, "_resolve_context_window", new=AsyncMock(return_value=1048576)),
+        patch.object(server._ctx_meta, "resolve_context_window", new=AsyncMock(return_value=1048576)),
     ):
         payload = await server.list_models(request=request, client_id="test-user")
 
@@ -1337,7 +1337,7 @@ async def test_ollama_show_reports_context_for_cloud_model():
 
     with (
         patch.object(server.provider_registry, "is_cloud_model", return_value=True),
-        patch.object(server, "_resolve_context_window", new=AsyncMock(return_value=1048576)),
+        patch.object(server._ctx_meta, "resolve_context_window", new=AsyncMock(return_value=1048576)),
         patch.object(server, "_resolve_cloud_attempts", return_value=([], None)),
     ):
         payload = await server.show_model_ollama(Request(), client_id="test-user")
@@ -1369,7 +1369,7 @@ async def test_model_metadata_rejects_unlinked_guardian_route():
 
 @pytest.mark.asyncio
 async def test_resolve_context_uses_loaded_backend_props_before_configured_value():
-    server._backend_context_cache.clear()
+    server._ctx_meta._backend_context_cache.clear()
 
     class FakeResponse:
         def raise_for_status(self):
@@ -1396,7 +1396,7 @@ async def test_resolve_context_uses_loaded_backend_props_before_configured_value
         patch.object(server.provider_registry, "get_context_override", return_value=None),
         patch.object(server.model_manager, "get_current_model", new=AsyncMock(return_value="Local")),
         patch.object(server.model_manager, "get_runtime_context_window", return_value=32768),
-        patch.object(server.httpx, "AsyncClient", FakeAsyncClient),
+        patch.object(server._ctx_meta.httpx, "AsyncClient", FakeAsyncClient),
     ):
         context_window = await server._resolve_context_window("local", "Local")
 
@@ -1405,7 +1405,7 @@ async def test_resolve_context_uses_loaded_backend_props_before_configured_value
 
 @pytest.mark.asyncio
 async def test_resolve_context_does_not_cache_props_after_backend_switches():
-    server._backend_context_cache.clear()
+    server._ctx_meta._backend_context_cache.clear()
 
     class FakeResponse:
         def raise_for_status(self):
@@ -1435,17 +1435,17 @@ async def test_resolve_context_does_not_cache_props_after_backend_switches():
             new=AsyncMock(side_effect=["Local", "Other"]),
         ),
         patch.object(server.model_manager, "get_runtime_context_window", return_value=32768),
-        patch.object(server.httpx, "AsyncClient", FakeAsyncClient),
+        patch.object(server._ctx_meta.httpx, "AsyncClient", FakeAsyncClient),
     ):
         context_window = await server._resolve_context_window("local", "Local")
 
     assert context_window == 32768
-    assert "Local" not in server._backend_context_cache
+    assert "Local" not in server._ctx_meta._backend_context_cache
 
 
 @pytest.mark.asyncio
 async def test_resolve_context_uses_logged_default_when_no_source_has_a_value(caplog):
-    server._context_fallback_warnings.discard("unknown/cloud-model")
+    server._ctx_meta._context_fallback_warnings.discard("unknown/cloud-model")
 
     with (
         patch.object(server.provider_registry, "get_context_override", return_value=None),
@@ -1676,7 +1676,7 @@ async def test_v1_post_forwards_cloud_model_to_provider_not_local():
         patch.object(server.provider_registry, "get_provider_for_model", return_value=fake_provider),
         patch.object(server.ProviderRegistry, "build_forward_headers", return_value={"Authorization": "Bearer sk-or-test", "Content-Type": "application/json"}),
         patch.object(server.ProviderRegistry, "build_forward_url", return_value="https://openrouter.ai/api/v1/chat/completions"),
-        patch.object(server.httpx, "AsyncClient", _FakeAsyncClient),
+        patch.object(server._ctx_meta.httpx, "AsyncClient", _FakeAsyncClient),
         patch.object(server, "_set_request_usage_metadata", lambda *a, **k: None),
         patch.object(server, "_start_live_request_usage", lambda *a, **k: None),
         patch.object(server, "_finish_live_request_usage", lambda *a, **k: None),
@@ -1747,7 +1747,7 @@ async def test_list_models_includes_cloud_models():
         patch.object(server.provider_registry, "get_all_cloud_models", return_value=["openai/gpt-4o", "anthropic/claude-3.5-sonnet"]),
         patch.object(server.provider_registry, "build_model_metadata_entry") as build_mock,
         patch.object(server.model_manager, "get_public_model_map", return_value={"local-model": "local-model"}),
-        patch.object(server, "_build_model_metadata_entry", return_value={"id": "local-model", "object": "model"}),
+        patch.object(server._ctx_meta, "build_model_metadata_entry", return_value={"id": "local-model", "object": "model"}),
     ):
         build_mock.side_effect = lambda name: {"id": name, "object": "model", "owned_by": "openrouter", "served_by": "cloud"}
         result = await server.list_models(request=SimpleNamespace(headers={}, state=SimpleNamespace(), url=SimpleNamespace(path="/v1/models"), method="GET"), client_id="test-user")
@@ -1787,7 +1787,7 @@ async def test_list_models_includes_failover_groups():
         patch.object(server, "provider_registry") as pr_mock,
         patch.object(server, "cloud_cred_store") as cc_mock,
         patch.object(server, "failover_registry") as fr_mock,
-        patch.object(server, "_build_model_metadata_entry", return_value={"id": "local", "object": "model"}),
+        patch.object(server._ctx_meta, "build_model_metadata_entry", return_value={"id": "local", "object": "model"}),
         patch.object(server, "_resolve_cloud_attempts", return_value=([], "glm-5.2")),
     ):
         mm_mock.get_public_model_map.return_value = {}
@@ -1991,7 +1991,7 @@ async def test_discover_google_models_uses_bearer_auth_without_exposing_key():
     http_client.__aenter__.return_value = client
     http_client.__aexit__.return_value = False
 
-    with patch.object(server.httpx, "AsyncClient", return_value=http_client):
+    with patch.object(server._ctx_meta.httpx, "AsyncClient", return_value=http_client):
         models = await server._discover_google_models("google-test-key")
 
     assert models == ["gemini-2.5-flash"]
@@ -2017,7 +2017,7 @@ async def test_discover_google_models_converts_upstream_failure_to_generic_502()
     http_client.__aexit__.return_value = False
 
     with (
-        patch.object(server.httpx, "AsyncClient", return_value=http_client),
+        patch.object(server._ctx_meta.httpx, "AsyncClient", return_value=http_client),
         pytest.raises(server.HTTPException) as exc_info,
     ):
         await server._discover_google_models("google-test-key")
