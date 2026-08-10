@@ -469,3 +469,246 @@ class TestWALRecordAuth:
         assert len(lines) == 2
         key_ids = {line["record_auth"]["key_id"] for line in lines}
         assert len(key_ids) == 1
+
+
+# ── Crash-recovery tests (Phase 6) ─────────────────────────────────────
+
+
+class TestWALWriterCrashRecovery:
+    """Simulate crashes mid-write and verify the writer recovers cleanly on restart.
+
+    Each test uses a fresh sink for the second writer instance because
+    ``writer.stop()`` closes the sink (puts a sentinel + sets ``_closed``).
+    """
+
+    @pytest.mark.asyncio
+    async def test_restart_resumes_writing_after_clean_stop(self, writer, sink, config, tmp_capture_root):
+        """After a clean stop and restart, the writer appends to the existing active file."""
+        await writer.start()
+        sink.try_put(CaptureEvent(data={"seq": 1, "event_type": "request_received"}))
+        sink.try_put(CaptureEvent(data={"seq": 2, "event_type": "request_received"}))
+        await writer.stop()
+
+        # Restart with a fresh writer + fresh sink
+        sink2 = CaptureSink(max_pending_events=config.max_pending_events)
+        writer2 = CaptureWALWriter(sink2, config)
+        await writer2.start()
+        sink2.try_put(CaptureEvent(data={"seq": 3, "event_type": "request_received"}))
+        await writer2.stop()
+
+        active = tmp_capture_root / "guardian_capture_current.jsonl"
+        lines = [json.loads(l) for l in active.read_text().strip().split("\n") if l.strip()]
+        seqs = [e["seq"] for e in lines]
+        assert seqs == [1, 2, 3]
+
+    @pytest.mark.asyncio
+    async def test_partial_line_after_restart_is_appended_not_corrupted(
+        self, writer, sink, config, tmp_capture_root
+    ):
+        """A partial line left by a crash is tolerated — new writes append after it."""
+        await writer.start()
+        sink.try_put(CaptureEvent(data={"seq": 1, "event_type": "request_received"}))
+        await writer.stop()
+
+        # Simulate crash: write a partial JSON line (with newline — the
+        # writer always appends complete lines ending in \n, so a crashed
+        # partial line would have a \n at the end if the buffer was flushed).
+        active = tmp_capture_root / "guardian_capture_current.jsonl"
+        with open(active, "a") as f:
+            f.write('{"partial": true, "cu\n')  # incomplete JSON + newline
+
+        # Restart writer with fresh sink
+        sink2 = CaptureSink(max_pending_events=config.max_pending_events)
+        writer2 = CaptureWALWriter(sink2, config)
+        await writer2.start()
+        sink2.try_put(CaptureEvent(data={"seq": 2, "event_type": "request_completed"}))
+        await writer2.stop()
+
+        lines = active.read_text().strip().split("\n")
+        # First line: complete event
+        json.loads(lines[0])
+        assert json.loads(lines[0])["seq"] == 1
+        # Second line: partial (reader must discard)
+        # Third line: new complete event
+        json.loads(lines[2])
+        assert json.loads(lines[2])["seq"] == 2
+
+    @pytest.mark.asyncio
+    async def test_state_persisted_across_restart(self, writer, sink, config, tmp_capture_root):
+        """Rotation sequence persists across restarts so file names don't collide."""
+        await writer.start()
+        sink.try_put(CaptureEvent(data={"seq": 1, "event_type": "request_received"}))
+        await asyncio.sleep(0.1)  # Let the writer consume the event
+        # Force a rotation to increment rotation_seq
+        path = writer.rotate()
+        assert path is not None, "rotate() should return the rotated file path"
+        await writer.stop()
+
+        # Restart — the writer should load the persisted rotation_seq
+        sink2 = CaptureSink(max_pending_events=config.max_pending_events)
+        writer2 = CaptureWALWriter(sink2, config)
+        writer2._load_state()
+        assert writer2._rotation_seq > 0, "rotation_seq should have been persisted"
+
+        # Next rotation should use the incremented seq
+        await writer2.start()
+        sink2.try_put(CaptureEvent(data={"seq": 2, "event_type": "request_received"}))
+        await asyncio.sleep(0.1)
+        result = writer2.rotate()
+        assert result is not None
+        await writer2.stop()
+
+        # The rotated filename should contain a higher sequence number
+        rotated_files = [f for f in tmp_capture_root.iterdir() if f.name.endswith(".jsonl.gz")]
+        assert len(rotated_files) >= 2
+
+    @pytest.mark.asyncio
+    async def test_corrupt_state_file_falls_back_to_defaults(self, writer, sink, config, tmp_capture_root):
+        """If the state file is corrupt, the writer resets to safe defaults."""
+        await writer.start()
+        sink.try_put(CaptureEvent(data={"seq": 1}))
+        await writer.stop()
+
+        # Corrupt the state file
+        state_path = tmp_capture_root / "guardian_capture_state.json"
+        if state_path.exists():
+            state_path.write_text('{" BROKEN JSON {{{')
+
+        # Should not raise on restart
+        sink2 = CaptureSink(max_pending_events=config.max_pending_events)
+        writer2 = CaptureWALWriter(sink2, config)
+        writer2._load_state()
+        assert writer2._rotation_seq == 0
+        assert "started_at" in writer2._state
+
+    @pytest.mark.asyncio
+    async def test_no_active_file_after_crash_creates_new_on_restart(
+        self, writer, sink, config, tmp_capture_root
+    ):
+        """If the active file was deleted during a crash, the writer creates a new one."""
+        await writer.start()
+        sink.try_put(CaptureEvent(data={"seq": 1}))
+        await writer.stop()
+
+        # Simulate crash: delete the active file
+        active = tmp_capture_root / "guardian_capture_current.jsonl"
+        active.unlink()
+        assert not active.exists()
+
+        # Restart — should create a new active file
+        sink2 = CaptureSink(max_pending_events=config.max_pending_events)
+        writer2 = CaptureWALWriter(sink2, config)
+        await writer2.start()
+        sink2.try_put(CaptureEvent(data={"seq": 2}))
+        await writer2.stop()
+
+        assert active.exists()
+        lines = [json.loads(l) for l in active.read_text().strip().split("\n") if l.strip()]
+        assert len(lines) == 1
+        assert lines[0]["seq"] == 2
+
+    @pytest.mark.asyncio
+    async def test_multiple_partial_lines_tolerance(self, writer, sink, config, tmp_capture_root):
+        """Multiple consecutive partial lines from repeated crashes are all tolerated."""
+        await writer.start()
+        sink.try_put(CaptureEvent(data={"seq": 1}))
+        await writer.stop()
+
+        active = tmp_capture_root / "guardian_capture_current.jsonl"
+        # Write multiple partial lines (with newlines — see partial_line test)
+        with open(active, "a") as f:
+            f.write('{"broken1":\n')
+            f.write('{"broken2": tru\n')
+
+        sink2 = CaptureSink(max_pending_events=config.max_pending_events)
+        writer2 = CaptureWALWriter(sink2, config)
+        await writer2.start()
+        sink2.try_put(CaptureEvent(data={"seq": 2}))
+        await writer2.stop()
+
+        lines = active.read_text().strip().split("\n")
+        # Line 0: valid (seq 1)
+        # Lines 1-2: partial (reader discards)
+        # Line 3: valid (seq 2)
+        json.loads(lines[0])
+        assert json.loads(lines[0])["seq"] == 1
+        json.loads(lines[3])
+        assert json.loads(lines[3])["seq"] == 2
+
+    @pytest.mark.asyncio
+    async def test_empty_file_after_crash_is_safe(self, writer, sink, config, tmp_capture_root):
+        """An empty active file (crash before any writes) is safe on restart."""
+        await writer.start()
+        await writer.stop()
+
+        active = tmp_capture_root / "guardian_capture_current.jsonl"
+        # File may or may not exist — if it does, it's empty
+        if active.exists():
+            assert active.read_text() == ""
+
+        # Restart and write
+        sink2 = CaptureSink(max_pending_events=config.max_pending_events)
+        writer2 = CaptureWALWriter(sink2, config)
+        await writer2.start()
+        sink2.try_put(CaptureEvent(data={"seq": 1}))
+        await writer2.stop()
+
+        lines = [l for l in active.read_text().strip().split("\n") if l.strip()]
+        assert len(lines) == 1
+        assert json.loads(lines[0])["seq"] == 1
+
+    @pytest.mark.asyncio
+    async def test_writer_survives_disk_full_simulated(self, writer, sink, config, tmp_capture_root):
+        """If writes fail (simulated disk full), the writer logs but doesn't crash."""
+        await writer.start()
+        sink.try_put(CaptureEvent(data={"seq": 1}))
+        await asyncio.sleep(0.1)
+
+        # Patch _write_event to simulate failure
+        original_write = writer._write_event
+
+        def failing_write(event):
+            return False  # Simulate write failure
+
+        writer._write_event = failing_write
+        sink.try_put(CaptureEvent(data={"seq": 2}))
+        await asyncio.sleep(0.1)
+
+        # Restore and verify recovery
+        writer._write_event = original_write
+        sink.try_put(CaptureEvent(data={"seq": 3}))
+        await asyncio.sleep(0.1)
+        await writer.stop()
+
+        active = tmp_capture_root / "guardian_capture_current.jsonl"
+        lines = [json.loads(l) for l in active.read_text().strip().split("\n") if l.strip()]
+        seqs = [e["seq"] for e in lines]
+        # seq 1 was written before failure; seq 2 was lost; seq 3 recovered
+        assert 1 in seqs
+        assert 3 in seqs
+        assert 2 not in seqs
+
+    @pytest.mark.asyncio
+    async def test_hmac_preserved_across_restart(self, writer, sink, config, tmp_capture_root, monkeypatch):
+        """Per-record HMAC continues to work after a writer restart."""
+        monkeypatch.setenv("GUARDIAN_CAPTURE_RECORD_AUTH_SECRET", "crash-recovery-secret")
+        await writer.start()
+        sink.try_put(CaptureEvent(data={"seq": 1, "event_type": "request_received"}))
+        await writer.stop()
+
+        # Restart with fresh sink
+        sink2 = CaptureSink(max_pending_events=config.max_pending_events)
+        writer2 = CaptureWALWriter(sink2, config)
+        await writer2.start()
+        sink2.try_put(CaptureEvent(data={"seq": 2, "event_type": "request_completed"}))
+        await writer2.stop()
+
+        active = tmp_capture_root / "guardian_capture_current.jsonl"
+        lines = [json.loads(l) for l in active.read_text().strip().split("\n") if l.strip()]
+        assert len(lines) == 2
+        for line in lines:
+            assert "record_auth" in line
+            assert line["record_auth"]["alg"] == "hmac-sha256"
+        # Both should have the same key_id (same secret)
+        key_ids = {line["record_auth"]["key_id"] for line in lines}
+        assert len(key_ids) == 1

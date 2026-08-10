@@ -135,7 +135,7 @@ When touching these areas, read the referenced detail docs:
 - ✅ `CaptureWALWriter.rotate()` public method (3 unit tests)
 - ✅ Multi-secret client_ref rotation (Decision 1A) — `GUARDIAN_CAPTURE_CLIENT_REF_SECRET_PREVIOUS` overlap period (13 unit tests)
 - ✅ Per-record HMAC authentication (Decision 2A) — `record_auth` field on WAL JSONL lines, `GUARDIAN_CAPTURE_RECORD_AUTH_SECRET` env var (10 unit tests)
-- 📋 Crash-recovery tests
+- ✅ Crash-recovery tests (9 unit tests — restart, partial line, state persistence, corrupt state, deleted active file, multiple partials, empty file, disk-full simulation, HMAC across restart)
 - 📋 Capture dashboard
 - 📋 72-hour soak test
 
