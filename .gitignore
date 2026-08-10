@@ -58,6 +58,7 @@ data/capture/
 config/api_keys.json
 benchmark_results.json
 node_modules/
+dashboard/dist/
 
 # Cloud credentials (contains API keys)
 config/cloud_keys.json
