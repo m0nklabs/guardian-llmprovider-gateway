@@ -121,9 +121,10 @@ When touching these areas, read the referenced detail docs:
 
 ### Phase 5 — Guardian Structural Separation 🔄 (In Progress)
 - ✅ Extract `app/gateway/context_metadata.py` (context window resolution + model metadata entry construction, 6 functions, dependency injection via `init()`)
+- ✅ Extract `app/cloud_inference/` (provider URL resolution, Google model discovery, routing helpers, retry classification, response header sanitisation, OpenAI reasoning param adaptation — 14 functions, dependency injection via `init()`)
 - 📋 Extract remaining `app/gateway/` (auth, normalization, routing, metrics, capture dispatch)
 - 📋 Extract `app/local_inference/` (inference queue, model switching, llama-server transport)
-- 📋 Extract `app/cloud_inference/` (provider/credential resolution, retry, failover)
+- 📋 Extract remaining `app/cloud_inference/` (cloud attempts resolution, forward_to_cloud_provider, streaming, capture dispatch integration)
 
 ### Phase 6 — Operational Hardening 🔄 (In Progress)
 - ✅ `guardianctl` CLI for capture control (`scripts/guardianctl.py`)

@@ -71,6 +71,9 @@ from app.capture.stream_assembler import StreamResponseAssembler
 # ── Gateway helpers (Phase 5 extraction) ─────────────────────────────
 from app.gateway import context_metadata as _ctx_meta
 
+# ── Cloud inference helpers (Phase 5 extraction) ────────────────────
+import app.cloud_inference as _cloud_inf
+
 # Load configuration from settings.yaml
 def load_config() -> dict:
 
@@ -119,6 +122,9 @@ CONFIG = load_config()
 # Cloud LLM provider registry (OpenRouter, NVIDIA, …) — enables Guardian to
 # act as a unified LLM router alongside its local GPU-backed llama-server.
 provider_registry = ProviderRegistry()
+
+# Initialize cloud_inference helpers with singleton registry
+_cloud_inf.init(provider_registry)
 
 # Per-key cloud credential store — allows linking cloud provider credentials
 # (NVIDIA, OpenRouter) to individual Guardian API keys so each key can route
@@ -4229,206 +4235,52 @@ async def proxy_v1_get(path: str, request: Request, client_id: str = Depends(ver
 
 # ── Cloud LLM router: forward to OpenRouter / NVIDIA / … ─────────────
 
-_PROVIDER_BASE_URLS = {
-    "openrouter": "https://openrouter.ai/api/v1",
-    "nvidia": "https://integrate.api.nvidia.com/v1",
-    "poolside": "https://inference.poolside.ai/v1",
-    # Direct OpenAI (service-account key stored in ${OPENAI_API_KEY}).  OpenAI
-    # uses BARE model names — no namespace — so global recognition comes from
-    # the explicit ``models:`` list in settings.yaml, and per-key routes use
-    # the guardian/openai/{model} convention (any model, no listing required).
-    "openai": "https://api.openai.com/v1",
-    "google": "https://generativelanguage.googleapis.com/v1beta/openai",
-}
+# ── Cloud inference helpers (delegated to app.cloud_inference) ──────
+# Phase 5: extracted to app/cloud_inference/__init__.py.  These thin
+# wrappers preserve the existing call sites in server.py.
 
-_GOOGLE_MODEL_CATALOG_URL = f"{_PROVIDER_BASE_URLS['google']}/models"
-_GOOGLE_MODEL_CATALOG_TIMEOUT_S = 30.0
-
+_PROVIDER_BASE_URLS = _cloud_inf.get_provider_base_urls()
+_GOOGLE_MODEL_CATALOG_URL = _cloud_inf._GOOGLE_MODEL_CATALOG_URL
+_GOOGLE_MODEL_CATALOG_TIMEOUT_S = _cloud_inf._GOOGLE_MODEL_CATALOG_TIMEOUT_S
 
 def _normalize_google_model_id(model_id: str) -> str:
-    """Normalize Google catalog IDs to bare OpenAI-compatible model names.
-
-    Google's ``/v1beta/openai/models`` listing may return resource-style IDs
-    such as ``models/gemini-2.5-flash``. Chat completions expect the bare name
-    (``gemini-2.5-flash``), so strip a single leading ``models/`` prefix.
-    """
-    normalized = model_id.strip()
-    if normalized.startswith("models/"):
-        normalized = normalized[len("models/") :].strip()
-    return normalized
-
+    return _cloud_inf.normalize_google_model_id(model_id)
 
 def _parse_google_model_catalog(payload: Any) -> List[str]:
-    """Validate and normalize Google OpenAI-compatible model catalog data."""
-    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
-        raise ValueError("Google model catalog response is missing model data")
-    models = sorted(
-        {
-            normalized
-            for entry in payload["data"]
-            if isinstance(entry, dict)
-            for model_id in [entry.get("id")]
-            if isinstance(model_id, str)
-            for normalized in [_normalize_google_model_id(model_id)]
-            if normalized
-        }
-    )
-    if not models:
-        raise ValueError("Google model catalog response has no model data")
-    return models
-
+    return _cloud_inf.parse_google_model_catalog(payload)
 
 async def _discover_google_models(api_key: str) -> List[str]:
-    """Fetch the current Google AI Studio OpenAI-compatible model catalog."""
-    try:
-        timeout = httpx.Timeout(_GOOGLE_MODEL_CATALOG_TIMEOUT_S, connect=5.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.get(
-                _GOOGLE_MODEL_CATALOG_URL,
-                headers={"Authorization": f"Bearer {api_key}"},
-            )
-        response.raise_for_status()
-        return _parse_google_model_catalog(response.json())
-    except (httpx.HTTPError, TypeError, ValueError) as exc:
-        logger.warning("Google model catalog discovery failed: %s", type(exc).__name__)
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "error": "google_model_discovery_failed",
-                "message": "Google model catalog could not be retrieved.",
-            },
-        ) from exc
-
+    return await _cloud_inf.discover_google_models(api_key)
 
 def _provider_base_url(provider_name: str) -> str:
-    """Return the base URL for a known provider, or empty string."""
-    return _PROVIDER_BASE_URLS.get(provider_name, "")
-
+    return _cloud_inf.provider_base_url(provider_name)
 
 def _cloud_provider_for_request(model_name: str) -> Optional[CloudProvider]:
-    """Return the configured cloud provider for *model_name*, or None."""
-    return provider_registry.get_provider_for_model(model_name)
-
+    return _cloud_inf.cloud_provider_for_request(model_name)
 
 def _is_cloud_or_guardian_route(model_name: str) -> bool:
-    """Check if a model name is a cloud model or a per-key guardian route."""
-    if provider_registry.is_cloud_model(model_name):
-        return True
-    return parse_guardian_route(model_name) is not None
-
+    return _cloud_inf.is_cloud_or_guardian_route(model_name)
 
 def _cloud_provider_unavailable_error(provider: CloudProvider) -> HTTPException:
-    """Build a 503 error for a provider that lacks an API key."""
-    return HTTPException(
-        status_code=503,
-        detail={
-            "error": "provider_unavailable",
-            "reason": "missing_api_key",
-            "message": (
-                f"Cloud provider '{provider.name}' is enabled but has no API key "
-                f"configured. Set the {provider.name.upper()}_API_KEY environment "
-                f"variable or disable the provider in settings.yaml."
-            ),
-            "provider": provider.name,
-        },
-    )
+    return _cloud_inf.cloud_provider_unavailable_error(provider)
 
-
-#: Upstream status codes worth retrying against the next failover candidate.
-#: A 429 is handled first by the per-key retry manager. If that local hold
-#: budget is exhausted, the failover route may try its next candidate. A 429
-#: never counts against the provider health tracker because rate limiting does
-#: not by itself indicate a broken provider.
-_RETRYABLE_STATUS_CODES = {408, 409, 425, 500, 502, 503, 504}
-
-#: Some providers (observed on NVIDIA NIM) report a degraded/unavailable
-#: backend as an HTTP 400 with a descriptive message instead of a 5xx, e.g.
-#: ``"Function id '...': DEGRADED function cannot be invoked"``. These
-#: substrings (checked case-insensitively against the error body) are treated
-#: as retryable even though the status code itself is not in
-#: :data:`_RETRYABLE_STATUS_CODES`.
-_DEGRADED_ERROR_MARKERS = (
-    "degraded function",
-    "function cannot be invoked",
-    "service is degraded",
-    "service unavailable",
-    "temporarily unavailable",
-)
-
+_RETRYABLE_STATUS_CODES = _cloud_inf._RETRYABLE_STATUS_CODES
+_DEGRADED_ERROR_MARKERS = _cloud_inf._DEGRADED_ERROR_MARKERS
 
 def _is_retryable_cloud_error(status_code: int, error_body_text: str) -> bool:
-    """Return True if a failover candidate's error is worth retrying on the next one.
+    return _cloud_inf.is_retryable_cloud_error(status_code, error_body_text)
 
-    A final 429 qualifies after the per-key retry manager has exhausted its
-    local hold budget, allowing a failover group to try its next provider.
-    Standard retryable status codes (5xx/408/409/425) always qualify. A 400
-    also qualifies when its body matches a known "provider is degraded"
-    pattern — other 400s (malformed request, bad schema) are left alone since
-    they would fail identically on every candidate.
-    """
-    if status_code == 429:
-        return True
-    if status_code in _RETRYABLE_STATUS_CODES:
-        return True
-    if status_code == 400 and error_body_text:
-        lowered = error_body_text.lower()
-        return any(marker in lowered for marker in _DEGRADED_ERROR_MARKERS)
-    return False
-
-
-_HOP_BY_HOP_RESPONSE_HEADERS = frozenset(
-    {
-        "connection",
-        "keep-alive",
-        "proxy-authenticate",
-        "proxy-authorization",
-        "te",
-        "trailers",
-        "transfer-encoding",
-        "upgrade",
-        # Recompute body framing locally. Upstream providers (notably Google)
-        # may emit both Content-Length and Transfer-Encoding, which nginx
-        # rejects as 502 when Guardian is fronted by the loopback HTTP proxy.
-        "content-length",
-        # Body is already decompressed by httpx; forwarding content-encoding
-        # would lie about the bytes we return.
-        "content-encoding",
-    }
-)
-
+_HOP_BY_HOP_RESPONSE_HEADERS = _cloud_inf._HOP_BY_HOP_RESPONSE_HEADERS
 
 def _sanitize_proxied_response_headers(headers: Any) -> Dict[str, str]:
-    """Strip hop-by-hop and body-framing headers from an upstream response."""
-    return {
-        key: value
-        for key, value in dict(headers or {}).items()
-        if key.lower() not in _HOP_BY_HOP_RESPONSE_HEADERS
-    }
-
+    return _cloud_inf.sanitize_proxied_response_headers(headers)
 
 def _guardian_debug_headers(
     provider: CloudProvider,
     upstream_model: str,
     failover_group: Optional[str],
 ) -> Dict[str, str]:
-    """Build response headers revealing which provider actually served a request.
-
-    Claude Code's own model badge is a static label set once at launch
-    (``ANTHROPIC_DEFAULT_SONNET_MODEL_NAME``) and never updates per-turn, so
-    it cannot show which failover candidate answered a given request. These
-    headers — plus the ``@provider`` suffix applied to the translated Anthropic
-    response's ``model`` field for failover routes — are the only per-request
-    signal of the winning provider; inspect them via ``claude --verbose``
-    network traces or Guardian's own logs (``journalctl -u llama-guardian.service
-    | grep 'Cloud route'``).
-    """
-    headers = {
-        "X-Guardian-Provider": provider.name,
-        "X-Guardian-Upstream-Model": upstream_model,
-    }
-    if failover_group:
-        headers["X-Guardian-Failover-Group"] = failover_group
-    return headers
+    return _cloud_inf.guardian_debug_headers(provider, upstream_model, failover_group)
 
 
 def _resolve_cloud_attempts(
@@ -4564,75 +4416,19 @@ def _resolve_cloud_vision_fallback(model_name: str) -> Optional[str]:
 #: OpenAI model prefixes whose API rejects ``max_tokens`` in favour of
 #: ``max_completion_tokens``.  This covers the entire ``o1``/``o3``/``o4``
 #: reasoning family and the ``gpt-5*`` generation.
-_OPENAI_REASONING_MODEL_PREFIXES: Tuple[str, ...] = (
-    "o1", "o3", "o4", "gpt-5",
-)
-
-#: Models that reject ``temperature`` entirely (o-series) or only accept the
-#: default value of 1 (gpt-5*).
-_OPENAI_TEMP_RESTRICTED_PREFIXES: Tuple[str, ...] = (
-    "o1", "o3", "o4", "gpt-5",
-)
-
+# OpenAI reasoning-model prefixes (delegated to app.cloud_inference)
+_OPENAI_REASONING_MODEL_PREFIXES = _cloud_inf._OPENAI_REASONING_MODEL_PREFIXES
+_OPENAI_TEMP_RESTRICTED_PREFIXES = _cloud_inf._OPENAI_TEMP_RESTRICTED_PREFIXES
 
 def _is_openai_reasoning_model(model_name: str) -> bool:
-    """Return True for the OpenAI reasoning models that reject ``max_tokens``."""
-    return model_name.startswith(_OPENAI_REASONING_MODEL_PREFIXES)
-
+    return _cloud_inf.is_openai_reasoning_model(model_name)
 
 def _adapt_openai_reasoning_params(
     provider: CloudProvider,
     upstream_model: str,
     body: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Translate client params for direct-OpenAI reasoning models.
-
-    Many OpenAI-compatible clients (Claude Code, OpenWebUI, Aider, …) send
-    ``max_tokens`` and ``temperature`` unconditionally.  OpenAI's reasoning
-    models reject both:
-
-    - **``max_tokens``** → rejected; must be ``max_completion_tokens``.
-    - **``temperature``** on the o-series → rejected entirely.
-    - **``temperature`` on the gpt-5 family → only the value ``1`` is accepted.
-
-    This function silently adapts the body so the request succeeds without
-    the client needing to know about per-model API differences.  Only applied
-    to the direct ``openai`` provider — OpenRouter handles its own param
-    translation, and other providers are unaffected.
-
-    Rules:
-    - If the client already set ``max_completion_tokens``, the stray
-      ``max_tokens`` is simply dropped (never overrides the explicit value).
-    - A client-supplied ``max_completion_tokens`` always wins over
-      ``max_tokens``.
-    - For o-series, ``temperature`` is stripped unconditionally.
-    - For gpt-5*, ``temperature`` is forced to ``1`` when set to anything
-      else; omitted is left omitted (OpenAI defaults to 1).
-    """
-    if provider.name != "openai":
-        return body
-    if not _is_openai_reasoning_model(upstream_model):
-        return body
-
-    adapted = dict(body)
-
-    # max_tokens → max_completion_tokens (original dropped if both present)
-    if "max_tokens" in adapted:
-        if "max_completion_tokens" not in adapted:
-            adapted["max_completion_tokens"] = adapted["max_tokens"]
-        adapted.pop("max_tokens", None)
-
-    # Temperature handling
-    if upstream_model.startswith(_OPENAI_TEMP_RESTRICTED_PREFIXES):
-        temp = adapted.get("temperature")
-        if temp is not None:
-            # o-series: strip entirely. gpt-5*: force to 1 (only accepted value).
-            if upstream_model.startswith(("o1", "o3", "o4")):
-                adapted.pop("temperature", None)
-            elif temp != 1:
-                adapted["temperature"] = 1
-
-    return adapted
+    return _cloud_inf.adapt_openai_reasoning_params(provider, upstream_model, body)
 
 
 def _prepare_cloud_candidate_request(
