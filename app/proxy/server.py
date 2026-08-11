@@ -80,6 +80,9 @@ from app.gateway import capture_dispatch as _capture_dispatch
 # ── Gateway streaming helpers (Phase 5 extraction) ──────────────────
 from app.gateway import streaming as _streaming
 
+# ── Gateway queue helpers (Phase 5 extraction) ──────────────────────
+from app.gateway import queue_helpers as _queue_helpers
+
 # Load configuration from settings.yaml
 def load_config() -> dict:
 
@@ -649,203 +652,44 @@ def _resolve_or_reject_inference_model(raw_model: Optional[str], current_model: 
 
 def _resolve_auto_reload_model(requested_model: Optional[str] = None) -> str:
     """Resolve the model Guardian should load when the backend is absent."""
-    return model_manager.resolve_reload_target(requested_model)
+# ── Queue helpers (delegated to app.gateway.queue_helpers) ──────────
+# Phase 5: extracted to app/gateway/queue_helpers.py.
 
+_GuardianRequestCancelled = _queue_helpers.GuardianRequestCancelled
 
 def _queue_headers(request_id: str, queue_wait_ms: float) -> Dict[str, str]:
-    return {
-        "X-Request-Id": request_id,
-        "X-Queue-Wait-Ms": str(int(queue_wait_ms)),
-    }
-
-
-class _GuardianRequestCancelled(Exception):
-    """Raised when Guardian cancels or abandons a tracked request lifecycle."""
-
-    def __init__(self, request_id: str, reason: str = "cancelled"):
-        super().__init__(f"request {request_id} cancelled: {reason}")
-        self.request_id = request_id
-        self.reason = reason
-
+    return _queue_helpers.queue_headers(request_id, queue_wait_ms)
 
 def _request_cancel_http_exception(request_id: str, reason: str) -> HTTPException:
-    """Translate internal request cancellation into a client-facing HTTP error."""
-    return HTTPException(
-        status_code=499,
-        detail={
-            "error": "request_cancelled",
-            "request_id": request_id,
-            "message": reason,
-        },
-    )
-
+    return _queue_helpers.request_cancel_http_exception(request_id, reason)
 
 async def _stop_background_task(task: Optional[asyncio.Task]) -> None:
-    """Cancel and await a background task without leaking cancellation noise."""
-    if task is None:
-        return
-    task.cancel()
-    try:
-        await asyncio.wait_for(task, timeout=STREAM_CLOSE_TIMEOUT_S)
-    except asyncio.CancelledError:
-        pass
-    except asyncio.TimeoutError:
-        logger.warning(
-            "Timed out after %.1fs while stopping background task %s",
-            STREAM_CLOSE_TIMEOUT_S,
-            task.get_name(),
-        )
-
+    await _queue_helpers.stop_background_task(task)
 
 async def _watch_request_disconnect(request: Request, request_id: str, client_id: str) -> None:
-    """Cancel the tracked queue request as soon as the downstream client disconnects."""
-    while True:
-        if await request.is_disconnected():
-            snapshot = inference_queue.cancel(
-                request_id,
-                client_id=client_id,
-                reason="client_disconnected",
-            )
-            logger.info(
-                "🔌 [%s] Client '%s' disconnected (%s)",
-                request_id[:8],
-                client_id,
-                (snapshot or {}).get("status", "unknown"),
-            )
-            return
-        await asyncio.sleep(0.25)
-
+    await _queue_helpers.watch_request_disconnect(request, request_id, client_id)
 
 async def _begin_queued_request(request: Request, client_id: str, model: str) -> tuple[str, asyncio.Task]:
-    """Register a queue request immediately and wait until Guardian grants a slot."""
-    normalized_client_id = client_id.strip() if isinstance(client_id, str) else ""
-    if not normalized_client_id or normalized_client_id.lower() == "unauthenticated":
-        logger.warning("🚫 Rejecting queue access without an authenticated client id")
-        raise HTTPException(
-            status_code=HTTP_401_UNAUTHORIZED,
-            detail="Authenticated client required for queue access",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    queue_owner_id = _get_queue_owner_id(request, normalized_client_id)
-    if not queue_owner_id:
-        logger.warning("🚫 Rejecting queue access without an authenticated API key fingerprint")
-        raise HTTPException(
-            status_code=HTTP_401_UNAUTHORIZED,
-            detail="Authenticated API key fingerprint required for queue access",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    try:
-        request_id = inference_queue.submit(
-            normalized_client_id,
-            model,
-            owner_id=queue_owner_id,
-        )
-    except QueueAdmissionRejected as exc:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": "queue_admission_rejected",
-                "reason": exc.reason,
-                "message": exc.message,
-                "existing_request_id": exc.existing_request_id,
-                "existing_status": exc.existing_status,
-                "client_id": exc.client_id,
-            },
-        ) from exc
-
-    _update_live_request_usage(request, queue_request_id=request_id, phase="queued")
-    disconnect_task = asyncio.create_task(_watch_request_disconnect(request, request_id, normalized_client_id))
-    try:
-        await inference_queue.wait_for_turn(request_id)
-    except QueueRequestCancelled as exc:
-        _update_live_request_usage(request, queue_request_id=request_id, phase="cancelled")
-        await _stop_background_task(disconnect_task)
-        raise _GuardianRequestCancelled(request_id, exc.reason) from exc
-    _update_live_request_usage(
-        request,
-        queue_request_id=request_id,
-        phase="running",
-        queue_wait_ms=inference_queue.get_queue_wait_ms(request_id),
-    )
-    return request_id, disconnect_task
-
+    return await _queue_helpers.begin_queued_request(request, client_id, model)
 
 async def _await_or_cancel_request(
     operation_task: asyncio.Task,
     request_id: str,
     cleanup: Optional[Callable[[], Awaitable[None]]] = None,
 ) -> Any:
-    """Wait for backend work to finish, but abort promptly if the tracked request is cancelled."""
-    cancel_event = inference_queue.get_cancel_event(request_id)
-    if cancel_event is None:
-        return await operation_task
-
-    cancel_task = asyncio.create_task(cancel_event.wait())
-    try:
-        done, pending = await asyncio.wait(
-            {operation_task, cancel_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if cancel_task in done and cancel_event.is_set():
-            if cleanup is not None:
-                with suppress(Exception):
-                    await asyncio.wait_for(cleanup(), timeout=STREAM_CLOSE_TIMEOUT_S)
-            if not operation_task.done():
-                operation_task.cancel()
-                with suppress(asyncio.CancelledError, Exception):
-                    await asyncio.wait_for(operation_task, timeout=STREAM_CLOSE_TIMEOUT_S)
-            snapshot = inference_queue.get_request_status(request_id)
-            reason = (snapshot or {}).get("cancel_reason", "cancelled")
-            raise _GuardianRequestCancelled(request_id, reason)
-        return await operation_task
-    finally:
-        cancel_task.cancel()
-        with suppress(asyncio.CancelledError):
-            await cancel_task
-
+    return await _queue_helpers.await_or_cancel_request(operation_task, request_id, cleanup)
 
 async def _close_stream_resources(response: httpx.Response, client: httpx.AsyncClient) -> None:
-    """Close the upstream streaming response and client without surfacing cleanup noise."""
-    for resource_name, closer in (
-        ("response", response.aclose),
-        ("client", client.aclose),
-    ):
-        try:
-            await asyncio.wait_for(closer(), timeout=STREAM_CLOSE_TIMEOUT_S)
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Timed out after %.1fs closing upstream stream %s during cancellation",
-                STREAM_CLOSE_TIMEOUT_S,
-                resource_name,
-            )
-        except Exception:
-            pass
-
+    await _queue_helpers.close_stream_resources(response, client)
 
 async def _close_on_request_cancel(
     request_id: str,
     cleanup: Callable[[], Awaitable[None]],
 ) -> None:
-    """Wait for request cancellation and then run the provided cleanup coroutine."""
-    cancel_event = inference_queue.get_cancel_event(request_id)
-    if cancel_event is None:
-        return
-    await cancel_event.wait()
-    try:
-        await asyncio.wait_for(cleanup(), timeout=STREAM_CLOSE_TIMEOUT_S)
-    except asyncio.TimeoutError:
-        logger.warning(
-            "Timed out after %.1fs while closing upstream resources for cancelled request %s",
-            STREAM_CLOSE_TIMEOUT_S,
-            request_id[:8],
-        )
-
+    await _queue_helpers.close_on_request_cancel(request_id, cleanup)
 
 def _request_outcome(request_id: str) -> str:
-    """Map the tracked request lifecycle to a final queue outcome."""
-    return "cancelled" if inference_queue.is_cancel_requested(request_id) else "completed"
+    return _queue_helpers.request_outcome(request_id)
 
 
 # ── Capture helpers (fail-open, never block inference) ──────────────────
@@ -2011,6 +1855,9 @@ inference_queue = InferenceQueue(
 
 # Initialize streaming helpers with queue + timeout constants
 _streaming.init(inference_queue, _GuardianRequestCancelled, STREAM_HEARTBEAT_INTERVAL_S, STREAM_CLOSE_TIMEOUT_S)
+
+# Initialize queue helpers with queue + usage helpers
+_queue_helpers.init(inference_queue, _get_queue_owner_id, _update_live_request_usage, STREAM_CLOSE_TIMEOUT_S)
 
 
 async def _reload_backend_after_connect_error(path: str, error: Exception) -> None:

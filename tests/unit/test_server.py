@@ -13,6 +13,7 @@ import pytest
 from app.proxy.failover import FailoverCandidate, FailoverGroup, FailoverRegistry
 from app.proxy import server
 from app.gateway import streaming as _streaming
+from app.gateway import queue_helpers as _queue_helpers
 
 
 def _metadata_request(key_fingerprint: str = "test-key") -> SimpleNamespace:
@@ -340,7 +341,7 @@ async def test_begin_queued_request_cleans_up_waiter_on_disconnect():
         async def is_disconnected(self) -> bool:
             return disconnected.is_set()
 
-    with patch.object(server, "inference_queue", queue):
+    with patch.object(server, "inference_queue", queue), patch.object(_queue_helpers, "_inference_queue", queue):
         waiter_task = asyncio.create_task(
             server._begin_queued_request(_FakeRequest(), "waiter-client", "model-x")
         )
@@ -369,7 +370,7 @@ async def test_begin_queued_request_rejects_unauthenticated_client():
         async def is_disconnected(self) -> bool:
             return False
 
-    with patch.object(server, "inference_queue", queue):
+    with patch.object(server, "inference_queue", queue), patch.object(_queue_helpers, "_inference_queue", queue):
         with pytest.raises(server.HTTPException) as exc_info:
             await server._begin_queued_request(_FakeRequest(), "unauthenticated", "model-x")
 
@@ -389,7 +390,7 @@ async def test_begin_queued_request_waits_behind_running_request_for_same_api_ke
         is_disconnected=lambda: asyncio.sleep(0, result=False),
     )
 
-    with patch.object(server, "inference_queue", queue):
+    with patch.object(server, "inference_queue", queue), patch.object(_queue_helpers, "_inference_queue", queue):
         waiter_task = asyncio.create_task(server._begin_queued_request(fake_request, "openclaw", "model-y"))
         await asyncio.sleep(0.05)
 
@@ -420,7 +421,7 @@ async def test_begin_queued_request_allows_multiple_queued_requests_for_same_api
         is_disconnected=lambda: asyncio.sleep(0, result=False),
     )
 
-    with patch.object(server, "inference_queue", queue):
+    with patch.object(server, "inference_queue", queue), patch.object(_queue_helpers, "_inference_queue", queue):
         waiter_task = asyncio.create_task(server._begin_queued_request(fake_request, "openclaw", "model-y"))
         await asyncio.sleep(0.05)
 
@@ -450,7 +451,7 @@ async def test_await_or_cancel_request_cleans_up_running_request():
 
     operation_task = asyncio.create_task(asyncio.sleep(10))
 
-    with patch.object(server, "inference_queue", queue):
+    with patch.object(server, "inference_queue", queue), patch.object(_queue_helpers, "_inference_queue", queue):
         queue.cancel(request_id, client_id="runner", reason="client_requested_cancel")
 
         with pytest.raises(server._GuardianRequestCancelled, match="client_requested_cancel"):
@@ -470,7 +471,7 @@ async def test_queue_request_status_endpoint_returns_snapshot():
     request_id = queue.submit("observer", "model-x", owner_id="key:observer")
     request = SimpleNamespace(state=SimpleNamespace(auth_context={"key_fingerprint": "observer"}))
 
-    with patch.object(server, "inference_queue", queue):
+    with patch.object(server, "inference_queue", queue), patch.object(_queue_helpers, "_inference_queue", queue):
         snapshot = await server.queue_request_status(request_id, request=request, client_id="observer")
 
     assert snapshot["request_id"] == request_id
@@ -484,7 +485,7 @@ async def test_cancel_queue_request_endpoint_marks_running_request():
     request_id = await queue.acquire("observer", "model-x", owner_id="key:observer")
     request = SimpleNamespace(state=SimpleNamespace(auth_context={"key_fingerprint": "observer"}))
 
-    with patch.object(server, "inference_queue", queue):
+    with patch.object(server, "inference_queue", queue), patch.object(_queue_helpers, "_inference_queue", queue):
         snapshot = await server.cancel_queue_request(request_id, request=request, client_id="observer")
 
     assert snapshot["request_id"] == request_id
@@ -498,7 +499,7 @@ async def test_queue_request_status_endpoint_is_isolated_per_api_key():
     request_id = queue.submit("observer", "model-x", owner_id="key:owner-a")
     foreign_request = SimpleNamespace(state=SimpleNamespace(auth_context={"key_fingerprint": "owner-b"}))
 
-    with patch.object(server, "inference_queue", queue):
+    with patch.object(server, "inference_queue", queue), patch.object(_queue_helpers, "_inference_queue", queue):
         with pytest.raises(server.HTTPException) as exc_info:
             await server.queue_request_status(request_id, request=foreign_request, client_id="observer")
 
