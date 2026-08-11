@@ -12,6 +12,7 @@ import pytest
 
 from app.proxy.failover import FailoverCandidate, FailoverGroup, FailoverRegistry
 from app.proxy import server
+from app.gateway import streaming as _streaming
 
 
 def _metadata_request(key_fingerprint: str = "test-key") -> SimpleNamespace:
@@ -816,7 +817,7 @@ async def test_stream_watchdog_exits_when_queue_request_is_cancelled():
     response = _FakeResponse()
     watchdog = server.StreamProgressWatchdog(base_timeout_s=300)
 
-    with patch.object(server, "inference_queue", queue):
+    with patch.object(server, "inference_queue", queue), patch.object(_streaming, "_inference_queue", queue):
         stream_iter = server._iter_sse_lines_with_watchdog(
             response,
             watchdog,
