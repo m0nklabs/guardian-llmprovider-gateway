@@ -8,6 +8,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException, Response, Depends
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.paths import LLAMA_SLOTS_DIR
@@ -38,6 +39,7 @@ from app.capture.integration import (
     get_capture_sink_snapshot,
 )
 from app.capture.schema import BuildContext
+from app.capture.policy import PolicyResult
 from app.capture.stream_assembler import StreamResponseAssembler
 
 # ── Gateway helpers (Phase 5 extraction) ─────────────────────────────
@@ -1496,6 +1498,7 @@ _local_ollama.init(
 # Initialize gateway v1 routing with all dependencies
 _gw_routing.init(
     resolve_or_reject_inference_model=_resolve_or_reject_inference_model,
+    resolve_inference_model=_resolve_inference_model,
     is_cloud_or_guardian_route=_is_cloud_or_guardian_route,
     resolve_cloud_attempts=_cloud_routing.resolve_cloud_attempts,
     resolve_cloud_vision_fallback=_cloud_routing.resolve_cloud_vision_fallback,

@@ -23,6 +23,7 @@ from fastapi.responses import StreamingResponse
 from app.proxy.providers import CloudProvider, ProviderRegistry
 from app.capture.config import PROTOCOL_ANTHROPIC, PROTOCOL_OPENAI
 from app.capture.schema import BuildContext
+from app.capture.policy import PolicyResult
 from app.capture.stream_assembler import StreamResponseAssembler
 from app.gateway.streaming import StreamProgressWatchdog
 
@@ -349,7 +350,7 @@ async def forward_to_cloud_provider(
                         error_payload = json.loads(body_bytes)
                     except (TypeError, ValueError, json.JSONDecodeError):
                         error_payload = body_bytes.decode("utf-8", errors="replace")
-                    anthropic_error = translate_openai_error_to_anthropic(resp.status_code, error_payload)
+                    anthropic_error = _translate_openai_error_to_anthropic(resp.status_code, error_payload)
                     logger.warning(
                         "🌉 Anthropic bridge: translated %s error from %s: %s",
                         resp.status_code,
@@ -511,13 +512,13 @@ async def forward_to_cloud_provider(
             if needs_translation and payload and isinstance(payload, dict):
                 # Translate errors first
                 if resp.status_code >= 400:
-                    anthropic_error = translate_openai_error_to_anthropic(resp.status_code, payload)
+                    anthropic_error = _translate_openai_error_to_anthropic(resp.status_code, payload)
                     return Response(
                         content=json.dumps(anthropic_error).encode("utf-8"),
                         status_code=resp.status_code,
                         headers={"Content-Type": "application/json", **debug_headers},
                     )
-                anthropic_response = translate_openai_response_to_anthropic(
+                anthropic_response = _translate_openai_response_to_anthropic(
                     payload,
                     response_model_name,
                     request_stop_sequences=candidate_json_body.get("stop_sequences"),
@@ -577,7 +578,7 @@ async def forward_to_cloud_provider(
             if needs_translation:
                 # ── Anthropic streaming translation ───────────────
                 # Translate OpenAI SSE chunks to Anthropic SSE events
-                async for event_line in translate_openai_stream_to_anthropic(
+                async for event_line in _translate_openai_stream_to_anthropic(
                     _read_sse_lines(),
                     response_model_name,
                     request_stop_sequences=json_body.get("stop_sequences") if needs_translation else None,

@@ -333,7 +333,7 @@ async def chat_ollama(request: Request, client_id: str):
         }
 
         # Forward to Llama Server (OpenAI Endpoint)
-        timeout_sec = get_model_timeout(model)
+        timeout_sec = _get_model_timeout(model)
         request_timeout = _build_stream_timeout(timeout_sec) if stream else timeout_sec
         client = httpx.AsyncClient(timeout=request_timeout)
         
@@ -701,7 +701,7 @@ async def generate_ollama(request: Request, client_id: str):
             "temperature": temperature
         }
 
-        timeout_sec = get_model_timeout(model)
+        timeout_sec = _get_model_timeout(model)
         request_timeout = _build_stream_timeout(timeout_sec) if stream else timeout_sec
         client = httpx.AsyncClient(timeout=request_timeout)
         
@@ -728,6 +728,9 @@ async def generate_ollama(request: Request, client_id: str):
 
         if stream:
             usage_totals = {"prompt_tokens": 0, "completion_tokens": 0}
+            _ollama_capture_assembler: Optional[StreamResponseAssembler] = None
+            if _capture_ctx is not None and _capture_policy_result is not None and _capture_policy_result.should_capture:
+                _ollama_capture_assembler = StreamResponseAssembler()
 
             async def stream_adapter_generate():
                 cancel_cleanup_task = asyncio.create_task(

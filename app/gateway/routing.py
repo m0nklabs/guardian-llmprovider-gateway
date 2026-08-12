@@ -23,6 +23,7 @@ from app.engine.manager import ModelLoadError
 from app.capture.config import PROTOCOL_ANTHROPIC, PROTOCOL_OPENAI, ROUTE_LOCAL
 from app.capture.redactor import anthropic_messages_to_openai
 from app.capture.schema import BuildContext
+from app.capture.policy import PolicyResult
 from app.capture.stream_assembler import StreamResponseAssembler
 from app.gateway.streaming import StreamProgressWatchdog
 from app.proxy.anthropic_bridge import _format_sse_event
@@ -34,6 +35,7 @@ logger = logging.getLogger("Guardian")
 
 # ── Injected (set once at startup by init()) ─────────────────────────
 _resolve_or_reject_inference_model = None
+_resolve_inference_model = None
 _is_cloud_or_guardian_route = None
 _resolve_cloud_attempts = None
 _resolve_cloud_vision_fallback = None
@@ -93,6 +95,7 @@ _capture_controller = None
 def init(
     *,
     resolve_or_reject_inference_model,
+    resolve_inference_model,
     is_cloud_or_guardian_route,
     resolve_cloud_attempts,
     resolve_cloud_vision_fallback,
@@ -150,7 +153,8 @@ def init(
 ) -> None:
     """Inject all dependencies. Called once at startup."""
     _vars = [
-        "_resolve_or_reject_inference_model", "_is_cloud_or_guardian_route",
+        "_resolve_or_reject_inference_model", "_resolve_inference_model",
+        "_is_cloud_or_guardian_route",
         "_resolve_cloud_attempts", "_resolve_cloud_vision_fallback",
         "_setup_cloud_capture", "_forward_to_cloud_provider",
         "_apply_anthropic_thinking_to_llama_params", "_apply_request_reasoning_defaults",
