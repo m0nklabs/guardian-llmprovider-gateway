@@ -25,14 +25,13 @@ context_overrides:
   gpt-4.1: 1047576
   deepseek/deepseek-chat: 1000000
 # Cloud retry policy for upstream 429 (rate-limited) responses.
-# NVIDIA's free tier and Poolside's direct API both have aggressive per-minute
-# rate limits.  The failover system (cloud_keys.json failover_groups) handles
-# cross-provider fallback, while this retry policy handles same-provider
-# in-request 429 retries with exponential backoff.
-# max_hold_seconds=600 (10 min): reasoning models like GLM-5.2 can take minutes
-# to generate; a too-short hold budget causes premature failover to paid OR.
+# DISABLED (2026-08-12): Guardian passes upstream 429 responses straight
+# through to the client — the agent harness (Claude Code, goose, …) owns
+# 429 backoff/retry. Re-enable only if a client is known not to retry 429s.
+# When disabled, the failover 429 probe (60s wait + one retry) is also
+# skipped; cross-provider failover switching itself stays active.
 cloud_retry:
-  enabled: true
+  enabled: false
   max_retries: 10            # was 30 — 10 is plenty with failover as the real backstop
   max_hold_seconds: 120      # was 600 — 2 min hold, then failover to next candidate
   base_backoff_seconds: 2    # was 1 — start slightly higher to let rate limit clear
@@ -63,7 +62,7 @@ providers:
     enabled: true
     base_url: https://openrouter.ai/api/v1
     api_key: ${OPENROUTER_API_KEY}
-    timeout_seconds: 600
+    timeout_seconds: 1200   # doubled 2026-08-12: pi owns 429 backoff; long reasoning generations need headroom
     # Any model whose name starts with one of these namespaces is recognised
     # as an OpenRouter cloud model — key-independent, using the global key
     # above — so clients can send raw upstream names not listed in `models:`.
@@ -106,7 +105,7 @@ providers:
     enabled: true
     base_url: https://integrate.api.nvidia.com/v1
     api_key: ${NVIDIA_API_KEY}
-    timeout_seconds: 600
+    timeout_seconds: 1200   # doubled 2026-08-12: pi owns 429 backoff; long reasoning generations need headroom
     # NVIDIA NIM namespaces — recognised key-independently via the global key.
     # z-ai/ added: NVIDIA NIM hosts glm-5.2 (z-ai/glm-5.2) — recognised via
     # prefix so clients can send the raw upstream name without a guardian/ route.
@@ -127,7 +126,7 @@ providers:
     enabled: true
     base_url: https://inference.poolside.ai/v1
     api_key: ${POOLSIDE_API_KEY}
-    timeout_seconds: 600
+    timeout_seconds: 1200   # doubled 2026-08-12: pi owns 429 backoff; long reasoning generations need headroom
     # Poolside Platform models use their own namespace, kept disjoint from
     # OpenRouter so direct Poolside requests never consume OpenRouter quota.
     model_prefixes:
@@ -139,7 +138,7 @@ providers:
     enabled: true
     base_url: https://api.openai.com/v1
     api_key: ${OPENAI_API_KEY}
-    timeout_seconds: 600
+    timeout_seconds: 1200   # doubled 2026-08-12: pi owns 429 backoff; long reasoning generations need headroom
     # Direct OpenAI access via a service-account key.  OpenAI uses BARE model
     # names (no namespace), so there is no ``model_prefixes`` entry — only the
     # chat/reasoning models explicitly listed below are recognised globally.
