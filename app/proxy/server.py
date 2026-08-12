@@ -110,6 +110,9 @@ from app.gateway import admin_api as _admin_api
 # ── Proxy lifespan (Phase 5 extraction) ──────────────────────────────
 from app.proxy import lifespan as _lifespan
 
+# ── Session slots (Phase 5 extraction) ───────────────────────────────
+from app.gateway import sessions as _sessions
+
 # ── Gateway streaming helpers (Phase 5 extraction) ──────────────────
 from app.gateway import streaming as _streaming
 
@@ -1064,6 +1067,12 @@ _lifespan.init(
     inference_queue=inference_queue,
 )
 
+# Initialize session slots with the llama-server URL + slots dir
+_sessions.init(
+    llama_server_url=LLAMA_SERVER_URL,
+    session_slots_dir=Path("/home/flip/llama_slots"),
+)
+
 # Initialize streaming helpers with queue + timeout constants
 _streaming.init(inference_queue, _GuardianRequestCancelled, STREAM_HEARTBEAT_INTERVAL_S, STREAM_CLOSE_TIMEOUT_S)
 
@@ -1700,88 +1709,30 @@ async def start_proxy():
 # [A-Za-z0-9_-]+.bin, then confirm the resolved path stays inside the slots
 # dir (defense in depth — redundant after basename + regex, but explicit).
 _SESSION_SLOTS_DIR = Path("/home/flip/llama_slots")
-_SESSION_FILENAME_RE = re.compile(r"^[A-Za-z0-9_-]+\.bin$")
 
 
 def _sanitize_session_filename(raw: object) -> str:
-    """Return a safe basename for a session slot, or raise HTTP 400."""
-    if not isinstance(raw, str) or not raw:
-        raise HTTPException(status_code=400, detail="Filename required")
-    basename = Path(raw).name  # drop any directory components
-    if not _SESSION_FILENAME_RE.fullmatch(basename):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid filename: use letters, digits, '_' or '-' with a .bin suffix",
-        )
-    resolved = (_SESSION_SLOTS_DIR / basename).resolve()
-    if resolved.parent != _SESSION_SLOTS_DIR.resolve():
-        raise HTTPException(status_code=400, detail="Invalid filename")
-    return basename
+    """Return a safe basename for a session slot, or raise HTTP 400 (Phase 5: delegated)."""
+    return _sessions.sanitize_session_filename(raw)
 
 
 @app.post("/api/session/save")
 async def save_session(request: Request, client_id: str = Depends(verify_api_key)):
-    logger.info(f"💾 Session SAVE request from {client_id}")
-    try:
-        data = await request.json()
-        filename = _sanitize_session_filename(data.get("filename"))
-        
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{LLAMA_SERVER_URL}/slots/0?action=save",
-                json={"filename": filename},
-                timeout=60.0
-            )  
-            if resp.status_code != 200:
-                logger.error(f"Llama save failed: {resp.text}")
-                raise HTTPException(status_code=resp.status_code, detail=f"Llama save failed: {resp.text}")
-                
-            return resp.json()
-    except HTTPException:
-        # Let client-facing 4xx (e.g. filename-sanitization 400) propagate unchanged.
-        raise
-    except Exception as e:
-        logger.error(f"Save session failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    """Save the current llama-server slot state to a session file (Phase 5: delegated)."""
+    return await _sessions.save_session(request, client_id)
+
 
 @app.post("/api/session/load")
 async def load_session(request: Request, client_id: str = Depends(verify_api_key)):
-    logger.info(f"📂 Session LOAD request from {client_id}")
-    try:
-        data = await request.json()
-        filename = _sanitize_session_filename(data.get("filename"))
-            
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{LLAMA_SERVER_URL}/slots/0?action=restore",
-                json={"filename": filename},
-                timeout=60.0 # Loading takes time
-            )
-            if resp.status_code != 200:
-                logger.error(f"Llama load failed: {resp.text}")
-                raise HTTPException(status_code=resp.status_code, detail=f"Llama load failed: {resp.text}")
-                
-            return resp.json()
-    except HTTPException:
-        # Let client-facing 4xx (e.g. filename-sanitization 400) propagate unchanged.
-        raise
-    except Exception as e:
-        logger.error(f"Load session failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    """Restore a llama-server slot state from a session file (Phase 5: delegated)."""
+    return await _sessions.load_session(request, client_id)
+
 
 @app.get("/api/session/list")
 async def list_sessions(client_id: str = Depends(verify_api_key)):
-    logger.debug(f"📜 Session LIST request from {client_id}")
-    try:
-        save_path = Path("/home/flip/llama_slots") 
-        if not save_path.exists():
-            return {"sessions": []}
-            
-        files = [f.stem for f in save_path.glob("*.bin")]
-        return {"sessions": sorted(files)}
-    except Exception as e:
-        logger.error(f"List sessions failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    """List available session files (Phase 5: delegated)."""
+    return await _sessions.list_sessions(client_id)
+
 
 if __name__ == "__main__":
     import asyncio
