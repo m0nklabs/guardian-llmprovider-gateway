@@ -88,15 +88,21 @@ When touching these areas, read the referenced detail docs:
 
 ## Active Handoff
 
-### Pi session `20260812_2` (last updated 2026-08-12 20:30)
+### Pi session `20260812_3` (last updated 2026-08-12 ~21:30)
 
 - Working directory: `/home/flip/llama_cpp_guardian`
-- **Phase 5 continued: server.py 5177 → 4003 lines, full suite 887 passed / 3 skipped.**
-  - Extracted `app/cloud_inference/forwarding.py` (`forward_to_cloud_provider`, 556 lines, 28 deps via `init()`)
-  - Extracted `app/local_inference/ollama.py` (`chat_ollama`/`generate_ollama`, 742 lines, 38 deps via `init()`); routes in server.py are thin wrappers; local init() call sits at module end (referenced helpers like `_is_cloud_or_guardian_route` are defined later in the module)
-  - Commits: `b64d92b`, `248c068` (+ earlier `121cfcc`, `88abf90`, `0524ae3`). Not pushed.
-- **Live config changes earlier this session:** `cloud_retry.enabled=false` (429 pass-through, live since 19:41 restart), provider timeouts 600→1200 (**NOT live** — settings.yaml edited 19:47, service last restarted 19:41; needs a restart that drops the session), pi retry backoff in `~/.pi/agent/settings.json` (`baseDelayMs` 4000, `maxRetryDelayMs` 120000, live).
-- **Remaining Phase 5 roadmap:** remaining `app/gateway/` (auth, normalization, routing, metrics), remaining `app/local_inference/` (model switching, llama-server transport), remaining `app/cloud_inference/`.
+- **Phase 5 structural separation: server.py 5177 → 1667 lines (−68%), full suite 887 passed / 3 skipped.** All logic lives in modules; server.py is a thin shell (routes, wrappers, init() calls). 95 delegation markers, 41 routes.
+- Modules (all with `init()` DI, wrappers keep `server._*` names so test patches survive):
+  - `app/gateway/`: `context_metadata`, `streaming`, `queue_helpers`, `usage`, `normalization`, `routing` (proxy_v1_post), `capture_dispatch`, `model_discovery` (/api/tags, /v1/models, /api/show), `admin_api` (25 handlers: keys, credentials, status, capture, scaler, queue), `sessions`
+  - `app/cloud_inference/`: `routing`, `forwarding`
+  - `app/local_inference/`: `ollama`, `models` (resolution, sizes, timeouts, VRAM scheduler, backend-reload recovery)
+  - `app/proxy/`: `process` (pid/listener/startup state), `lifespan`, `state`
+  - `app/config_loader.py` (settings.yaml parsed once per process; typed accessors)
+- **No hardcoded vars rule** added to Critical rules (2026-08-12): extraction bodies must be re-checked for literals (`/home/...`, `:11434`, `guardian.pid`, …) and re-routed through `config/settings.yaml` or `app/paths.py` before committing. Sessions dir now flows via `paths.LLAMA_SLOTS_DIR`; `PROXY_PORT`/`PID_FILE` derive from settings.yaml (`proxy.port`, `proxy.pid_file`).
+- **Bug fixed during extraction:** `_resolve_auto_reload_model` had been an empty stub since the queue_helpers extraction (returned `None`); body restored in `app/local_inference/models.py` (`model_manager.resolve_reload_target`).
+- Commits since last handoff (newest first): `93ceeda`, `95a2313`, `be562f1`, `74cfb08`, `494a20e`, `04685b4`, `5107a8a`, `fedf6dc`, `b436307`, `55051ce`, `22cd9f6` … **all 27+ Phase 5 commits NOT pushed.**
+- **Provider timeouts 600→1200 still NOT live** (settings.yaml edited 2026-08-12 19:47; service last restarted 19:41). Needs `sudo systemctl restart llama-guardian` — session drops, operator runs it (see Critical rule). Verify after restart: `cloud_retry.enabled=false`, `providers.*.timeout_seconds=1200`.
+- Takeover sequence: `git diff` review → `py_compile` on `app/` → `./venv/bin/python -m pytest tests/ -q` → restart with operator → push after review.
 
 ### Pi session `20260812_1` (last updated 2026-08-12 19:45)
 
