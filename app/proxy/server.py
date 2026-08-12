@@ -1,56 +1,34 @@
 import os
-import base64
-import json
 import asyncio
+from contextlib import asynccontextmanager
 import logging
-import re
 import signal
-import subprocess
-import time
-import uuid
-import errno
-import struct
-import zlib
-from dataclasses import dataclass, field
-from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException, Response, Depends
-from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.status import HTTP_401_UNAUTHORIZED
 
 from app.paths import LLAMA_SLOTS_DIR
 from app.engine.manager import ModelManager, ModelLoadError
-from app.proxy.auth import build_request_auth_context, get_request_auth_context, set_request_auth_context, verify_api_key, generate_api_key, load_api_keys, _token_fingerprint
+from app.proxy.auth import get_request_auth_context, verify_api_key, generate_api_key, load_api_keys, _token_fingerprint
 from app.proxy.providers import CloudProvider, ProviderRegistry
-from app.proxy.cloud_keys import CloudCredentialStore, parse_guardian_route, mask_api_key
+from app.proxy.cloud_keys import CloudCredentialStore, parse_guardian_route
 from app.proxy.failover import FailoverRegistry, ProviderHealthTracker, FAILURE_THRESHOLD, COOLDOWN_SECONDS, RATE_LIMIT_COOLDOWN_SECONDS
 from app.proxy.ratelimit import RateLimitConfig, RateLimitRetryManager
 from app.proxy.anthropic_bridge import (
-    _format_sse_event,
-    provider_needs_anthropic_translation,
-    translate_anthropic_request_to_openai,
     translate_openai_error_to_anthropic,
     translate_openai_response_to_anthropic,
     translate_openai_stream_to_anthropic,
 )
-from app.proxy.queue import InferenceQueue, QueueAdmissionRejected, QueueRequestCancelled
+from app.proxy.queue import InferenceQueue
 from app.proxy.metrics import (
-    track_request,
     update_queue_metrics,
     update_gpu_metrics,
     update_system_metrics,
     update_capture_metrics,
     get_metrics_output,
-    MODEL_SWITCHES,
-    MODEL_CRASHES,
-    QUEUE_TOTAL_QUEUED,
-    QUEUE_TOTAL_COMPLETED,
-    QUEUE_TOTAL_TIMEOUTS,
-    AUTH_FAILURES,
 )
 
 # ── Capture subsystem (opt-in, fail-open, disabled by default) ───────
@@ -59,8 +37,6 @@ from app.capture.integration import (
     get_capture_controller,
     get_capture_sink_snapshot,
 )
-from app.capture.config import PROTOCOL_OPENAI, PROTOCOL_ANTHROPIC, PROTOCOL_OLLAMA, ROUTE_LOCAL
-from app.capture.redactor import anthropic_messages_to_openai
 from app.capture.schema import BuildContext
 from app.capture.stream_assembler import StreamResponseAssembler
 
@@ -119,7 +95,7 @@ from app.gateway import queue_helpers as _queue_helpers
 from app import config_loader as _config_loader
 
 # ── Proxy state container (Phase 5 extraction) ───────────────────────
-from app.proxy.state import State as _State, state as _state
+from app.proxy.state import State as _State
 
 def load_config() -> dict:
     """Load configuration from settings.yaml with sensible defaults (Phase 5: delegated)."""
