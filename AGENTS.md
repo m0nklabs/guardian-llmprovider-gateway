@@ -190,7 +190,7 @@ When touching these areas, read the referenced detail docs:
 - Failover attempt tracking in capture events
 - 836 Guardian unit tests, 833 Keanu tests, 222 capture-specific tests
 
-### Phase 5 — Guardian Structural Separation 🔄 (In Progress)
+### Phase 5 — Guardian Structural Separation ✅ (server.py is a thin shell: 5177 → 1667 lines, −68%)
 - ✅ Extract `app/gateway/context_metadata.py` (context window resolution + model metadata entry construction, 6 functions, dependency injection via `init()`)
 - ✅ Extract `app/cloud_inference/` (provider URL resolution, Google model discovery, routing helpers, retry classification, response header sanitisation, OpenAI reasoning param adaptation — 14 functions, dependency injection via `init()`)
 - ✅ Extract `app/gateway/capture_dispatch.py` (capture event dispatch, 11 functions, dependency injection via `init()`)
@@ -208,9 +208,11 @@ When touching these areas, read the referenced detail docs:
 - ✅ Extract `app/gateway/sessions.py` (session save/load/list + filename sanitizer — 4 funcs, ~85 lines)
 - ✅ Extract `app/config_loader.py` (load_config + typed accessors vram/heartbeat/close-timeout/queue — YAML now parsed once per process)
 - ✅ Extract `app/proxy/state.py` (State container with vram_limit_mb param)
-- 📋 Extract remaining `app/gateway/` (auth, normalization, routing, metrics)
-- 📋 Extract remaining `app/local_inference/` (model switching, llama-server transport)
-- 📋 Extract remaining `app/cloud_inference/` (cloud attempts resolution, forward_to_cloud_provider, streaming, capture dispatch integration)
+- ✅ `app/gateway/` extraction complete (auth stays imported in server.py; `prometheus_metrics` is a thin wrapper over `app/proxy/metrics.py`)
+- ✅ `app/local_inference/` extraction complete (ollama, models incl. VRAM scheduler + backend reload; queue stays in `app/proxy/queue.py` and is injected)
+- ✅ `app/cloud_inference/` extraction complete (routing + forwarding)
+- ✅ `app/proxy/` process/lifespan/state + `app/config_loader.py` done — **server.py is a thin shell: 5177 → 1667 lines (−68%), 95 delegation markers, 41 routes**
+- 📋 Optional polish: `proxy_v1_get` passthrough, final import cleanup, push to GitHub
 
 ### Phase 6 — Operational Hardening 🔄 (In Progress)
 - ✅ `guardianctl` CLI for capture control (`scripts/guardianctl.py`)
