@@ -86,6 +86,9 @@ from app.local_inference import ollama as _local_ollama
 # ── Gateway capture dispatch (Phase 5 extraction) ────────────────────
 from app.gateway import capture_dispatch as _capture_dispatch
 
+# ── Gateway usage tracking (Phase 5 extraction) ──────────────────────
+from app.gateway import usage as _usage
+
 # ── Gateway streaming helpers (Phase 5 extraction) ──────────────────
 from app.gateway import streaming as _streaming
 
@@ -1575,85 +1578,8 @@ class State:
 
 state = State()
 
-
-def _coerce_usage_int(value: object) -> int:
-    """Convert token usage values to non-negative integers."""
-    try:
-        return max(int(value), 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-# Initialize capture dispatch with injected helpers
-_capture_dispatch.init(get_request_auth_context, _coerce_usage_int)
-
-# Initialize cloud routing with all dependencies
-_cloud_routing.init(
-    provider_registry, cloud_cred_store, failover_registry, failover_health,
-    get_request_auth_context,
-    _capture_dispatch.capture_client_fingerprint,
-    _capture_dispatch.capture_endpoint_from_request,
-    _capture_dispatch.dispatch_capture_request_received,
-    get_capture_controller,
-    _cloud_inf.provider_base_url,
-    _cloud_inf.cloud_provider_for_request,
-    _cloud_inf.cloud_provider_unavailable_error,
-    _cloud_inf.adapt_openai_reasoning_params,
-)
-
-
-def _coerce_header_int(value: object) -> int:
-    """Convert a header-like byte count to a non-negative integer."""
-    try:
-        return max(int(str(value).strip()), 0)
-    except (AttributeError, TypeError, ValueError):
-        return 0
-
-
-def _request_size_bytes(request: Request) -> int:
-    """Best-effort byte count for the inbound request body."""
-    return _coerce_header_int(request.headers.get("content-length"))
-
-
-def _response_size_bytes(response: Response) -> int:
-    """Best-effort byte count for the outbound response body."""
-    header_value = response.headers.get("content-length")
-    if header_value not in (None, ""):
-        return _coerce_header_int(header_value)
-    body = getattr(response, "body", None)
-    if isinstance(body, (bytes, bytearray)):
-        return len(body)
-    return 0
-
-
-def _should_track_api_usage(path: str) -> bool:
-    """Return whether the request path should count toward API usage."""
-    if path in {"/healthz", "/metrics"}:
-        return False
-    return path.startswith("/api/") or path.startswith("/v1/") or path.startswith("/admin/")
-
-
-def _get_usage_client_id(request: Request) -> Optional[str]:
-    """Extract the authenticated client name attached by auth."""
-    user = getattr(request.state, "user", None)
-    if isinstance(user, dict):
-        name = user.get("name")
-        if isinstance(name, str) and name.strip():
-            return name.strip()
-    auth_context = getattr(request.state, "auth_context", None)
-    if isinstance(auth_context, dict):
-        name = auth_context.get("client_name")
-        if isinstance(name, str) and name.strip():
-            return name.strip()
-    return None
-
-
-def _get_usage_attribution(request: Request) -> Optional[Dict[str, Any]]:
-    """Return request attribution details collected during auth."""
-    auth_context = get_request_auth_context(request)
-    if isinstance(auth_context, dict):
-        return auth_context
-    return build_request_auth_context(request)
+# Initialize usage tracking with the server State object
+_usage.init(state)
 
 
 def _get_queue_owner_id(request: Request, client_id: Optional[str]) -> Optional[str]:
@@ -1677,35 +1603,67 @@ def _get_cloud_key_fingerprint(request: Request, client_id: Optional[str]) -> st
         return fingerprint.strip()
     return str(client_id or "unknown-client")
 
+def _coerce_usage_int(value: object) -> int:
+    """Convert token usage values to non-negative integers (Phase 5: delegated)."""
+    return _usage.coerce_usage_int(value)
+
+
+# Initialize capture dispatch with injected helpers
+_capture_dispatch.init(get_request_auth_context, _coerce_usage_int)
+
+# Initialize cloud routing with all dependencies
+_cloud_routing.init(
+    provider_registry, cloud_cred_store, failover_registry, failover_health,
+    get_request_auth_context,
+    _capture_dispatch.capture_client_fingerprint,
+    _capture_dispatch.capture_endpoint_from_request,
+    _capture_dispatch.dispatch_capture_request_received,
+    get_capture_controller,
+    _cloud_inf.provider_base_url,
+    _cloud_inf.cloud_provider_for_request,
+    _cloud_inf.cloud_provider_unavailable_error,
+    _cloud_inf.adapt_openai_reasoning_params,
+)
+
+
+def _coerce_header_int(value: object) -> int:
+    """Convert a header-like byte count to a non-negative integer (Phase 5: delegated)."""
+    return _usage.coerce_header_int(value)
+
+
+def _request_size_bytes(request: Request) -> int:
+    """Best-effort byte count for the inbound request body (Phase 5: delegated)."""
+    return _usage.request_size_bytes(request)
+
+
+def _response_size_bytes(response: Response) -> int:
+    """Best-effort byte count for the outbound response body (Phase 5: delegated)."""
+    return _usage.response_size_bytes(response)
+
+
+def _should_track_api_usage(path: str) -> bool:
+    """Return whether the request path should count toward API usage (Phase 5: delegated)."""
+    return _usage.should_track_api_usage(path)
+
+
+def _get_usage_client_id(request: Request) -> Optional[str]:
+    """Extract the authenticated client name attached by auth (Phase 5: delegated)."""
+    return _usage.get_usage_client_id(request)
+
+
+def _get_usage_attribution(request: Request) -> Optional[Dict[str, Any]]:
+    """Return request attribution details collected during auth (Phase 5: delegated)."""
+    return _usage.get_usage_attribution(request)
+
 
 def _get_live_usage_request_id(request: Request) -> Optional[str]:
-    """Return the dashboard request id bound to the current FastAPI request."""
-    state_obj = getattr(request, "state", None)
-    if state_obj is None:
-        return None
-    request_id = getattr(state_obj, "guardian_usage_request_id", None)
-    if isinstance(request_id, str) and request_id.strip():
-        return request_id.strip()
-    return None
+    """Return the dashboard request id bound to the current FastAPI request (Phase 5: delegated)."""
+    return _usage.get_live_usage_request_id(request)
 
 
 def _start_live_request_usage(request: Request) -> None:
-    """Register the current API request as in-flight for dashboard polling."""
-    if not isinstance(get_request_auth_context(request), dict):
-        set_request_auth_context(request, build_request_auth_context(request))
-    live_request_id = str(uuid.uuid4())
-    request.state.guardian_usage_request_id = live_request_id
-    request.state.guardian_usage_started_monotonic = time.monotonic()
-    state.api_usage.start_request(
-        request_id=live_request_id,
-        client_id=_get_usage_client_id(request),
-        endpoint=request.url.path,
-        method=request.method,
-        model=getattr(request.state, "guardian_usage_model", None),
-        request_bytes=_request_size_bytes(request),
-        streamed=bool(getattr(request.state, "guardian_usage_streamed", False)),
-        attribution=_get_usage_attribution(request),
-    )
+    """Register the current API request as in-flight for dashboard polling (Phase 5: delegated)."""
+    _usage.start_live_request_usage(request)
 
 
 def _update_live_request_usage(
@@ -1721,12 +1679,9 @@ def _update_live_request_usage(
     output_chars_delta: object = 0,
     response_bytes_delta: object = 0,
 ) -> None:
-    """Push incremental request metadata into the live dashboard tracker."""
-    live_request_id = _get_live_usage_request_id(request)
-    if live_request_id is None:
-        return
-    state.api_usage.update_active_request(
-        request_id=live_request_id,
+    """Push incremental request metadata into the live dashboard tracker (Phase 5: delegated)."""
+    _usage.update_live_request_usage(
+        request,
         model=model,
         streamed=streamed,
         queue_request_id=queue_request_id,
@@ -1745,28 +1700,8 @@ def _finish_live_request_usage(
     status_code: int,
     response_bytes: Optional[int] = None,
 ) -> None:
-    """Finalize the live dashboard request entry and fold it into history."""
-    live_request_id = _get_live_usage_request_id(request)
-    if live_request_id is None or getattr(request.state, "guardian_usage_finished", False):
-        return
-    started = getattr(request.state, "guardian_usage_started_monotonic", None)
-    duration_ms = None
-    if isinstance(started, (int, float)):
-        duration_ms = max((time.monotonic() - float(started)) * 1000.0, 0.0)
-    state.api_usage.finish_request(
-        request_id=live_request_id,
-        client_id=_get_usage_client_id(request),
-        endpoint=request.url.path,
-        method=request.method,
-        status_code=status_code,
-        model=getattr(request.state, "guardian_usage_model", None),
-        duration_ms=duration_ms,
-        request_bytes=_request_size_bytes(request),
-        response_bytes=response_bytes,
-        streamed=bool(getattr(request.state, "guardian_usage_streamed", False)),
-        attribution=_get_usage_attribution(request),
-    )
-    request.state.guardian_usage_finished = True
+    """Finalize the live dashboard request entry and fold it into history (Phase 5: delegated)."""
+    _usage.finish_live_request_usage(request, status_code=status_code, response_bytes=response_bytes)
 
 
 def _set_request_usage_metadata(
@@ -1775,12 +1710,8 @@ def _set_request_usage_metadata(
     model: Optional[str] = None,
     streamed: Optional[bool] = None,
 ) -> None:
-    """Attach request metadata for dashboard usage snapshots."""
-    if model is not None:
-        request.state.guardian_usage_model = model
-    if streamed is not None:
-        request.state.guardian_usage_streamed = streamed
-    _update_live_request_usage(request, model=model, streamed=streamed)
+    """Attach request metadata for dashboard usage snapshots (Phase 5: delegated)."""
+    _usage.set_request_usage_metadata(request, model=model, streamed=streamed)
 
 
 def _record_request_token_usage(
@@ -1793,17 +1724,15 @@ def _record_request_token_usage(
     prompt_tokens: object = 0,
     completion_tokens: object = 0,
 ) -> None:
-    """Store token usage for a completed request when available."""
-    resolved_attribution = attribution
-    if resolved_attribution is None and request is not None:
-        resolved_attribution = _get_usage_attribution(request)
-    state.api_usage.record_tokens(
-        client_id=client_id,
-        endpoint=endpoint,
-        model=model,
-        prompt_tokens=_coerce_usage_int(prompt_tokens),
-        completion_tokens=_coerce_usage_int(completion_tokens),
-        attribution=resolved_attribution,
+    """Store token usage for a completed request when available (Phase 5: delegated)."""
+    _usage.record_request_token_usage(
+        client_id,
+        endpoint,
+        model,
+        request=request,
+        attribution=attribution,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
     )
 
 
@@ -1816,45 +1745,21 @@ def _record_usage_from_payload(
     request: Optional[Request] = None,
     attribution: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Extract OpenAI-style usage fields from a JSON payload."""
-    if not isinstance(payload, dict):
-        return
-    usage = payload.get("usage")
-    if not isinstance(usage, dict):
-        return
-    _record_request_token_usage(
+    """Extract OpenAI-style usage fields from a JSON payload (Phase 5: delegated)."""
+    _usage.record_usage_from_payload(
         client_id,
         endpoint,
         model,
+        payload,
         request=request,
         attribution=attribution,
-        prompt_tokens=usage.get("prompt_tokens", usage.get("input_tokens", 0)),
-        completion_tokens=usage.get("completion_tokens", usage.get("output_tokens", 0)),
     )
 
 
 @app.middleware("http")
 async def track_api_usage_middleware(request: Request, call_next):
-    """Track aggregate API usage for dashboard monitoring."""
-    path = request.url.path
-    if not _should_track_api_usage(path):
-        return await call_next(request)
-
-    _start_live_request_usage(request)
-    try:
-        response = await call_next(request)
-    except Exception:
-        _finish_live_request_usage(request, status_code=500, response_bytes=0)
-        raise
-
-    is_streaming_response = bool(getattr(request.state, "guardian_usage_streamed", False)) and isinstance(response, StreamingResponse)
-    if not is_streaming_response:
-        _finish_live_request_usage(
-            request,
-            status_code=response.status_code,
-            response_bytes=_response_size_bytes(response),
-        )
-    return response
+    """Track aggregate API usage for dashboard monitoring (Phase 5: delegated)."""
+    return await _usage.track_api_usage(request, call_next)
 
 
 # --- Inference queue: serializes access to single-slot backend ---

@@ -321,7 +321,7 @@ def test_start_live_request_usage_seeds_request_auth_context(tmp_path: Path):
         method="GET",
     )
 
-    with patch.object(server, "state", SimpleNamespace(api_usage=tracker)):
+    with patch.object(server._usage, "_state", SimpleNamespace(api_usage=tracker)):
         server._start_live_request_usage(request)
 
     assert request.state.auth_context["source_ip"] == "10.0.0.8"
