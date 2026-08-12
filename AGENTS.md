@@ -20,6 +20,7 @@
 
 - **Test before claiming fixed:** `./venv/bin/python -m py_compile <file>` then run `./venv/bin/python -m pytest tests/ -x`. Never claim a fix works without verifying.
 - **No hot reload.** The provider registry, queue, and server load at startup. Code changes require `sudo systemctl restart llama-guardian` to take effect. Config-file edits to `settings.yaml` also need a restart (the "hot reload" claim in older docs is incorrect).
+- **The agent routes through Guardian — restarting cuts the agent's own model traffic.** This agent harness (Claude Code / goose / pi) reaches its model *through this very service* (nginx `:11434` → TLS `:11435` → app). A `sudo systemctl restart llama-guardian` therefore silences the current session until startup completes; a code/config error that prevents startup is **not self-healable** — the agent's model is unreachable, so it cannot fix its own mistake. Before any restart: (1) validate with `py_compile` + focused pytest, (2) tell the operator a restart is coming and the session will drop, (3) let the operator run the restart from outside the session, (4) if startup fails, the operator must revert (`git stash`/`git checkout` on `app/`, restore previous `settings.yaml`) — never promise in-session recovery. **Known recovery path (proven 2026-08-12):** the operator enables `gh copilot` (routes around Guardian) and uses it to inspect/repair/restart Guardian while the pi session is down.
 - **TLS requires both paths.** `GUARDIAN_TLS_CERTFILE` and `GUARDIAN_TLS_KEYFILE` are an all-or-nothing pair. The production drop-in binds TLS to `127.0.0.1:11435` through `GUARDIAN_TLS_HOST` and `GUARDIAN_TLS_PORT`; nginx's `libnginx-mod-stream` module and a top-level `stream { include /etc/nginx/stream-conf.d/*.conf; }` block are required for the public protocol multiplexer. Keep the private key `0600`.
 - **Secrets in `.env`.** API keys use `${ENV_VAR}` expansion. Never inline keys in YAML or Python. Use `scripts/generate_key.py` to mint new Guardian keys.
 - **Model resolution is name-based and key-independent.** A model is cloud-hosted when it matches an explicit `models:` entry or a `model_prefixes:` namespace (e.g. `anthropic/`, `nvidia/`). Local models are aliases from `config/models.yaml`. Unknown models return `404 model_not_served`. See `@docs/LLM_ROUTER.md`.
@@ -83,6 +84,59 @@ When touching these areas, read the referenced detail docs:
 - This file is the source of truth. `CLAUDE.md` and `.goosehints` are relative symlinks to this file.
 - Every behavior change goes here first; symlinks follow automatically.
 - If this repo gains Windows CI, run `scripts/sync-agent-docs.sh` instead of symlinks.
+
+## Active Handoff
+
+### Pi session `20260812_1` (last updated 2026-08-12 19:45)
+
+- Working directory: `/home/flip/llama_cpp_guardian`
+- Last user instruction: disable the 429 retry catcher and restart; then document that the agent's own model traffic routes through Guardian.
+- **429 catcher disabled (live).** `config/settings.yaml` → `cloud_retry.enabled: false`; both failover 429 probes (streaming + non-streaming) in `app/proxy/server.py` are gated on `cloud_rate_limiter.config.enabled`. Upstream 429s now pass straight through to the client (agent harness owns backoff/retry). Cross-provider failover switching stays active. Service restarted 2026-08-12 ~19:36 UTC and again 19:41 UTC; the restart interrupted this agent's own session (see new Critical rule "The agent routes through Guardian"). The operator had to enable `gh copilot` to get the system responsive again — this is now recorded as the proven recovery path.
+- **Cloud provider timeouts doubled (config only, not yet live).** `providers.*.timeout_seconds` 600 → 1200 (openrouter, nvidia, poolside, openai) — pi owns its own 429 backoff now, so per-request budgets must leave headroom for long reasoning generations. Local `timeouts.tiers` and `queue.queue_timeout_seconds` deliberately unchanged (recently tuned; local watchdog still bounds stalls). Needs a restart to take effect — warn the operator first: the session drops during restart.
+- **Pi-side retry backoff stretched (live, no restart needed).** `~/.pi/agent/settings.json` → `retry.baseDelayMs` 2000 → 4000 (pi's own agent-level 429 retry: 4s, 8s, 16s instead of 2s, 4s, 8s), `retry.provider.maxRetryDelayMs` 60000 → 120000 (accept server Retry-After up to 2 min). `maxRetries: 3` and `provider.maxRetries: 0` unchanged. This lives outside the repo — pi reads it at startup of a new turn; backup at `/tmp/pi-settings.json.bak`.
+- Validation: `py_compile` OK, `tests/unit/test_ratelimit.py` 13 passed, `tests/unit/test_server.py` 115 passed, and the full suite 887 passed / 3 skipped. A minimal pi-authenticated OpenRouter request returned HTTP 200 after the final restart.
+- **Resolved Phase 5 regressions:** `app/cloud_inference/routing.py` imported `anthropic_messages_to_openai` from the wrong module, causing HTTP 500s during cloud capture setup. It now imports the existing helper from `app.capture.redactor`. Stale server tests were updated to patch the injected `_cloud_routing` dependencies.
+- Still uncommitted from the previous takeover: structural extraction in `app/proxy/server.py`, `tests/unit/test_server.py`, and untracked `app/cloud_inference/routing.py`. The 429 change is part of the same working tree.
+
+#### Takeover sequence (next session)
+
+1. Inspect the uncommitted extraction and test changes:
+   `git diff -- app/proxy/server.py tests/unit/test_server.py app/cloud_inference/routing.py`
+2. Run syntax validation:
+   `./venv/bin/python -m py_compile app/proxy/server.py app/cloud_inference/routing.py`
+3. Run the focused server tests:
+   `./venv/bin/python -m pytest tests/unit/test_server.py -q`
+4. Re-run the focused and full suites after any further extraction changes:
+   `./venv/bin/python -m pytest tests/ -x`
+5. Restart Guardian only with the operator present and aware that the session drops (see Critical rules). Only push after the tests and the final `git diff` have been reviewed.
+
+### Goose session `20260809_5` (last updated 2026-08-12 17:25)
+
+- Working directory: `/home/flip/llama_cpp_guardian`
+- Last user instruction: update the docs, make the progress clear in `AGENTS.md`, and push to GitHub.
+- No Goose response or push confirmation was recorded after that instruction. Do not assume the push happened.
+- Current takeover files: `app/proxy/server.py` and `tests/unit/test_server.py` are modified; `app/cloud_inference/routing.py` is untracked.
+- The active work is the structural extraction from `app/proxy/server.py`. Context metadata patches in `tests/unit/test_server.py` were updated to use `server._ctx_meta`; routing extraction introduced `server._cloud_routing`, so tests that still patch old server-level routing or failover objects need review.
+
+#### Last recorded validation
+
+- Full unit suite: 870 tests passed.
+- `tests/unit/test_server.py`: 115 tests passed after patch updates.
+- Integration run: 9 passed, 3 skipped, 1 failed. `test_chat_completions_basic` returned `503 Loading model` instead of `200`.
+- Two integration attempts timed out after 120 and 180 seconds without output.
+- Vision fallback tests were still suspected to patch `server.failover_registry` while the extracted code reads `_cloud_routing._failover_registry`; this was not confirmed fixed before the session ended.
+
+#### Takeover sequence
+
+1. Inspect the uncommitted extraction and test changes:
+   `git diff -- app/proxy/server.py tests/unit/test_server.py app/cloud_inference/routing.py`
+2. Run syntax validation:
+   `./venv/bin/python -m py_compile app/proxy/server.py app/cloud_inference/routing.py`
+3. Run the focused server tests:
+   `./venv/bin/python -m pytest tests/unit/test_server.py -q`
+4. Fix remaining patch-target or model-loading failures, then run:
+   `./venv/bin/python -m pytest tests/ -x`
+5. Restart Guardian before integration checks; there is no hot reload. Only push after the tests and the final `git diff` have been reviewed.
 
 ## Capture Implementation Status
 
