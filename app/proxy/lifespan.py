@@ -19,8 +19,8 @@ logger = logging.getLogger("Guardian")
 
 
 # ── Injected (set once at startup by init()) ─────────────────────────
-_proxy_port = 11434
-_pid_file = "guardian.pid"
+_proxy_port = None  # injected via init()
+_pid_file = None  # injected via init()
 _get_pid_file_path = None
 _get_pid_file_status = None
 _get_proxy_listener_info = None
