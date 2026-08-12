@@ -179,8 +179,10 @@ def init(
     ]
     for _v in _vars:
         globals()[_v] = locals()[_v[1:]]
-    _GuardianRequestCancelled = guardian_request_cancelled
-    _get_model_timeout = get_model_timeout
+    # Special cases: camelCase global vs snake_case parameter, plus an
+    # underscore-prefixed param that does not map 1:1 via the loop above.
+    globals()["_GuardianRequestCancelled"] = guardian_request_cancelled
+    globals()["_get_model_timeout"] = get_model_timeout
 
 
 async def route_v1_post(path: str, request: Request, client_id: str):

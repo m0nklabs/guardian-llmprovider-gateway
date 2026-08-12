@@ -132,7 +132,7 @@ cloud_rate_limiter = RateLimitRetryManager(
 )
 
 # Configuration
-LLAMA_SERVER_URL = "http://127.0.0.1:11440"
+LLAMA_SERVER_URL = str(CONFIG.get("proxy", {}).get("target", "http://127.0.0.1:11440"))
 
 def _load_vram_limit() -> int:
     """Return the VRAM budget (MB) from proxy.vram_limit_mb (Phase 5: delegated)."""
@@ -684,7 +684,7 @@ app.add_middleware(
 model_manager = ModelManager()
 
 # Initialize gateway context_metadata with singleton dependencies
-_ctx_meta.init(model_manager, provider_registry, failover_registry)
+_ctx_meta.init(model_manager, provider_registry, failover_registry, llama_server_url=LLAMA_SERVER_URL)
 
 DEFAULT_CONTEXT_WINDOW = _ctx_meta.DEFAULT_CONTEXT_WINDOW
 BACKEND_CONTEXT_CACHE_SECONDS = 5.0

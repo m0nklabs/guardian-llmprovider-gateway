@@ -2310,3 +2310,64 @@ class TestExtractCloudResponseContent:
         assert tool_calls is not None
         assert len(tool_calls) == 1
         assert tool_calls[0]["function"]["name"] == "lookup"
+
+
+@pytest.mark.asyncio
+async def test_gw_routing_init_binds_camelcase_globals():
+    """Regression: init() must bind _GuardianRequestCancelled and _get_model_timeout
+    as module globals — a local-only assignment left them None, which turns the
+    `except _GuardianRequestCancelled` clauses in route_v1_post into a TypeError
+    at runtime whenever a request cancellation actually occurs.
+    """
+    assert server._gw_routing._GuardianRequestCancelled is server._GuardianRequestCancelled
+    assert server._gw_routing._GuardianRequestCancelled is not None
+    assert callable(server._gw_routing._get_model_timeout)
+
+
+@pytest.mark.asyncio
+async def test_resolve_auto_reload_model_delegates_to_model_manager():
+    """Regression: the function was an empty stub after the queue_helpers
+    extraction, silently returning None instead of the reload target."""
+    with patch.object(server._local_models, "_model_manager") as mm:
+        mm.resolve_reload_target.return_value = "qwen3-30b"
+        result = server._resolve_auto_reload_model("llama3.2-3b")
+        assert result == "qwen3-30b"
+        mm.resolve_reload_target.assert_called_once_with("llama3.2-3b")
+
+
+@pytest.mark.asyncio
+async def test_reload_backend_after_connect_error_skips_when_healthy():
+    """Backend-reload recovery must not reload when the backend is healthy again."""
+    with (
+        patch.object(server._local_models, "_model_manager") as mm,
+        patch.object(server._local_models, "_model_switch_lock", asyncio.Lock()),
+        patch.object(server._local_models, "_run_guardian_operation", new_callable=AsyncMock) as run_op,
+    ):
+        mm.get_current_model = AsyncMock(return_value="llama3.2-3b")
+        mm.backend_health_ok = AsyncMock(return_value=True)
+        mm.load = AsyncMock()
+        await server._reload_backend_after_connect_error("chat/completions", RuntimeError("boom"))
+        run_op.assert_not_awaited()
+        mm.load.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reload_backend_after_connect_error_reloads_when_down():
+    """Backend-reload recovery must load the resolved target when the backend is down."""
+    with (
+        patch.object(server._local_models, "_model_manager") as mm,
+        patch.object(server._local_models, "_model_switch_lock", asyncio.Lock()),
+        patch.object(server._local_models, "_reset_startup_check_status", return_value=42),
+        patch.object(server._local_models, "_run_guardian_operation", new_callable=AsyncMock) as run_op,
+    ):
+        mm.get_current_model = AsyncMock(return_value="llama3.2-3b")
+        mm.backend_health_ok = AsyncMock(return_value=False)
+        mm.resolve_reload_target.return_value = "qwen3-30b"
+        mm.load = AsyncMock()
+        await server._reload_backend_after_connect_error("chat/completions", RuntimeError("boom"))
+        run_op.assert_awaited_once()
+        args, kwargs = run_op.await_args
+        assert kwargs["phase"] == "backend_reload"
+        assert kwargs["source"] == "proxy"
+        assert kwargs["target_model"] == "qwen3-30b"
+        assert mm.is_unloaded is True

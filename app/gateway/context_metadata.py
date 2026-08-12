@@ -26,7 +26,7 @@ logger = logging.getLogger("Guardian")
 # ── Constants ────────────────────────────────────────────────────────
 
 DEFAULT_CONTEXT_WINDOW = 131_072
-LLAMA_SERVER_URL = "http://127.0.0.1:11440"
+LLAMA_SERVER_URL = None  # injected via init()
 BACKEND_CONTEXT_CACHE_SECONDS = 5.0
 
 # ── Module-level state ───────────────────────────────────────────────
@@ -43,12 +43,13 @@ _provider_registry = None  # ProviderRegistry instance
 _failover_registry = None  # FailoverRegistry instance
 
 
-def init(model_manager, provider_registry, failover_registry) -> None:
+def init(model_manager, provider_registry, failover_registry, *, llama_server_url=None) -> None:
     """Inject the singleton dependencies.  Called once at startup."""
-    global _model_manager, _provider_registry, _failover_registry
+    global _model_manager, _provider_registry, _failover_registry, LLAMA_SERVER_URL
     _model_manager = model_manager
     _provider_registry = provider_registry
     _failover_registry = failover_registry
+    LLAMA_SERVER_URL = llama_server_url
 
 
 # ── Public functions ─────────────────────────────────────────────────

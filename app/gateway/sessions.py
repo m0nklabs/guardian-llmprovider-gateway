@@ -33,11 +33,6 @@ def init(*, llama_server_url: str, session_slots_dir: Path) -> None:
 
 def sanitize_session_filename(raw: object) -> str:
     """Return a safe basename for a session slot, or raise HTTP 400."""
-_SESSION_SLOTS_DIR = None  # injected via init()
-_SESSION_FILENAME_RE = re.compile(r"^[A-Za-z0-9_-]+\.bin$")
-
-
-def sanitize_session_filename(raw: object) -> str:
     if not isinstance(raw, str) or not raw:
         raise HTTPException(status_code=400, detail="Filename required")
     basename = Path(raw).name  # drop any directory components
