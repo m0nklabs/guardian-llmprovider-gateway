@@ -198,6 +198,7 @@ When touching these areas, read the referenced detail docs:
 - ✅ Extract `app/proxy/process.py` (pid file, listener inspection/stale termination, startup-check state machine, guarded model operations, background startup check — 15 funcs, ~260 lines; owns `_startup_check_status`/`_startup_check_task` with accessors)
 - ✅ Extract `app/gateway/model_discovery.py` (Ollama /api/tags, /v1/models list+metadata, /api/show handler bodies — 4 async handlers, ~245 lines; routes stay thin wrappers in server.py)
 - ✅ Extract `app/gateway/admin_api.py` (keys, cloud credentials CRUD/links/google refresh, crash history, server status, capture status/rotate, scaler, queue status/cancel — 25 async handlers, ~420 lines; routes stay thin wrappers)
+- ✅ Extract `app/gateway/sessions.py` (session save/load/list + filename sanitizer — 4 funcs, ~85 lines)
 - 📋 Extract remaining `app/gateway/` (auth, normalization, routing, metrics)
 - 📋 Extract remaining `app/local_inference/` (model switching, llama-server transport)
 - 📋 Extract remaining `app/cloud_inference/` (cloud attempts resolution, forward_to_cloud_provider, streaming, capture dispatch integration)
