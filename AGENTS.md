@@ -87,6 +87,16 @@ When touching these areas, read the referenced detail docs:
 
 ## Active Handoff
 
+### Pi session `20260812_2` (last updated 2026-08-12 20:30)
+
+- Working directory: `/home/flip/llama_cpp_guardian`
+- **Phase 5 continued: server.py 5177 → 4003 lines, full suite 887 passed / 3 skipped.**
+  - Extracted `app/cloud_inference/forwarding.py` (`forward_to_cloud_provider`, 556 lines, 28 deps via `init()`)
+  - Extracted `app/local_inference/ollama.py` (`chat_ollama`/`generate_ollama`, 742 lines, 38 deps via `init()`); routes in server.py are thin wrappers; local init() call sits at module end (referenced helpers like `_is_cloud_or_guardian_route` are defined later in the module)
+  - Commits: `b64d92b`, `248c068` (+ earlier `121cfcc`, `88abf90`, `0524ae3`). Not pushed.
+- **Live config changes earlier this session:** `cloud_retry.enabled=false` (429 pass-through, live since 19:41 restart), provider timeouts 600→1200 (**NOT live** — settings.yaml edited 19:47, service last restarted 19:41; needs a restart that drops the session), pi retry backoff in `~/.pi/agent/settings.json` (`baseDelayMs` 4000, `maxRetryDelayMs` 120000, live).
+- **Remaining Phase 5 roadmap:** remaining `app/gateway/` (auth, normalization, routing, metrics), remaining `app/local_inference/` (model switching, llama-server transport), remaining `app/cloud_inference/`.
+
 ### Pi session `20260812_1` (last updated 2026-08-12 19:45)
 
 - Working directory: `/home/flip/llama_cpp_guardian`
@@ -179,8 +189,11 @@ When touching these areas, read the referenced detail docs:
 - ✅ Extract `app/gateway/capture_dispatch.py` (capture event dispatch, 11 functions, dependency injection via `init()`)
 - ✅ Extract `app/gateway/streaming.py` (SSE watchdog, keepalives, Anthropic enrichment, 11 functions/class, dependency injection via `init()`)
 - ✅ Extract `app/gateway/queue_helpers.py` (request lifecycle, disconnect watch, cancel cleanup, 11 functions/class, dependency injection via `init()`)
+- ✅ Extract `app/cloud_inference/routing.py` (attempt resolution, candidate preparation, capture setup, 385 lines, `init()` DI) — plus test patches updated to `server._cloud_routing` targets
+- ✅ Extract `app/cloud_inference/forwarding.py` (`forward_to_cloud_provider`: streaming/non-streaming cloud forwarding, failover + 429 handling, Anthropic translation, usage + capture hooks, 556 lines, 28 injected deps via `init()`); server.py keeps a thin wrapper
+- ✅ Extract `app/local_inference/ollama.py` (`chat_ollama`/`generate_ollama`: Ollama-protocol bridges to local llama-server, queue admission, auto-reload/switch, SSE translation, usage + capture, 742 lines, 38 injected deps via `init()`); routes in server.py are thin wrappers, init() call at module end
 - 📋 Extract remaining `app/gateway/` (auth, normalization, routing, metrics)
-- 📋 Extract `app/local_inference/` (inference queue, model switching, llama-server transport)
+- 📋 Extract remaining `app/local_inference/` (model switching, llama-server transport)
 - 📋 Extract remaining `app/cloud_inference/` (cloud attempts resolution, forward_to_cloud_provider, streaming, capture dispatch integration)
 
 ### Phase 6 — Operational Hardening 🔄 (In Progress)
