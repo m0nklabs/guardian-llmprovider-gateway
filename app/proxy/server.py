@@ -95,6 +95,9 @@ from app.gateway import normalization as _normalization
 # ── Gateway v1 routing (Phase 5 extraction) ─────────────────────────
 from app.gateway import routing as _gw_routing
 
+# ── Proxy process management (Phase 5 extraction) ───────────────────
+from app.proxy import process as _process
+
 # ── Gateway streaming helpers (Phase 5 extraction) ──────────────────
 from app.gateway import streaming as _streaming
 
@@ -220,142 +223,59 @@ logger = logging.getLogger("Guardian")
 
 PID_FILE = "guardian.pid"
 PROXY_PORT = 11434
-_startup_check_task: Optional[asyncio.Task] = None
-_startup_check_status: Dict[str, Optional[object]] = {
-    "state": "idle",
-    "phase": "idle",
-    "source": None,
-    "owner": None,
-    "target_model": None,
-    "requested_model": None,
-    "effective_model": None,
-    "started_at": None,
-    "completed_at": None,
-    "error": None,
-    "generation": 0,
-}
-
 _VISION_PROBE_IMAGE_DATA_URL: Optional[str] = None
 
 
 def _get_pid_file_path() -> Path:
-    return Path(__file__).parent.parent.parent / PID_FILE
+    """Return the guardian pid file path (Phase 5: delegated)."""
+    return _process.get_pid_file_path()
 
 
 def _describe_process(pid: int) -> Optional[str]:
-    try:
-        result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "args="],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0:
-            return result.stdout.strip() or None
-    except Exception:
-        return None
-    return None
+    """Describe a process via ps (Phase 5: delegated)."""
+    return _process.describe_process(pid)
 
 
 def _get_process_cgroup(pid: int) -> Optional[str]:
-    try:
-        lines = Path(f"/proc/{pid}/cgroup").read_text().splitlines()
-    except Exception:
-        return None
-
-    for line in lines:
-        parts = line.split(":", 2)
-        if len(parts) == 3 and parts[2]:
-            return parts[2]
-    return None
+    """Return the cgroup slice for a pid (Phase 5: delegated)."""
+    return _process.get_process_cgroup(pid)
 
 
 def _get_proxy_listener_info(port: int = PROXY_PORT) -> Optional[Dict[str, Optional[object]]]:
-    try:
-        result = subprocess.run(
-            ["ss", "-ltnp", f"( sport = :{port} )"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode != 0:
-            return None
-
-        for line in result.stdout.splitlines():
-            if f":{port}" not in line or "pid=" not in line:
-                continue
-            pid_match = re.search(r"pid=(\d+)", line)
-            name_match = re.search(r'"([^"]+)"', line)
-            if not pid_match:
-                continue
-            pid = int(pid_match.group(1))
-            cgroup = _get_process_cgroup(pid)
-            systemd_unit = None
-            if cgroup:
-                cgroup_name = Path(cgroup).name
-                if cgroup_name.endswith(".service"):
-                    systemd_unit = cgroup_name
-            return {
-                "pid": pid,
-                "process_name": name_match.group(1) if name_match else None,
-                "command": _describe_process(pid),
-                "cgroup": cgroup,
-                "systemd_unit": systemd_unit,
-                "port": port,
-                "is_current_process": pid == os.getpid(),
-            }
-    except Exception as e:
-        logger.debug(f"Failed to inspect proxy listener on {port}: {e}")
-    return None
+    """Inspect the process listening on the proxy port (Phase 5: delegated)."""
+    return _process.get_proxy_listener_info(port=port)
 
 
 def _get_pid_file_status() -> Dict[str, Optional[object]]:
-    pid_path = _get_pid_file_path()
-    status: Dict[str, Optional[object]] = {
-        "path": str(pid_path),
-        "exists": pid_path.exists(),
-        "pid": None,
-        "alive": None,
-    }
-    if not pid_path.exists():
-        return status
-
-    try:
-        raw = pid_path.read_text().strip()
-        if not raw:
-            return status
-        pid = int(raw)
-        status["pid"] = pid
-        try:
-            os.kill(pid, 0)
-            status["alive"] = True
-        except OSError as exc:
-            status["alive"] = exc.errno != errno.ESRCH
-    except Exception:
-        status["alive"] = False
-    return status
+    """Return pid file existence/alive status (Phase 5: delegated)."""
+    return _process.get_pid_file_status()
 
 
 async def _wait_for_proxy_listener_release(old_pid: int, timeout: float = 3.0) -> bool:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        listener = _get_proxy_listener_info()
-        if listener is None or listener.get("pid") != old_pid:
-            return True
-        await asyncio.sleep(0.1)
-    return False
+    """Wait until the old pid no longer owns the proxy port (Phase 5: delegated)."""
+    return await _process.wait_for_proxy_listener_release(old_pid, timeout=timeout)
+
+
+def _is_guardian_uvicorn_listener(listener: Optional[Dict[str, Optional[object]]]) -> bool:
+    """Return whether a listener looks like this Guardian app (Phase 5: delegated)."""
+    return _process.is_guardian_uvicorn_listener(listener)
+
+
+async def _stop_stale_guardian_listener(
+    listener: Optional[Dict[str, Optional[object]]], timeout: float = 3.0
+) -> bool:
+    """Terminate a stale Guardian listener before rebinding (Phase 5: delegated)."""
+    return await _process.stop_stale_guardian_listener(listener, timeout=timeout)
 
 
 def _operation_state_for_phase(phase: str) -> str:
-    if phase == "startup_check":
-        return "checking"
-    if phase in {"manual_load", "auto_switch", "auto_reload", "backend_reload"}:
-        return "switching"
-    return "running"
+    """Map an operation phase to its startup-state value (Phase 5: delegated)."""
+    return _process.operation_state_for_phase(phase)
 
 
 def _startup_state_is_in_progress(state: Optional[str]) -> bool:
-    return state in {"pending", "running", "checking", "switching"}
+    """Return whether a startup state is still in progress (Phase 5: delegated)."""
+    return _process.startup_state_is_in_progress(state)
 
 
 # ── Streaming helpers (delegated to app.gateway.streaming) ──────────
@@ -469,23 +389,14 @@ def _reset_startup_check_status(
     requested_model: Optional[str] = None,
     owner: Optional[str] = None,
 ) -> int:
-    generation = int(_startup_check_status.get("generation", 0)) + 1
-    _startup_check_status.update(
-        {
-            "state": "pending",
-            "phase": phase,
-            "source": source,
-            "owner": owner,
-            "target_model": target_model,
-            "requested_model": requested_model,
-            "effective_model": None,
-            "started_at": None,
-            "completed_at": None,
-            "error": None,
-            "generation": generation,
-        }
+    """Start a new startup-check generation (Phase 5: delegated)."""
+    return _process.reset_startup_check_status(
+        source=source,
+        phase=phase,
+        target_model=target_model,
+        requested_model=requested_model,
+        owner=owner,
     )
-    return generation
 
 
 def _mark_startup_check_status(
@@ -500,39 +411,23 @@ def _mark_startup_check_status(
     requested_model: Optional[str] = None,
     effective_model: Optional[str] = None,
 ) -> None:
-    if generation is not None and generation != _startup_check_status.get("generation"):
-        return
-
-    now = time.time()
-    _startup_check_status["state"] = state
-    if phase is not None:
-        _startup_check_status["phase"] = phase
-    if source is not None:
-        _startup_check_status["source"] = source
-    if owner is not None:
-        _startup_check_status["owner"] = owner
-    if target_model is not None:
-        _startup_check_status["target_model"] = target_model
-    if requested_model is not None:
-        _startup_check_status["requested_model"] = requested_model
-    if effective_model is not None:
-        _startup_check_status["effective_model"] = effective_model
-    if _startup_state_is_in_progress(state):
-        _startup_check_status["started_at"] = now
-        _startup_check_status["completed_at"] = None
-        _startup_check_status["error"] = None
-        return
-
-    if _startup_check_status["started_at"] is None:
-        _startup_check_status["started_at"] = now
-    _startup_check_status["completed_at"] = now
-    _startup_check_status["error"] = error
+    """Update the startup-check state machine (Phase 5: delegated)."""
+    _process.mark_startup_check_status(
+        state,
+        error,
+        generation=generation,
+        phase=phase,
+        source=source,
+        owner=owner,
+        target_model=target_model,
+        requested_model=requested_model,
+        effective_model=effective_model,
+    )
 
 
 def _get_startup_check_status() -> Dict[str, Optional[object]]:
-    snapshot = dict(_startup_check_status)
-    snapshot["task_active"] = _startup_check_task is not None and not _startup_check_task.done()
-    return snapshot
+    """Return a snapshot of the startup-check state (Phase 5: delegated)."""
+    return _process.get_startup_check_status()
 
 
 async def _run_guardian_operation(
@@ -545,75 +440,21 @@ async def _run_guardian_operation(
     operation,
     generation: int,
 ):
-    in_progress_state = _operation_state_for_phase(phase)
-    _mark_startup_check_status(
-        in_progress_state,
-        generation=generation,
+    """Run a model operation with startup-state tracking (Phase 5: delegated)."""
+    return await _process.run_guardian_operation(
         source=source,
         phase=phase,
-        owner=owner,
         target_model=target_model,
         requested_model=requested_model,
+        owner=owner,
+        operation=operation,
+        generation=generation,
     )
-
-    try:
-        result = await operation()
-    except asyncio.CancelledError:
-        _mark_startup_check_status("cancelled", generation=generation)
-        raise
-    except Exception as e:
-        _mark_startup_check_status("error", str(e), generation=generation)
-        raise
-
-    healthy = await model_manager.backend_health_ok()
-    verified = await model_manager.verify_backend_model() if healthy else False
-    effective_model = await model_manager.get_current_model()
-
-    if healthy and verified:
-        _mark_startup_check_status(
-            "ready",
-            generation=generation,
-            source=source,
-            phase=phase,
-            target_model=target_model,
-            requested_model=requested_model,
-            effective_model=effective_model,
-        )
-    else:
-        reasons = []
-        if not healthy:
-            reasons.append("backend_health_check_failed")
-        if not verified:
-            reasons.append("backend_model_unverified")
-        _mark_startup_check_status(
-            "degraded",
-            ", ".join(reasons) or None,
-            generation=generation,
-            source=source,
-            phase=phase,
-            target_model=target_model,
-            requested_model=requested_model,
-            effective_model=effective_model,
-        )
-    return result
 
 
 async def _run_startup_check_in_background(generation: int, target_model: Optional[str]) -> None:
-    try:
-        async with _model_switch_lock:
-            await _run_guardian_operation(
-                source="startup",
-                phase="startup_check",
-                target_model=target_model,
-                requested_model=target_model,
-                owner="startup",
-                operation=model_manager.startup_check,
-                generation=generation,
-            )
-    except Exception as e:
-        logger.error(f"⚠️ Startup check error (non-fatal): {e}")
-    else:
-        logger.info("✅ Startup check completed in background")
+    """Run the startup check under the switch lock (Phase 5: delegated)."""
+    await _process.run_startup_check_in_background(generation, target_model)
 
 
 def _resolve_inference_model(raw_model: Optional[str], current_model: str) -> Optional[str]:
@@ -963,7 +804,6 @@ def _map_multimodal_backend_error(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _startup_check_task
 
     # Startup: Check and write PID file
     pid_path = _get_pid_file_path()
@@ -1055,7 +895,9 @@ async def lifespan(app: FastAPI):
         requested_model=startup_target,
     )
     logger.info("🔄 Scheduling startup model verification in background")
-    _startup_check_task = asyncio.create_task(_run_startup_check_in_background(generation, startup_target))
+    _process.set_startup_check_task(
+        asyncio.create_task(_run_startup_check_in_background(generation, startup_target))
+    )
 
     # Start capture writer (fail-open: disabled by default, errors are logged not raised)
     capture_writer_task: Optional[asyncio.Task] = None
@@ -1076,16 +918,10 @@ async def lifespan(app: FastAPI):
     yield
 
     idle_task.cancel()
-    if _startup_check_task is not None:
-        _startup_check_task.cancel()
+    _process.cancel_startup_check_task()
 
     with suppress(asyncio.CancelledError):
         await idle_task
-
-    if _startup_check_task is not None:
-        with suppress(asyncio.CancelledError):
-            await _startup_check_task
-        _startup_check_task = None
 
     # Shutdown: Stop capture writer
     try:
@@ -1231,6 +1067,14 @@ def get_model_timeout(model_name: str) -> int:
 # Model switch concurrency lock - prevents race conditions when
 # multiple requests try to switch models simultaneously
 _model_switch_lock = asyncio.Lock()
+
+# Initialize process management with constants + singletons
+_process.init(
+    model_manager=model_manager,
+    model_switch_lock=_model_switch_lock,
+    pid_file=PID_FILE,
+    proxy_port=PROXY_PORT,
+)
 
 # Auth replaced by verify_api_key imported from app.proxy.auth
 

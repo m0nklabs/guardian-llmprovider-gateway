@@ -38,7 +38,7 @@ async def test_lifespan_does_not_wait_for_startup_check(tmp_path: Path):
     pid_file = tmp_path / "guardian-startup-test.pid"
 
     with (
-        patch.object(server, "PID_FILE", str(pid_file)),
+        patch.object(server._process, "_pid_file", str(pid_file)),
         patch.object(server.model_manager, "startup_check", fake_startup_check),
         patch.object(server, "_idle_unload_watcher", fake_idle_unload_watcher),
         patch.object(server, "_get_proxy_listener_info", return_value=None),
@@ -94,7 +94,7 @@ async def test_lifespan_tolerates_existing_live_pid_file(tmp_path: Path):
     pid_file.write_text(f"{os.getppid()}\n")
 
     with (
-        patch.object(server, "PID_FILE", str(pid_file)),
+        patch.object(server._process, "_pid_file", str(pid_file)),
         patch.object(server.model_manager, "startup_check", fake_startup_check),
         patch.object(server, "_idle_unload_watcher", fake_idle_unload_watcher),
         patch.object(server, "_get_proxy_listener_info", return_value=None),
