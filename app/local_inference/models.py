@@ -25,6 +25,10 @@ _provider_registry = None
 _parse_guardian_route = None
 _config: Dict[str, Any] = {}
 _safe_vram_limit_mb = 0
+_model_switch_lock = None
+_reset_startup_check_status = None
+_run_guardian_operation = None
+_ModelLoadError = None
 
 
 def init(
@@ -34,14 +38,23 @@ def init(
     parse_guardian_route,
     config: Dict[str, Any],
     safe_vram_limit_mb: int,
+    model_switch_lock,
+    reset_startup_check_status,
+    run_guardian_operation,
+    model_load_error_cls,
 ) -> None:
     """Inject all dependencies. Called once at startup."""
     global _model_manager, _provider_registry, _parse_guardian_route, _config, _safe_vram_limit_mb
+    global _model_switch_lock, _reset_startup_check_status, _run_guardian_operation, _ModelLoadError
     _model_manager = model_manager
     _provider_registry = provider_registry
     _parse_guardian_route = parse_guardian_route
     _config = config
     _safe_vram_limit_mb = safe_vram_limit_mb
+    _model_switch_lock = model_switch_lock
+    _reset_startup_check_status = reset_startup_check_status
+    _run_guardian_operation = run_guardian_operation
+    _ModelLoadError = model_load_error_cls
 
 
 def resolve_inference_model(raw_model: Optional[str], current_model: str) -> Optional[str]:
@@ -218,3 +231,50 @@ class VramScheduler:
                 del self.active_counts[model_name]
             self.condition.notify_all()
             logger.info(f"VRAM Released for {model_name}.")
+
+async def reload_backend_after_connect_error(path: str, error: Exception) -> None:
+    """Reload llama-server once after Guardian detects stale backend state."""
+    current_model = await _model_manager.get_current_model()
+    reload_model = resolve_auto_reload_model(current_model)
+    logger.warning(
+        f"⚠️ Backend unreachable while proxying /v1/{path}; "
+        f"reloading '{reload_model}' once before retry: {error}"
+    )
+
+    async with _model_switch_lock:
+        if await _model_manager.backend_health_ok():
+            _model_manager.is_unloaded = False
+            logger.info("✅ Backend became healthy before retry")
+            return
+
+        _model_manager.is_unloaded = True
+        try:
+            generation = _reset_startup_check_status(
+                source="proxy",
+                phase="backend_reload",
+                target_model=reload_model,
+                requested_model=current_model,
+                owner="backend_recovery",
+            )
+            await _run_guardian_operation(
+                source="proxy",
+                phase="backend_reload",
+                target_model=reload_model,
+                requested_model=current_model,
+                owner="backend_recovery",
+                operation=lambda: _model_manager.load(reload_model),
+                generation=generation,
+            )
+        except _ModelLoadError as e:
+            crash = e.crash_record
+            detail = {
+                "error": f"Backend reload failed for '{reload_model}'",
+                "message": str(e),
+                "crash_details": crash.to_dict() if crash else None,
+            }
+            logger.error(f"💥 Backend reload crash: {detail}")
+            raise HTTPException(status_code=503, detail=detail)
+        except Exception as e:
+            logger.error(f"❌ Backend reload failed after connect error: {e}")
+            raise HTTPException(status_code=503, detail=f"Backend reload failed: {e}")
+

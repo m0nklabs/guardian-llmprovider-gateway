@@ -809,6 +809,10 @@ _local_models.init(
     parse_guardian_route=parse_guardian_route,
     config=CONFIG,
     safe_vram_limit_mb=SAFE_VRAM_LIMIT_MB,
+    model_switch_lock=_model_switch_lock,
+    reset_startup_check_status=_reset_startup_check_status,
+    run_guardian_operation=_run_guardian_operation,
+    model_load_error_cls=ModelLoadError,
 )
 
 
@@ -1102,50 +1106,8 @@ _cloud_forwarding.init(
 
 
 async def _reload_backend_after_connect_error(path: str, error: Exception) -> None:
-    """Reload llama-server once after Guardian detects stale backend state."""
-    current_model = await model_manager.get_current_model()
-    reload_model = _resolve_auto_reload_model(current_model)
-    logger.warning(
-        f"⚠️ Backend unreachable while proxying /v1/{path}; "
-        f"reloading '{reload_model}' once before retry: {error}"
-    )
-
-    async with _model_switch_lock:
-        if await model_manager.backend_health_ok():
-            model_manager.is_unloaded = False
-            logger.info("✅ Backend became healthy before retry")
-            return
-
-        model_manager.is_unloaded = True
-        try:
-            generation = _reset_startup_check_status(
-                source="proxy",
-                phase="backend_reload",
-                target_model=reload_model,
-                requested_model=current_model,
-                owner="backend_recovery",
-            )
-            await _run_guardian_operation(
-                source="proxy",
-                phase="backend_reload",
-                target_model=reload_model,
-                requested_model=current_model,
-                owner="backend_recovery",
-                operation=lambda: model_manager.load(reload_model),
-                generation=generation,
-            )
-        except ModelLoadError as e:
-            crash = e.crash_record
-            detail = {
-                "error": f"Backend reload failed for '{reload_model}'",
-                "message": str(e),
-                "crash_details": crash.to_dict() if crash else None,
-            }
-            logger.error(f"💥 Backend reload crash: {detail}")
-            raise HTTPException(status_code=503, detail=detail)
-        except Exception as e:
-            logger.error(f"❌ Backend reload failed after connect error: {e}")
-            raise HTTPException(status_code=503, detail=f"Backend reload failed: {e}")
+    """Reload llama-server once after Guardian detects stale backend state (Phase 5: delegated)."""
+    await _local_models.reload_backend_after_connect_error(path, error)
 
 
 @app.post("/api/chat")
@@ -1259,54 +1221,8 @@ async def admin_unload(client_id: str = Depends(verify_api_key)):
 
 @app.post("/admin/load")
 async def admin_load(request: Request, client_id: str = Depends(verify_api_key)):
-    """Reload llama-server. Optionally pass {\"model\": \"name\"} to load a specific model."""
-    body = {}
-    try:
-        body = await request.json()
-    except Exception:
-        pass
-    target = body.get("model", None)
-    if target:
-        try:
-            target = model_manager.resolve_model(target)
-        except ValueError:
-            pass
-    enable_vision = body.get("enable_vision")
-    runtime_overrides = body.get("runtime_overrides")
-    if runtime_overrides is not None and not isinstance(runtime_overrides, dict):
-        raise HTTPException(status_code=400, detail="runtime_overrides must be an object")
-    generation = _reset_startup_check_status(
-        source="admin",
-        phase="manual_load",
-        target_model=target or model_manager.current_model,
-        requested_model=body.get("model"),
-        owner=client_id,
-    )
-    model_manager.last_request_time = time.time()
-    model_manager.active_requests += 1
-    try:
-        async with _model_switch_lock:
-            await _run_guardian_operation(
-                source="admin",
-                phase="manual_load",
-                target_model=target or model_manager.current_model,
-                requested_model=body.get("model"),
-                owner=client_id,
-                operation=lambda: model_manager.load(
-                    target,
-                    enable_vision=enable_vision,
-                    runtime_overrides=runtime_overrides,
-                ),
-                generation=generation,
-            )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=str(e))
-    finally:
-        model_manager.active_requests = max(0, model_manager.active_requests - 1)
-        model_manager.last_request_time = time.time()
-    return {"status": "loaded", "model": model_manager.current_model}
+    """Reload llama-server. Optionally pass {"model": "name"} to load a specific model (Phase 5: delegated)."""
+    return await _admin_api.admin_load(request, client_id)
 
 
 # ── Cloud credential management API ───────────────────────────────────
@@ -1767,6 +1683,8 @@ _admin_api.init(
     _generate_api_key=generate_api_key,
     _token_fingerprint=_token_fingerprint,
     _model_switch_lock=_model_switch_lock,
+    _reset_startup_check_status=_reset_startup_check_status,
+    _run_guardian_operation=_run_guardian_operation,
 )
 
 async def start_proxy():

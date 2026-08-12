@@ -43,6 +43,8 @@ _load_api_keys = None
 _generate_api_key = None
 _token_fingerprint = None
 _model_switch_lock = None
+_reset_startup_check_status = None
+_run_guardian_operation = None
 
 
 def init(
@@ -71,6 +73,8 @@ def init(
     _generate_api_key,
     _token_fingerprint,
     _model_switch_lock,
+    _reset_startup_check_status,
+    _run_guardian_operation,
 ) -> None:
     """Inject all dependencies. Called once at startup."""
     globals().update({k: v for k, v in locals().items() if k != "_init"})
@@ -583,5 +587,53 @@ async def cancel_queue_request(request_id: str, request: Request, client_id: str
         raise HTTPException(status_code=404, detail="Queue request not found")
     return snapshot
 
-
+async def admin_load(request: Request, client_id: str) -> Any:
+    """Reload llama-server. Optionally pass {"model": "name"} to load a specific model."""
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    target = body.get("model", None)
+    if target:
+        try:
+            target = _model_manager.resolve_model(target)
+        except ValueError:
+            pass
+    enable_vision = body.get("enable_vision")
+    runtime_overrides = body.get("runtime_overrides")
+    if runtime_overrides is not None and not isinstance(runtime_overrides, dict):
+        raise HTTPException(status_code=400, detail="runtime_overrides must be an object")
+    generation = _reset_startup_check_status(
+        source="admin",
+        phase="manual_load",
+        target_model=target or _model_manager.current_model,
+        requested_model=body.get("model"),
+        owner=client_id,
+    )
+    _model_manager.last_request_time = time.time()
+    _model_manager.active_requests += 1
+    try:
+        async with _model_switch_lock:
+            await _run_guardian_operation(
+                source="admin",
+                phase="manual_load",
+                target_model=target or _model_manager.current_model,
+                requested_model=body.get("model"),
+                owner=client_id,
+                operation=lambda: _model_manager.load(
+                    target,
+                    enable_vision=enable_vision,
+                    runtime_overrides=runtime_overrides,
+                ),
+                generation=generation,
+            )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    finally:
+        _model_manager.active_requests = max(0, _model_manager.active_requests - 1)
+        _model_manager.last_request_time = time.time()
+    return {"status": "loaded", "model": _model_manager.current_model}
 

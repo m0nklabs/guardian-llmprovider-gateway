@@ -1554,7 +1554,7 @@ async def test_admin_load_returns_400_for_runtime_override_validation_error():
     async def raise_validation_error(**kwargs):
         raise ValueError("runtime_overrides.context must be > 0")
 
-    with patch.object(server, "_run_guardian_operation", side_effect=raise_validation_error):
+    with patch.object(server._admin_api, "_run_guardian_operation", side_effect=raise_validation_error):
         with pytest.raises(server.HTTPException) as exc:
             await server.admin_load(DummyRequest(), client_id="test-user")
     assert exc.value.status_code == 400
@@ -1575,7 +1575,7 @@ async def test_admin_load_passes_kv_type_runtime_override():
     with (
         patch.object(server.model_manager, "resolve_model", return_value="llama3"),
         patch.object(server.model_manager, "load", new_callable=AsyncMock) as load_mock,
-        patch.object(server, "_run_guardian_operation", side_effect=capture_operation),
+        patch.object(server._admin_api, "_run_guardian_operation", side_effect=capture_operation),
     ):
         await server.admin_load(DummyRequest(), client_id="test-user")
         assert captured_operation is not None
