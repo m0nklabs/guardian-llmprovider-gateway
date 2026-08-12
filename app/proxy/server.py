@@ -16,7 +16,6 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Tuple
 
-import yaml
 import httpx
 from fastapi import FastAPI, Request, HTTPException, Response, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -120,50 +119,16 @@ from app.gateway import streaming as _streaming
 # ── Gateway queue helpers (Phase 5 extraction) ──────────────────────
 from app.gateway import queue_helpers as _queue_helpers
 
-# Load configuration from settings.yaml
-def load_config() -> dict:
+# ── Configuration loading (Phase 5 extraction) ───────────────────────
+from app import config_loader as _config_loader
 
-    """Load configuration from settings.yaml with sensible defaults."""
-    config_path = Path(__file__).parent.parent.parent / "config" / "settings.yaml"
-    default_config = {
-        "proxy": {
-            "stream_heartbeat_seconds": 15,
-            "stream_close_timeout_seconds": 5,
-        },
-        "cloud_retry": RateLimitConfig().to_dict(),
-        "timeouts": {
-            "tiers": {
-                "tier_70b": {"min_size_mb": 40000, "timeout_seconds": 3600},
-                "tier_32b": {"min_size_mb": 20000, "timeout_seconds": 600},
-                "tier_13b": {"min_size_mb": 10000, "timeout_seconds": 300},
-                "tier_8b": {"min_size_mb": 5000, "timeout_seconds": 180},
-                "tier_small": {"min_size_mb": 0, "timeout_seconds": 120},
-            },
-            "default_timeout": 300
-        }
-    }
-    
-    try:
-        if config_path.exists():
-            with open(config_path, 'r') as f:
-                file_config = yaml.safe_load(f) or {}
-            # Merge with defaults (file config takes precedence)
-            if "proxy" in file_config:
-                default_config["proxy"].update(file_config["proxy"])
-            if "cloud_retry" in file_config:
-                default_config["cloud_retry"].update(file_config["cloud_retry"])
-            if "timeouts" in file_config:
-                default_config["timeouts"].update(file_config["timeouts"])
-            if "failover_health" in file_config:
-                default_config["failover_health"] = file_config["failover_health"]
-            return default_config
-    except Exception as e:
-        logging.warning(f"Failed to load config from {config_path}: {e}. Using defaults.")
-    
-    return default_config
+def load_config() -> dict:
+    """Load configuration from settings.yaml with sensible defaults (Phase 5: delegated)."""
+    return _config_loader.load_config()
+
 
 # Load config at module level
-CONFIG = load_config()
+CONFIG = _config_loader.CONFIG
 
 # Cloud LLM provider registry (OpenRouter, NVIDIA, …) — enables Guardian to
 # act as a unified LLM router alongside its local GPU-backed llama-server.
@@ -194,41 +159,25 @@ cloud_rate_limiter = RateLimitRetryManager(
 # Configuration
 LLAMA_SERVER_URL = "http://127.0.0.1:11440"
 
-# Total VRAM available (approx 28GB: 12GB + 16GB)
-# Read from settings.yaml proxy.vram_limit_mb, fallback to hardcoded value
 def _load_vram_limit() -> int:
-    try:
-        config_path = Path(__file__).parent.parent.parent / "config" / "settings.yaml"
-        if config_path.exists():
-            with open(config_path, 'r') as f:
-                cfg = yaml.safe_load(f) or {}
-            return cfg.get("proxy", {}).get("vram_limit_mb", 27000)
-    except Exception:
-        pass
-    return 27000
+    """Return the VRAM budget (MB) from proxy.vram_limit_mb (Phase 5: delegated)."""
+    return _config_loader.load_vram_limit(CONFIG)
+
 
 SAFE_VRAM_LIMIT_MB = _load_vram_limit()
 
 
 def _load_stream_heartbeat_interval_s() -> Optional[float]:
-    """Return the configured SSE heartbeat interval, or None when disabled."""
-    try:
-        interval = float(CONFIG.get("proxy", {}).get("stream_heartbeat_seconds", 15))
-    except (TypeError, ValueError):
-        interval = 15.0
-    return interval if interval > 0 else None
+    """Return the configured SSE heartbeat interval, or None when disabled (Phase 5: delegated)."""
+    return _config_loader.load_stream_heartbeat_interval_s(CONFIG)
 
 
 STREAM_HEARTBEAT_INTERVAL_S = _load_stream_heartbeat_interval_s()
 
 
 def _load_stream_close_timeout_s() -> float:
-    """Return the bounded timeout used for upstream stream cleanup."""
-    try:
-        timeout = float(CONFIG.get("proxy", {}).get("stream_close_timeout_seconds", 5))
-    except (TypeError, ValueError):
-        timeout = 5.0
-    return max(timeout, 0.5)
+    """Return the bounded timeout used for upstream stream cleanup (Phase 5: delegated)."""
+    return _config_loader.load_stream_close_timeout_s(CONFIG)
 
 
 STREAM_CLOSE_TIMEOUT_S = _load_stream_close_timeout_s()
@@ -1031,15 +980,9 @@ async def track_api_usage_middleware(request: Request, call_next):
 
 # --- Inference queue: serializes access to single-slot backend ---
 def _load_queue_config() -> dict:
-    try:
-        config_path = Path(__file__).parent.parent.parent / "config" / "settings.yaml"
-        if config_path.exists():
-            with open(config_path, 'r') as f:
-                cfg = yaml.safe_load(f) or {}
-            return cfg.get("queue", {})
-    except Exception:
-        pass
-    return {}
+    """Return the queue section of the configuration (Phase 5: delegated)."""
+    return _config_loader.load_queue_config(CONFIG)
+
 
 _queue_cfg = _load_queue_config()
 inference_queue = InferenceQueue(
