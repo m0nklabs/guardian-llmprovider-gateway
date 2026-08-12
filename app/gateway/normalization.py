@@ -18,7 +18,9 @@ from typing import Any, Dict, Optional
 import httpx
 from fastapi.responses import JSONResponse
 
-logger = None  # reserved
+import logging
+
+logger = logging.getLogger("Guardian")
 
 # ── Module state ─────────────────────────────────────────────────────
 _VISION_PROBE_IMAGE_DATA_URL: Optional[str] = None
