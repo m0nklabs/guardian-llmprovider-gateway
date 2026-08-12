@@ -329,6 +329,54 @@ async def run_startup_check_in_background(generation: int, target_model: Optiona
         logger.info("✅ Startup check completed in background")
 
 
+def is_guardian_uvicorn_listener(listener: Optional[Dict[str, Optional[object]]]) -> bool:
+    if not listener:
+        return False
+    command = str(listener.get("command") or "")
+    repo_root = str(Path(__file__).parent.parent.parent)
+    return (
+        listener.get("process_name") == "uvicorn"
+        and "app.proxy.server:app" in command
+        and repo_root in command
+        and f"--port {_proxy_port}" in command
+    )
+
+
+async def stop_stale_guardian_listener(
+    listener: Optional[Dict[str, Optional[object]]], timeout: float = 3.0
+) -> bool:
+    if not is_guardian_uvicorn_listener(listener):
+        return False
+
+    pid = listener.get("pid")
+    if not isinstance(pid, int) or pid == os.getpid():
+        return False
+
+    logger.warning(
+        f"Terminating stale Guardian listener PID {pid} before binding port {_proxy_port}: "
+        f"{listener.get('command')}"
+    )
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError as exc:
+        if exc.errno == errno.ESRCH:
+            return True
+        raise
+
+    if await wait_for_proxy_listener_release(pid, timeout=timeout):
+        return True
+
+    logger.warning(f"Stale Guardian listener PID {pid} ignored SIGTERM; sending SIGKILL")
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError as exc:
+        if exc.errno != errno.ESRCH:
+            raise
+
+    return await wait_for_proxy_listener_release(pid, timeout=1.0)
+
+
+
 def set_startup_check_task(task: Optional[asyncio.Task]) -> None:
     """Bind the background startup-check task (used by lifespan)."""
     global _startup_check_task
