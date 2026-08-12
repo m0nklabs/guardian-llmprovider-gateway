@@ -10,6 +10,8 @@ from unittest.mock import AsyncMock, Mock, patch
 import httpx
 import pytest
 
+from app.proxy.usage import ApiUsageTracker
+
 from app.proxy.failover import FailoverCandidate, FailoverGroup, FailoverRegistry
 from app.proxy import server
 from app.gateway import streaming as _streaming
@@ -311,7 +313,7 @@ def test_get_usage_attribution_falls_back_to_request_headers_without_auth_contex
 
 
 def test_start_live_request_usage_seeds_request_auth_context(tmp_path: Path):
-    tracker = server.ApiUsageTracker(state_file=tmp_path / "usage_state.json")
+    tracker = ApiUsageTracker(state_file=tmp_path / "usage_state.json")
     request = SimpleNamespace(
         state=SimpleNamespace(),
         scope={},

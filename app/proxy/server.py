@@ -22,17 +22,13 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.status import HTTP_401_UNAUTHORIZED
 
-from collections import defaultdict
 from app.paths import LLAMA_SLOTS_DIR
-from app.proxy.optimizer import RequestOptimizer
-from app.proxy.scaler import DynamicScaler
 from app.engine.manager import ModelManager, ModelLoadError
 from app.proxy.auth import build_request_auth_context, get_request_auth_context, set_request_auth_context, verify_api_key, generate_api_key, load_api_keys, _token_fingerprint
 from app.proxy.providers import CloudProvider, ProviderRegistry
 from app.proxy.cloud_keys import CloudCredentialStore, parse_guardian_route, mask_api_key
 from app.proxy.failover import FailoverRegistry, ProviderHealthTracker, FAILURE_THRESHOLD, COOLDOWN_SECONDS, RATE_LIMIT_COOLDOWN_SECONDS
 from app.proxy.ratelimit import RateLimitConfig, RateLimitRetryManager
-from app.proxy.usage import ApiUsageTracker
 from app.proxy.anthropic_bridge import (
     _format_sse_event,
     provider_needs_anthropic_translation,
@@ -121,6 +117,9 @@ from app.gateway import queue_helpers as _queue_helpers
 
 # ── Configuration loading (Phase 5 extraction) ───────────────────────
 from app import config_loader as _config_loader
+
+# ── Proxy state container (Phase 5 extraction) ───────────────────────
+from app.proxy.state import State as _State, state as _state
 
 def load_config() -> dict:
     """Load configuration from settings.yaml with sensible defaults (Phase 5: delegated)."""
@@ -754,8 +753,6 @@ _process.init(
 
 # Auth replaced by verify_api_key imported from app.proxy.auth
 
-# VRAM scheduler + model helpers (Phase 5: delegated to app.local_inference.models)
-VramScheduler = _local_models.VramScheduler
 _local_models.init(
     model_manager=model_manager,
     provider_registry=provider_registry,
@@ -771,21 +768,8 @@ _local_models.init(
 
 
 
-# State
-class State:
-    def __init__(self):
-        self.active_generations: Dict[str, int] = {} # request_id -> vram_usage
-        self.model_stats: Dict[str, int] = {}
-        self.last_used: Dict[str, float] = defaultdict(float)
-        self.api_usage = ApiUsageTracker()
-        # VRAM Scheduler
-        self.scheduler = VramScheduler(SAFE_VRAM_LIMIT_MB)
-        # Optimizer
-        self.optimizer = RequestOptimizer()
-        # Dynamic scaler — adaptive reasoning budget & max_tokens
-        self.scaler = DynamicScaler()
-
-state = State()
+# State container (Phase 5: delegated to app.proxy.state)
+state = _State(vram_limit_mb=SAFE_VRAM_LIMIT_MB)
 
 # Initialize usage tracking with the server State object
 _usage.init(state)
