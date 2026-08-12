@@ -20,7 +20,7 @@ logger = logging.getLogger("Guardian")
 
 # ── Injected (set once at startup by init()) ─────────────────────────
 _llama_server_url = None
-_SESSION_SLOTS_DIR = Path("/home/flip/llama_slots")
+_SESSION_SLOTS_DIR = None  # injected via init()
 _SESSION_FILENAME_RE = re.compile(r"^[A-Za-z0-9_-]+\.bin$")
 
 
@@ -33,7 +33,7 @@ def init(*, llama_server_url: str, session_slots_dir: Path) -> None:
 
 def sanitize_session_filename(raw: object) -> str:
     """Return a safe basename for a session slot, or raise HTTP 400."""
-_SESSION_SLOTS_DIR = Path("/home/flip/llama_slots")
+_SESSION_SLOTS_DIR = None  # injected via init()
 _SESSION_FILENAME_RE = re.compile(r"^[A-Za-z0-9_-]+\.bin$")
 
 
@@ -105,7 +105,7 @@ async def list_sessions(client_id: str) -> Any:
     """List available session files."""
     logger.debug(f"📜 Session LIST request from {client_id}")
     try:
-        save_path = Path("/home/flip/llama_slots") 
+        save_path = _SESSION_SLOTS_DIR
         if not save_path.exists():
             return {"sessions": []}
             

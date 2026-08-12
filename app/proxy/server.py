@@ -24,6 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.status import HTTP_401_UNAUTHORIZED
 
 from collections import defaultdict
+from app.paths import LLAMA_SLOTS_DIR
 from app.proxy.optimizer import RequestOptimizer
 from app.proxy.scaler import DynamicScaler
 from app.engine.manager import ModelManager, ModelLoadError
@@ -236,8 +237,8 @@ STREAM_CLOSE_TIMEOUT_S = _load_stream_close_timeout_s()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Guardian")
 
-PID_FILE = "guardian.pid"
-PROXY_PORT = 11434
+PID_FILE = str(CONFIG.get("proxy", {}).get("pid_file", "guardian.pid"))
+PROXY_PORT = int(CONFIG.get("proxy", {}).get("port", 11434))
 _VISION_PROBE_IMAGE_DATA_URL: Optional[str] = None
 
 
@@ -1070,7 +1071,7 @@ _lifespan.init(
 # Initialize session slots with the llama-server URL + slots dir
 _sessions.init(
     llama_server_url=LLAMA_SERVER_URL,
-    session_slots_dir=Path("/home/flip/llama_slots"),
+    session_slots_dir=LLAMA_SLOTS_DIR,
 )
 
 # Initialize streaming helpers with queue + timeout constants
@@ -1708,7 +1709,7 @@ async def start_proxy():
 # Block path traversal: strip directory components, allow only
 # [A-Za-z0-9_-]+.bin, then confirm the resolved path stays inside the slots
 # dir (defense in depth — redundant after basename + regex, but explicit).
-_SESSION_SLOTS_DIR = Path("/home/flip/llama_slots")
+_SESSION_SLOTS_DIR = LLAMA_SLOTS_DIR
 
 
 def _sanitize_session_filename(raw: object) -> str:

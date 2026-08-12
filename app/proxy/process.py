@@ -26,8 +26,8 @@ logger = logging.getLogger("Guardian")
 # ── Injected (set once at startup by init()) ─────────────────────────
 _model_manager = None
 _model_switch_lock = None
-_pid_file = "guardian.pid"
-_proxy_port = 11434
+_pid_file = None  # injected via init()
+_proxy_port = None  # injected via init()
 
 
 def init(*, model_manager, model_switch_lock, pid_file, proxy_port) -> None:

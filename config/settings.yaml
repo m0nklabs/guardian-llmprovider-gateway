@@ -14,6 +14,7 @@ benchmark:
 proxy:
   port: 11434
   target: http://localhost:11440
+  pid_file: guardian.pid
   vram_limit_mb: 27000
   stream_heartbeat_seconds: 15
 # Model discovery always advertises a positive context window. These values
