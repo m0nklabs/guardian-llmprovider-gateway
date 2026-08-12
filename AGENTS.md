@@ -31,6 +31,7 @@
 - **Don't duplicate docs.** Detailed architecture lives in `docs/`. `AGENTS.md` is the index — reference, don't re-explain.
 - **No hardcoded vars.** Literals that depend on the deployment (paths, ports, file names, URLs, timeouts) belong in `config/settings.yaml` (`${VAR}`-expandable) or `app/paths.py` (env-var overridable). Never copy a literal into a new module "for convenience" — inject it via `init()` and keep one source of truth. When extracting code, check the moved bodies for literals (`/home/...`, `:11434`, `guardian.pid`, …) and re-route them through config/paths before committing. A hardcoded value in a helper module that bypasses config is a bug, not a shortcut.
 - **Commit language:** Dutch is fine for operator-facing notes (internal project); English for code, API, and public docs.
+- **AGENTS.md is always updated.** Every behavior change, bug fix, extraction, config change, or lesson learned goes into AGENTS.md (progress lists, handoff section, Critical rules) in the SAME working session — before the final commit/push, not after. If you finish a task and AGENTS.md does not reflect it, the task is not done. The handoff section is the primary continuity mechanism between agent sessions; a stale handoff is a bug.
 
 ## Directory map
 
