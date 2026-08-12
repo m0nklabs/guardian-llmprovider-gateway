@@ -20,6 +20,7 @@
 
 - **Test before claiming fixed:** `./venv/bin/python -m py_compile <file>` then run `./venv/bin/python -m pytest tests/ -x`. Never claim a fix works without verifying.
 - **No hot reload.** The provider registry, queue, and server load at startup. Code changes require `sudo systemctl restart llama-guardian` to take effect. Config-file edits to `settings.yaml` also need a restart (the "hot reload" claim in older docs is incorrect).
+- **Run the pre-restart gate before every restart.** `./venv/bin/python scripts/pre_restart_check.py` runs py_compile + pyflakes (undefined names) + the wrapper-vs-module signature check + the full pytest suite. All four gates must pass before `sudo systemctl restart llama-guardian`; any failure means the restart may not come back up (agent traffic routes through Guardian). Added 2026-08-12 after the post-restart audit caught 6 injection/signature bugs the unit suite had missed.
 - **The agent routes through Guardian — restarting cuts the agent's own model traffic.** This agent harness (Claude Code / goose / pi) reaches its model *through this very service* (nginx `:11434` → TLS `:11435` → app). A `sudo systemctl restart llama-guardian` therefore silences the current session until startup completes; a code/config error that prevents startup is **not self-healable** — the agent's model is unreachable, so it cannot fix its own mistake. Before any restart: (1) validate with `py_compile` + focused pytest, (2) tell the operator a restart is coming and the session will drop, (3) let the operator run the restart from outside the session, (4) if startup fails, the operator must revert (`git stash`/`git checkout` on `app/`, restore previous `settings.yaml`) — never promise in-session recovery. **Known recovery path (proven 2026-08-12):** the operator enables `gh copilot` (routes around Guardian) and uses it to inspect/repair/restart Guardian while the pi session is down.
 - **TLS requires both paths.** `GUARDIAN_TLS_CERTFILE` and `GUARDIAN_TLS_KEYFILE` are an all-or-nothing pair. The production drop-in binds TLS to `127.0.0.1:11435` through `GUARDIAN_TLS_HOST` and `GUARDIAN_TLS_PORT`; nginx's `libnginx-mod-stream` module and a top-level `stream { include /etc/nginx/stream-conf.d/*.conf; }` block are required for the public protocol multiplexer. Keep the private key `0600`.
 - **Secrets in `.env`.** API keys use `${ENV_VAR}` expansion. Never inline keys in YAML or Python. Use `scripts/generate_key.py` to mint new Guardian keys.
@@ -61,6 +62,7 @@ scripts/
 ├─ start_llama.sh        # launch llama-server backend
 ├─ update_guardian_config.py  # live config mutation helper
 ├─ generate_key.py       # mint Guardian API keys
+├─ pre_restart_check.py  # restart gate: py_compile + pyflakes + signature check + pytest
 └─ guardianctl.py        # capture subsystem CLI (status/config/files/rotate/enable/disable)
 ```
 
@@ -89,7 +91,16 @@ When touching these areas, read the referenced detail docs:
 
 ## Active Handoff
 
-### Pi session `20260812_4` (last updated 2026-08-12 ~22:40)
+### Pi session `20260812_5` (last updated 2026-08-12 ~23:00)
+
+- Working directory: `/home/flip/llama_cpp_guardian`
+- **New Critical rule: AGENTS.md must always be updated in the same session as the change** (commit `cf7a879`).
+- **Pre-restart gate added:** `scripts/pre_restart_check.py` — py_compile + pyflakes + wrapper-vs-module signature check + pytest in one command. All 4 gates PASS on the current tree. New Critical rule: run it before every restart.
+- **Generic signature regression test** added to `tests/unit/test_server.py` (`test_all_wrapper_calls_match_module_signatures`) — covers every `_module.func(...)` delegation in server.py (the admin_api-only test caught 11 of 25 handlers; the generic one is the permanent net).
+- Fixed the last 2 pyflakes findings (pre-existing lazy string annotations): `Union` in `app/capture/redactor.py`, `Dict`/`Any` in `app/proxy/metrics.py`. `pyflakes app/` is now fully clean.
+- Full suite: 893 passed, 3 skipped. Commits: `cf7a879` (AGENTS.md rule), plus this session's gate work. Pushed.
+
+
 
 - Working directory: `/home/flip/llama_cpp_guardian`
 - **RESTARTED 22:27 + 22:35 UTC — provider timeouts 600→1200 now LIVE**, `cloud_retry.enabled=false` live. Post-restart audit found and fixed 6 bugs:

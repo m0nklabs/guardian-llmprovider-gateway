@@ -2412,3 +2412,64 @@ def test_admin_api_handler_signatures_match_wrappers():
         fn = getattr(mod, handler)
         actual = list(inspect.signature(fn).parameters)
         assert actual == params, f"{handler}: expected {params}, got {actual}"
+
+
+def test_all_wrapper_calls_match_module_signatures():
+    """Generic Phase 5 regression: every `_module.func(...)` call in server.py
+    must reference an existing function and pass exactly the parameters the
+    module function accepts. The admin_api extraction broke 11 of 25 handlers
+    by giving them uniform signatures; this check covers every delegation.
+    """
+    import ast
+    import importlib
+    import inspect
+
+    tree = ast.parse(inspect.getsource(server))
+    alias_map = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            for a in node.names:
+                if a.asname and a.asname.startswith("_"):
+                    alias_map[a.asname] = f"{node.module}.{a.name}"
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                if a.asname and a.asname.startswith("_"):
+                    alias_map[a.asname] = a.name
+
+    problems = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        if not (isinstance(node.func.value, ast.Name) and node.func.value.id in alias_map):
+            continue
+        fn_name = node.func.attr
+        if fn_name == "init":
+            continue
+        mod = importlib.import_module(alias_map[node.func.value.id])
+        fn = getattr(mod, fn_name, None)
+        if fn is None:
+            problems.append(f"{node.lineno}: {alias_map[node.func.value.id]}.{fn_name} does not exist")
+            continue
+        sig = inspect.signature(fn)
+        params = list(sig.parameters)
+        var_pos = any(v.kind == inspect.Parameter.VAR_POSITIONAL for v in sig.parameters.values())
+        # positional args fill params in order (excluding already-keyword-filled ones)
+        pos = len(node.args)
+        kw = {k.arg for k in node.keywords if k.arg}
+        if not var_pos and pos > len(params):
+            problems.append(f"{node.lineno}: {fn_name} gets {pos} positional but only has {len(params)} params")
+            continue
+        # required params that are neither positionally nor by keyword provided
+        filled = set(params[:pos]) | kw
+        for p, v in sig.parameters.items():
+            if v.default is inspect.Parameter.empty and p not in filled and v.kind not in (
+                inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD,
+            ):
+                problems.append(f"{node.lineno}: {fn_name} missing required param '{p}'")
+        for k in kw:
+            if k not in sig.parameters and not any(
+                v.kind == inspect.Parameter.VAR_KEYWORD for v in sig.parameters.values()
+            ):
+                problems.append(f"{node.lineno}: {fn_name} unexpected kwarg '{k}'")
+
+    assert not problems, "\n".join(problems)

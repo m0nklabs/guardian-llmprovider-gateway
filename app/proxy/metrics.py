@@ -7,7 +7,7 @@ All metrics are prefixed with 'guardian_' for easy Grafana dashboard filtering.
 import logging
 import time
 from contextlib import contextmanager
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from prometheus_client import (
     Counter,
