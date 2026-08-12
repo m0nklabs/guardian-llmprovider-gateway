@@ -13,6 +13,7 @@ import pytest
 from app.proxy.failover import FailoverCandidate, FailoverGroup, FailoverRegistry
 from app.proxy import server
 from app.gateway import streaming as _streaming
+from app.cloud_inference import routing as _cloud_routing
 from app.gateway import queue_helpers as _queue_helpers
 
 
@@ -953,7 +954,7 @@ def test_cloud_vision_fallback_resolves_by_underlying_model(tmp_path: Path, mode
     )
     registry = FailoverRegistry(config_path)
 
-    with patch.object(server, "failover_registry", registry):
+    with patch.object(server._cloud_routing, "_failover_registry", registry):
         fallback = server._resolve_cloud_vision_fallback(model_name)
 
     assert fallback == "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Q8KV"
@@ -962,7 +963,7 @@ def test_cloud_vision_fallback_resolves_by_underlying_model(tmp_path: Path, mode
 def test_cloud_vision_fallback_ignores_unconfigured_models(tmp_path: Path):
     registry = FailoverRegistry(tmp_path / "cloud_keys.json")
 
-    with patch.object(server, "failover_registry", registry):
+    with patch.object(server._cloud_routing, "_failover_registry", registry):
         fallback = server._resolve_cloud_vision_fallback("guardian/openrouter/openai/gpt-4o")
 
     assert fallback is None
@@ -998,7 +999,7 @@ def test_cloud_vision_fallback_skips_image_capable_models(tmp_path: Path, model_
     )
     registry = FailoverRegistry(config_path)
 
-    with patch.object(server, "failover_registry", registry):
+    with patch.object(server._cloud_routing, "_failover_registry", registry):
         fallback = server._resolve_cloud_vision_fallback(model_name)
 
     assert fallback is None
@@ -1040,7 +1041,7 @@ def test_cloud_attempts_normalize_openrouter_model_alias():
         api_key="sk-or-test",
     )
 
-    with patch.object(server, "_cloud_provider_for_request", return_value=provider):
+    with patch.object(server._cloud_routing, "_cloud_provider_for_request", return_value=provider):
         attempts, failover_group = server._resolve_cloud_attempts(
             "openrouter/moonshotai/kimi-k3",
             request,

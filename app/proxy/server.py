@@ -74,6 +74,9 @@ from app.gateway import context_metadata as _ctx_meta
 # ── Cloud inference helpers (Phase 5 extraction) ────────────────────
 import app.cloud_inference as _cloud_inf
 
+# ── Cloud inference routing (Phase 5 extraction) ────────────────────
+from app.cloud_inference import routing as _cloud_routing
+
 # ── Gateway capture dispatch (Phase 5 extraction) ────────────────────
 from app.gateway import capture_dispatch as _capture_dispatch
 
@@ -1577,6 +1580,20 @@ def _coerce_usage_int(value: object) -> int:
 
 # Initialize capture dispatch with injected helpers
 _capture_dispatch.init(get_request_auth_context, _coerce_usage_int)
+
+# Initialize cloud routing with all dependencies
+_cloud_routing.init(
+    provider_registry, cloud_cred_store, failover_registry, failover_health,
+    get_request_auth_context,
+    _capture_dispatch.capture_client_fingerprint,
+    _capture_dispatch.capture_endpoint_from_request,
+    _capture_dispatch.dispatch_capture_request_received,
+    get_capture_controller,
+    _cloud_inf.provider_base_url,
+    _cloud_inf.cloud_provider_for_request,
+    _cloud_inf.cloud_provider_unavailable_error,
+    _cloud_inf.adapt_openai_reasoning_params,
+)
 
 
 def _coerce_header_int(value: object) -> int:
@@ -3676,367 +3693,30 @@ def _guardian_debug_headers(
     return _cloud_inf.guardian_debug_headers(provider, upstream_model, failover_group)
 
 
-def _resolve_cloud_attempts(
-    model_name: str,
-    request: Request,
-    client_id: str,
-    *,
-    requires_vision: bool = False,
-) -> Tuple[List[Tuple[CloudProvider, str]], Optional[str]]:
-    """Resolve the ordered list of ``(provider, upstream_model)`` attempts.
+# ── Cloud routing (delegated to app.cloud_inference.routing) ────────
+# Phase 5: extracted to app/cloud_inference/routing.py.
 
-    Returns ``(attempts, failover_group_name)``. *failover_group_name* is only
-    set for ``guardian/failover/{group}`` routes (used for logging); every
-    other route resolves to exactly one attempt.
-
-    Raises the same ``HTTPException``s the single-provider code used to raise
-    when a route, credential, or provider cannot be resolved.
-    """
-    guardian_route = parse_guardian_route(model_name)
-    if guardian_route is None:
-        # Global cloud model from settings.yaml providers config
-        provider = _cloud_provider_for_request(model_name)
-        if provider is None:
-            raise HTTPException(status_code=404, detail=f"Model '{model_name}' is not a cloud model")
-        if not provider.is_configured:
-            raise _cloud_provider_unavailable_error(provider)
-        return [(provider, ProviderRegistry.canonical_model_id(model_name))], None
-
-    provider_name, model_path = guardian_route
-    auth_ctx = get_request_auth_context(request) or {}
-    key_fingerprint = auth_ctx.get("key_fingerprint") or client_id
-
-    if provider_name == "failover":
-        # guardian/failover/{group}: try each candidate in the group,
-        # health-ordered, until one succeeds.
-        group = failover_registry.get_group(model_path)
-        if group is None:
-            raise HTTPException(
-                status_code=404,
-                detail={
-                    "error": "failover_group_not_found",
-                    "group": model_path,
-                    "message": f"No failover group named '{model_path}' is configured.",
-                },
-            )
-        ordered = failover_health.order_candidates(group.candidates)
-        attempts: List[Tuple[CloudProvider, str]] = []
-        for candidate in ordered:
-            if requires_vision and "image" not in candidate.modalities:
-                continue
-            cred = cloud_cred_store.get_credential_for_key(key_fingerprint, candidate.provider)
-            if cred is None:
-                continue
-            if candidate.provider == "google" and candidate.model not in cred.models:
-                continue
-            attempts.append((
-                CloudProvider(
-                    name=candidate.provider,
-                    base_url=_provider_base_url(candidate.provider),
-                    api_key=cred.api_key,
-                    models=[candidate.model],
-                ),
-                candidate.model,
-            ))
-        if not attempts:
-            raise HTTPException(
-                status_code=403,
-                detail={
-                    "error": "cloud_credential_not_linked",
-                    "reason": "no_credential_for_failover_group",
-                    "message": (
-                        f"No credential is linked to your Guardian API key for any "
-                        f"provider in failover group '{model_path}'."
-                    ),
-                    "group": model_path,
-                },
-            )
-        return attempts, model_path
-
-    # Per-key cloud route: guardian/{provider}/{model_path}
-    cred = cloud_cred_store.get_credential_for_key(key_fingerprint, provider_name)
-    if cred is None:
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "error": "cloud_credential_not_linked",
-                "reason": "no_credential_for_provider",
-                "message": (
-                    f"No {provider_name} credential is linked to your Guardian API key. "
-                    f"Link a credential via the Guardian admin API or dashboard."
-                ),
-                "provider": provider_name,
-                "requested_route": model_name,
-            },
-        )
-    if provider_name == "google" and model_path not in cred.models:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Google model '{model_path}' is not available for this credential",
-        )
-    provider = CloudProvider(
-        name=provider_name,
-        base_url=_provider_base_url(provider_name),
-        api_key=cred.api_key,
-        models=[model_path],
-    )
-    return [(provider, model_path)], None
-
+def _resolve_cloud_attempts(model_name: str, request: Request, client_id: str, *, requires_vision: bool = False) -> Tuple[List[Tuple[CloudProvider, str]], Optional[str]]:
+    return _cloud_routing.resolve_cloud_attempts(model_name, request, client_id, requires_vision=requires_vision)
 
 def _resolve_cloud_vision_fallback(model_name: str) -> Optional[str]:
-    """Return a local vision fallback for a text-only cloud model.
+    return _cloud_routing.resolve_cloud_vision_fallback(model_name)
 
-    Direct provider routes and global cloud model routes resolve the fallback
-    from their upstream model name. Failover routes retain their group-level
-    behavior: if any candidate accepts images, the cloud group handles them.
-    """
-    guardian_route = parse_guardian_route(model_name)
-    if guardian_route is None:
-        return failover_registry.get_image_fallback_for_model(
-            ProviderRegistry.canonical_model_id(model_name)
-        )
-    provider_name, model_path = guardian_route
-    if provider_name != "failover":
-        return failover_registry.get_image_fallback_for_model(model_path)
-    group = failover_registry.get_group(model_path)
-    if group is None or group.has_image_capable_candidate():
-        return None
-    return group.image_fallback_model
-
-
-# ── OpenAI reasoning-model parameter adaptation ───────────────────────
-
-#: OpenAI model prefixes whose API rejects ``max_tokens`` in favour of
-#: ``max_completion_tokens``.  This covers the entire ``o1``/``o3``/``o4``
-#: reasoning family and the ``gpt-5*`` generation.
-# OpenAI reasoning-model prefixes (delegated to app.cloud_inference)
-_OPENAI_REASONING_MODEL_PREFIXES = _cloud_inf._OPENAI_REASONING_MODEL_PREFIXES
-_OPENAI_TEMP_RESTRICTED_PREFIXES = _cloud_inf._OPENAI_TEMP_RESTRICTED_PREFIXES
-
+# OpenAI reasoning wrappers (delegated to app.cloud_inference)
 def _is_openai_reasoning_model(model_name: str) -> bool:
     return _cloud_inf.is_openai_reasoning_model(model_name)
 
-def _adapt_openai_reasoning_params(
-    provider: CloudProvider,
-    upstream_model: str,
-    body: Dict[str, Any],
-) -> Dict[str, Any]:
+def _adapt_openai_reasoning_params(provider: CloudProvider, upstream_model: str, body: Dict[str, Any]) -> Dict[str, Any]:
     return _cloud_inf.adapt_openai_reasoning_params(provider, upstream_model, body)
 
+def _prepare_cloud_candidate_request(provider: CloudProvider, upstream_model: str, path: str, base_json_body: Dict[str, Any], client_user_id: Optional[str] = None) -> Tuple[str, Dict[str, Any], bytes, bool]:
+    return _cloud_routing.prepare_cloud_candidate_request(provider, upstream_model, path, base_json_body, client_user_id)
 
-def _prepare_cloud_candidate_request(
-    provider: CloudProvider,
-    upstream_model: str,
-    path: str,
-    base_json_body: Dict[str, Any],
-    client_user_id: Optional[str] = None,
-) -> Tuple[str, Dict[str, Any], bytes, bool]:
-    """Build the request body/path for one failover candidate.
+def _extract_cloud_response_content(payload: Optional[Dict[str, Any]]) -> Tuple[Optional[str], Optional[list]]:
+    return _cloud_routing.extract_cloud_response_content(payload)
 
-    Rewrites the ``model`` field to *upstream_model*, applies the Anthropic ↔
-    OpenAI bridge translation when the candidate provider needs it, and fills
-    in any per-model default sampling params the client did not already
-    specify.
-
-    When *client_user_id* is provided, it is injected as the ``user`` field
-    in the request body (only for OpenRouter).  This gives OpenRouter a stable
-    per-end-user identifier so that:
-
-    - **Abuse isolation** — a provider policy block triggered by one app does
-      not affect other apps sharing the same OpenRouter API key.
-    - **Cache correctness** — the ``user`` field is part of the SHA-256 cache
-      key, so different apps get separate cache entries while the same app
-      benefits from cache hits.
-
-    Returns ``(effective_path, json_body, body_bytes, needs_translation)``.
-    """
-    candidate_json_body = {**base_json_body, "model": upstream_model}
-
-    # Inject a stable per-client identifier for OpenRouter.  OpenRouter folds
-    # this into a hashed identity sent upstream and never forwards it raw,
-    # so using the Guardian key fingerprint (a 12-char SHA-256 prefix) is
-    # privacy-safe.  We never override a ``user`` value the client already set.
-    if client_user_id and provider.name == "openrouter" and "user" not in candidate_json_body:
-        candidate_json_body["user"] = client_user_id
-
-    # When the client sends a /v1/messages (Anthropic) request but the target
-    # provider only speaks OpenAI format (e.g. NVIDIA NIM), translate the
-    # request transparently. OpenRouter supports /v1/messages natively, so
-    # translation is skipped for that provider.
-    needs_translation = provider_needs_anthropic_translation(provider.name, path)
-    effective_path = path
-    if needs_translation:
-        candidate_json_body = translate_anthropic_request_to_openai(candidate_json_body)
-        effective_path = "chat/completions"
-
-    # Some providers (NVIDIA NIM) recommend specific sampling defaults per
-    # model (e.g. temperature/top_p/max_tokens/seed). These are configured in
-    # cloud_keys.json's top-level "model_defaults" map and only fill in
-    # fields the client did not already specify — an explicit value from the
-    # client (Claude Code, etc.) always wins.
-    model_defaults = cloud_cred_store.get_model_defaults(upstream_model)
-    if model_defaults:
-        missing = {k: v for k, v in model_defaults.items() if k not in candidate_json_body}
-        if missing:
-            candidate_json_body = {**candidate_json_body, **missing}
-            logger.info("☁️  Applied model defaults for '%s': %s", upstream_model, missing)
-
-    # Translate params for direct OpenAI reasoning models (o-series, gpt-5*).
-    # Many clients send max_tokens + temperature unconditionally; OpenAI rejects
-    # both for reasoning models.  OpenRouter handles this itself, so this only
-    # applies to the direct openai provider.
-    candidate_json_body = _adapt_openai_reasoning_params(
-        provider, upstream_model, candidate_json_body
-    )
-
-    candidate_body = json.dumps(candidate_json_body).encode("utf-8")
-    return effective_path, candidate_json_body, candidate_body, needs_translation
-
-
-def _extract_cloud_response_content(
-    payload: Optional[Dict[str, Any]],
-) -> Tuple[Optional[str], Optional[list]]:
-    """Extract text content and tool_calls from a non-streaming cloud response.
-
-    Handles both OpenAI-format (choices[0].message) and Anthropic-format
-    (content blocks) responses.
-    """
-    if not isinstance(payload, dict):
-        return None, None
-
-    content_parts: list[str] = []
-    tool_calls: Optional[list] = None
-
-    # OpenAI format: choices[0].message
-    choices = payload.get("choices")
-    if isinstance(choices, list) and choices:
-        msg = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
-        if isinstance(msg, dict):
-            text = msg.get("content")
-            if isinstance(text, str) and text:
-                content_parts.append(text)
-            elif isinstance(text, list):
-                # OpenAI content blocks (vision)
-                for block in text:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        content_parts.append(block.get("text", ""))
-            tc = msg.get("tool_calls")
-            if isinstance(tc, list) and tc:
-                tool_calls = tc
-            reasoning = msg.get("reasoning_content")
-            if isinstance(reasoning, str) and reasoning and not content_parts:
-                content_parts.append(reasoning)
-
-    # Anthropic format: content blocks at top level
-    if not content_parts and tool_calls is None:
-        anthropic_content = payload.get("content")
-        if isinstance(anthropic_content, list):
-            for block in anthropic_content:
-                if not isinstance(block, dict):
-                    continue
-                btype = block.get("type")
-                if btype == "text":
-                    content_parts.append(block.get("text", ""))
-                elif btype == "tool_use":
-                    if tool_calls is None:
-                        tool_calls = []
-                    tool_calls.append({
-                        "id": block.get("id"),
-                        "type": "function",
-                        "function": {
-                            "name": block.get("name"),
-                            "arguments": json.dumps(block.get("input", {})),
-                        },
-                    })
-
-    content = "\n".join(content_parts) if content_parts else None
-    return content, tool_calls
-
-
-def _setup_cloud_capture(
-    request: Request,
-    client_id: str,
-    *,
-    model_name: str,
-    json_body: Dict[str, Any],
-    path: str,
-) -> Tuple[Optional[BuildContext], Optional["PolicyResult"], Optional[str], Optional[float]]:
-    """Set up capture context for a cloud route.
-
-    Cloud routes bypass the inference queue, so we generate a request_id
-    and start a timer here.  Returns (ctx, policy_result, request_id, start_time).
-    All values may be None when capture is disabled or evaluation fails.
-    """
-    try:
-        controller = get_capture_controller()
-        client_fp = _capture_client_fingerprint(request, client_id)
-        endpoint = _capture_endpoint_from_request(request)
-        # For cloud routes via proxy_v1_post, path is "chat/completions" or "messages"
-        # For cloud routes via Ollama bridge, path is "chat/completions"
-        # Determine protocol from the endpoint/route
-        if endpoint.startswith("/v1/messages"):
-            protocol = PROTOCOL_ANTHROPIC
-        elif endpoint.startswith("/api/chat") or endpoint.startswith("/api/generate"):
-            protocol = PROTOCOL_OLLAMA
-        else:
-            protocol = PROTOCOL_OPENAI
-
-        # Generate a unique request_id for cloud routes (not from queue)
-        cloud_request_id = str(uuid.uuid4())
-
-        # Build capture messages
-        capture_messages = None
-        capture_params = None
-        if isinstance(json_body, dict):
-            if protocol == PROTOCOL_ANTHROPIC:
-                capture_messages = anthropic_messages_to_openai(
-                    messages=json_body.get("messages", []),
-                    system=json_body.get("system"),
-                )
-                capture_params = {
-                    k: v for k, v in json_body.items()
-                    if k not in ("messages", "system")
-                }
-            else:
-                capture_messages = json_body.get("messages")
-                capture_params = {
-                    k: v for k, v in json_body.items() if k != "messages"
-                }
-
-        policy_result = _dispatch_capture_request_received(
-            request, client_id,
-            request_id=cloud_request_id,
-            endpoint=endpoint,
-            ingress_protocol=protocol,
-            route_type=ROUTE_CLOUD,
-            requested_model=model_name,
-            resolved_model=model_name,
-            request_messages=capture_messages,
-            request_parameters=capture_params,
-            queue_wait_ms=0,
-        )
-
-        if policy_result is not None and policy_result.should_capture:
-            ctx = BuildContext(
-                request_id=cloud_request_id,
-                endpoint=endpoint,
-                ingress_protocol=protocol,
-                route_type=ROUTE_CLOUD,
-                requested_model=model_name,
-                resolved_model=model_name,
-                capture_policy_version=capture_controller.config.policy_version,
-                instance_id=capture_controller.config.instance_id,
-                client_fingerprint=client_fp,
-            )
-            start_time = time.monotonic()
-            return ctx, policy_result, cloud_request_id, start_time
-
-    except Exception:
-        pass
-
-    return None, None, None, None
-
-
+def _setup_cloud_capture(request: Request, client_id: str, *, model_name: str, json_body: Dict[str, Any], path: str) -> Tuple[Optional[BuildContext], Optional["PolicyResult"], Optional[str], Optional[float]]:
+    return _cloud_routing.setup_cloud_capture(request, client_id, model_name=model_name, json_body=json_body, path=path)
 async def _forward_to_cloud_provider(
     path: str,
     body: bytes,
@@ -4185,10 +3865,12 @@ async def _forward_to_cloud_provider(
             # (e.g. NVIDIA's free tier) gets one more chance after a 60s wait.
             # Concurrent requests skip the rate-limited candidate and go
             # directly to the next one (OR), keeping them responsive.
+            # Skipped when cloud_retry.enabled=false (agent harness owns 429s).
             if (
                 getattr(resp, "status_code", 0) == 429
                 and failover_group is not None
                 and not is_last_attempt
+                and cloud_rate_limiter.config.enabled
             ):
                 _probe_wait = failover_health._rate_limit_cooldown_seconds
                 logger.info(
@@ -4315,10 +3997,12 @@ async def _forward_to_cloud_provider(
                 raise HTTPException(status_code=502, detail=f"Cloud provider request failed: {e}")
 
             # ── Failover 429 probe: wait and retry once before falling through ──
+            # Skipped when cloud_retry.enabled=false (agent harness owns 429s).
             if (
                 getattr(resp, "status_code", 0) == 429
                 and failover_group is not None
                 and not is_last_attempt
+                and cloud_rate_limiter.config.enabled
             ):
                 _probe_wait = failover_health._rate_limit_cooldown_seconds
                 logger.info(
