@@ -40,7 +40,8 @@
 app/
 ├─ main.py              # uvicorn entrypoint
 ├─ paths.py             # central path resolution (REPO_ROOT, CONFIG_DIR, MODELS_DIR, …)
-├─ proxy/server.py      # FastAPI router: all endpoints, cloud forwarding, streaming
+├─ config_loader.py     # settings.yaml parsing — loaded ONCE per process, typed accessors
+├─ proxy/server.py      # thin shell: routes + init() wiring, 1643 lines (Phase 5: all logic extracted)
 ├─ proxy/auth.py        # API key verification
 ├─ proxy/providers.py   # ProviderRegistry: cloud model recognition (exact + prefix)
 ├─ proxy/cloud_keys.py   # CloudCredentialStore: per-key credential linking
@@ -50,12 +51,30 @@ app/
 ├─ proxy/ratelimit.py    # Cloud provider rate-limit retries
 ├─ proxy/metrics.py      # Prometheus /metrics
 ├─ proxy/usage.py        # persistent API usage tracking for dashboard
+├─ proxy/process.py      # pid file, listener inspection/stale termination, startup-check state
+├─ proxy/lifespan.py     # startup/shutdown orchestration + idle-unload watcher
+├─ proxy/state.py        # runtime State container (VRAM scheduler, scaler, optimizer, usage)
+├─ gateway/              # Phase 5 extracted logic, all with init() DI:
+│  ├─ routing.py         #   /v1/{path} dispatch (cloud/local, queue, vision fallback)
+│  ├─ normalization.py   #   multimodal preflight, error mapping, thinking params
+│  ├─ streaming.py       #   SSE watchdog, keepalives, Anthropic enrichment
+│  ├─ queue_helpers.py   #   request lifecycle, disconnect watch, cancel
+│  ├─ usage.py           #   live usage tracking + middleware
+│  ├─ capture_dispatch.py #   capture event dispatch hooks
+│  ├─ model_discovery.py #   /api/tags, /v1/models, /api/show handler bodies
+│  ├─ admin_api.py       #   25 admin/status/credential/scaler/queue handlers
+│  ├─ sessions.py        #   session slot save/load/list
+│  └─ context_metadata.py #  context window resolution + model metadata
+├─ cloud_inference/      # Phase 5 extracted: routing.py (attempts/fallback/capture setup),
+│                        #   forwarding.py (forward_to_cloud_provider, 28 deps)
+├─ local_inference/      # Phase 5 extracted: ollama.py (chat/generate bridges),
+│                        #   models.py (resolution, sizes, timeouts, VRAM scheduler, reload)
 ├─ engine/manager.py     # llama-server lifecycle (start/stop/reload)
 ├─ scheduler/manager.py  # Idle-unload + auto-switch scheduler
 ├─ tweaker/              # Finetune v2: context/ngl/tensor_split tuning
 └─ capture/             # Privacy-aware capture subsystem (config, policy, redactor, schema, sink, WAL writer)
 config/
-├─ settings.yaml         # proxy, providers (OpenRouter/NVIDIA/Poolside), queue, timeout tiers
+├─ settings.yaml         # proxy (port/target/pid_file/vram), providers, queue, timeout tiers
 ├─ models.yaml           # model registry (aliases, runtime, tensor_split, switch policy)
 └─ api_keys.json         # named API keys (goose, oelala, hydroponics, …)
 scripts/
@@ -100,6 +119,14 @@ When touching these areas, read the referenced detail docs:
 - **Generic signature regression test** added to `tests/unit/test_server.py` (`test_all_wrapper_calls_match_module_signatures`) — covers every `_module.func(...)` delegation in server.py.
 - Fixed the last 2 pyflakes findings: `Union` in `app/capture/redactor.py`, `Dict`/`Any` in `app/proxy/metrics.py` — `pyflakes app/` is now fully clean.
 - Full suite: 893 passed, 3 skipped. Commits: `cf7a879`, `235045e`. Pushed.
+- **Docs refresh (2026-08-12, commit `8ac206b`+):** all documentation updated for the Phase 5 structure:
+  - `AGENTS.md` directory map rewritten (gateway/cloud_inference/local_inference/proxy modules, config_loader, server.py = thin shell 1643 lines)
+  - `docs/ANTHROPIC_BRIDGE.md`: enrichment layer now `app/gateway/streaming.py`, cloud bridge `app/cloud_inference/forwarding.py` (was `app/proxy/server.py`)
+  - `docs/LLM_ROUTER.md`: `_PROVIDER_BASE_URLS` + `_adapt_openai_reasoning_params` now `app/cloud_inference/routing.py`
+  - `docs/API_REFERENCE.md`: added missing endpoint groups — API keys (`/api/keys`), cloud credentials (`/api/cloud/*`, 12 routes, owner-scoped), capture admin (`/api/capture/status`, `/api/capture/rotate`)
+  - `docs/GUARDIAN_KEANU_CAPTURE_PLAN.json`: statuses corrected — phases 0–5 complete, phase 6 in_progress (was all `not_started`)
+  - `docs/skills/operator-runbook.md`: code-change flow now runs `scripts/pre_restart_check.py` as the mandatory gate
+  - Keanu-side docs (`SOURCE/PARSER_GUARDIAN_CAPTURE.md`) are still outdated — covered by `docs/KEANU_GUARDIAN_CAPTURE_HANDOFF.md` (task 2 for the Keanu agent)
 
 
 

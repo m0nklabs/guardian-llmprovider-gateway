@@ -56,8 +56,9 @@ endpoint (registered in `server.cpp`). It internally converts:
 
 However, llama-server's implementation has several gaps that Guardian's
 **enrichment layer** fills. The enrichment is applied transparently in
-`app/proxy/server.py` without modifying the upstream response body when
-no enrichment is needed.
+`app/gateway/streaming.py` (extracted from `app/proxy/server.py` in
+Phase 5) without modifying the upstream response body when no enrichment
+is needed.
 
 ### Path 2: Cloud Providers (full translation bridge)
 
@@ -76,8 +77,9 @@ determines whether translation is needed based on provider name and request path
 
 ## Local Model Enrichment Layer
 
-The enrichment layer in `app/proxy/server.py` fixes the following gaps in
-llama-server's Anthropic implementation:
+The enrichment layer (in `app/gateway/streaming.py` since the Phase 5
+extraction; previously in `app/proxy/server.py`) fixes the following gaps
+in llama-server's Anthropic implementation:
 
 ### 1. Thinking Configuration Translation
 
@@ -386,7 +388,9 @@ curl -X POST http://localhost:11434/v1/messages \
 | File | Purpose |
 |---|---|
 | `app/proxy/anthropic_bridge.py` | Cloud bridge: full Anthropic ↔ OpenAI translation |
-| `app/proxy/server.py` | Local model enrichment layer + cloud bridge integration |
+| `app/gateway/streaming.py` | Local model enrichment layer (SSE watchdog, keepalives, Anthropic enrichment) |
+| `app/cloud_inference/forwarding.py` | Cloud forwarding incl. Anthropic translation (28 injected deps) |
+| `app/gateway/routing.py` | `/v1/{path}` dispatch incl. Anthropic request translation |
 | `tests/unit/test_anthropic_bridge.py` | 63 unit tests for the bridge |
 | `docs/LLM_ROUTER.md` | Cloud provider routing documentation |
 | `config/settings.yaml` | Provider configuration |

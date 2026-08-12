@@ -104,8 +104,13 @@ grep -E 'OPENROUTER_API_KEY|NVIDIA_API_KEY|POOLSIDE_API_KEY' .env
 ## When making code changes
 
 1. Edit `app/*.py`
-2. `./venv/bin/python -m py_compile <file>` — syntax check
-3. `./venv/bin/python -m pytest tests/ -x` — run tests
-4. `sudo systemctl restart llama-guardian` — deploy
-5. `curl -s http://127.0.0.1:11434/healthz` — verify it's back up
-6. Watch logs: `journalctl -u llama-guardian.service -f | grep -v healthz`
+2. Run the full pre-restart gate (py_compile + pyflakes + signature check + pytest):
+   ```bash
+   ./venv/bin/python scripts/pre_restart_check.py
+   ```
+   All four gates must PASS before restarting — a startup-breaking error is
+   not self-healable because the agent's own model traffic routes through
+   Guardian (see AGENTS.md Critical rules).
+3. `sudo systemctl restart llama-guardian` — deploy
+4. `curl -s http://127.0.0.1:11434/healthz` — verify it's back up
+5. Watch logs: `journalctl -u llama-guardian.service -f | grep -v healthz`

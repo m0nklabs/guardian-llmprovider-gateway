@@ -434,6 +434,50 @@ Representative response:
 | `POST` | `/admin/load` | No | Reload current or specified model |
 | `POST` | `/admin/unload` | No | Stop backend immediately and free VRAM |
 
+### API key management endpoints
+
+| Method | Path | Queued | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/api/keys` | No | List all Guardian keys (tokens masked, fingerprints shown) |
+| `POST` | `/api/keys` | No | Generate a new Guardian API key (returns the full key once) |
+
+`POST /api/keys` body: `{"name": "my-app", "prefix": "myapp", "metadata": {"client": "my-app"}}`.
+The full key is returned only once — store it immediately.
+
+### Cloud credential endpoints (per-key cloud routing)
+
+| Method | Path | Queued | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/api/cloud/credentials` | No | List credentials owned by the calling key |
+| `POST` | `/api/cloud/credentials` | No | Add a provider credential (`provider`, `name`, `api_key`, `models`) |
+| `POST` | `/api/cloud/credentials/{cred_id}/refresh-models` | No | Refresh the stored Google model catalog |
+| `DELETE` | `/api/cloud/credentials/{cred_id}` | No | Delete a credential and all its links |
+| `POST` | `/api/cloud/credentials/{cred_id}/models` | No | Add a model to a credential |
+| `DELETE` | `/api/cloud/credentials/{cred_id}/models/{model_name:path}` | No | Remove a model from a credential |
+| `GET` | `/api/cloud/links` | No | List credential links for the calling key |
+| `POST` | `/api/cloud/links` | No | Link a credential to a Guardian key |
+| `DELETE` | `/api/cloud/links` | No | Unlink a credential from a Guardian key |
+| `GET` | `/api/cloud/providers` | No | List configured providers and their status |
+| `GET` | `/api/cloud/models` | No | List global + per-key cloud models for the caller |
+| `GET` | `/api/cloud/ratelimit-stats` | No | Per-key 429 counters and provider hints |
+
+Credentials and links are **owner-scoped**: only the Guardian key that created
+a credential can manage or share it (403/404 otherwise). Google credentials
+automatically fetch their model catalog on create/refresh.
+
+### Capture management endpoints (admin)
+
+| Method | Path | Queued | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/api/capture/status` | No | Capture subsystem status, config summary, writer metrics, disk usage |
+| `POST` | `/api/capture/rotate` | No | Force rotation of the active WAL file |
+
+Capture is **disabled by default** (`GUARDIAN_CAPTURE_ENABLED=false`).
+`/api/capture/status` shows the effective policy (field policies, retention,
+opt-in counts) without secrets; `/api/capture/rotate` closes the active WAL
+file and opens a new one (returns the rotated + active paths). See
+`scripts/guardianctl.py` for the operator CLI mirroring these endpoints.
+
 #### `POST /admin/load`
 
 Request body:

@@ -464,15 +464,17 @@ curl http://localhost:11434/api/chat \
   **bare** name (`gpt-4o`).  `gpt-4o` → direct OpenAI; `openai/gpt-4o` →
   OpenRouter.  Both work, to different backends.
 - **Added on**: 2026-08-01.  `https://api.openai.com/v1` is also registered in
-  `_PROVIDER_BASE_URLS` (`app/proxy/server.py`) so per-key
+  `_PROVIDER_BASE_URLS` (in `app/cloud_inference/routing.py` since the
+  Phase 5 extraction; previously `app/proxy/server.py`) so per-key
   `guardian/openai/{model}` routes resolve a base URL.
 - **Reasoning-model parameter adaptation**: OpenAI's reasoning models (the
   `o1`/`o3`/`o4` family and the entire `gpt-5*` generation) reject
   `max_tokens` (must use `max_completion_tokens`) and restrict
   `temperature` (o-series: unsupported; gpt-5*: only value `1`).  Many
   OpenAI-compatible clients (Claude Code, OpenWebUI, Aider, …) send these
-  params unconditionally.  Guardian's `_adapt_openai_reasoning_params`
-  (called inside `_prepare_cloud_candidate_request`) silently adapts them
+  params unconditionally.  Guardian's `_adapt_openai_reasoning_params` (in
+  `app/cloud_inference/routing.py`; called inside
+  `_prepare_cloud_candidate_request`) silently adapts them
   **only for the direct `openai` provider** — OpenRouter handles its own
   param translation.  An explicit client-supplied `max_completion_tokens`
   always wins; the stray `max_tokens` is dropped, not overridden.

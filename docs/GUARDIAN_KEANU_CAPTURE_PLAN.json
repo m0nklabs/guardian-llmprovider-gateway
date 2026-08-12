@@ -1,558 +1,559 @@
 {
-  "document": {
-    "id": "guardian-keanu-capture-plan",
-    "title": "Guardian to Keanu Factory Capture and Foundation Improvement Plan",
-    "version": "1.0.0",
-    "status": "proposed",
-    "created_at": "2026-08-01",
-    "language": "en",
-    "owners": [
-      "llama_cpp_guardian",
-      "keanu-factory"
-    ],
-    "implementation_status": "not_started",
-    "summary": "Introduce a privacy-aware, non-blocking capture boundary between Guardian and Keanu Factory while separating Guardian into shared gateway, local inference, and cloud inference responsibilities."
-  },
-  "repositories": {
-    "guardian": {
-      "path": "/home/flip/llama_cpp_guardian",
-      "role": "Capture producer and inference gateway"
-    },
-    "keanu_factory": {
-      "path": "/home/flip/keanu-factory",
-      "remote": "https://github.com/m0nklabs/keanu-factory.git",
-      "role": "Capture consumer, privacy processor, and dataset builder"
-    }
-  },
-  "goals": [
-    "Capture eligible Guardian request and response data for dataset construction.",
-    "Keep inference available when capture is disabled, overloaded, or unavailable.",
-    "Preserve provenance across local, cloud, translated, retried, and failed-over requests.",
-    "Keep Guardian and Keanu Factory independently deployable.",
-    "Separate shared gateway, local inference, and cloud inference responsibilities.",
-    "Make capture policy, retention, privacy, and schema evolution explicit and testable."
+ "document": {
+  "id": "guardian-keanu-capture-plan",
+  "title": "Guardian to Keanu Factory Capture and Foundation Improvement Plan",
+  "version": "1.0.0",
+  "status": "in_progress",
+  "created_at": "2026-08-01",
+  "language": "en",
+  "owners": [
+   "llama_cpp_guardian",
+   "keanu-factory"
   ],
-  "non_goals": [
-    "Guardian does not produce final ChatML or training-ready Gold datasets.",
-    "Guardian does not import or depend on Keanu Factory Python packages.",
-    "Capture does not replace Guardian usage telemetry or operational logging.",
-    "The initial implementation does not require Redis, Kafka, or another network service.",
-    "The initial implementation does not capture raw image bodies by default.",
-    "Cloud responses are not captured until provider terms have been reviewed and explicitly accepted."
+  "implementation_status": "phases_0_5_complete_phase_6_soak_pending",
+  "summary": "Introduce a privacy-aware, non-blocking capture boundary between Guardian and Keanu Factory while separating Guardian into shared gateway, local inference, and cloud inference responsibilities.",
+  "updated_at": "2026-08-12"
+ },
+ "repositories": {
+  "guardian": {
+   "path": "/home/flip/llama_cpp_guardian",
+   "role": "Capture producer and inference gateway"
+  },
+  "keanu_factory": {
+   "path": "/home/flip/keanu-factory",
+   "remote": "https://github.com/m0nklabs/keanu-factory.git",
+   "role": "Capture consumer, privacy processor, and dataset builder"
+  }
+ },
+ "goals": [
+  "Capture eligible Guardian request and response data for dataset construction.",
+  "Keep inference available when capture is disabled, overloaded, or unavailable.",
+  "Preserve provenance across local, cloud, translated, retried, and failed-over requests.",
+  "Keep Guardian and Keanu Factory independently deployable.",
+  "Separate shared gateway, local inference, and cloud inference responsibilities.",
+  "Make capture policy, retention, privacy, and schema evolution explicit and testable."
+ ],
+ "non_goals": [
+  "Guardian does not produce final ChatML or training-ready Gold datasets.",
+  "Guardian does not import or depend on Keanu Factory Python packages.",
+  "Capture does not replace Guardian usage telemetry or operational logging.",
+  "The initial implementation does not require Redis, Kafka, or another network service.",
+  "The initial implementation does not capture raw image bodies by default.",
+  "Cloud responses are not captured until provider terms have been reviewed and explicitly accepted."
+ ],
+ "architecture": {
+  "boundary": "versioned append-only JSONL files on the local filesystem",
+  "producer": "Guardian capture subsystem",
+  "consumer": "Keanu Factory Guardian capture parser",
+  "flow": [
+   "Client request enters the shared Guardian gateway.",
+   "Guardian authenticates, normalizes, assigns a request ID, and evaluates capture policy.",
+   "The request is routed to either local or cloud inference.",
+   "Route-specific adapters attach resolved model, provider, retry, and failover metadata.",
+   "Streaming responses are reconstructed into one final semantic response.",
+   "Eligible events enter a bounded non-blocking queue.",
+   "A single background writer appends events to an active JSONL file.",
+   "Guardian atomically closes and rotates completed files.",
+   "Keanu reads only completed files and validates event schema and integrity.",
+   "Keanu applies its Privacy Gateway before producing Silver or Gold data."
   ],
-  "architecture": {
-    "boundary": "versioned append-only JSONL files on the local filesystem",
-    "producer": "Guardian capture subsystem",
-    "consumer": "Keanu Factory Guardian capture parser",
-    "flow": [
-      "Client request enters the shared Guardian gateway.",
-      "Guardian authenticates, normalizes, assigns a request ID, and evaluates capture policy.",
-      "The request is routed to either local or cloud inference.",
-      "Route-specific adapters attach resolved model, provider, retry, and failover metadata.",
-      "Streaming responses are reconstructed into one final semantic response.",
-      "Eligible events enter a bounded non-blocking queue.",
-      "A single background writer appends events to an active JSONL file.",
-      "Guardian atomically closes and rotates completed files.",
-      "Keanu reads only completed files and validates event schema and integrity.",
-      "Keanu applies its Privacy Gateway before producing Silver or Gold data."
-    ],
-    "guardian_components": {
-      "shared_gateway": [
-        "authentication",
-        "protocol ingress and normalization",
-        "request identity and lifecycle",
-        "local versus cloud routing",
-        "SSE watchdogs and keepalives",
-        "usage and metrics",
-        "capture policy and event dispatch",
-        "admin APIs"
-      ],
-      "local_inference": [
-        "inference queue",
-        "model switching and reload",
-        "llama-server transport",
-        "GPU and VRAM scheduling",
-        "vision runtime validation",
-        "local reasoning defaults",
-        "model-specific compatibility transforms"
-      ],
-      "cloud_inference": [
-        "provider and credential resolution",
-        "request translation",
-        "rate-limit handling",
-        "retry and failover",
-        "cloud transport",
-        "upstream model attribution"
-      ],
-      "capture": [
-        "validated capture configuration",
-        "policy evaluation",
-        "mandatory credential redaction",
-        "stream response assembly",
-        "bounded asynchronous event queue",
-        "append-only JSONL writer",
-        "rotation and retention",
-        "drop and failure metrics"
-      ]
-    },
-    "keanu_components": [
-      "guardian_capture_v1 parser",
-      "typed parser registry",
-      "ProcessingLedger-based idempotency",
-      "PrivacyGateway redaction and pseudonymization",
-      "Bronze to Silver transformation",
-      "validated Silver to Gold publication"
-    ]
+  "guardian_components": {
+   "shared_gateway": [
+    "authentication",
+    "protocol ingress and normalization",
+    "request identity and lifecycle",
+    "local versus cloud routing",
+    "SSE watchdogs and keepalives",
+    "usage and metrics",
+    "capture policy and event dispatch",
+    "admin APIs"
+   ],
+   "local_inference": [
+    "inference queue",
+    "model switching and reload",
+    "llama-server transport",
+    "GPU and VRAM scheduling",
+    "vision runtime validation",
+    "local reasoning defaults",
+    "model-specific compatibility transforms"
+   ],
+   "cloud_inference": [
+    "provider and credential resolution",
+    "request translation",
+    "rate-limit handling",
+    "retry and failover",
+    "cloud transport",
+    "upstream model attribution"
+   ],
+   "capture": [
+    "validated capture configuration",
+    "policy evaluation",
+    "mandatory credential redaction",
+    "stream response assembly",
+    "bounded asynchronous event queue",
+    "append-only JSONL writer",
+    "rotation and retention",
+    "drop and failure metrics"
+   ]
   },
-  "capture_contract": {
-    "schema_name": "guardian_capture_v1",
-    "schema_version": "1.0.0",
-    "serialization": "newline-delimited JSON",
-    "event_types": {
-      "request_received": "Normalized request and capture-policy metadata after authentication.",
-      "request_completed": "Final semantic response, resolved route, usage, and timing metadata.",
-      "request_failed": "Sanitized error classification and route-attempt metadata.",
-      "request_cancelled": "Client disconnect, timeout, or interrupted stream metadata."
-    },
-    "required_fields": [
-      "schema_name",
-      "schema_version",
-      "event_id",
-      "event_type",
-      "request_id",
-      "sequence",
-      "timestamp_utc",
-      "guardian_instance_id",
-      "client_ref",
-      "endpoint",
-      "ingress_protocol",
-      "route_type",
-      "requested_model",
-      "capture_policy_version"
-    ],
-    "optional_fields": [
-      "resolved_model",
-      "upstream_model",
-      "provider",
-      "failover_group",
-      "request_messages",
-      "request_parameters",
-      "response_content",
-      "tool_calls",
-      "tool_results",
-      "reasoning_content",
-      "finish_reason",
-      "http_status",
-      "prompt_tokens",
-      "completion_tokens",
-      "total_tokens",
-      "queue_wait_ms",
-      "duration_ms",
-      "error_code",
-      "attempts",
-      "streamed",
-      "incomplete",
-      "record_auth"
-    ],
-    "identity": {
-      "event_id": "Lowercase hex-encoded SHA-256 of the UTF-8 bytes '{guardian_instance_id}|{request_id}|{event_type}|{sequence}'. Values must not contain the delimiter character '|'.",
-      "request_id": "Existing Guardian request ID or a generated UUID.",
-      "client_ref": "Lowercase hex-encoded HMAC-SHA-256 using GUARDIAN_CAPTURE_CLIENT_REF_SECRET as key and the authenticated Guardian key fingerprint as UTF-8 message. Never persist the raw API key, client IP, display name, or HMAC input.",
-      "sequence": "Monotonically increasing integer within one request."
-    },
-    "normalization": {
-      "request": "Capture semantic messages after ingress normalization and before route-specific transport translation.",
-      "response": "Capture the final semantic response returned to the client.",
-      "streaming": "Accumulate deltas in memory and emit one completed response event instead of persisting individual chunks.",
-      "images": "Replace raw image data with policy-approved metadata such as SHA-256, MIME type, byte size, and dimensions.",
-      "errors": "Store stable error codes and sanitized messages without upstream credentials or raw response headers."
-    },
-    "content_shapes": {
-      "image_metadata": {
-        "type": "image_metadata",
-        "sha256": "lowercase hex-encoded SHA-256 of decoded image bytes",
-        "mime_type": "image/png",
-        "size_bytes": 12345,
-        "width": 800,
-        "height": 600
-      },
-      "image_metadata_rules": [
-        "sha256 is required when images policy is hash_and_metadata.",
-        "mime_type and size_bytes are required when available.",
-        "width and height are optional and must be positive integers when present.",
-        "Raw base64 data and remote image query strings must not be persisted."
-      ]
-    },
-    "compatibility_rules": [
-      "The schema_name suffix is the wire-contract major version; readers for guardian_capture_v1 must reject guardian_capture_v2 and later names until explicitly supported.",
-      "schema_version uses semantic versioning within one schema name and must remain in the 1.x range for guardian_capture_v1.",
-      "Readers must ignore unknown fields within a supported schema name and major schema_version.",
-      "New optional fields require a minor schema_version increment.",
-      "Breaking field or semantic changes require guardian_capture_v2 with schema_version 2.0.0.",
-      "Every event records the capture policy version used to produce it.",
-      "record_auth (optional, added 2026-08-07): per-record HMAC authentication. When GUARDIAN_CAPTURE_RECORD_AUTH_SECRET is set, each JSONL line includes a record_auth object with {alg, key_id, mac}. Keanu verifies by stripping record_auth from the parsed JSON, re-serialising, and recomputing HMAC-SHA-256 with its verification-only copy of the secret. Absence of record_auth means the feature is disabled — Keanu should fall back to file-level checksum verification."
-    ]
-  },
-  "security_and_privacy": {
-    "default_posture": "disabled_and_opt_in",
-    "failure_mode": "fail_open",
-    "invariants": [
-      "Capture failure never blocks or changes inference output.",
-      "Authorization headers and raw API keys are never persisted.",
-      "Cloud provider credentials and environment-variable values are never persisted.",
-      "Raw client IP addresses are never persisted in dataset events.",
-      "Admin, health, metrics, embeddings, and key-management endpoints are excluded.",
-      "Every captured event remains local until Keanu privacy processing succeeds.",
-      "Only privacy-processed and validated outputs may advance beyond Bronze."
-    ],
-    "recommended_defaults": {
-      "enabled": false,
-      "local_capture": false,
-      "cloud_capture": false,
-      "per_client_opt_in": "When the global switch and route-type switch are enabled, a request is captured only if its authenticated client_ref is explicitly allowed. Per-client policy can never override a disabled global switch.",
-      "system_prompts": "strip",
-      "reasoning": "strip",
-      "tool_definitions": "capture",
-      "tool_calls": "capture",
-      "tool_results": "strip",
-      "images": "hash_and_metadata",
-      "unknown_content_blocks": "strip",
-      "retention_days": 7,
-      "max_capture_bytes": 10737418240,
-      "max_pending_events": 10000,
-      "file_mode": "0640",
-      "directory_mode": "0750",
-      "ownership_assumption": "Guardian owns capture files. Keanu runs as the same Unix user or belongs to a dedicated shared read-only group; no world-readable permissions are permitted."
-    },
-    "cloud_controls": [
-      "Cloud capture requires a provider allowlist.",
-      "Provider terms must be reviewed before enabling response capture.",
-      "Cloud provenance must include provider and upstream model.",
-      "Local and cloud capture policies must be independently configurable."
-    ],
-    "integrity_controls": [
-      "Use one writer and append-only file descriptors.",
-      "Prevent symlink traversal and anchor all writes beneath the configured capture root.",
-      "Write complete JSON lines and recover by discarding an incomplete final line.",
-      "Store a SHA-256 checksum for every completed rotated file.",
-      "Consider keyed record authentication after key-management and rotation rules are defined."
-    ],
-    "keanu_obligations": [
-      "Run secret and PII redaction before Silver output.",
-      "Pseudonymize client and user identifiers.",
-      "Reject invalid or unsupported events.",
-      "Quarantine incomplete, malformed, or policy-violating records.",
-      "Prevent raw Bronze data from cloud sync and source control.",
-      "Record every accepted event in the ProcessingLedger."
-    ]
-  },
-  "storage": {
-    "guardian_root": "data/capture",
-    "active_file": "guardian_capture_current.jsonl",
-    "completed_file_pattern": "guardian_capture_<utc_timestamp>_<sequence>.jsonl.gz",
-    "state_file": ".capture_state.json",
-    "writer_model": "single_background_writer",
-    "rotation": {
-      "max_file_bytes": 268435456,
-      "max_file_age_seconds": 3600,
-      "trigger_logic": "Rotate when either max_file_bytes or max_file_age_seconds is reached.",
-      "compress_completed_files": true,
-      "keanu_reads_active_file": false
-    },
-    "backpressure": {
-      "queue_type": "bounded",
-      "overflow_behavior": "drop_new_event_and_increment_metric",
-      "inference_behavior": "continue",
-      "required_metrics": [
-        "guardian_capture_events_total",
-        "guardian_capture_events_dropped_total",
-        "guardian_capture_write_failures_total",
-        "guardian_capture_queue_depth",
-        "guardian_capture_bytes_total",
-        "guardian_capture_disk_bytes"
-      ]
-    }
-  },
-  "target_module_boundaries": {
-    "guardian": {
-      "composition_root": "app/proxy/server.py",
-      "shared_gateway_candidates": [
-        "app/gateway/config.py",
-        "app/gateway/lifecycle.py",
-        "app/gateway/streaming.py",
-        "app/gateway/request_lifecycle.py",
-        "app/gateway/router.py",
-        "app/gateway/admin.py"
-      ],
-      "local_candidates": [
-        "app/local/routes.py",
-        "app/local/forward.py",
-        "app/local/model_switch.py",
-        "app/local/vision.py",
-        "app/local/reasoning.py",
-        "app/local/compat.py"
-      ],
-      "cloud_candidates": [
-        "app/cloud/routes.py",
-        "app/cloud/forward.py",
-        "app/cloud/resolver.py"
-      ],
-      "capture_candidates": [
-        "app/capture/config.py",
-        "app/capture/schema.py",
-        "app/capture/policy.py",
-        "app/capture/redactor.py",
-        "app/capture/stream_assembler.py",
-        "app/capture/sink.py",
-        "app/capture/wal_writer.py"
-      ]
-    },
-    "keanu_factory": {
-      "contract_change": "Add Source.GUARDIAN_CAPTURE.",
-      "parser": "src/pipeline/parsers/guardian_capture_parser.py",
-      "orchestration_change": "Replace the manual parser list with a typed registry and register Guardian capture ingestion.",
-      "privacy_boundary": "All Guardian events pass through PrivacyGateway before Silver output."
-    }
-  },
-  "phases": [
-    {
-      "id": "phase_0",
-      "name": "Decisions and contracts",
-      "status": "not_started",
-      "objective": "Freeze the integration boundary and safety invariants before implementation.",
-      "deliverables": [
-        "Architecture decision for filesystem JSONL transport.",
-        "guardian_capture_v1 JSON Schema and representative fixtures.",
-        "Capture policy and retention specification.",
-        "Cloud-provider terms review checklist.",
-        "Threat-model-derived security tests."
-      ],
-      "acceptance_criteria": [
-        "Both repositories agree on the same fixtures.",
-        "Fixtures contain no credentials or raw client identifiers.",
-        "Unsupported-version behavior is specified and tested."
-      ]
-    },
-    {
-      "id": "phase_1",
-      "name": "Minimal shared gateway extraction",
-      "status": "not_started",
-      "objective": "Create stable capture hook points without changing runtime behavior.",
-      "deliverables": [
-        "Extract validated configuration.",
-        "Extract request lifecycle and model routing.",
-        "Extract SSE streaming and watchdog helpers.",
-        "Keep app/proxy/server.py as the composition root."
-      ],
-      "acceptance_criteria": [
-        "All existing Guardian tests pass.",
-        "Local and cloud smoke tests remain behaviorally identical.",
-        "No capture code is active yet."
-      ]
-    },
-    {
-      "id": "phase_2",
-      "name": "Guardian capture vertical slice",
-      "status": "not_started",
-      "objective": "Capture opt-in local OpenAI chat requests safely in streaming and non-streaming modes.",
-      "deliverables": [
-        "Validated capture configuration and global kill switch.",
-        "Policy engine and mandatory credential redactor.",
-        "Bounded non-blocking event queue.",
-        "Stream response assembler.",
-        "Append-only writer, rotation, retention, and metrics."
-      ],
-      "acceptance_criteria": [
-        "Capture is disabled by default.",
-        "Inference succeeds when the capture writer fails.",
-        "No auth header, API key, provider credential, or raw image is persisted.",
-        "Streaming and non-streaming requests produce equivalent semantic records.",
-        "Capture has no material p99 latency regression."
-      ]
-    },
-    {
-      "id": "phase_3",
-      "name": "Keanu ingestion",
-      "status": "not_started",
-      "objective": "Ingest Guardian events idempotently through Keanu's modern contracts and privacy boundary.",
-      "deliverables": [
-        "Source.GUARDIAN_CAPTURE contract value.",
-        "guardian_capture_v1 parser.",
-        "Typed parser registration.",
-        "ProcessingLedger integration.",
-        "PrivacyGateway and quarantine integration."
-      ],
-      "acceptance_criteria": [
-        "Reprocessing produces no duplicate records.",
-        "Malformed, incomplete, and unsupported events are quarantined.",
-        "Raw records cannot bypass PrivacyGateway.",
-        "Only completed request-response pairs become dataset candidates."
-      ]
-    },
-    {
-      "id": "phase_4",
-      "name": "Protocol and route coverage",
-      "status": "not_started",
-      "objective": "Extend capture to all approved Guardian ingress protocols and route outcomes.",
-      "deliverables": [
-        "Anthropic Messages support.",
-        "Ollama chat and generate support.",
-        "Tool-call and tool-result policy support.",
-        "Cancellation, timeout, retry, and failover events.",
-        "Provider-approved cloud capture allowlists."
-      ],
-      "acceptance_criteria": [
-        "Equivalent requests across protocols normalize to equivalent semantic events.",
-        "Provider and upstream-model provenance survives failover.",
-        "Incomplete streams never become automatic training examples.",
-        "Cloud capture remains off for providers without explicit approval."
-      ]
-    },
-    {
-      "id": "phase_5",
-      "name": "Guardian structural separation",
-      "status": "not_started",
-      "objective": "Complete the shared, local, and cloud module separation after capture proves the boundaries.",
-      "deliverables": [
-        "Shared gateway package.",
-        "Local inference package.",
-        "Cloud inference package.",
-        "Thin FastAPI composition root.",
-        "Config-driven provider base URLs with no duplicate hardcoded map."
-      ],
-      "acceptance_criteria": [
-        "Public API behavior remains unchanged.",
-        "Shared modules do not depend on local or cloud implementation details.",
-        "Local and cloud adapters satisfy shared route contracts.",
-        "app/proxy/server.py is reduced to orchestration and router registration."
-      ]
-    },
-    {
-      "id": "phase_6",
-      "name": "Operational hardening",
-      "status": "not_started",
-      "objective": "Prove durability, bounded resource use, and operator control under production traffic.",
-      "deliverables": [
-        "guardianctl capture status, pause, resume, rotate, validate, and purge commands.",
-        "Crash-recovery and disk-exhaustion tests.",
-        "Capture dashboard and Prometheus metrics.",
-        "Documented restore, purge, and incident procedures.",
-        "Seventy-two-hour soak test."
-      ],
-      "acceptance_criteria": [
-        "Disk usage remains within configured limits.",
-        "Process termination leaves at most one recoverable partial final line.",
-        "Queue overflow is visible and does not interrupt inference.",
-        "Rotation, retention, and Keanu handoff remain stable for 72 hours."
-      ]
-    }
-  ],
-  "test_strategy": {
-    "guardian_unit": [
-      "Capture schema serialization and deterministic IDs.",
-      "Policy matching for client, model, endpoint, route, and provider.",
-      "Credential, PII precursor, image, reasoning, and tool redaction.",
-      "OpenAI, Anthropic, and Ollama stream assembly.",
-      "Queue overflow and failure metrics.",
-      "Rotation, retention, partial-line recovery, and path safety."
-    ],
-    "guardian_integration": [
-      "Local streaming and non-streaming equivalence.",
-      "Capture writer unavailable while inference remains healthy.",
-      "Client disconnect and upstream timeout lifecycle.",
-      "Cloud retry and failover provenance.",
-      "Secret canary scan over produced capture files."
-    ],
-    "keanu": [
-      "Schema parsing and unsupported-version rejection.",
-      "ProcessingLedger idempotency.",
-      "PrivacyGateway enforcement.",
-      "Malformed and incomplete record quarantine.",
-      "Deterministic Silver and Gold output."
-    ],
-    "performance": [
-      "Compare capture-disabled and capture-enabled p50, p95, and p99 latency.",
-      "Load test at 100 concurrent streaming requests.",
-      "Verify bounded memory at maximum queue depth.",
-      "Verify capture stops cleanly at disk quota."
-    ]
-  },
-  "risks": [
-    {
-      "id": "R1",
-      "severity": "critical",
-      "risk": "Credentials or secrets enter raw capture data.",
-      "mitigation": "Mandatory Guardian credential redaction, secret canary tests, local-only Bronze storage, and Keanu PrivacyGateway processing."
-    },
-    {
-      "id": "R2",
-      "severity": "high",
-      "risk": "Cloud response capture violates provider terms.",
-      "mitigation": "Cloud capture disabled by default with an explicit per-provider allowlist and terms review."
-    },
-    {
-      "id": "R3",
-      "severity": "high",
-      "risk": "Capture latency or failure degrades inference.",
-      "mitigation": "Bounded non-blocking queue, background writer, fail-open behavior, and latency acceptance tests."
-    },
-    {
-      "id": "R4",
-      "severity": "high",
-      "risk": "Tool results, reasoning, system prompts, or images leak sensitive information.",
-      "mitigation": "Independent field policies with strip-by-default settings and Keanu quarantine rules."
-    },
-    {
-      "id": "R5",
-      "severity": "medium",
-      "risk": "Disk exhaustion interrupts Guardian or other host services.",
-      "mitigation": "Strict byte and age limits, rotation, retention, disk metrics, and capture shutdown before filesystem exhaustion."
-    },
-    {
-      "id": "R6",
-      "severity": "medium",
-      "risk": "Partial streams or retries create invalid or duplicate training records.",
-      "mitigation": "Explicit lifecycle events, deterministic event IDs, completion status, and ProcessingLedger deduplication."
-    },
-    {
-      "id": "R7",
-      "severity": "medium",
-      "risk": "A large refactor changes routing behavior while capture is introduced.",
-      "mitigation": "Use small behavior-preserving extractions and deliver one narrow vertical capture slice before broader module separation."
-    }
-  ],
-  "global_acceptance_criteria": [
-    "All existing Guardian tests pass after each extraction and capture change.",
-    "Local, cloud, OpenAI, Anthropic, and Ollama smoke tests retain their existing behavior.",
-    "No secret canary appears in any completed capture file.",
-    "Capture failures never alter successful inference responses.",
-    "Keanu reprocessing produces no duplicate dataset records.",
-    "Only privacy-processed, validated, and completed exchanges reach Gold output.",
-    "Retention, rotation, and disk limits remain stable during a 72-hour soak test."
-  ],
-  "first_delivery_slice": {
-    "scope": "Opt-in local OpenAI chat capture for streaming and non-streaming requests.",
-    "prerequisites": [
-      "Approve guardian_capture_v1 fixtures.",
-      "Extract only the minimum shared request lifecycle and streaming hooks.",
-      "Add secret canary and fail-open tests before wiring production routes."
-    ],
-    "excluded": [
-      "Cloud capture",
-      "Raw images",
-      "Reasoning content",
-      "Tool results",
-      "Anthropic and Ollama ingress",
-      "Automatic Gold publication"
-    ],
-    "success_definition": "A disabled-by-default vertical slice produces privacy-safe, idempotently ingestible local capture files without changing inference behavior or latency materially."
-  },
-  "open_decisions": [
-    "RESOLVED (2026-08-07): Multi-secret overlap period — Guardian supports GUARDIAN_CAPTURE_CLIENT_REF_SECRET (current) and GUARDIAN_CAPTURE_CLIENT_REF_SECRET_PREVIOUS (legacy) so existing opt-in client_refs remain valid during rotation. No forced re-registration.",
-    "RESOLVED (2026-08-07): Per-record HMAC — each WAL JSONL line carries a record_auth field (hmac-sha256, key_id, mac). Keanu verifies per-record authenticity, not just file-level checksums.",
-    "RESOLVED (2026-08-07): Same Unix user — both Guardian and Keanu run as the same user (flip) on the same host. File mode 0o640, directory mode 0o750, no world access.",
-    "RESOLVED (2026-08-07): Global on/off sufficient — the existing cloud_capture boolean plus the cloud_allowlist namespace filter provides sufficient granularity. No per-provider flags needed.",
-    "RESOLVED (2026-08-07): No truncation — Guardian delivers raw data without per-message/per-response size limits. Data processing (truncation, transformation) is Keanu's responsibility. File-level rotation and disk-level retention manage disk usage.",
-    "RESOLVED (2026-08-07): YAML-only — the operator who edits settings.yaml is responsible for field policy changes. No additional audit log or approval workflow. Conservative defaults protect against accidental disclosure."
+  "keanu_components": [
+   "guardian_capture_v1 parser",
+   "typed parser registry",
+   "ProcessingLedger-based idempotency",
+   "PrivacyGateway redaction and pseudonymization",
+   "Bronze to Silver transformation",
+   "validated Silver to Gold publication"
   ]
+ },
+ "capture_contract": {
+  "schema_name": "guardian_capture_v1",
+  "schema_version": "1.0.0",
+  "serialization": "newline-delimited JSON",
+  "event_types": {
+   "request_received": "Normalized request and capture-policy metadata after authentication.",
+   "request_completed": "Final semantic response, resolved route, usage, and timing metadata.",
+   "request_failed": "Sanitized error classification and route-attempt metadata.",
+   "request_cancelled": "Client disconnect, timeout, or interrupted stream metadata."
+  },
+  "required_fields": [
+   "schema_name",
+   "schema_version",
+   "event_id",
+   "event_type",
+   "request_id",
+   "sequence",
+   "timestamp_utc",
+   "guardian_instance_id",
+   "client_ref",
+   "endpoint",
+   "ingress_protocol",
+   "route_type",
+   "requested_model",
+   "capture_policy_version"
+  ],
+  "optional_fields": [
+   "resolved_model",
+   "upstream_model",
+   "provider",
+   "failover_group",
+   "request_messages",
+   "request_parameters",
+   "response_content",
+   "tool_calls",
+   "tool_results",
+   "reasoning_content",
+   "finish_reason",
+   "http_status",
+   "prompt_tokens",
+   "completion_tokens",
+   "total_tokens",
+   "queue_wait_ms",
+   "duration_ms",
+   "error_code",
+   "attempts",
+   "streamed",
+   "incomplete",
+   "record_auth"
+  ],
+  "identity": {
+   "event_id": "Lowercase hex-encoded SHA-256 of the UTF-8 bytes '{guardian_instance_id}|{request_id}|{event_type}|{sequence}'. Values must not contain the delimiter character '|'.",
+   "request_id": "Existing Guardian request ID or a generated UUID.",
+   "client_ref": "Lowercase hex-encoded HMAC-SHA-256 using GUARDIAN_CAPTURE_CLIENT_REF_SECRET as key and the authenticated Guardian key fingerprint as UTF-8 message. Never persist the raw API key, client IP, display name, or HMAC input.",
+   "sequence": "Monotonically increasing integer within one request."
+  },
+  "normalization": {
+   "request": "Capture semantic messages after ingress normalization and before route-specific transport translation.",
+   "response": "Capture the final semantic response returned to the client.",
+   "streaming": "Accumulate deltas in memory and emit one completed response event instead of persisting individual chunks.",
+   "images": "Replace raw image data with policy-approved metadata such as SHA-256, MIME type, byte size, and dimensions.",
+   "errors": "Store stable error codes and sanitized messages without upstream credentials or raw response headers."
+  },
+  "content_shapes": {
+   "image_metadata": {
+    "type": "image_metadata",
+    "sha256": "lowercase hex-encoded SHA-256 of decoded image bytes",
+    "mime_type": "image/png",
+    "size_bytes": 12345,
+    "width": 800,
+    "height": 600
+   },
+   "image_metadata_rules": [
+    "sha256 is required when images policy is hash_and_metadata.",
+    "mime_type and size_bytes are required when available.",
+    "width and height are optional and must be positive integers when present.",
+    "Raw base64 data and remote image query strings must not be persisted."
+   ]
+  },
+  "compatibility_rules": [
+   "The schema_name suffix is the wire-contract major version; readers for guardian_capture_v1 must reject guardian_capture_v2 and later names until explicitly supported.",
+   "schema_version uses semantic versioning within one schema name and must remain in the 1.x range for guardian_capture_v1.",
+   "Readers must ignore unknown fields within a supported schema name and major schema_version.",
+   "New optional fields require a minor schema_version increment.",
+   "Breaking field or semantic changes require guardian_capture_v2 with schema_version 2.0.0.",
+   "Every event records the capture policy version used to produce it.",
+   "record_auth (optional, added 2026-08-07): per-record HMAC authentication. When GUARDIAN_CAPTURE_RECORD_AUTH_SECRET is set, each JSONL line includes a record_auth object with {alg, key_id, mac}. Keanu verifies by stripping record_auth from the parsed JSON, re-serialising, and recomputing HMAC-SHA-256 with its verification-only copy of the secret. Absence of record_auth means the feature is disabled \u2014 Keanu should fall back to file-level checksum verification."
+  ]
+ },
+ "security_and_privacy": {
+  "default_posture": "disabled_and_opt_in",
+  "failure_mode": "fail_open",
+  "invariants": [
+   "Capture failure never blocks or changes inference output.",
+   "Authorization headers and raw API keys are never persisted.",
+   "Cloud provider credentials and environment-variable values are never persisted.",
+   "Raw client IP addresses are never persisted in dataset events.",
+   "Admin, health, metrics, embeddings, and key-management endpoints are excluded.",
+   "Every captured event remains local until Keanu privacy processing succeeds.",
+   "Only privacy-processed and validated outputs may advance beyond Bronze."
+  ],
+  "recommended_defaults": {
+   "enabled": false,
+   "local_capture": false,
+   "cloud_capture": false,
+   "per_client_opt_in": "When the global switch and route-type switch are enabled, a request is captured only if its authenticated client_ref is explicitly allowed. Per-client policy can never override a disabled global switch.",
+   "system_prompts": "strip",
+   "reasoning": "strip",
+   "tool_definitions": "capture",
+   "tool_calls": "capture",
+   "tool_results": "strip",
+   "images": "hash_and_metadata",
+   "unknown_content_blocks": "strip",
+   "retention_days": 7,
+   "max_capture_bytes": 10737418240,
+   "max_pending_events": 10000,
+   "file_mode": "0640",
+   "directory_mode": "0750",
+   "ownership_assumption": "Guardian owns capture files. Keanu runs as the same Unix user or belongs to a dedicated shared read-only group; no world-readable permissions are permitted."
+  },
+  "cloud_controls": [
+   "Cloud capture requires a provider allowlist.",
+   "Provider terms must be reviewed before enabling response capture.",
+   "Cloud provenance must include provider and upstream model.",
+   "Local and cloud capture policies must be independently configurable."
+  ],
+  "integrity_controls": [
+   "Use one writer and append-only file descriptors.",
+   "Prevent symlink traversal and anchor all writes beneath the configured capture root.",
+   "Write complete JSON lines and recover by discarding an incomplete final line.",
+   "Store a SHA-256 checksum for every completed rotated file.",
+   "Consider keyed record authentication after key-management and rotation rules are defined."
+  ],
+  "keanu_obligations": [
+   "Run secret and PII redaction before Silver output.",
+   "Pseudonymize client and user identifiers.",
+   "Reject invalid or unsupported events.",
+   "Quarantine incomplete, malformed, or policy-violating records.",
+   "Prevent raw Bronze data from cloud sync and source control.",
+   "Record every accepted event in the ProcessingLedger."
+  ]
+ },
+ "storage": {
+  "guardian_root": "data/capture",
+  "active_file": "guardian_capture_current.jsonl",
+  "completed_file_pattern": "guardian_capture_<utc_timestamp>_<sequence>.jsonl.gz",
+  "state_file": ".capture_state.json",
+  "writer_model": "single_background_writer",
+  "rotation": {
+   "max_file_bytes": 268435456,
+   "max_file_age_seconds": 3600,
+   "trigger_logic": "Rotate when either max_file_bytes or max_file_age_seconds is reached.",
+   "compress_completed_files": true,
+   "keanu_reads_active_file": false
+  },
+  "backpressure": {
+   "queue_type": "bounded",
+   "overflow_behavior": "drop_new_event_and_increment_metric",
+   "inference_behavior": "continue",
+   "required_metrics": [
+    "guardian_capture_events_total",
+    "guardian_capture_events_dropped_total",
+    "guardian_capture_write_failures_total",
+    "guardian_capture_queue_depth",
+    "guardian_capture_bytes_total",
+    "guardian_capture_disk_bytes"
+   ]
+  }
+ },
+ "target_module_boundaries": {
+  "guardian": {
+   "composition_root": "app/proxy/server.py",
+   "shared_gateway_candidates": [
+    "app/gateway/config.py",
+    "app/gateway/lifecycle.py",
+    "app/gateway/streaming.py",
+    "app/gateway/request_lifecycle.py",
+    "app/gateway/router.py",
+    "app/gateway/admin.py"
+   ],
+   "local_candidates": [
+    "app/local/routes.py",
+    "app/local/forward.py",
+    "app/local/model_switch.py",
+    "app/local/vision.py",
+    "app/local/reasoning.py",
+    "app/local/compat.py"
+   ],
+   "cloud_candidates": [
+    "app/cloud/routes.py",
+    "app/cloud/forward.py",
+    "app/cloud/resolver.py"
+   ],
+   "capture_candidates": [
+    "app/capture/config.py",
+    "app/capture/schema.py",
+    "app/capture/policy.py",
+    "app/capture/redactor.py",
+    "app/capture/stream_assembler.py",
+    "app/capture/sink.py",
+    "app/capture/wal_writer.py"
+   ]
+  },
+  "keanu_factory": {
+   "contract_change": "Add Source.GUARDIAN_CAPTURE.",
+   "parser": "src/pipeline/parsers/guardian_capture_parser.py",
+   "orchestration_change": "Replace the manual parser list with a typed registry and register Guardian capture ingestion.",
+   "privacy_boundary": "All Guardian events pass through PrivacyGateway before Silver output."
+  }
+ },
+ "phases": [
+  {
+   "id": "phase_0",
+   "name": "Decisions and contracts",
+   "status": "complete",
+   "objective": "Freeze the integration boundary and safety invariants before implementation.",
+   "deliverables": [
+    "Architecture decision for filesystem JSONL transport.",
+    "guardian_capture_v1 JSON Schema and representative fixtures.",
+    "Capture policy and retention specification.",
+    "Cloud-provider terms review checklist.",
+    "Threat-model-derived security tests."
+   ],
+   "acceptance_criteria": [
+    "Both repositories agree on the same fixtures.",
+    "Fixtures contain no credentials or raw client identifiers.",
+    "Unsupported-version behavior is specified and tested."
+   ]
+  },
+  {
+   "id": "phase_1",
+   "name": "Minimal shared gateway extraction",
+   "status": "complete",
+   "objective": "Create stable capture hook points without changing runtime behavior.",
+   "deliverables": [
+    "Extract validated configuration.",
+    "Extract request lifecycle and model routing.",
+    "Extract SSE streaming and watchdog helpers.",
+    "Keep app/proxy/server.py as the composition root."
+   ],
+   "acceptance_criteria": [
+    "All existing Guardian tests pass.",
+    "Local and cloud smoke tests remain behaviorally identical.",
+    "No capture code is active yet."
+   ]
+  },
+  {
+   "id": "phase_2",
+   "name": "Guardian capture vertical slice",
+   "status": "complete",
+   "objective": "Capture opt-in local OpenAI chat requests safely in streaming and non-streaming modes.",
+   "deliverables": [
+    "Validated capture configuration and global kill switch.",
+    "Policy engine and mandatory credential redactor.",
+    "Bounded non-blocking event queue.",
+    "Stream response assembler.",
+    "Append-only writer, rotation, retention, and metrics."
+   ],
+   "acceptance_criteria": [
+    "Capture is disabled by default.",
+    "Inference succeeds when the capture writer fails.",
+    "No auth header, API key, provider credential, or raw image is persisted.",
+    "Streaming and non-streaming requests produce equivalent semantic records.",
+    "Capture has no material p99 latency regression."
+   ]
+  },
+  {
+   "id": "phase_3",
+   "name": "Keanu ingestion",
+   "status": "complete",
+   "objective": "Ingest Guardian events idempotently through Keanu's modern contracts and privacy boundary.",
+   "deliverables": [
+    "Source.GUARDIAN_CAPTURE contract value.",
+    "guardian_capture_v1 parser.",
+    "Typed parser registration.",
+    "ProcessingLedger integration.",
+    "PrivacyGateway and quarantine integration."
+   ],
+   "acceptance_criteria": [
+    "Reprocessing produces no duplicate records.",
+    "Malformed, incomplete, and unsupported events are quarantined.",
+    "Raw records cannot bypass PrivacyGateway.",
+    "Only completed request-response pairs become dataset candidates."
+   ]
+  },
+  {
+   "id": "phase_4",
+   "name": "Protocol and route coverage",
+   "status": "complete",
+   "objective": "Extend capture to all approved Guardian ingress protocols and route outcomes.",
+   "deliverables": [
+    "Anthropic Messages support.",
+    "Ollama chat and generate support.",
+    "Tool-call and tool-result policy support.",
+    "Cancellation, timeout, retry, and failover events.",
+    "Provider-approved cloud capture allowlists."
+   ],
+   "acceptance_criteria": [
+    "Equivalent requests across protocols normalize to equivalent semantic events.",
+    "Provider and upstream-model provenance survives failover.",
+    "Incomplete streams never become automatic training examples.",
+    "Cloud capture remains off for providers without explicit approval."
+   ]
+  },
+  {
+   "id": "phase_5",
+   "name": "Guardian structural separation",
+   "status": "complete",
+   "objective": "Complete the shared, local, and cloud module separation after capture proves the boundaries.",
+   "deliverables": [
+    "Shared gateway package.",
+    "Local inference package.",
+    "Cloud inference package.",
+    "Thin FastAPI composition root.",
+    "Config-driven provider base URLs with no duplicate hardcoded map."
+   ],
+   "acceptance_criteria": [
+    "Public API behavior remains unchanged.",
+    "Shared modules do not depend on local or cloud implementation details.",
+    "Local and cloud adapters satisfy shared route contracts.",
+    "app/proxy/server.py is reduced to orchestration and router registration."
+   ]
+  },
+  {
+   "id": "phase_6",
+   "name": "Operational hardening",
+   "status": "in_progress",
+   "objective": "Prove durability, bounded resource use, and operator control under production traffic.",
+   "deliverables": [
+    "guardianctl capture status, pause, resume, rotate, validate, and purge commands.",
+    "Crash-recovery and disk-exhaustion tests.",
+    "Capture dashboard and Prometheus metrics.",
+    "Documented restore, purge, and incident procedures.",
+    "Seventy-two-hour soak test."
+   ],
+   "acceptance_criteria": [
+    "Disk usage remains within configured limits.",
+    "Process termination leaves at most one recoverable partial final line.",
+    "Queue overflow is visible and does not interrupt inference.",
+    "Rotation, retention, and Keanu handoff remain stable for 72 hours."
+   ]
+  }
+ ],
+ "test_strategy": {
+  "guardian_unit": [
+   "Capture schema serialization and deterministic IDs.",
+   "Policy matching for client, model, endpoint, route, and provider.",
+   "Credential, PII precursor, image, reasoning, and tool redaction.",
+   "OpenAI, Anthropic, and Ollama stream assembly.",
+   "Queue overflow and failure metrics.",
+   "Rotation, retention, partial-line recovery, and path safety."
+  ],
+  "guardian_integration": [
+   "Local streaming and non-streaming equivalence.",
+   "Capture writer unavailable while inference remains healthy.",
+   "Client disconnect and upstream timeout lifecycle.",
+   "Cloud retry and failover provenance.",
+   "Secret canary scan over produced capture files."
+  ],
+  "keanu": [
+   "Schema parsing and unsupported-version rejection.",
+   "ProcessingLedger idempotency.",
+   "PrivacyGateway enforcement.",
+   "Malformed and incomplete record quarantine.",
+   "Deterministic Silver and Gold output."
+  ],
+  "performance": [
+   "Compare capture-disabled and capture-enabled p50, p95, and p99 latency.",
+   "Load test at 100 concurrent streaming requests.",
+   "Verify bounded memory at maximum queue depth.",
+   "Verify capture stops cleanly at disk quota."
+  ]
+ },
+ "risks": [
+  {
+   "id": "R1",
+   "severity": "critical",
+   "risk": "Credentials or secrets enter raw capture data.",
+   "mitigation": "Mandatory Guardian credential redaction, secret canary tests, local-only Bronze storage, and Keanu PrivacyGateway processing."
+  },
+  {
+   "id": "R2",
+   "severity": "high",
+   "risk": "Cloud response capture violates provider terms.",
+   "mitigation": "Cloud capture disabled by default with an explicit per-provider allowlist and terms review."
+  },
+  {
+   "id": "R3",
+   "severity": "high",
+   "risk": "Capture latency or failure degrades inference.",
+   "mitigation": "Bounded non-blocking queue, background writer, fail-open behavior, and latency acceptance tests."
+  },
+  {
+   "id": "R4",
+   "severity": "high",
+   "risk": "Tool results, reasoning, system prompts, or images leak sensitive information.",
+   "mitigation": "Independent field policies with strip-by-default settings and Keanu quarantine rules."
+  },
+  {
+   "id": "R5",
+   "severity": "medium",
+   "risk": "Disk exhaustion interrupts Guardian or other host services.",
+   "mitigation": "Strict byte and age limits, rotation, retention, disk metrics, and capture shutdown before filesystem exhaustion."
+  },
+  {
+   "id": "R6",
+   "severity": "medium",
+   "risk": "Partial streams or retries create invalid or duplicate training records.",
+   "mitigation": "Explicit lifecycle events, deterministic event IDs, completion status, and ProcessingLedger deduplication."
+  },
+  {
+   "id": "R7",
+   "severity": "medium",
+   "risk": "A large refactor changes routing behavior while capture is introduced.",
+   "mitigation": "Use small behavior-preserving extractions and deliver one narrow vertical capture slice before broader module separation."
+  }
+ ],
+ "global_acceptance_criteria": [
+  "All existing Guardian tests pass after each extraction and capture change.",
+  "Local, cloud, OpenAI, Anthropic, and Ollama smoke tests retain their existing behavior.",
+  "No secret canary appears in any completed capture file.",
+  "Capture failures never alter successful inference responses.",
+  "Keanu reprocessing produces no duplicate dataset records.",
+  "Only privacy-processed, validated, and completed exchanges reach Gold output.",
+  "Retention, rotation, and disk limits remain stable during a 72-hour soak test."
+ ],
+ "first_delivery_slice": {
+  "scope": "Opt-in local OpenAI chat capture for streaming and non-streaming requests.",
+  "prerequisites": [
+   "Approve guardian_capture_v1 fixtures.",
+   "Extract only the minimum shared request lifecycle and streaming hooks.",
+   "Add secret canary and fail-open tests before wiring production routes."
+  ],
+  "excluded": [
+   "Cloud capture",
+   "Raw images",
+   "Reasoning content",
+   "Tool results",
+   "Anthropic and Ollama ingress",
+   "Automatic Gold publication"
+  ],
+  "success_definition": "A disabled-by-default vertical slice produces privacy-safe, idempotently ingestible local capture files without changing inference behavior or latency materially."
+ },
+ "open_decisions": [
+  "RESOLVED (2026-08-07): Multi-secret overlap period \u2014 Guardian supports GUARDIAN_CAPTURE_CLIENT_REF_SECRET (current) and GUARDIAN_CAPTURE_CLIENT_REF_SECRET_PREVIOUS (legacy) so existing opt-in client_refs remain valid during rotation. No forced re-registration.",
+  "RESOLVED (2026-08-07): Per-record HMAC \u2014 each WAL JSONL line carries a record_auth field (hmac-sha256, key_id, mac). Keanu verifies per-record authenticity, not just file-level checksums.",
+  "RESOLVED (2026-08-07): Same Unix user \u2014 both Guardian and Keanu run as the same user (flip) on the same host. File mode 0o640, directory mode 0o750, no world access.",
+  "RESOLVED (2026-08-07): Global on/off sufficient \u2014 the existing cloud_capture boolean plus the cloud_allowlist namespace filter provides sufficient granularity. No per-provider flags needed.",
+  "RESOLVED (2026-08-07): No truncation \u2014 Guardian delivers raw data without per-message/per-response size limits. Data processing (truncation, transformation) is Keanu's responsibility. File-level rotation and disk-level retention manage disk usage.",
+  "RESOLVED (2026-08-07): YAML-only \u2014 the operator who edits settings.yaml is responsible for field policy changes. No additional audit log or approval workflow. Conservative defaults protect against accidental disclosure."
+ ]
 }
