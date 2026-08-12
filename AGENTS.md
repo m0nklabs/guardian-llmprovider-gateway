@@ -100,7 +100,7 @@ When touching these areas, read the referenced detail docs:
   - `app/config_loader.py` (settings.yaml parsed once per process; typed accessors)
 - **No hardcoded vars rule** added to Critical rules (2026-08-12): extraction bodies must be re-checked for literals (`/home/...`, `:11434`, `guardian.pid`, …) and re-routed through `config/settings.yaml` or `app/paths.py` before committing. Sessions dir now flows via `paths.LLAMA_SLOTS_DIR`; `PROXY_PORT`/`PID_FILE` derive from settings.yaml (`proxy.port`, `proxy.pid_file`).
 - **Bug fixed during extraction:** `_resolve_auto_reload_model` had been an empty stub since the queue_helpers extraction (returned `None`); body restored in `app/local_inference/models.py` (`model_manager.resolve_reload_target`).
-- Commits since last handoff (newest first): `93ceeda`, `95a2313`, `be562f1`, `74cfb08`, `494a20e`, `04685b4`, `5107a8a`, `fedf6dc`, `b436307`, `55051ce`, `22cd9f6` … **all 27+ Phase 5 commits NOT pushed.**
+- **PUSHED to GitHub (2026-08-12 ~22:00 UTC):** all 36 Phase 5 commits (`f9bf3bb..60050ce`) are on `origin/main`. Note: `GH_TOKEN`/`GITHUB_TOKEN` env vars hold an invalid token — push required `unset GH_TOKEN GITHUB_TOKEN GITHUB_PERSONAL_ACCESS_TOKEN` + `gh auth setup-git` (uses the valid `gho_...` oauth_token from `~/.config/gh/hosts.yml`).
 - **Provider timeouts 600→1200 still NOT live** (settings.yaml edited 2026-08-12 19:47; service last restarted 19:41). Needs `sudo systemctl restart llama-guardian` — session drops, operator runs it (see Critical rule). Verify after restart: `cloud_retry.enabled=false`, `providers.*.timeout_seconds=1200`.
 - Takeover sequence: `git diff` review → `py_compile` on `app/` → `./venv/bin/python -m pytest tests/ -q` → restart with operator → push after review.
 
