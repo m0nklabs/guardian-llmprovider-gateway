@@ -342,7 +342,7 @@ async def test_begin_queued_request_cleans_up_waiter_on_disconnect():
         async def is_disconnected(self) -> bool:
             return disconnected.is_set()
 
-    with patch.object(server, "inference_queue", queue), patch.object(_queue_helpers, "_inference_queue", queue):
+    with patch.object(server, "inference_queue", queue), patch.object(_queue_helpers, "_inference_queue", queue), patch.object(server._admin_api, "_inference_queue", queue):
         waiter_task = asyncio.create_task(
             server._begin_queued_request(_FakeRequest(), "waiter-client", "model-x")
         )
@@ -371,7 +371,7 @@ async def test_begin_queued_request_rejects_unauthenticated_client():
         async def is_disconnected(self) -> bool:
             return False
 
-    with patch.object(server, "inference_queue", queue), patch.object(_queue_helpers, "_inference_queue", queue):
+    with patch.object(server, "inference_queue", queue), patch.object(_queue_helpers, "_inference_queue", queue), patch.object(server._admin_api, "_inference_queue", queue):
         with pytest.raises(server.HTTPException) as exc_info:
             await server._begin_queued_request(_FakeRequest(), "unauthenticated", "model-x")
 
@@ -391,7 +391,7 @@ async def test_begin_queued_request_waits_behind_running_request_for_same_api_ke
         is_disconnected=lambda: asyncio.sleep(0, result=False),
     )
 
-    with patch.object(server, "inference_queue", queue), patch.object(_queue_helpers, "_inference_queue", queue):
+    with patch.object(server, "inference_queue", queue), patch.object(_queue_helpers, "_inference_queue", queue), patch.object(server._admin_api, "_inference_queue", queue):
         waiter_task = asyncio.create_task(server._begin_queued_request(fake_request, "openclaw", "model-y"))
         await asyncio.sleep(0.05)
 
@@ -422,7 +422,7 @@ async def test_begin_queued_request_allows_multiple_queued_requests_for_same_api
         is_disconnected=lambda: asyncio.sleep(0, result=False),
     )
 
-    with patch.object(server, "inference_queue", queue), patch.object(_queue_helpers, "_inference_queue", queue):
+    with patch.object(server, "inference_queue", queue), patch.object(_queue_helpers, "_inference_queue", queue), patch.object(server._admin_api, "_inference_queue", queue):
         waiter_task = asyncio.create_task(server._begin_queued_request(fake_request, "openclaw", "model-y"))
         await asyncio.sleep(0.05)
 
@@ -452,7 +452,7 @@ async def test_await_or_cancel_request_cleans_up_running_request():
 
     operation_task = asyncio.create_task(asyncio.sleep(10))
 
-    with patch.object(server, "inference_queue", queue), patch.object(_queue_helpers, "_inference_queue", queue):
+    with patch.object(server, "inference_queue", queue), patch.object(_queue_helpers, "_inference_queue", queue), patch.object(server._admin_api, "_inference_queue", queue):
         queue.cancel(request_id, client_id="runner", reason="client_requested_cancel")
 
         with pytest.raises(server._GuardianRequestCancelled, match="client_requested_cancel"):
@@ -472,7 +472,7 @@ async def test_queue_request_status_endpoint_returns_snapshot():
     request_id = queue.submit("observer", "model-x", owner_id="key:observer")
     request = SimpleNamespace(state=SimpleNamespace(auth_context={"key_fingerprint": "observer"}))
 
-    with patch.object(server, "inference_queue", queue), patch.object(_queue_helpers, "_inference_queue", queue):
+    with patch.object(server, "inference_queue", queue), patch.object(_queue_helpers, "_inference_queue", queue), patch.object(server._admin_api, "_inference_queue", queue):
         snapshot = await server.queue_request_status(request_id, request=request, client_id="observer")
 
     assert snapshot["request_id"] == request_id
@@ -486,7 +486,7 @@ async def test_cancel_queue_request_endpoint_marks_running_request():
     request_id = await queue.acquire("observer", "model-x", owner_id="key:observer")
     request = SimpleNamespace(state=SimpleNamespace(auth_context={"key_fingerprint": "observer"}))
 
-    with patch.object(server, "inference_queue", queue), patch.object(_queue_helpers, "_inference_queue", queue):
+    with patch.object(server, "inference_queue", queue), patch.object(_queue_helpers, "_inference_queue", queue), patch.object(server._admin_api, "_inference_queue", queue):
         snapshot = await server.cancel_queue_request(request_id, request=request, client_id="observer")
 
     assert snapshot["request_id"] == request_id
@@ -500,7 +500,7 @@ async def test_queue_request_status_endpoint_is_isolated_per_api_key():
     request_id = queue.submit("observer", "model-x", owner_id="key:owner-a")
     foreign_request = SimpleNamespace(state=SimpleNamespace(auth_context={"key_fingerprint": "owner-b"}))
 
-    with patch.object(server, "inference_queue", queue), patch.object(_queue_helpers, "_inference_queue", queue):
+    with patch.object(server, "inference_queue", queue), patch.object(_queue_helpers, "_inference_queue", queue), patch.object(server._admin_api, "_inference_queue", queue):
         with pytest.raises(server.HTTPException) as exc_info:
             await server.queue_request_status(request_id, request=foreign_request, client_id="observer")
 
@@ -2044,7 +2044,7 @@ async def test_add_google_credential_discovers_models_before_storing():
 
     stored_credential = {"id": "cred_google", "provider": "google", "models": ["gemini-2.5-flash"]}
     with (
-        patch.object(server, "_discover_google_models", AsyncMock(return_value=["gemini-2.5-flash"])) as discover,
+        patch.object(server._admin_api, "_discover_google_models", AsyncMock(return_value=["gemini-2.5-flash"])) as discover,
         patch.object(server.cloud_cred_store, "add_credential", AsyncMock(return_value=stored_credential)) as add_credential,
     ):
         result = await server.add_cloud_credential(JsonRequest(), "admin")
@@ -2066,7 +2066,7 @@ async def test_refresh_google_credential_replaces_catalog():
     with (
         patch.object(server.cloud_cred_store, "get_credential_by_id", return_value=credential),
         patch.object(server.cloud_cred_store, "is_credential_owned_by", return_value=True),
-        patch.object(server, "_discover_google_models", AsyncMock(return_value=["gemini-2.5-flash"])) as discover,
+        patch.object(server._admin_api, "_discover_google_models", AsyncMock(return_value=["gemini-2.5-flash"])) as discover,
         patch.object(server.cloud_cred_store, "replace_models_for_credential", AsyncMock(return_value=True)) as replace_models,
     ):
         result = await server.refresh_cloud_credential_models(
@@ -2092,7 +2092,7 @@ async def test_failed_google_catalog_refresh_preserves_existing_models():
     with (
         patch.object(server.cloud_cred_store, "get_credential_by_id", return_value=credential),
         patch.object(server.cloud_cred_store, "is_credential_owned_by", return_value=True),
-        patch.object(server, "_discover_google_models", AsyncMock(side_effect=discovery_error)),
+        patch.object(server._admin_api, "_discover_google_models", AsyncMock(side_effect=discovery_error)),
         patch.object(server.cloud_cred_store, "replace_models_for_credential", AsyncMock()) as replace_models,
         pytest.raises(server.HTTPException) as exc_info,
     ):
@@ -2112,7 +2112,7 @@ async def test_foreign_owner_cannot_refresh_google_catalog():
     with (
         patch.object(server.cloud_cred_store, "get_credential_by_id", return_value=credential),
         patch.object(server.cloud_cred_store, "is_credential_owned_by", return_value=False),
-        patch.object(server, "_discover_google_models", AsyncMock()) as discover,
+        patch.object(server._admin_api, "_discover_google_models", AsyncMock()) as discover,
         pytest.raises(server.HTTPException) as exc_info,
     ):
         await server.refresh_cloud_credential_models(

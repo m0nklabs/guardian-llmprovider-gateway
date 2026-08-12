@@ -104,6 +104,9 @@ from app.local_inference import models as _local_models
 # ── Model discovery (Phase 5 extraction) ─────────────────────────────
 from app.gateway import model_discovery as _model_discovery
 
+# ── Admin API (Phase 5 extraction) ────────────────────────────────────
+from app.gateway import admin_api as _admin_api
+
 # ── Gateway streaming helpers (Phase 5 extraction) ──────────────────
 from app.gateway import streaming as _streaming
 
@@ -1479,82 +1482,27 @@ async def admin_load(request: Request, client_id: str = Depends(verify_api_key))
 
 @app.get("/api/keys")
 async def list_api_keys(client_id: str = Depends(verify_api_key)):
-    """List all Guardian API keys (tokens masked, fingerprints shown)."""
-    keys = load_api_keys()
-    result = []
-    for token, data in keys.items():
-        result.append({
-            "key_fingerprint": _token_fingerprint(token),
-            "key_prefix": token.split("_")[0] if "_" in token else "legacy",
-            "name": data.get("name"),
-            "created_at": data.get("created_at"),
-            "metadata": data.get("metadata", {}),
-        })
-    result.sort(key=lambda x: x.get("created_at", 0), reverse=True)
-    return {"keys": result}
+    """list_api_keys (Phase 5: delegated to app.gateway.admin_api)."""
+    return await _admin_api.list_api_keys(client_id)
 
 
 @app.post("/api/keys")
 async def create_api_key(request: Request, client_id: str = Depends(verify_api_key)):
-    """Generate a new Guardian API key.
+    """create_api_key (Phase 5: delegated to app.gateway.admin_api)."""
+    return await _admin_api.create_api_key(request, client_id)
 
-    Body: ``{"name": "my-app", "prefix": "myapp", "metadata": {"client": "my-app"}}``
-    Returns the full API key (only shown once).
-    """
-    body = await request.json()
-    name = str(body.get("name", "")).strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="name is required")
-    prefix = body.get("prefix")
-    metadata = body.get("metadata")
-    api_key = generate_api_key(name, metadata=metadata, prefix=prefix)
-    logger.info("🔑 Admin '%s' generated new API key for '%s'", client_id, name)
-    return {
-        "api_key": api_key,
-        "key_fingerprint": _token_fingerprint(api_key),
-        "name": name,
-        "message": "Store this key securely — it will not be shown again.",
-    }
 
 
 @app.get("/api/cloud/credentials")
 async def list_cloud_credentials(request: Request, client_id: str = Depends(verify_api_key)):
-    """List cloud credentials owned by the authenticated Guardian key."""
-    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
-    return {"credentials": cloud_cred_store.list_credentials_for_owner(owner_key_fingerprint)}
+    """list_cloud_credentials (Phase 5: delegated to app.gateway.admin_api)."""
+    return await _admin_api.list_cloud_credentials(request, client_id)
 
 
 @app.post("/api/cloud/credentials")
 async def add_cloud_credential(request: Request, client_id: str = Depends(verify_api_key)):
-    """Add a new cloud provider credential.
-
-    Body: ``{"provider": "nvidia", "name": "NVIDIA Default", "api_key": "nvapi-xxx", "models": ["minimax/minimax-m3"]}``
-    """
-    body = await request.json()
-    provider = str(body.get("provider", "")).strip().lower()
-    name = str(body.get("name", "")).strip()
-    api_key = str(body.get("api_key", "")).strip()
-    models = body.get("models") or []
-    if not provider:
-        raise HTTPException(status_code=400, detail="provider is required")
-    if not name:
-        raise HTTPException(status_code=400, detail="name is required")
-    if not api_key:
-        raise HTTPException(status_code=400, detail="api_key is required")
-    if not isinstance(models, list):
-        raise HTTPException(status_code=400, detail="models must be a list")
-    if provider == "google":
-        models = await _discover_google_models(api_key)
-    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
-    cred = await cloud_cred_store.add_credential(
-        provider=provider,
-        name=name,
-        api_key=api_key,
-        models=[str(m) for m in models if m],
-        owner_key_fingerprint=owner_key_fingerprint,
-    )
-    logger.info("☁️  Admin '%s' added cloud credential '%s' for provider '%s'", client_id, cred["id"], provider)
-    return cred
+    """add_cloud_credential (Phase 5: delegated to app.gateway.admin_api)."""
+    return await _admin_api.add_cloud_credential(request, client_id)
 
 
 @app.post("/api/cloud/credentials/{cred_id}/refresh-models")
@@ -1563,33 +1511,8 @@ async def refresh_cloud_credential_models(
     request: Request,
     client_id: str = Depends(verify_api_key),
 ):
-    """Refresh the Google model catalog stored for a cloud credential."""
-    credential = cloud_cred_store.get_credential_by_id(cred_id)
-    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
-    if credential is None or not cloud_cred_store.is_credential_owned_by(cred_id, owner_key_fingerprint):
-        raise HTTPException(status_code=404, detail=f"Credential '{cred_id}' not found")
-    if credential.provider != "google":
-        raise HTTPException(
-            status_code=400,
-            detail="Automatic model refresh is currently supported only for Google credentials",
-        )
-
-    models = await _discover_google_models(credential.api_key)
-    replaced = await cloud_cred_store.replace_models_for_credential(cred_id, models)
-    if not replaced:
-        raise HTTPException(status_code=404, detail=f"Credential '{cred_id}' not found")
-    logger.info(
-        "☁️  Admin '%s' refreshed %d Google model(s) for credential '%s'",
-        client_id,
-        len(models),
-        cred_id,
-    )
-    return {
-        "status": "refreshed",
-        "credential_id": cred_id,
-        "model_count": len(models),
-        "models": models,
-    }
+    """refresh_cloud_credential_models (Phase 5: delegated to app.gateway.admin_api)."""
+    return await _admin_api.refresh_cloud_credential_models(cred_id, request, client_id)
 
 
 @app.delete("/api/cloud/credentials/{cred_id}")
@@ -1598,34 +1521,14 @@ async def delete_cloud_credential(
     request: Request,
     client_id: str = Depends(verify_api_key),
 ):
-    """Delete a cloud provider credential and all its links."""
-    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
-    if not cloud_cred_store.is_credential_owned_by(cred_id, owner_key_fingerprint):
-        raise HTTPException(status_code=404, detail=f"Credential '{cred_id}' not found")
-    deleted = await cloud_cred_store.delete_credential(cred_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail=f"Credential '{cred_id}' not found")
-    logger.info("☁️  Admin '%s' deleted cloud credential '%s'", client_id, cred_id)
-    return {"status": "deleted", "credential_id": cred_id}
+    """delete_cloud_credential (Phase 5: delegated to app.gateway.admin_api)."""
+    return await _admin_api.delete_cloud_credential(cred_id, request, client_id)
 
 
 @app.post("/api/cloud/credentials/{cred_id}/models")
 async def add_model_to_credential(cred_id: str, request: Request, client_id: str = Depends(verify_api_key)):
-    """Add a model to an existing credential's model list.
-
-    Body: ``{"model": "minimax/minimax-m3"}``
-    """
-    body = await request.json()
-    model_name = str(body.get("model", "")).strip()
-    if not model_name:
-        raise HTTPException(status_code=400, detail="model is required")
-    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
-    if not cloud_cred_store.is_credential_owned_by(cred_id, owner_key_fingerprint):
-        raise HTTPException(status_code=404, detail=f"Credential '{cred_id}' not found")
-    added = await cloud_cred_store.add_model_to_credential(cred_id, model_name)
-    if not added:
-        raise HTTPException(status_code=404, detail=f"Credential '{cred_id}' not found or model already present")
-    return {"status": "added", "credential_id": cred_id, "model": model_name}
+    """add_model_to_credential (Phase 5: delegated to app.gateway.admin_api)."""
+    return await _admin_api.add_model_to_credential(cred_id, request, client_id)
 
 
 @app.delete("/api/cloud/credentials/{cred_id}/models/{model_name:path}")
@@ -1635,328 +1538,70 @@ async def remove_model_from_credential(
     request: Request,
     client_id: str = Depends(verify_api_key),
 ):
-    """Remove a model from a credential's model list."""
-    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
-    if not cloud_cred_store.is_credential_owned_by(cred_id, owner_key_fingerprint):
-        raise HTTPException(status_code=404, detail="Credential or model not found")
-    removed = await cloud_cred_store.remove_model_from_credential(cred_id, model_name)
-    if not removed:
-        raise HTTPException(status_code=404, detail="Credential or model not found")
-    return {"status": "removed", "credential_id": cred_id, "model": model_name}
+    """remove_model_from_credential (Phase 5: delegated to app.gateway.admin_api)."""
+    return await _admin_api.remove_model_from_credential(cred_id, model_name, request, client_id)
 
 
 @app.get("/api/cloud/links")
 async def list_cloud_links(request: Request, client_id: str = Depends(verify_api_key)):
-    """List links for cloud credentials owned by the authenticated Guardian key."""
-    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
-    return {"links": cloud_cred_store.list_links_for_owner(owner_key_fingerprint)}
+    """list_cloud_links (Phase 5: delegated to app.gateway.admin_api)."""
+    return await _admin_api.list_cloud_links(request, client_id)
 
 
 @app.get("/api/cloud/ratelimit-stats")
 async def get_cloud_ratelimit_stats(request: Request, client_id: str = Depends(verify_api_key)):
-    """Return current per-key cloud 429 counters and provider hints."""
-    key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
-    return cloud_rate_limiter.get_stats(key_fingerprint)
+    """get_cloud_ratelimit_stats (Phase 5: delegated to app.gateway.admin_api)."""
+    return await _admin_api.get_cloud_ratelimit_stats(request, client_id)
 
 
 @app.post("/api/cloud/links")
 async def link_credential(request: Request, client_id: str = Depends(verify_api_key)):
-    """Link a cloud credential to a Guardian API key.
-
-    Body: ``{"guardian_key_fingerprint": "abc123...", "provider": "nvidia", "credential_id": "cred_001"}``
-    """
-    body = await request.json()
-    key_fp = str(body.get("guardian_key_fingerprint", "")).strip()
-    provider = str(body.get("provider", "")).strip().lower()
-    cred_id = str(body.get("credential_id", "")).strip()
-    if not key_fp:
-        raise HTTPException(status_code=400, detail="guardian_key_fingerprint is required")
-    if not provider:
-        raise HTTPException(status_code=400, detail="provider is required")
-    if not cred_id:
-        raise HTTPException(status_code=400, detail="credential_id is required")
-    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
-    if not cloud_cred_store.is_credential_owned_by(cred_id, owner_key_fingerprint):
-        raise HTTPException(status_code=404, detail="Credential not found")
-    linked = await cloud_cred_store.link_credential(key_fp, provider, cred_id)
-    if not linked:
-        raise HTTPException(status_code=404, detail="Credential not found")
-    logger.info("☁️  Admin '%s' linked credential '%s' to key '%s' for provider '%s'", client_id, cred_id, key_fp, provider)
-    return {"status": "linked", "guardian_key_fingerprint": key_fp, "provider": provider, "credential_id": cred_id}
+    """link_credential (Phase 5: delegated to app.gateway.admin_api)."""
+    return await _admin_api.link_credential(request, client_id)
 
 
 @app.delete("/api/cloud/links")
 async def unlink_credential(request: Request, client_id: str = Depends(verify_api_key)):
-    """Unlink a cloud credential from a Guardian API key.
-
-    Body: ``{"guardian_key_fingerprint": "abc123...", "provider": "nvidia"}``
-    """
-    body = await request.json()
-    key_fp = str(body.get("guardian_key_fingerprint", "")).strip()
-    provider = str(body.get("provider", "")).strip().lower()
-    if not key_fp:
-        raise HTTPException(status_code=400, detail="guardian_key_fingerprint is required")
-    if not provider:
-        raise HTTPException(status_code=400, detail="provider is required")
-    credential = cloud_cred_store.get_credential_for_key(key_fp, provider)
-    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
-    if credential is None or not cloud_cred_store.is_credential_owned_by(credential.id, owner_key_fingerprint):
-        raise HTTPException(status_code=404, detail="Link not found")
-    unlinked = await cloud_cred_store.unlink_credential(key_fp, provider)
-    if not unlinked:
-        raise HTTPException(status_code=404, detail="Link not found")
-    return {"status": "unlinked", "guardian_key_fingerprint": key_fp, "provider": provider}
+    """unlink_credential (Phase 5: delegated to app.gateway.admin_api)."""
+    return await _admin_api.unlink_credential(request, client_id)
 
 
 @app.get("/api/cloud/providers")
 async def list_cloud_providers(client_id: str = Depends(verify_api_key)):
-    """List all configured cloud providers and their status."""
-    providers = []
-    for p in provider_registry.get_enabled_providers():
-        providers.append({
-            "name": p.name,
-            "base_url": p.base_url,
-            "configured": p.is_configured,
-            "model_count": len(p.models),
-            "models": p.models,
-        })
-    # Include known providers even if not in settings.yaml
-    known = set(_PROVIDER_BASE_URLS.keys())
-    configured = {p["name"] for p in providers}
-    for name in known - configured:
-        providers.append({"name": name, "base_url": _PROVIDER_BASE_URLS[name], "configured": False, "model_count": 0, "models": []})
-    return {"providers": providers}
+    """list_cloud_providers (Phase 5: delegated to app.gateway.admin_api)."""
+    return await _admin_api.list_cloud_providers(client_id)
 
 
 @app.get("/api/cloud/models")
 async def list_cloud_models(request: Request, client_id: str = Depends(verify_api_key)):
-    """List all cloud models available to the requesting client.
+    """list_cloud_models (Phase 5: delegated to app.gateway.admin_api)."""
+    return await _admin_api.list_cloud_models(request, client_id)
 
-    Combines global cloud models from settings.yaml with per-key cloud routes
-    linked to the requesting Guardian API key.
-    """
-    models = []
-    # Global cloud models
-    for model_name in provider_registry.get_all_cloud_models():
-        entry = provider_registry.build_model_metadata_entry(model_name)
-        if entry:
-            models.append(entry)
-    # Per-key cloud routes
-    auth_ctx = get_request_auth_context(request) or {}
-    key_fp = auth_ctx.get("key_fingerprint") or client_id
-    for cloud_model in cloud_cred_store.get_linked_models_for_key(key_fp):
-        models.append({
-            "id": cloud_model["id"],
-            "object": "model",
-            "created": int(time.time()),
-            "owned_by": cloud_model["provider"],
-            "permission": [],
-            "served_by": "cloud",
-            "provider": cloud_model["provider"],
-            "credential_id": cloud_model["credential_id"],
-        })
-    return {"models": models}
 
 
 @app.get("/api/crashes")
 async def get_crash_history(client_id: str = Depends(verify_api_key)):
-    """Return the crash history of llama-server load failures."""
-    return {
-        "total_crashes": len(model_manager.crash_history),
-        "last_crash": model_manager.last_crash.to_dict() if model_manager.last_crash else None,
-        "history": model_manager.get_crash_history(),
-    }
+    """get_crash_history (Phase 5: delegated to app.gateway.admin_api)."""
+    return await _admin_api.get_crash_history(client_id)
 
 
 @app.get("/api/status")
 async def get_server_status(client_id: str = Depends(verify_api_key)):
-    """Return current model status and backend health."""
-    current_model = await model_manager.get_current_model()
-    startup_status = _get_startup_check_status()
-    queue_status = inference_queue.get_status()
-    switch_in_progress = _startup_state_is_in_progress(startup_status.get("state")) and startup_status.get("phase") != "idle"
-    current_requested_target = startup_status.get("target_model") if switch_in_progress else None
-    active_switch_owner = startup_status.get("owner") if switch_in_progress else None
-    healthy = False
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{LLAMA_SERVER_URL}/health")
-            healthy = resp.status_code == 200
-    except Exception:
-        pass
+    """get_server_status (Phase 5: delegated to app.gateway.admin_api)."""
+    return await _admin_api.get_server_status(client_id)
 
-    preferred_tool_model = model_manager.get_preferred_tool_model(current_model)
-    preferred_reasoning_model = model_manager.get_preferred_reasoning_model(current_model)
-    backend_model_path = model_manager._get_backend_model_path()
-    backend_model_name = model_manager._last_backend_model
-    if backend_model_name is None and backend_model_path:
-        backend_model_name = model_manager._identify_model_by_path(backend_model_path)
-    vram = get_gpu_metrics()
-    idle_minutes = model_manager.idle_unload_minutes
-    idle_secs = time.time() - model_manager.last_request_time
-    return {
-        "current_model": current_model,
-        "backend_healthy": healthy,
-        "is_unloaded": model_manager.is_unloaded,
-        "idle_seconds": round(idle_secs),
-        "idle_unload_minutes": idle_minutes,
-        "backend_url": LLAMA_SERVER_URL,
-        "total_crashes": len(model_manager.crash_history),
-        "last_crash": model_manager.last_crash.to_dict() if model_manager.last_crash else None,
-        "vram": vram,
-        "vram_model_mb": get_model_size(current_model),
-        "security": {
-            "pinned_model": model_manager.pinned_model,
-            "switch_allowlist": list(model_manager._switch_allowlist) if model_manager._switch_allowlist else None,
-            "backend_verified": model_manager._model_verified,
-            "last_backend_verification_at": model_manager._last_verification_at,
-            "last_successful_backend_verification_at": model_manager._last_successful_verification_at,
-            "last_verified_model": model_manager._last_verified_model,
-            "backend_model": backend_model_name,
-            "backend_model_path": backend_model_path,
-        },
-        "startup": startup_status,
-        "current_requested_target": current_requested_target,
-        "switch": {
-            "active": switch_in_progress,
-            "state": startup_status.get("state"),
-            "phase": startup_status.get("phase"),
-            "owner": active_switch_owner,
-            "requested_target": current_requested_target,
-            "requested_model": startup_status.get("requested_model"),
-            "lock_held": _model_switch_lock.locked(),
-        },
-        "queue": queue_status,
-        "routing": {
-            "tool_model": preferred_tool_model,
-            "reasoning_model": preferred_reasoning_model,
-            "auto_behavior": "tool_friendly_same_weights_if_available",
-        },
-        "proxy": {
-            "pid": os.getpid(),
-            "port": PROXY_PORT,
-            "listener": _get_proxy_listener_info(),
-            "pid_file": _get_pid_file_status(),
-        },
-        "scaler": {
-            "enabled": state.scaler.config.get("enabled", False),
-            "profiles": list(state.scaler.config.get("profiles", {}).keys()),
-        },
-    }
-
-
-# --- Capture status endpoint (admin) ---
 
 @app.get("/api/capture/status")
 async def get_capture_status(client_id: str = Depends(verify_api_key)):
-    """Return capture subsystem status, config, and runtime metrics.
-
-    Requires an API key.  Shows whether capture is enabled, the kill switch
-    state, queue depth, writer status, and disk usage.
-    """
-    controller = get_capture_controller()
-    cfg = controller.config
-
-    # Build config summary (without secrets)
-    config_summary = {
-        "enabled": cfg.enabled,
-        "active": cfg.is_active,
-        "local_capture": cfg.local_capture,
-        "cloud_capture": cfg.cloud_capture,
-        "per_client_opt_in": cfg.per_client_opt_in,
-        "allowed_client_refs_count": len(cfg.allowed_client_refs),
-        "policy_version": cfg.policy_version,
-        "instance_id": cfg.instance_id,
-        "capture_root": cfg.capture_root,
-        "retention_days": cfg.retention_days,
-        "max_capture_bytes": cfg.max_capture_bytes,
-        "max_pending_events": cfg.max_pending_events,
-        "max_file_bytes": cfg.max_file_bytes,
-        "max_file_age_seconds": cfg.max_file_age_seconds,
-        "file_mode": oct(cfg.file_mode),
-        "directory_mode": oct(cfg.directory_mode),
-        "field_policies": {
-            "system_prompts": cfg.system_prompts,
-            "reasoning": cfg.reasoning,
-            "tool_definitions": cfg.tool_definitions,
-            "tool_calls": cfg.tool_calls,
-            "tool_results": cfg.tool_results,
-            "images": cfg.images,
-            "unknown_content_blocks": cfg.unknown_content_blocks,
-        },
-    }
-
-    # Sink snapshot (queue depth, dropped events, etc.)
-    sink_snap = controller.sink.snapshot()
-
-    # Writer snapshot (if writer exists)
-    writer_snap = {}
-    if controller.writer is not None:
-        writer_snap = controller.writer.snapshot()
-        writer_snap["running"] = controller._writer_started
-    else:
-        writer_snap = {"running": False, "reason": "writer_not_initialized"}
-
-    # Disk usage
-    disk_bytes = 0
-    capture_root_path = None
-    if controller.writer is not None:
-        disk_bytes = writer_snap.get("capture_disk_bytes", 0) or 0
-        capture_root_path = str(controller.writer.get_write_path())
-    else:
-        try:
-            root = __import__("pathlib").Path(cfg.capture_root).resolve()
-            if root.exists():
-                capture_root_path = str(root)
-                disk_bytes = sum(
-                    f.stat().st_size for f in root.rglob("*") if f.is_file()
-                )
-        except OSError:
-            pass
-
-    return {
-        "config": config_summary,
-        "sink": sink_snap,
-        "writer": writer_snap,
-        "disk": {
-            "bytes_used": disk_bytes,
-            "bytes_budget": cfg.max_capture_bytes,
-            "root": capture_root_path,
-            "retention_days": cfg.retention_days,
-        },
-    }
+    """get_capture_status (Phase 5: delegated to app.gateway.admin_api)."""
+    return await _admin_api.get_capture_status(client_id)
 
 
 @app.post("/api/capture/rotate")
 async def rotate_capture_file(client_id: str = Depends(verify_api_key)):
-    """Force rotation of the active capture WAL file.
+    """rotate_capture_file (Phase 5: delegated to app.gateway.admin_api)."""
+    return await _admin_api.rotate_capture_file(client_id)
 
-    Requires an API key.  The current active file is closed (and gzipped
-    if compression is configured), and a new active file is opened for
-    subsequent events.
-    """
-    controller = get_capture_controller()
-    if not controller.config.is_active:
-        return {"message": "Capture is not active", "rotated": False}
-
-    writer = controller.writer
-    if writer is None:
-        return {"message": "Capture writer is not initialized", "rotated": False}
-
-    rotated_path = None
-    active_path = None
-    try:
-        rotated_path = writer.rotate()
-        active_path = str(writer.get_write_path())
-    except Exception as e:
-        return {"message": f"Rotation failed: {e}", "rotated": False}
-
-    return {
-        "message": "Rotation complete",
-        "rotated": True,
-        "rotated_file": rotated_path,
-        "active_file": active_path,
-    }
 
 
 # --- Prometheus metrics endpoint (no auth — standard for scraping) ---
@@ -1979,111 +1624,48 @@ async def prometheus_metrics():
 
 @app.get("/api/scaler")
 async def get_scaler_config(client_id: str = Depends(verify_api_key)):
-    """Return current scaler configuration."""
-    return state.scaler.get_config()
+    """get_scaler_config (Phase 5: delegated to app.gateway.admin_api)."""
+    return await _admin_api.get_scaler_config(client_id)
 
 
 @app.put("/api/scaler")
 async def update_scaler_config(request: Request, client_id: str = Depends(verify_api_key)):
-    """Update scaler configuration (partial merge).
-
-    Body examples::
-
-        {"enabled": false}
-        {"profiles": {"trivial": {"thinking_budget": 512}}}
-        {"queue_pressure": {"heavy_threshold": 6}}
-    """
-    patch = await request.json()
-    persist = patch.pop("_persist", True)
-    updated = state.scaler.update_config(patch, persist=persist)
-    return {"status": "updated", "config": updated}
+    """update_scaler_config (Phase 5: delegated to app.gateway.admin_api)."""
+    return await _admin_api.update_scaler_config(request, client_id)
 
 
 @app.post("/api/scaler/reset")
 async def reset_scaler_config(client_id: str = Depends(verify_api_key)):
-    """Reset scaler configuration to built-in defaults."""
-    config = state.scaler.reset_config()
-    return {"status": "reset", "config": config}
+    """reset_scaler_config (Phase 5: delegated to app.gateway.admin_api)."""
+    return await _admin_api.reset_scaler_config(client_id)
 
 
 @app.post("/api/scaler/recommend")
 async def scaler_recommend(request: Request, client_id: str = Depends(verify_api_key)):
-    """Return recommended thinking_budget_tokens and max_tokens for a request.
+    """scaler_recommend (Phase 5: delegated to app.gateway.admin_api)."""
+    return await _admin_api.scaler_recommend(request, client_id)
 
-    Advisory only — the client decides whether to use these values.
-
-    Body: same shape as a chat/completions request (needs ``messages``).
-    Returns recommended values and the classification details.
-    """
-    body = await request.json()
-    messages = body.get("messages", [])
-
-    # Classify complexity
-    profile_name, complexity = state.scaler._classify_complexity(messages)
-    profile = state.scaler.config["profiles"].get(profile_name, {})
-
-    base_thinking = profile.get("thinking_budget", -1)
-    base_max_tokens = profile.get("max_tokens", 8192)
-
-    # Apply queue pressure
-    thinking_budget, max_tokens = state.scaler._apply_queue_pressure(
-        base_thinking, base_max_tokens, inference_queue.waiting_count
-    )
-    pressure = state.scaler._pressure_label(inference_queue.waiting_count)
-
-    if state.scaler.config.get("log_decisions"):
-        logger.info(
-            f"📋 [{client_id}] Scaler recommend: profile={profile_name} "
-            f"pressure={pressure} → thinking_budget={thinking_budget}, max_tokens={max_tokens}"
-        )
-
-    return {
-        "profile": profile_name,
-        "complexity": complexity,
-        "pressure": pressure,
-        "recommended": {
-            "thinking_budget_tokens": thinking_budget,
-            "max_tokens": max_tokens,
-        },
-    }
 
 
 # --- Queue status endpoint (non-queued, always immediately available) ---
 
 @app.get("/v1/queue/status")
 async def queue_status(request: Request, client_id: str = Depends(verify_api_key)):
-    """Return current queue status.  Clients should poll this while waiting."""
-    return inference_queue.get_status(
-        client_id=client_id,
-        owner_id=_get_queue_owner_id(request, client_id),
-    )
+    """queue_status (Phase 5: delegated to app.gateway.admin_api)."""
+    return await _admin_api.queue_status(request, client_id)
 
 
 @app.get("/v1/queue/requests/{request_id}")
 async def queue_request_status(request_id: str, request: Request, client_id: str = Depends(verify_api_key)):
-    """Return the lifecycle state for one tracked queue request."""
-    snapshot = inference_queue.get_request_status(
-        request_id,
-        client_id=client_id,
-        owner_id=_get_queue_owner_id(request, client_id),
-    )
-    if snapshot is None:
-        raise HTTPException(status_code=404, detail="Queue request not found")
-    return snapshot
+    """queue_request_status (Phase 5: delegated to app.gateway.admin_api)."""
+    return await _admin_api.queue_request_status(request_id, request, client_id)
 
 
 @app.delete("/v1/queue/requests/{request_id}")
 async def cancel_queue_request(request_id: str, request: Request, client_id: str = Depends(verify_api_key)):
-    """Cancel a waiting request or request cancellation of a running one."""
-    snapshot = inference_queue.cancel(
-        request_id,
-        client_id=client_id,
-        owner_id=_get_queue_owner_id(request, client_id),
-        reason="client_requested_cancel",
-    )
-    if snapshot is None:
-        raise HTTPException(status_code=404, detail="Queue request not found")
-    return snapshot
+    """cancel_queue_request (Phase 5: delegated to app.gateway.admin_api)."""
+    return await _admin_api.cancel_queue_request(request_id, request, client_id)
+
 
 
 # OpenAI-compatible /v1/ routes (used by OpenClaw and other OpenAI-compatible clients)
@@ -2325,6 +1907,34 @@ _model_discovery.init(
     _enrich_model_context_metadata=_enrich_model_context_metadata,
     _resolve_context_window=_resolve_context_window,
     _get_model_size=get_model_size,
+)
+
+# Initialize admin API with injected helpers (after all helpers are defined)
+_admin_api.init(
+    _model_manager=model_manager,
+    _provider_registry=provider_registry,
+    _cloud_cred_store=cloud_cred_store,
+    _cloud_rate_limiter=cloud_rate_limiter,
+    _inference_queue=inference_queue,
+    _state=state,
+    _llama_server_url=LLAMA_SERVER_URL,
+    _proxy_port=PROXY_PORT,
+    _PROVIDER_BASE_URLS=_PROVIDER_BASE_URLS,
+    _get_cloud_key_fingerprint=_get_cloud_key_fingerprint,
+    _get_request_auth_context=get_request_auth_context,
+    _get_queue_owner_id=_get_queue_owner_id,
+    _get_startup_check_status=_get_startup_check_status,
+    _startup_state_is_in_progress=_startup_state_is_in_progress,
+    _get_proxy_listener_info=_get_proxy_listener_info,
+    _get_pid_file_status=_get_pid_file_status,
+    _get_capture_controller=get_capture_controller,
+    _get_gpu_metrics=get_gpu_metrics,
+    _get_model_size=get_model_size,
+    _discover_google_models=_discover_google_models,
+    _load_api_keys=load_api_keys,
+    _generate_api_key=generate_api_key,
+    _token_fingerprint=_token_fingerprint,
+    _model_switch_lock=_model_switch_lock,
 )
 
 async def start_proxy():
