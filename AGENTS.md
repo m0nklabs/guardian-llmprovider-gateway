@@ -88,7 +88,22 @@ When touching these areas, read the referenced detail docs:
 
 ## Active Handoff
 
-### Pi session `20260812_3` (last updated 2026-08-12 ~21:30)
+### Pi session `20260812_4` (last updated 2026-08-12 ~22:40)
+
+- Working directory: `/home/flip/llama_cpp_guardian`
+- **RESTARTED 22:27 + 22:35 UTC — provider timeouts 600→1200 now LIVE**, `cloud_retry.enabled=false` live. Post-restart audit found and fixed 6 bugs:
+  1. `admin_api.py`: extraction gave all 25 handlers the same `(request, client_id)` signature — 11 mismatched their wrappers (8 client_id-only, 3 with path params) → `/api/status` 500. Fixed + signature regression test.
+  2. `ollama.py`: bare `get_model_timeout` instead of injected `_get_model_timeout` → 500 on local chat. Fixed.
+  3. `ollama.py`: `generate_ollama` missing `_ollama_capture_assembler` init (pre-existing latent NameError on EVERY streaming /api/generate call, copied verbatim from old server.py). Fixed.
+  4. `forwarding.py`: 7 call sites used `translate_openai_*` without injected `_`-prefix → NameError on Anthropic-translated cloud errors. Fixed.
+  5. `routing.py`: vision-fallback path called `_resolve_inference_model`, never injected — added to init(). Fixed.
+  6. Type-hint hygiene: `PolicyResult` from `app.capture.policy` (not schema), asyncio/List/Tuple/JSONResponse imports restored.
+- **pyflakes now clean** for app/ (only 2 pre-existing lazy string annotations in capture/redactor.py + proxy/metrics.py). `pip install pyflakes` available in venv — run `./venv/bin/python -m pyflakes app/` as a pre-restart gate.
+- Verified live: `/api/status` OK (llama3.2-3b, backend healthy, 0 crashes), local chat OK, ollama streaming /api/generate OK, cloud forwarding OK (openrouter 404 was an upstream account privacy setting, not Guardian). Integration suite: 17 passed, 3 skipped (FINETUNE_V2_LIVE gated). Full suite: 892 passed, 3 skipped.
+- All fixes pushed (`de03ba9..5e6483e`). Working tree clean.
+- **Lesson recorded:** signature mismatches and `_`-prefix injection bugs are the #1 extraction failure mode. Run pyflakes + the admin-signature test before every restart; consider a wrapper-vs-module signature check in CI.
+
+
 
 - Working directory: `/home/flip/llama_cpp_guardian`
 - **Phase 5 structural separation: server.py 5177 → 1667 lines (−68%), full suite 887 passed / 3 skipped.** All logic lives in modules; server.py is a thin shell (routes, wrappers, init() calls). 95 delegation markers, 41 routes.
