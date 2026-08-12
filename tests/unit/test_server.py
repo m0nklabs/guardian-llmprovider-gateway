@@ -1315,7 +1315,7 @@ async def test_list_models_adds_context_aliases_to_every_served_model():
             "_groups",
             {"kimi-k3": FailoverGroup(name="kimi-k3")},
         ),
-        patch.object(server, "_resolve_cloud_attempts", return_value=([], "kimi-k3")),
+        patch.object(server._model_discovery, "resolve_cloud_attempts", return_value=([], "kimi-k3")),
         patch.object(server._ctx_meta, "resolve_context_window", new=AsyncMock(return_value=1048576)),
     ):
         payload = await server.list_models(request=request, client_id="test-user")
@@ -1341,7 +1341,7 @@ async def test_ollama_show_reports_context_for_cloud_model():
     with (
         patch.object(server.provider_registry, "is_cloud_model", return_value=True),
         patch.object(server._ctx_meta, "resolve_context_window", new=AsyncMock(return_value=1048576)),
-        patch.object(server, "_resolve_cloud_attempts", return_value=([], None)),
+        patch.object(server._model_discovery, "resolve_cloud_attempts", return_value=([], None)),
     ):
         payload = await server.show_model_ollama(Request(), client_id="test-user")
 
@@ -1786,12 +1786,12 @@ async def test_list_models_includes_failover_groups():
     fake_group = SimpleNamespace(name="glm-5.2")
 
     with (
-        patch.object(server, "model_manager") as mm_mock,
-        patch.object(server, "provider_registry") as pr_mock,
-        patch.object(server, "cloud_cred_store") as cc_mock,
-        patch.object(server, "failover_registry") as fr_mock,
+        patch.object(server._model_discovery, "_model_manager") as mm_mock,
+        patch.object(server._model_discovery, "_provider_registry") as pr_mock,
+        patch.object(server._model_discovery, "_cloud_cred_store") as cc_mock,
+        patch.object(server._model_discovery, "_failover_registry") as fr_mock,
         patch.object(server._ctx_meta, "build_model_metadata_entry", return_value={"id": "local", "object": "model"}),
-        patch.object(server, "_resolve_cloud_attempts", return_value=([], "glm-5.2")),
+        patch.object(server._model_discovery, "resolve_cloud_attempts", return_value=([], "glm-5.2")),
     ):
         mm_mock.get_public_model_map.return_value = {}
         pr_mock.get_all_cloud_models.return_value = []
@@ -1818,8 +1818,8 @@ async def test_get_model_metadata_returns_failover_group():
     fake_group = SimpleNamespace(name="glm-5.2")
 
     with (
-        patch.object(server, "failover_registry") as fr_mock,
-        patch.object(server, "_resolve_cloud_attempts", return_value=([], "glm-5.2")),
+        patch.object(server._model_discovery, "_failover_registry") as fr_mock,
+        patch.object(server._model_discovery, "resolve_cloud_attempts", return_value=([], "glm-5.2")),
     ):
         fr_mock.get_group.return_value = fake_group
         result = await server.get_model_metadata(
