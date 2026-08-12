@@ -541,8 +541,8 @@ async def test_non_gpu_v1_route_bypasses_queue_even_with_same_key_busy():
     request = _FakeRequest()
 
     with (
-        patch.object(server, "_set_request_usage_metadata", lambda *args, **kwargs: None),
-        patch.object(server, "_begin_queued_request", side_effect=AssertionError("queue should not be used")),
+        patch.object(server._gw_routing, "_set_request_usage_metadata", lambda *args, **kwargs: None),
+        patch.object(server._gw_routing, "_begin_queued_request", side_effect=AssertionError("queue should not be used")),
         patch.object(server._ctx_meta.httpx, "AsyncClient", _FakeAsyncClient),
     ):
         response = await server.proxy_v1_post("models", request, client_id="openclaw")
@@ -566,8 +566,8 @@ async def test_v1_inference_rejects_unserved_model_before_queue_admission():
     request = _FakeRequest()
 
     with (
-        patch.object(server, "_set_request_usage_metadata", lambda *args, **kwargs: None),
-        patch.object(server, "_begin_queued_request", side_effect=AssertionError("queue should not be used")),
+        patch.object(server._gw_routing, "_set_request_usage_metadata", lambda *args, **kwargs: None),
+        patch.object(server._gw_routing, "_begin_queued_request", side_effect=AssertionError("queue should not be used")),
         patch.object(server.model_manager, "models", {"Qwen-Agent": {}}),
         patch.object(server.model_manager, "get_current_model", AsyncMock(return_value="Qwen-Agent")),
         patch.object(server.model_manager, "resolve_model", side_effect=ValueError("not found")),
@@ -660,9 +660,9 @@ async def test_v1_chat_completions_sanitizes_late_system_messages_before_forward
     request = _FakeRequest()
 
     with (
-        patch.object(server, "_set_request_usage_metadata", lambda *args, **kwargs: None),
-        patch.object(server, "_begin_queued_request", return_value=("req-123", None)),
-        patch.object(server, "_resolve_or_reject_inference_model", return_value="Qwen-Agent"),
+        patch.object(server._gw_routing, "_set_request_usage_metadata", lambda *args, **kwargs: None),
+        patch.object(server._gw_routing, "_begin_queued_request", return_value=("req-123", None)),
+        patch.object(server._gw_routing, "_resolve_or_reject_inference_model", return_value="Qwen-Agent"),
         patch.object(server.model_manager, "get_current_model", AsyncMock(return_value="Qwen-Agent")),
         patch.object(server.model_manager, "models", {"Qwen-Agent": {}, "auto": {}}),
         patch.object(server._ctx_meta.httpx, "AsyncClient", _FakeAsyncClient),
@@ -752,9 +752,9 @@ async def test_v1_chat_completions_keeps_stream_flag_while_sanitizing_messages()
     request = _FakeRequest()
 
     with (
-        patch.object(server, "_set_request_usage_metadata", lambda *args, **kwargs: None),
-        patch.object(server, "_begin_queued_request", return_value=("req-123", None)),
-        patch.object(server, "_resolve_or_reject_inference_model", return_value="Qwen-Agent"),
+        patch.object(server._gw_routing, "_set_request_usage_metadata", lambda *args, **kwargs: None),
+        patch.object(server._gw_routing, "_begin_queued_request", return_value=("req-123", None)),
+        patch.object(server._gw_routing, "_resolve_or_reject_inference_model", return_value="Qwen-Agent"),
         patch.object(server.model_manager, "get_current_model", AsyncMock(return_value="Qwen-Agent")),
         patch.object(server.model_manager, "models", {"Qwen-Agent": {}, "auto": {}}),
         patch.object(server._ctx_meta.httpx, "AsyncClient", _FakeAsyncClient),
@@ -1141,10 +1141,10 @@ async def test_image_fallback_validates_cloud_route_before_local_model_resolutio
 
     with (
         patch.object(server.model_manager, "get_current_model", AsyncMock(return_value="local-model")),
-        patch.object(server, "_resolve_or_reject_inference_model", return_value="guardian/openrouter/z-ai/glm-5.2"),
-        patch.object(server, "_resolve_cloud_vision_fallback", return_value="vision-model"),
+        patch.object(server._gw_routing, "_resolve_or_reject_inference_model", return_value="guardian/openrouter/z-ai/glm-5.2"),
+        patch.object(server._gw_routing, "_resolve_cloud_vision_fallback", return_value="vision-model"),
         patch.object(
-            server,
+            server._gw_routing,
             "_resolve_cloud_attempts",
             side_effect=server.HTTPException(status_code=403, detail="cloud credential not linked"),
         ),
@@ -1680,13 +1680,13 @@ async def test_v1_post_forwards_cloud_model_to_provider_not_local():
         patch.object(server.ProviderRegistry, "build_forward_headers", return_value={"Authorization": "Bearer sk-or-test", "Content-Type": "application/json"}),
         patch.object(server.ProviderRegistry, "build_forward_url", return_value="https://openrouter.ai/api/v1/chat/completions"),
         patch.object(server._ctx_meta.httpx, "AsyncClient", _FakeAsyncClient),
-        patch.object(server, "_set_request_usage_metadata", lambda *a, **k: None),
-        patch.object(server, "_start_live_request_usage", lambda *a, **k: None),
-        patch.object(server, "_finish_live_request_usage", lambda *a, **k: None),
-        patch.object(server, "_record_usage_from_payload", lambda *a, **k: None),
+        patch.object(server._gw_routing, "_set_request_usage_metadata", lambda *a, **k: None),
+        patch.object(server._cloud_forwarding, "_start_live_request_usage", lambda *a, **k: None),
+        patch.object(server._cloud_forwarding, "_finish_live_request_usage", lambda *a, **k: None),
+        patch.object(server._cloud_forwarding, "_record_usage_from_payload", lambda *a, **k: None),
         patch.object(server.model_manager, "get_current_model", AsyncMock(return_value="local-model")),
         patch.object(server.model_manager, "resolve_model", side_effect=ValueError("not local")),
-        patch.object(server, "_begin_queued_request", side_effect=AssertionError("queue must be bypassed for cloud models")),
+        patch.object(server._gw_routing, "_begin_queued_request", side_effect=AssertionError("queue must be bypassed for cloud models")),
     ):
         response = await server.proxy_v1_post("chat/completions", _FakeRequest(), client_id="test-user")
 
@@ -1721,12 +1721,12 @@ async def test_v1_post_cloud_model_without_api_key_returns_503():
     with (
         patch.object(server.provider_registry, "is_cloud_model", return_value=True),
         patch.object(server.provider_registry, "get_provider_for_model", return_value=fake_provider),
-        patch.object(server, "_set_request_usage_metadata", lambda *a, **k: None),
-        patch.object(server, "_start_live_request_usage", lambda *a, **k: None),
-        patch.object(server, "_finish_live_request_usage", lambda *a, **k: None),
+        patch.object(server._gw_routing, "_set_request_usage_metadata", lambda *a, **k: None),
+        patch.object(server._cloud_forwarding, "_start_live_request_usage", lambda *a, **k: None),
+        patch.object(server._cloud_forwarding, "_finish_live_request_usage", lambda *a, **k: None),
         patch.object(server.model_manager, "get_current_model", AsyncMock(return_value="local-model")),
         patch.object(server.model_manager, "resolve_model", side_effect=ValueError("not local")),
-        patch.object(server, "_begin_queued_request", side_effect=AssertionError("queue must be bypassed")),
+        patch.object(server._gw_routing, "_begin_queued_request", side_effect=AssertionError("queue must be bypassed")),
     ):
         with pytest.raises(server.HTTPException) as exc_info:
             await server.proxy_v1_post("chat/completions", _FakeRequest(), client_id="test-user")
