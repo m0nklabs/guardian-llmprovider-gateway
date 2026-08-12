@@ -91,7 +91,17 @@ When touching these areas, read the referenced detail docs:
 
 ## Active Handoff
 
-### Pi session `20260812_5` (last updated 2026-08-12 ~23:00)
+### Pi session `20260812_5` (last updated 2026-08-12 ~23:15)
+
+- Working directory: `/home/flip/llama_cpp_guardian`
+- **Keanu handoff delivered:** `docs/KEANU_GUARDIAN_CAPTURE_HANDOFF.md` written into `/home/flip/keanu-factory/docs/` (NOT committed to the Keanu repo yet — the operator decides when). Verdict: Keanu side is NOT fully ready — the parser (2026-08-05) predates Decisions 1A/2A (2026-08-07): `record_auth` HMAC verification is missing, Keanu's SOURCE/PARSER docs don't document it, and the capture→dataset pipeline is not set up. The handoff lists 4 ordered tasks (record_auth verification → docs → pipeline → contract test) with the exact wire format, `compute_record_auth` reference, key_id rotation, and validation checklist.
+- **New Critical rule: AGENTS.md must always be updated in the same session as the change** (commit `cf7a879`).
+- **Pre-restart gate added:** `scripts/pre_restart_check.py` — py_compile + pyflakes + wrapper-vs-module signature check + pytest in one command. All 4 gates PASS. New Critical rule: run it before every restart.
+- **Generic signature regression test** added to `tests/unit/test_server.py` (`test_all_wrapper_calls_match_module_signatures`) — covers every `_module.func(...)` delegation in server.py.
+- Fixed the last 2 pyflakes findings: `Union` in `app/capture/redactor.py`, `Dict`/`Any` in `app/proxy/metrics.py` — `pyflakes app/` is now fully clean.
+- Full suite: 893 passed, 3 skipped. Commits: `cf7a879`, `235045e`. Pushed.
+
+
 
 - Working directory: `/home/flip/llama_cpp_guardian`
 - **New Critical rule: AGENTS.md must always be updated in the same session as the change** (commit `cf7a879`).
