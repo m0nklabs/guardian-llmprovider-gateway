@@ -2371,3 +2371,44 @@ async def test_reload_backend_after_connect_error_reloads_when_down():
         assert kwargs["source"] == "proxy"
         assert kwargs["target_model"] == "qwen3-30b"
         assert mm.is_unloaded is True
+
+
+def test_admin_api_handler_signatures_match_wrappers():
+    """Regression: the admin_api extraction gave every handler the same
+    (request, client_id) signature — wrappers calling with the original
+    argument lists crashed at runtime (e.g. get_server_status 500).
+    """
+    import inspect
+    from app.gateway import admin_api as mod
+    # (handler, wrapper call arity, expected params)
+    expectations = {
+        "list_api_keys": ["client_id"],
+        "create_api_key": ["request", "client_id"],
+        "list_cloud_credentials": ["request", "client_id"],
+        "add_cloud_credential": ["request", "client_id"],
+        "refresh_cloud_credential_models": ["cred_id", "request", "client_id"],
+        "delete_cloud_credential": ["cred_id", "request", "client_id"],
+        "add_model_to_credential": ["cred_id", "request", "client_id"],
+        "remove_model_from_credential": ["cred_id", "model_name", "request", "client_id"],
+        "list_cloud_links": ["request", "client_id"],
+        "get_cloud_ratelimit_stats": ["request", "client_id"],
+        "link_credential": ["request", "client_id"],
+        "unlink_credential": ["request", "client_id"],
+        "list_cloud_providers": ["client_id"],
+        "list_cloud_models": ["request", "client_id"],
+        "get_crash_history": ["client_id"],
+        "get_server_status": ["client_id"],
+        "get_capture_status": ["client_id"],
+        "rotate_capture_file": ["client_id"],
+        "get_scaler_config": ["client_id"],
+        "update_scaler_config": ["request", "client_id"],
+        "reset_scaler_config": ["client_id"],
+        "scaler_recommend": ["request", "client_id"],
+        "queue_status": ["request", "client_id"],
+        "queue_request_status": ["request_id", "request", "client_id"],
+        "cancel_queue_request": ["request_id", "request", "client_id"],
+    }
+    for handler, params in expectations.items():
+        fn = getattr(mod, handler)
+        actual = list(inspect.signature(fn).parameters)
+        assert actual == params, f"{handler}: expected {params}, got {actual}"

@@ -80,7 +80,7 @@ def init(
     globals().update({k: v for k, v in locals().items() if k != "_init"})
 
 
-async def list_api_keys(request: Request, client_id: str) -> Any:
+async def list_api_keys(client_id: str) -> Any:
     keys = _load_api_keys()
     result = []
     for token, data in keys.items():
@@ -179,7 +179,7 @@ async def refresh_cloud_credential_models(cred_id: str, request: Request, client
 
 
 
-async def delete_cloud_credential(request: Request, client_id: str) -> Any:
+async def delete_cloud_credential(cred_id: str, request: Request, client_id: str) -> Any:
     owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
     if not _cloud_cred_store.is_credential_owned_by(cred_id, owner_key_fingerprint):
         raise HTTPException(status_code=404, detail=f"Credential '{cred_id}' not found")
@@ -191,7 +191,7 @@ async def delete_cloud_credential(request: Request, client_id: str) -> Any:
 
 
 
-async def add_model_to_credential(request: Request, client_id: str) -> Any:
+async def add_model_to_credential(cred_id: str, request: Request, client_id: str) -> Any:
     body = await request.json()
     model_name = str(body.get("model", "")).strip()
     if not model_name:
@@ -206,7 +206,7 @@ async def add_model_to_credential(request: Request, client_id: str) -> Any:
 
 
 
-async def remove_model_from_credential(request: Request, client_id: str) -> Any:
+async def remove_model_from_credential(cred_id: str, model_name: str, request: Request, client_id: str) -> Any:
     owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
     if not _cloud_cred_store.is_credential_owned_by(cred_id, owner_key_fingerprint):
         raise HTTPException(status_code=404, detail="Credential or model not found")
@@ -270,7 +270,7 @@ async def unlink_credential(request: Request, client_id: str) -> Any:
 
 
 
-async def list_cloud_providers(request: Request, client_id: str) -> Any:
+async def list_cloud_providers(client_id: str) -> Any:
     providers = []
     for p in _provider_registry.get_enabled_providers():
         providers.append({
@@ -314,7 +314,7 @@ async def list_cloud_models(request: Request, client_id: str) -> Any:
 
 
 
-async def get_crash_history(request: Request, client_id: str) -> Any:
+async def get_crash_history(client_id: str) -> Any:
     return {
         "total_crashes": len(_model_manager.crash_history),
         "last_crash": _model_manager.last_crash.to_dict() if _model_manager.last_crash else None,
@@ -323,7 +323,7 @@ async def get_crash_history(request: Request, client_id: str) -> Any:
 
 
 
-async def get_server_status(request: Request, client_id: str) -> Any:
+async def get_server_status(client_id: str) -> Any:
     current_model = await _model_manager.get_current_model()
     startup_status = _get_startup_check_status()
     queue_status = _inference_queue.get_status()
@@ -401,7 +401,7 @@ async def get_server_status(request: Request, client_id: str) -> Any:
 # --- Capture status endpoint (admin) ---
 
 
-async def get_capture_status(request: Request, client_id: str) -> Any:
+async def get_capture_status(client_id: str) -> Any:
     controller = _get_capture_controller()
     cfg = controller.config
 
@@ -476,7 +476,7 @@ async def get_capture_status(request: Request, client_id: str) -> Any:
 
 
 
-async def rotate_capture_file(request: Request, client_id: str) -> Any:
+async def rotate_capture_file(client_id: str) -> Any:
     controller = _get_capture_controller()
     if not controller.config.is_active:
         return {"message": "Capture is not active", "rotated": False}
@@ -502,7 +502,7 @@ async def rotate_capture_file(request: Request, client_id: str) -> Any:
 
 
 
-async def get_scaler_config(request: Request, client_id: str) -> Any:
+async def get_scaler_config(client_id: str) -> Any:
     return _state.scaler.get_config()
 
 
@@ -515,7 +515,7 @@ async def update_scaler_config(request: Request, client_id: str) -> Any:
 
 
 
-async def reset_scaler_config(request: Request, client_id: str) -> Any:
+async def reset_scaler_config(client_id: str) -> Any:
     config = _state.scaler.reset_config()
     return {"status": "reset", "config": config}
 
