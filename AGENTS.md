@@ -113,6 +113,12 @@ When touching these areas, read the referenced detail docs:
 ### Pi session `20260812_5` (last updated 2026-08-12 ~23:15)
 
 - Working directory: `/home/flip/llama_cpp_guardian`
+- **Keanu cross-repo contract work (2026-08-13, "tijd om te gaan bouwen"):** the Keanu agent (openhands loop) already completed handoff tasks t1 (record_auth HMAC verification, commit `6d6f2cc`), t2 (docs for Decisions 1A/2A, `0fdf51f`), t3 (capture→dataset pipeline with staging/dry-run/synthetic WAL, `3043efb`); t4 (live-WAL contract test) was marked blocked pending a Guardian-side privacy decision. This session closed the gap WITHOUT enabling live capture:
+  - `scripts/generate_contract_wal.py` (Guardian): produces a realistic WAL with the REAL `CaptureSink`/`CaptureWALWriter`/event builders (not synthetic)
+  - **Shared test vectors pinned in BOTH repos** (`TestSharedCrossRepoVector`): Guardian `tests/unit/test_capture_schema.py` regenerates, Keanu `tests/unit/parsers/test_guardian_capture_parser.py` verifies — any serialisation/HMAC drift breaks the other side
+  - Keanu fixture `tests/fixtures/guardian_contract_wal/` + `tests/unit/pipeline/test_capture_contract_fixture.py`: authentic producer artifact flows through `capture_ingest` (2/2 record_auth verified, record accepted; tampered file quarantined)
+  - Verified end-to-end manually: real writer → Keanu ingest → ChatML record accepted (3-turn history, ≥12-word replies pass the chatml quality gates: MIN_PAIRS=3, _PLACEHOLDER_MIN_WORDS=12)
+  - Guardian suite: 895 passed / 3 skipped. Keanu parsers+pipeline: 832 passed.
 - **Keanu handoff delivered:** `docs/KEANU_GUARDIAN_CAPTURE_HANDOFF.md` written into `/home/flip/keanu-factory/docs/` (NOT committed to the Keanu repo yet — the operator decides when). Verdict: Keanu side is NOT fully ready — the parser (2026-08-05) predates Decisions 1A/2A (2026-08-07): `record_auth` HMAC verification is missing, Keanu's SOURCE/PARSER docs don't document it, and the capture→dataset pipeline is not set up. The handoff lists 4 ordered tasks (record_auth verification → docs → pipeline → contract test) with the exact wire format, `compute_record_auth` reference, key_id rotation, and validation checklist.
 - **New Critical rule: AGENTS.md must always be updated in the same session as the change** (commit `cf7a879`).
 - **Pre-restart gate added:** `scripts/pre_restart_check.py` — py_compile + pyflakes + wrapper-vs-module signature check + pytest in one command. All 4 gates PASS. New Critical rule: run it before every restart.
