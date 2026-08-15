@@ -257,8 +257,32 @@ def write_doc(results: dict[str, Any], entries: list[dict[str, Any]]) -> None:
         kv = cfg.get("kv_type", "—")
         ngl = cfg.get("ngl", "—")
         if "error" in r:
+            err = r["error"]
+            # Classificeer de error tot een korte, leesbare statusregel.
+            # De volledige foutmelding staat in state.json voor debuggen.
+            err_lower = err.lower()
+            # Specifieke GGUF-corruptie-check eerst (Ornith bevat "geen OOM" in
+            # de diagnose, dus de brede OOM-check mag niet oordeelvoerend zijn).
+            if "gguf" in err_lower and ("corrupt" in err_lower or "laad-fout" in err_lower or "failed to load model" in err_lower):
+                short = "GGUF laad-fout (corrupt/truncated?)"
+            elif (
+                "out of memory" in err_lower
+                or "cudamalloc failed" in err_lower
+                or err_lower.startswith("oom")
+                or "(oom" in err_lower
+            ):
+                short = "OOM (KV-cache / VRAM)"
+            elif "failed to load model" in err_lower or "failed to load" in err_lower:
+                short = "load failed (GGUF/config)"
+            elif "crash" in err_lower or "exitin" in err_lower:
+                short = "crash on load"
+            else:
+                import re as _re
+                m = _re.search(r"HTTP (\d{3})", err)
+                prefix = f"HTTP {m.group(1)}: " if m else ""
+                short = prefix + err.split("`")[0][:50].strip()
             lines.append(
-                f"| `{name}` | {kv} | {ngl} | — | — | — | — | ❌ {r['error'][:40]} |"
+                f"| `{name}` | {kv} | {ngl} | — | — | — | — | ❌ {short} |"
             )
             continue
         lines.append(
@@ -274,7 +298,23 @@ def write_doc(results: dict[str, Any], entries: list[dict[str, Any]]) -> None:
     lines.append("")
     for name in sorted(by_name.keys()):
         r = results["completed"].get(name)
-        if not r or "error" in r:
+        if not r:
+            # pending (never attempted) — still list config
+            lines.append(f"### `{name}`")
+            lines.append("")
+            lines.append(f"- path: `{by_name[name].get('path', '—')}`")
+            lines.append(f"- ngl: {by_name[name].get('ngl', '—')}, kv_type: `{by_name[name].get('kv_type', 'f16')}`")
+            lines.append("- status: **pending (not benchmarked this run)**")
+            lines.append("")
+            continue
+        if "error" in r:
+            # failed — document config + diagnosis so the failure is actionable
+            lines.append(f"### `{name}`")
+            lines.append("")
+            lines.append(f"- path: `{by_name[name].get('path', '—')}`")
+            lines.append(f"- ngl: {by_name[name].get('ngl', '—')}, kv_type: `{by_name[name].get('kv_type', 'f16')}`")
+            lines.append(f"- **status: FAILED — {r['error']}**")
+            lines.append("")
             continue
         lines.append(f"### `{name}`")
         lines.append("")

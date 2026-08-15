@@ -112,6 +112,19 @@ When touching these areas, read the referenced detail docs:
 
 ## Active Handoff
 
+### Benchmark session `20260815_bench` (last updated 2026-08-15)
+
+- Working directory: `/home/flip/llama_cpp_guardian`
+- **Alle 18 benchmarkbare modellen (excl. embedding + laguna, op verzoek overgeslagen) gemeten via Guardian** → `docs/MODEL_BENCHMARKS.md`. Script: `scripts/bench_all_models.py` ( Guardian-native, leest `config/models.yaml`, streamt via `/v1/chat/completions`, meet load+switch/TTFT/gen tps/prompt eval tps, resumable via `data/bench-models/state.json`).
+- **13 ✅ geslaagd / 4 ❌ OOM / 1 ❌ GGUF laad-fout:**
+  - Snelste: `llama3.2-3b` 126 t/s, `Qwen3.6-…-Aggressive` 85 t/s, `Qwen3.6-…-Q8KV`/`Turbo4` 82 t/s
+  - Nieuw geïnstalleerd + werkend: `granite-4.1-8b` 31 t/s (turbo4), `qwen3.8-27b` (thinking) 64 t/s, `qwen3.8-27b-instruct` 17 t/s
+  - **OOM (KV-cache bij ctx=262144 + grote weights):** `Ministral-3-14B-Reasoning-2512` (Q8 ~15GB), `Qwen3-30B-A3B-Thinking-2507` (Q4_K_M ~18GB), `Step3-VL-10B` (F16 ~20GB), `google-gemma-4-12B-it-qat-q4_0-GPU1` — alle op ngl=99 kv=turbo4. Fix: `context` verlagen (naar 32768/131072) of ngl deels naar RAM. turbo4 alleen rekt het niet voor deze vier.
+  - **GGUF laad-fout (geen OOM):** `Ornith-1.0-35B` — `llama_model_loader: failed to load model from .gguf` na een fit-params error. Bestand mogelijk corrupt/truncated → opnieuw downloaden.
+- **Config-aanpassingen door gebruiker (turbo4 rollout, 2026-08-15):** `kv_type` f16/q4_0/q8_0 → `turbo4` voor `Ministral-3-14B`, `Qwen3-30B-A3B`, beide `Huihui-gemma-4-26B`/`unsloth-gemma-4-26B`, `Step3-VL-10B`, `Ornith-1.0-35B`, `google-gemma-4-12B` (naast de reeds-gecommitte turbo4 voor granite + qwen3.8). `ngl` overal naar 99 waar voorheen gedeeltelijk (40/30/48). Alles in `config/models.yaml`.
+- **Bench-script verbeterd:** error-classificatie in `write_doc` (OOM/GGUF-laad-fout/load-failed/crash i.p.v. afgekapte JSON-fragmenten); failed modellen krijgen nu een per-model detail-blok met diagnose (voorheen overgeslagen). `--only` filter beperkt nu ook de tabel-regeneratie (volledige state via `write_doc(state, alle-entries-zonder-laguna)`).
+- **Niet herstart na user-edits vr OOM-herretse:** de 4 OOM-modellen faalden met turbo4; oplossing is `context` verlagen (niet `kv_type` — turbo4 staat al aan). Operator-beslissing welke ctx-override per model.
+
 ### GCD implementation session `20260815_gcd` (last updated 2026-08-15)
 
 - Working directory: `/home/flip/llama_cpp_guardian`

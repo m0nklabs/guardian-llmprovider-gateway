@@ -51,15 +51,15 @@ models:
     benchmark_context_limit: 262144
     context: 262144
     ngl: 99
-    kv_type: f16
+    kv_type: turbo4
     tensor_split: "0.45,0.55"
   Qwen3-30B-A3B-Thinking-2507:
     path: /home/flip/models/Qwen3-30B-A3B-Thinking-2507-Q4_K_M.gguf
     total_layers: 48
     benchmark_context_limit: 262144
     context: 262144
-    ngl: 40
-    kv_type: q4_0
+    ngl: 99
+    kv_type: turbo4
     tensor_split: "0.45,0.55"
 
   # --- Vision models ---
@@ -69,7 +69,7 @@ models:
     benchmark_context_limit: 262144
     context: 262144
     ngl: 99
-    kv_type: q4_0
+    kv_type: turbo4
     tensor_split: "0.45,0.55"
     mmproj: /home/flip/models/mmproj-Step3-VL-10B-F16.gguf
   Ornith-1.0-35B:
@@ -78,11 +78,11 @@ models:
     benchmark_context_limit: 262144
     context: 262144
     ngl: 99
-    kv_type: q4_0
+    kv_type: turbo4
     tensor_split: "0.42,0.58"
     mmproj: /home/flip/models/mmproj-Ornith-1.0-35B-bf16.gguf
     vision_context: 262144
-    vision_ngl: 40
+    vision_ngl: 99
     vision_tensor_split: "0.42,0.58"
 
   # --- Gemma 4 ---
@@ -91,8 +91,8 @@ models:
     total_layers: 30
     benchmark_context_limit: 262144
     context: 262144
-    ngl: 30
-    kv_type: q4_0
+    ngl: 99
+    kv_type: turbo4
     tensor_split: "0.45,0.55"
     mmproj: /home/flip/models/gemma-4-26b-a4b-mmproj-BF16.gguf
     extra_args: "--flash-attn on --repeat-penalty 1 --temp 1.0 --top-p 0.95 --top-k 64"
@@ -101,45 +101,45 @@ models:
     total_layers: 30
     benchmark_context_limit: 262144
     context: 262144
-    ngl: 30
-    kv_type: q8_0
+    ngl: 99
+    kv_type: turbo4
     tensor_split: "0.36,0.64"
     mmproj: /home/flip/models/gemma-4-26b-a4b-mmproj-BF16.gguf
     extra_args: "--flash-attn on --repeat-penalty 1 --temp 1.0 --top-p 0.95 --top-k 64"
     vision_context: 262144
-    vision_ngl: 30
+    vision_ngl: 99
     vision_tensor_split: "0.36,0.64"
   unsloth-gemma-4-26B-A4B-it-qat-UD-Q4_K_XL-Q8KV:
     path: /home/flip/models/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
     total_layers: 30
     benchmark_context_limit: 262144
     context: 262144
-    ngl: 30
-    kv_type: q8_0
+    ngl: 99
+    kv_type: turbo4
     tensor_split: "0.36,0.64"
     mmproj: /home/flip/models/gemma-4-26b-a4b-mmproj-BF16.gguf
     extra_args: "--flash-attn on --repeat-penalty 1 --temp 1.0 --top-p 0.95 --top-k 64 --main-gpu 1 -sm layer"
     vision_context: 262144
-    vision_ngl: 30
+    vision_ngl: 99
     vision_tensor_split: "0.36,0.64"
   google-gemma-4-12B-it-qat-q4_0-GPU1:
     path: /home/flip/models/gemma-4-12b-it-qat-q4_0.gguf
     total_layers: 48
     benchmark_context_limit: 131072
     context: 131072
-    ngl: 48
-    kv_type: q4_0
+    ngl: 99
+    kv_type: turbo4
     cuda_visible_devices: "1"
     mmproj: /home/flip/models/mmproj-gemma-4-12b-it-qat-q4_0.gguf
     extra_args: "--main-gpu 1 -sm none --flash-attn on"
     vision_context: 131072
-    vision_ngl: 48
+    vision_ngl: 99
   gemma-4-E4B-it-uncensored:
     path: /home/flip/models/gemma-4-E4B-it-uncensored-Q4_K_M.gguf
     total_layers: 42
     benchmark_context_limit: 131072
     context: 131072
-    ngl: 42
+    ngl: 99
     kv_type: f16
     tensor_split: "0.32,0.68"
     extra_args: "--flash-attn on --parallel 1 --batch-size 256 --ubatch-size 128 --repeat-penalty 1 --repeat-last-n 128 --dry-multiplier 1.0 --dry-base 1.75 --dry-penalty-last-n 256 --temp 1.0 --top-p 0.95 --top-k 64"
@@ -154,11 +154,11 @@ models:
     benchmark_context_limit: 262144
     context: 262144
     ngl: 99
-    kv_type: q4_0
+    kv_type: turbo4
     tensor_split: "0.38,0.62"
     mmproj: /home/flip/models/Qwen3.6-35B-A3B-mmproj-BF16.gguf
     vision_context: 262144
-    vision_ngl: 40
+    vision_ngl: 99
     vision_tensor_split: "0.36,0.64"
     extra_args: "--reasoning on --reasoning-format deepseek --reasoning-budget -1 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
   Qwen3.6-35B-A3B-HauhauCS-Aggressive-Turbo4:
@@ -194,7 +194,7 @@ models:
     tensor_split: "0.36,0.64"
     mmproj: /home/flip/models/Qwen3.6-35B-A3B-mmproj-BF16.gguf
     vision_context: 262144
-    vision_ngl: 45
+    vision_ngl: 99
     vision_tensor_split: "0.36,0.64"
     extra_args: "--reasoning on --reasoning-format deepseek --reasoning-budget -1 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
   Qwen3.6-35B-A3B-HauhauCS-Aggressive-DFlash-Turbo4:
@@ -202,7 +202,7 @@ models:
     total_layers: 40
     benchmark_context_limit: 262144
     context: 262144
-    ngl: 40
+    ngl: 99
     kv_type: turbo4
     tensor_split: "0.38,0.62"
     mmproj: /home/flip/models/Qwen3.6-35B-A3B-mmproj-BF16.gguf
