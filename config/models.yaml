@@ -205,11 +205,14 @@ models:
     path: /home/flip/models/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_XL.gguf
     total_layers: 65
     benchmark_context_limit: 262144
-    context: 262144
+    context: 220000
     ngl: 99
     kv_type: q8_0
-    tensor_split: "0.36,0.64"
+    tensor_split: "0.40,0.60"
     mmproj: /home/flip/models/qwen3.8-27b/mmproj-F16.gguf
+    vision_context: 165000
+    vision_ngl: 99
+    vision_tensor_split: "0.37,0.63"
     default_enable_thinking: true
     extra_args: "--jinja --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
   # Instruct mode (thinking OFF). Unsloth Qwen3.8-27B instruct-mode samplers:
