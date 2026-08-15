@@ -475,8 +475,23 @@ class ProviderRegistry:
             # Per-app attribution: show the actual app name (e.g. "goose")
             # instead of a generic "Guardian" so analytics/rankings on
             # OpenRouter distinguish between apps.
-            display_name = f"Guardian/{app_name}" if app_name else "Guardian"
-            headers.setdefault("HTTP-Referer", f"https://guardian.local/{app_name}" if app_name else "https://guardian.local")
+            #
+            # The app identifier is encoded as a SUBDOMAIN (not a URL path)
+            # because OpenRouter's dashboard groups attributions by request
+            # origin and strips the path component of HTTP-Referer — a path
+            # like https://guardian.local/goose would collapse back to the bare
+            # origin https://guardian.local and all apps would merge. A subdomain
+            # like https://goose.guardian.local keeps each app as a distinct
+            # origin in OpenRouter's logs/dashboard. App names are lowercased
+            # (subdomains are case-insensitive; lowercase is the convention).
+            if app_name:
+                app_slug = app_name.lower()
+                referer = f"https://{app_slug}.guardian.local"
+                display_name = f"Guardian/{app_name}"
+            else:
+                referer = "https://guardian.local"
+                display_name = "Guardian"
+            headers.setdefault("HTTP-Referer", referer)
             headers.setdefault("X-Title", display_name)
             # Enable response caching so identical requests from the same app
             # get zero-cost cache hits.  The cache key includes a SHA-256 of

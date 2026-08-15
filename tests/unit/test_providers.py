@@ -507,12 +507,29 @@ class TestForwardingHelpers:
         assert headers["X-OpenRouter-Cache"] == "true"
 
     def test_build_forward_headers_openrouter_with_app_name(self, settings_with_providers: Path):
-        """When app_name is provided, attribution headers reflect the app name."""
+        """When app_name is provided, attribution headers reflect the app name.
+
+        The app is encoded as a SUBDOMAIN (not a path) because OpenRouter
+        groups attributions by request origin and strips the URL path — a
+        path form would collapse all apps back to the bare origin.
+        """
         reg = ProviderRegistry(settings_path=settings_with_providers)
         p = reg.get_provider_for_model("openai/gpt-4o")
         headers = ProviderRegistry.build_forward_headers(p, app_name="goose")
         assert headers["X-Title"] == "Guardian/goose"
-        assert headers["HTTP-Referer"] == "https://guardian.local/goose"
+        assert headers["HTTP-Referer"] == "https://goose.guardian.local"
+        assert headers["X-OpenRouter-Cache"] == "true"
+
+    def test_build_forward_headers_openrouter_app_name_lowercased(self, settings_with_providers: Path):
+        """App names with uppercase chars are lowercased for the subdomain
+        (subdomains are case-insensitive; lowercase is the convention). The
+        X-Title display name preserves the original casing.
+        """
+        reg = ProviderRegistry(settings_path=settings_with_providers)
+        p = reg.get_provider_for_model("openai/gpt-4o")
+        headers = ProviderRegistry.build_forward_headers(p, app_name="ChatBox")
+        assert headers["HTTP-Referer"] == "https://chatbox.guardian.local"
+        assert headers["X-Title"] == "Guardian/ChatBox"
         assert headers["X-OpenRouter-Cache"] == "true"
 
     def test_build_forward_headers_nvidia(self, settings_with_providers: Path):
