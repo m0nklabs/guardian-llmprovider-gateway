@@ -1,5 +1,7 @@
 import asyncio
 import copy
+import hashlib
+import json
 import logging
 import math
 import subprocess
@@ -17,6 +19,7 @@ from app.paths import (
     CONFIG_DIR,
     CURRENT_MODEL_ARGS_FILE,
     CURRENT_MODEL_ENV_FILE,
+    CURRENT_MODEL_SIG_FILE,
     LLAMA_SLOTS_DIR,
     OFFICIAL_LLAMA_SERVER_BIN,
 )
@@ -593,6 +596,13 @@ class ModelManager:
         """Detect which model the backend is running by reading current_model.args.
         Falls back to first model in config if detection fails.
         """
+        # Prefer the persisted launch signature: it names the last-launched model
+        # authoritatively (arg-scoring is fragile when the config changed).
+        persisted = self._read_persisted_signature()
+        if persisted and persisted.get("model") in self.models:
+            logger.info(f"🔍 Detected last-launched model from signature file: {persisted['model']}")
+            return persisted["model"]
+
         try:
             args_file = self.config_path.parent / "current_model.args"
             if args_file.exists():
@@ -723,8 +733,16 @@ class ModelManager:
         target = self.resolve_reload_target(self._pinned_model or self.current_model)
         logger.info(f"🔍 Startup check: expecting model '{target}'")
 
+        # If the running backend's persisted signature doesn't match current models.yaml,
+        # force a reload even if the backend process looks alive (settings changed).
+        startup_drift = self._config_drifted(target, enable_vision=self.current_vision_enabled)
+        if startup_drift:
+            logger.info(
+                f"🔄 Startup config drift for '{target}' — forcing reload to apply new models.yaml settings"
+            )
+
         verified = await self.verify_backend_model()
-        if verified:
+        if verified and not startup_drift:
             logger.info(f"✅ Startup check passed — backend matches '{self.current_model}'")
             return
 
@@ -735,7 +753,7 @@ class ModelManager:
             f"🔄 Startup mismatch: forcing switch from actual '{actual_name}' to target '{target}'"
         )
 
-        if not self._pinned_model and actual_name in self.models:
+        if not self._pinned_model and actual_name in self.models and not startup_drift:
             logger.warning(
                 "🔄 Startup mismatch has a known live backend and no model pin; "
                 "adopting '%s' instead of replacing it with stale args state",
@@ -815,9 +833,15 @@ class ModelManager:
         desired_vision = self._resolve_runtime_vision_flag(model_name, enable_vision)
         current_vision = self.current_vision_enabled if model_name == self.current_model else self.current_runtime_uses_mmproj(model_name)
 
-        if model_name == self.current_model and desired_vision == current_vision:
+        drifted = self._config_drifted(model_name, enable_vision=desired_vision)
+        if model_name == self.current_model and desired_vision == current_vision and not drifted:
             logger.info(f"Model {model_name} is already active")
             return
+        if drifted:
+            logger.info(
+                f"🔄 Config drift detected for '{model_name}' "
+                "(settings changed in models.yaml) — reloading to apply new settings"
+            )
 
         logger.info(
             "Switching from %s [%s] to %s [%s]",
@@ -872,6 +896,11 @@ class ModelManager:
         
         self.current_model = model_name
         self.current_vision_enabled = desired_vision
+        # Persist the launch signature so future same-model requests can detect
+        # config drift and reload instead of skipping.
+        launch_sig = self._compute_launch_signature(model_name, enable_vision=desired_vision)
+        if launch_sig is not None:
+            self._write_persisted_signature(launch_sig)
         self.reset_vision_validation(model_name)
         logger.info(f"✅ Model '{model_name}' loaded successfully")
 
@@ -1163,16 +1192,11 @@ class ModelManager:
             else:
                 raise Exception("Restore failed")
 
-    def _write_server_args(self, config: Dict):
-        """Build llama-server CLI arguments from model config and write to args file.
-
-        Supported config keys (from models.yaml):
-            path, context, ngl, kv_type, tensor_split, mmproj, extra_args,
-            cuda_visible_devices, draft_model_path, spec_type,
-            spec_draft_n_max, spec_draft_n_min, draft_cache_type_k, draft_cache_type_v
+    def _build_args_string(self, config: Dict[str, Any]) -> tuple[str, dict[str, str]]:
+        """Build the llama-server CLI args string + env vars from a runtime config.
+        MUST be byte-identical to what _write_server_args writes to current_model.args
+        and current_model.env. Single source of truth for both launch and signature.
         """
-        args_file = CURRENT_MODEL_ARGS_FILE
-        env_file = CURRENT_MODEL_ENV_FILE
         path = config["path"]
         ctx = config.get("context", 4096)
         ngl = config.get("ngl", 99)
@@ -1240,19 +1264,78 @@ class ModelManager:
             args_content += f" {extra_args}"
             logger.info(f"Extra args: {extra_args}")
 
+        # Optional per-model GPU pinning for the systemd launch wrapper.
+        # scripts/start_llama.sh sources current_model.env before launching llama-server.
+        env_dict: dict[str, str] = {}
+        cuda_visible_devices = str(cuda_visible_devices).strip()
+        if cuda_visible_devices:
+            env_dict["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
+        return args_content, env_dict
+
+    def _write_server_args(self, config: Dict):
+        """Build llama-server CLI arguments from model config and write to args file.
+
+        Supported config keys (from models.yaml):
+            path, context, ngl, kv_type, tensor_split, mmproj, extra_args,
+            cuda_visible_devices, draft_model_path, spec_type,
+            spec_draft_n_max, spec_draft_n_min, draft_cache_type_k, draft_cache_type_v
+        """
+        args_file = CURRENT_MODEL_ARGS_FILE
+        env_file = CURRENT_MODEL_ENV_FILE
+
+        args_content, env_dict = self._build_args_string(config)
+
         with open(args_file, "w") as f:
             f.write(args_content)
 
         # Optional per-model GPU pinning for the systemd launch wrapper.
         # scripts/start_llama.sh sources current_model.env before launching llama-server.
-        cuda_visible_devices = str(cuda_visible_devices).strip()
-        if cuda_visible_devices:
+        if env_dict:
             with open(env_file, "w") as f:
-                f.write(f"export CUDA_VISIBLE_DEVICES={cuda_visible_devices}\n")
-            logger.info(f"CUDA_VISIBLE_DEVICES={cuda_visible_devices}")
+                f.write(f"export CUDA_VISIBLE_DEVICES={env_dict['CUDA_VISIBLE_DEVICES']}\n")
+            logger.info(f"CUDA_VISIBLE_DEVICES={env_dict['CUDA_VISIBLE_DEVICES']}")
         elif env_file.exists():
             env_file.unlink()
             logger.info("Cleared model environment file (no CUDA_VISIBLE_DEVICES override)")
+
+    def _compute_launch_signature(self, model_name: str, *, enable_vision: Optional[bool]) -> Optional[dict]:
+        """Compute the launch signature for a model+vision-mode from CURRENT models.yaml.
+        Returns None if the model is unknown. Uses build_runtime_config (so vision/text
+        overrides resolve correctly)."""
+        if model_name not in self.models:
+            return None
+        runtime_config = self.build_runtime_config(model_name, enable_vision=enable_vision)
+        args_str, env_dict = self._build_args_string(runtime_config)
+        return {
+            "model": model_name,
+            "vision": bool(self._resolve_runtime_vision_flag(model_name, enable_vision)),
+            "args_sha256": hashlib.sha256(args_str.encode("utf-8")).hexdigest(),
+            "env_sha256": hashlib.sha256(json.dumps(env_dict, sort_keys=True).encode("utf-8")).hexdigest(),
+        }
+
+    def _read_persisted_signature(self) -> Optional[dict]:
+        try:
+            text = CURRENT_MODEL_SIG_FILE.read_text()
+            return json.loads(text)
+        except Exception:
+            return None
+
+    def _write_persisted_signature(self, sig: dict) -> None:
+        try:
+            CURRENT_MODEL_SIG_FILE.write_text(json.dumps(sig, sort_keys=True))
+        except Exception as e:
+            logger.warning(f"Failed to persist launch signature: {e}")
+
+    def _config_drifted(self, model_name: str, *, enable_vision: Optional[bool]) -> bool:
+        """True if the model must be reloaded to apply current models.yaml settings.
+        Drift = persisted sig missing, OR model/vision differ, OR args/env hash differ."""
+        persisted = self._read_persisted_signature()
+        if not persisted:
+            return True
+        current = self._compute_launch_signature(model_name, enable_vision=enable_vision)
+        if not current:
+            return True
+        return persisted != current
 
     async def _stop_server(self):
         # Use create_subprocess_exec (no shell) — the command is static, but

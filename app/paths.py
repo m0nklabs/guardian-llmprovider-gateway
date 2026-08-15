@@ -16,6 +16,7 @@ MODELS_DIR = _expand_path(os.getenv("MODELS_DIR", str(REPO_ROOT.parent / "models
 
 CURRENT_MODEL_ARGS_FILE = CONFIG_DIR / "current_model.args"
 CURRENT_MODEL_ENV_FILE = CONFIG_DIR / "current_model.env"
+CURRENT_MODEL_SIG_FILE = CONFIG_DIR / "current_model.sig"
 
 LLAMA_SLOTS_DIR = _expand_path(
     os.getenv("LLAMA_CPP_GUARDIAN_SLOTS_DIR", str(Path.home() / "llama_slots"))

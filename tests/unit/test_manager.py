@@ -1,6 +1,7 @@
 """Tests for app.engine.manager — Core model lifecycle management."""
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Dict
 from unittest.mock import AsyncMock, MagicMock, patch, mock_open
@@ -15,6 +16,16 @@ from tests.conftest import SAMPLE_MODELS_YAML, SAMPLE_SETTINGS_YAML
 # ── Helpers ────────────────────────────────────────────────────────────
 
 MODELS_CFG = yaml.safe_load(SAMPLE_MODELS_YAML)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_runtime_state_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Point the runtime-state files (args/env/launch signature) at the tmp config dir
+    so switch/startup paths never touch the real repo config dir."""
+    config_dir = tmp_path / "config"
+    monkeypatch.setattr("app.engine.manager.CURRENT_MODEL_ARGS_FILE", config_dir / "current_model.args")
+    monkeypatch.setattr("app.engine.manager.CURRENT_MODEL_ENV_FILE", config_dir / "current_model.env")
+    monkeypatch.setattr("app.engine.manager.CURRENT_MODEL_SIG_FILE", config_dir / "current_model.sig")
 
 
 def _make_manager(tmp_path: Path, models_yaml: str = SAMPLE_MODELS_YAML):
@@ -37,6 +48,15 @@ def _make_manager(tmp_path: Path, models_yaml: str = SAMPLE_MODELS_YAML):
         from app.engine.manager import ModelManager
 
         mgr = ModelManager(config_path=str(models_file))
+
+    # Seed a matching persisted launch signature so same-model switches with
+    # unchanged config take the fast-path skip (drift-free by default).
+    try:
+        sig = mgr._compute_launch_signature(mgr.current_model, enable_vision=mgr.current_vision_enabled)
+        if sig is not None:
+            (config_dir / "current_model.sig").write_text(json.dumps(sig, sort_keys=True))
+    except Exception:
+        pass
 
     return mgr
 
@@ -1060,3 +1080,203 @@ models:
             await mgr.load(runtime_overrides={"kv_type": "F16"})
         written_config = mock_write.call_args.args[0]
         assert written_config["kv_type"] == "f16"
+
+
+# ── Config-drift detection ─────────────────────────────────────────────
+
+
+class TestConfigDriftDetection:
+    @pytest.mark.asyncio
+    async def test_switch_skips_when_config_unchanged(self, tmp_path: Path):
+        """Persisted sig matches current config for the same model+vision → early return."""
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+        mgr.current_vision_enabled = False
+
+        with patch.object(mgr, "_stop_server", new_callable=AsyncMock) as mock_stop:
+            await mgr.switch_model("GLM-4.7-Flash")
+
+        mock_stop.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_switch_reloads_when_kv_type_changed(self, tmp_path: Path):
+        """Editing kv_type in models.yaml forces a reload on the same-model re-request."""
+        kv_yaml = """\
+models:
+    GLM-4.7-Flash:
+        path: /models/GLM-4.7-Flash.gguf
+        context: 8192
+        ngl: 99
+        kv_type: turbo4
+"""
+        mgr = _make_manager(tmp_path, models_yaml=kv_yaml)
+        mgr.current_model = "GLM-4.7-Flash"
+        mgr.current_vision_enabled = False
+
+        # Config edited after the last launch: kv_type turbo4 -> q8_0
+        mgr.config_path.write_text(kv_yaml.replace("kv_type: turbo4", "kv_type: q8_0"))
+
+        with (
+            patch.object(mgr, "_save_context", new_callable=AsyncMock),
+            patch.object(mgr, "_stop_server", new_callable=AsyncMock),
+            patch.object(mgr, "_free_gpu_memory", new_callable=AsyncMock),
+            patch.object(mgr, "_start_server", new_callable=AsyncMock) as mock_start,
+            patch.object(mgr, "_wait_for_health", new_callable=AsyncMock, return_value=True),
+            patch.object(mgr, "verify_backend_model", new_callable=AsyncMock, return_value=True),
+            patch.object(mgr, "_load_context", new_callable=AsyncMock, side_effect=Exception("no save")),
+            patch.object(mgr, "_write_server_args") as mock_write,
+        ):
+            await mgr.switch_model("GLM-4.7-Flash")
+
+        mock_start.assert_awaited_once()
+        mock_write.assert_called_once()
+        written_config = mock_write.call_args.args[0]
+        assert written_config["kv_type"] == "q8_0"
+
+    @pytest.mark.asyncio
+    async def test_switch_reloads_when_tensor_split_changed(self, tmp_path: Path):
+        """Editing tensor_split in models.yaml forces a reload on the same-model re-request."""
+        split_yaml = """\
+models:
+    GLM-4.7-Flash:
+        path: /models/GLM-4.7-Flash.gguf
+        context: 8192
+        ngl: 99
+        tensor_split: "0.55,0.45"
+"""
+        mgr = _make_manager(tmp_path, models_yaml=split_yaml)
+        mgr.current_model = "GLM-4.7-Flash"
+        mgr.current_vision_enabled = False
+
+        # Config edited after the last launch: tensor_split 0.55,0.45 -> 0.60,0.40
+        mgr.config_path.write_text(split_yaml.replace("0.55,0.45", "0.60,0.40"))
+
+        with (
+            patch.object(mgr, "_save_context", new_callable=AsyncMock),
+            patch.object(mgr, "_stop_server", new_callable=AsyncMock),
+            patch.object(mgr, "_free_gpu_memory", new_callable=AsyncMock),
+            patch.object(mgr, "_start_server", new_callable=AsyncMock) as mock_start,
+            patch.object(mgr, "_wait_for_health", new_callable=AsyncMock, return_value=True),
+            patch.object(mgr, "verify_backend_model", new_callable=AsyncMock, return_value=True),
+            patch.object(mgr, "_load_context", new_callable=AsyncMock, side_effect=Exception("no save")),
+            patch.object(mgr, "_write_server_args") as mock_write,
+        ):
+            await mgr.switch_model("GLM-4.7-Flash")
+
+        mock_start.assert_awaited_once()
+        mock_write.assert_called_once()
+        written_config = mock_write.call_args.args[0]
+        assert written_config["tensor_split"] == "0.60,0.40"
+
+    @pytest.mark.asyncio
+    async def test_switch_reloads_when_extra_args_changed(self, tmp_path: Path):
+        """Editing extra_args in models.yaml forces a reload on the same-model re-request."""
+        args_yaml = """\
+models:
+    GLM-4.7-Flash:
+        path: /models/GLM-4.7-Flash.gguf
+        context: 8192
+        ngl: 99
+        extra_args: "--no-warmup"
+"""
+        mgr = _make_manager(tmp_path, models_yaml=args_yaml)
+        mgr.current_model = "GLM-4.7-Flash"
+        mgr.current_vision_enabled = False
+
+        # Config edited after the last launch: extra_args changed
+        mgr.config_path.write_text(args_yaml.replace("--no-warmup", "--no-warmup --temp 0.6"))
+
+        with (
+            patch.object(mgr, "_save_context", new_callable=AsyncMock),
+            patch.object(mgr, "_stop_server", new_callable=AsyncMock),
+            patch.object(mgr, "_free_gpu_memory", new_callable=AsyncMock),
+            patch.object(mgr, "_start_server", new_callable=AsyncMock) as mock_start,
+            patch.object(mgr, "_wait_for_health", new_callable=AsyncMock, return_value=True),
+            patch.object(mgr, "verify_backend_model", new_callable=AsyncMock, return_value=True),
+            patch.object(mgr, "_load_context", new_callable=AsyncMock, side_effect=Exception("no save")),
+            patch.object(mgr, "_write_server_args") as mock_write,
+        ):
+            await mgr.switch_model("GLM-4.7-Flash")
+
+        mock_start.assert_awaited_once()
+        mock_write.assert_called_once()
+        written_config = mock_write.call_args.args[0]
+        assert written_config["extra_args"] == "--no-warmup --temp 0.6"
+
+    @pytest.mark.asyncio
+    async def test_startup_forces_reload_on_drift(self, tmp_path: Path):
+        """A live-but-stale backend (persisted sig != current config) is NOT adopted;
+        startup_check forces a switch even though backend verification passes."""
+        kv_yaml = """\
+models:
+    GLM-4.7-Flash:
+        path: /models/GLM-4.7-Flash.gguf
+        context: 8192
+        ngl: 99
+        kv_type: turbo4
+"""
+        mgr = _make_manager(tmp_path, models_yaml=kv_yaml)
+        mgr.current_model = "GLM-4.7-Flash"
+        mgr.current_vision_enabled = False
+
+        # Config edited while the backend kept running: kv_type turbo4 -> q8_0
+        mgr.config_path.write_text(kv_yaml.replace("kv_type: turbo4", "kv_type: q8_0"))
+
+        with (
+            patch.object(mgr, "verify_backend_model", new_callable=AsyncMock, return_value=True),
+            patch.object(mgr, "_get_backend_model_path", return_value="/models/GLM-4.7-Flash.gguf"),
+            patch.object(mgr, "switch_model", new_callable=AsyncMock) as mock_switch,
+        ):
+            await mgr.startup_check()
+
+        mock_switch.assert_awaited_once_with("GLM-4.7-Flash")
+
+    def test_detect_initial_model_prefers_signature(self, tmp_path: Path):
+        """The persisted signature names the last-launched model authoritatively,
+        even when arg-scoring would pick a different one."""
+        mgr = _make_manager(tmp_path)
+        sig = mgr._compute_launch_signature("Qwen3-30B-A3B", enable_vision=False)
+        assert sig is not None
+        (tmp_path / "config" / "current_model.sig").write_text(json.dumps(sig, sort_keys=True))
+
+        detected = mgr._detect_initial_model()
+
+        assert detected == "Qwen3-30B-A3B"
+
+    def test_build_args_string_byte_identical(self, tmp_path: Path):
+        """Regression guard for the _write_server_args refactor: the builder output
+        must be byte-identical to what the writer persists."""
+        from app.engine.manager import LLAMA_SLOTS_DIR
+
+        mgr = _make_manager(tmp_path)
+        mmproj = tmp_path / "mmproj.gguf"
+        mmproj.write_text("mmproj")
+
+        config = {
+            "path": "/models/GLM-4.7-Flash.gguf",
+            "context": 8192,
+            "ngl": 99,
+            "kv_type": "turbo4",
+            "tensor_split": "0.55,0.45",
+            "mmproj": str(mmproj),
+            "extra_args": "--no-warmup --temp 0.6",
+            "cuda_visible_devices": "0",
+        }
+
+        args_str, env_dict = mgr._build_args_string(config)
+
+        expected = (
+            "-m /models/GLM-4.7-Flash.gguf -c 8192 -ngl 99 -ctk turbo4 -ctv turbo4 "
+            f"--host 127.0.0.1 --port 11440 --slot-save-path {LLAMA_SLOTS_DIR} --load-mode none"
+            " --tensor-split 0.55,0.45"
+            f" --mmproj {mmproj}"
+            " --no-warmup --temp 0.6"
+        )
+        assert args_str == expected
+        assert env_dict == {"CUDA_VISIBLE_DEVICES": "0"}
+
+        # The writer must persist exactly the builder's string + env line.
+        with patch("app.engine.manager.CURRENT_MODEL_ARGS_FILE", tmp_path / "written.args"):
+            mgr._write_server_args(config)
+        assert (tmp_path / "written.args").read_text() == expected
+        assert (tmp_path / "config" / "current_model.env").read_text() == "export CUDA_VISIBLE_DEVICES=0\n"
