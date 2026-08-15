@@ -247,7 +247,7 @@ models:
     benchmark_context_limit: 131072
     context: 131072
     ngl: 99
-    kv_type: f16
+    kv_type: turbo4
     extra_args: "--jinja"
 
   # --- Qwen3.8 (IBM-dense 27B VLM, hybrid SSM+attention, qwen35 arch) ---
@@ -261,8 +261,8 @@ models:
     total_layers: 65
     benchmark_context_limit: 262144
     context: 262144
-    ngl: 40
-    kv_type: f16
+    ngl: 99
+    kv_type: turbo4
     tensor_split: "0.45,0.55"
     mmproj: /home/flip/models/qwen3.8-27b/mmproj-F16.gguf
     default_enable_thinking: true
@@ -275,8 +275,8 @@ models:
     total_layers: 65
     benchmark_context_limit: 262144
     context: 262144
-    ngl: 40
-    kv_type: f16
+    ngl: 99
+    kv_type: turbo4
     tensor_split: "0.45,0.55"
     mmproj: /home/flip/models/qwen3.8-27b/mmproj-F16.gguf
     default_enable_thinking: false
