@@ -1419,3 +1419,99 @@ class TestClientContextHint:
 
         (tmp_path / "config" / "current_model.args").write_text("-m /models/bigctx.gguf -c 16384 -ngl 99")
         assert mgr.current_launch_context() == 16384
+
+
+# ── Speculative decoding without a draft model (native MTP / n-gram) ─────
+
+
+SPEC_YAML = """\
+models:
+    SpecModel:
+        path: /models/spec.gguf
+        context: 8192
+        ngl: 99
+        kv_type: turbo4
+"""
+
+
+class TestSpeculativeDecodingNoDraft:
+    def _args(self, mgr, extra: Dict = None) -> str:
+        config = {
+            "path": "/models/spec.gguf",
+            "context": 8192,
+            "ngl": 99,
+            "kv_type": "turbo4",
+        }
+        if extra:
+            config.update(extra)
+        args_str, _ = mgr._build_args_string(config)
+        return args_str
+
+    def test_spec_type_mtp_emits_spec_flag_without_draft(self, tmp_path: Path):
+        """spec_type: draft-mtp without draft_model_path → --spec-type only."""
+        mgr = _make_manager(tmp_path, models_yaml=SPEC_YAML)
+        args_str = self._args(mgr, {"spec_type": "draft-mtp"})
+
+        assert "--spec-type draft-mtp" in args_str
+        assert "--model-draft" not in args_str
+
+    def test_spec_type_ngram_emits_spec_flag(self, tmp_path: Path):
+        """spec_type: ngram-simple without draft_model_path → --spec-type only."""
+        mgr = _make_manager(tmp_path, models_yaml=SPEC_YAML)
+        args_str = self._args(mgr, {"spec_type": "ngram-simple"})
+
+        assert "--spec-type ngram-simple" in args_str
+        assert "--model-draft" not in args_str
+
+    def test_spec_type_none_emits_nothing(self, tmp_path: Path):
+        """spec_type: none → no --spec-type flag at all."""
+        mgr = _make_manager(tmp_path, models_yaml=SPEC_YAML)
+        args_str = self._args(mgr, {"spec_type": "none"})
+
+        assert "--spec-type" not in args_str
+
+    def test_spec_type_absent_no_spec_flag(self, tmp_path: Path):
+        """No spec_type field → no --spec-type flag (backward compat)."""
+        mgr = _make_manager(tmp_path, models_yaml=SPEC_YAML)
+        args_str = self._args(mgr)
+
+        assert "--spec-type" not in args_str
+
+    def test_dflash_still_uses_draft_model_when_set(self, tmp_path: Path):
+        """spec_type: draft-dflash WITH an existing draft model keeps the full
+        draft flags (backward compat for the DFlash config entry)."""
+        mgr = _make_manager(tmp_path, models_yaml=SPEC_YAML)
+        draft = tmp_path / "draft.gguf"
+        draft.write_text("draft")
+        args_str = self._args(
+            mgr,
+            {"spec_type": "draft-dflash", "draft_model_path": str(draft)},
+        )
+
+        assert "--spec-type draft-dflash" in args_str
+        assert f"--model-draft {draft}" in args_str
+
+    def test_dflash_without_draft_model_emits_nothing(self, tmp_path: Path):
+        """spec_type: draft-dflash without draft_model_path is a config error →
+        no spec flags emitted (would not launch)."""
+        mgr = _make_manager(tmp_path, models_yaml=SPEC_YAML)
+        args_str = self._args(mgr, {"spec_type": "draft-dflash"})
+
+        assert "--spec-type" not in args_str
+
+    def test_spec_type_change_triggers_drift(self, tmp_path: Path):
+        """Persisted sig has no --spec-type; config gains spec_type: draft-mtp →
+        launch signature differs → _config_drifted returns True (reload)."""
+        mgr = _make_manager(tmp_path, models_yaml=SPEC_YAML)
+        mgr.current_model = "SpecModel"
+        mgr.current_vision_enabled = False
+
+        # Persist the signature of a backend launched WITHOUT spec_type.
+        sig = mgr._compute_launch_signature("SpecModel", enable_vision=False)
+        assert sig is not None
+        (tmp_path / "config" / "current_model.sig").write_text(json.dumps(sig, sort_keys=True))
+        assert mgr._config_drifted("SpecModel", enable_vision=False) is False
+
+        # Config now gains spec_type: draft-mtp → args differ → drift.
+        mgr.models["SpecModel"]["spec_type"] = "draft-mtp"
+        assert mgr._config_drifted("SpecModel", enable_vision=False) is True

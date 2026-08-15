@@ -1293,6 +1293,23 @@ class ModelManager:
                     f"⚡ Speculative decoding enabled: spec_type={spec_type}, "
                     f"draft={draft_path.name}, n_max={spec_draft_n_max}, n_min={spec_draft_n_min}"
                 )
+        elif spec_type not in ("", "none", "draft-dflash"):
+            # Speculative decoding WITHOUT an external draft model: either native
+            # MTP layers (draft-mtp — requires model-architecture MTP heads) or
+            # n-gram lookup (ngram-simple/ngram-map-k/ngram-mod/ngram-cache — works
+            # on any model, uses prompt-context lookup tables). Emit only --spec-type.
+            args_content += f" --spec-type {spec_type}"
+            logger.info(f"⚡ Speculative decoding enabled (no draft): spec_type={spec_type}")
+        elif spec_type == "draft-dflash":
+            # draft-dflash requires an external draft model; without one it cannot
+            # launch — treat as a config error and emit nothing. Note: the spec_type
+            # default IS "draft-dflash", so only warn when it was explicitly set
+            # (an absent field just means "no speculation configured" — silent).
+            if "spec_type" in config:
+                logger.warning(
+                    "⚠️  spec_type=draft-dflash without draft_model_path — "
+                    "speculative decoding DISABLED (draft-dflash needs --model-draft)"
+                )
 
         # Optional per-model parallel slot count (--parallel). Higher slot counts
         # pair naturally with client-hinted smaller contexts: more concurrent
