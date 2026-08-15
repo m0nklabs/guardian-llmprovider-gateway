@@ -195,6 +195,21 @@ models:
     mmproj: /home/flip/models/qwen3.8-27b/mmproj-F16.gguf
     default_enable_thinking: true
     extra_args: "--jinja --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
+  # Q8KV variant: q8_0 KV cache (hoger quality dan turbo4, ~2× VRAM) en
+  # tensor_split 0.36,0.64 — alleen geheugen-settings overgenomen van
+  # Qwen3.6-...-Q8KV. Alle andere settings (samplers, context, ngl, mmproj,
+  # thinking-mode) identiek aan qwen3.8-27b hierboven.
+  qwen3.8-27b-q8kv:
+    path: /home/flip/models/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_XL.gguf
+    total_layers: 65
+    benchmark_context_limit: 262144
+    context: 262144
+    ngl: 99
+    kv_type: q8_0
+    tensor_split: "0.36,0.64"
+    mmproj: /home/flip/models/qwen3.8-27b/mmproj-F16.gguf
+    default_enable_thinking: true
+    extra_args: "--jinja --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
   # Instruct mode (thinking OFF). Unsloth Qwen3.8-27B instruct-mode samplers:
   # temp 0.7, top_p 0.80, top_k 20, min_p 0.0, presence_penalty 1.5,
   # repetition_penalty 1.0. Same GGUF file, different reasoning flag + samplers.
@@ -228,6 +243,7 @@ aliases:
   gemma4-26b-qat-q8kv: "unsloth-gemma-4-26B-A4B-it-qat-UD-Q4_K_XL-Q8KV"
   gemma4-e4b: "gemma-4-E4B-it-uncensored"
   llama3: "llama3.2-3b"
+  qwen3.8-q8kv: "qwen3.8-27b-q8kv"
 
 # === Guardian Security Config ===
 guardian:
