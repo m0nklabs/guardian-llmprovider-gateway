@@ -225,6 +225,23 @@ models:
     default_enable_thinking: false
     extra_args: "--jinja --reasoning off --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0.0 --presence-penalty 1.5 --repeat-penalty 1.0"
 
+  # Qwen3.5-9B (Alibaba Qwen, arch: qwen35; Unsloth UD-Q8_K_XL quant)
+  # Native vision-language model (image_count/video_count macros in chat
+  # template) — requires the mmproj projector below. Thinking default-on.
+  # kv_type turbo4: ctx=262144 + ngl=99 — f16 KV would be ~34 GB (OOM),
+  # turbo4 KV ~8.6 GB fits both GPUs with the 0.45/0.55 split.
+  qwen3.5-9b:
+    path: /home/flip/models/qwen3.5-9b/Qwen3.5-9B-UD-Q8_K_XL.gguf
+    total_layers: 32
+    benchmark_context_limit: 262144
+    context: 262144
+    ngl: 99
+    kv_type: turbo4
+    tensor_split: "0.45,0.55"
+    mmproj: /home/flip/models/qwen3.5-9b/mmproj-F16.gguf
+    default_enable_thinking: true
+    extra_args: "--jinja --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
+
 # === Model Aliases ===
 # Short names usable in API requests: {"model": "qwen3.6-35b-uncensored"}
 aliases:
