@@ -180,7 +180,16 @@ When touching these areas, read the referenced detail docs:
 - **Subagent-infra decode (belangrijk voor toekomstige sessies):** de default subagent-model-string in `~/.pi/agent/settings.json` was `guardian/openrouter/deepseek/deepseek-v4-flash-0731:high` — die faalde met "Unknown subagent model in active Pi model registry". Root cause: pi's model-registry laadt `models.json` alleen bij startup (NIET via `/reload` of `/reload-runtime`); én de `guardian/`-prefix-vorm moest expliciet toegevoegd worden aan de `providers.guardian.models` array in `~/.pi/agent/models.json`. Fix: entry toegevoegd (gemodelleerd op `guardian/openrouter/deepseek/deepseek-chat`), pi volledig herstart, daarna werkt `guardian/openrouter/deepseek/deepseek-v4-flash-0731:high` voor subagents. De bare vorm `openrouter/deepseek/deepseek-v4-flash-0731` faalt met 401 (pi routeert direct naar OpenRouter i.p.v. via Guardian). OpenRouter-key is disabled → ALLE subagent-traffic via Guardian. Constraint: max 3 simultaneous subagents (Guardian raakt 429-failover bij >3 concurrent reasoning-requests; Novita upstream rate-limits).
 - **Constraints/preferences opgeslagen in project-memory:** subagent-modelconfig (context), max-3-simultaan (constraint).
 
-### Pi session `20260812_5` (last updated 2026-08-12 ~23:15)
+### Pi session `20260813_1` (session wrap-up, last updated 2026-08-13)
+
+- Working directory: `/home/flip/llama_cpp_guardian`
+- **Session conclusion (verbeterplan):** Phase 5 structural separation COMPLETE and maintained by other agent sessions (20 commits landed since: MTP/spec-type, Qwen3.5-9B variants, config-drift detection, per-app OpenRouter attribution, client context-hint + n_slots — all in the extracted modules, server.py +15 lines only). Pre-restart gate: all 4 PASS. Suite: 950 passed / 3 skipped.
+- **Cleanup done:** committed pending `config/models.yaml` tuning (qwen3.8-27b context 220000, vision params) + `docs/CLIENT_KEY_LINKING.md`; removed untracked secret-bearing `config/cloud_keys.json.bak.*` (superseded by the committed attribution change). Commit `cea91ff`.
+- **Keanu side (2026-08-13):** loop completed t0–t4; t4 unblocked in fixture form (real-writer WAL, shared vectors in both repos); new loop work ongoing (parallel distill, keanu-worker). Keanu `main` contains all capture work.
+- **Still open (by design, operator decisions):** (1) live capture enablement (privacy decision — `capture.enabled` stays false; the 72 h soak test starts once enabled), (2) CI adoption of `scripts/pre_restart_check.py` as a GitHub Action, (3) first real dataset build on the Keanu side.
+- **Known-good recovery:** `gh copilot` routes around Guardian if a restart breaks startup; `unset GH_TOKEN GITHUB_TOKEN GITHUB_PERSONAL_ACCESS_TOKEN` before `git push`.
+
+
 
 - Working directory: `/home/flip/llama_cpp_guardian`
 - **Keanu cross-repo contract work (2026-08-13, "tijd om te gaan bouwen"):** the Keanu agent (openhands loop) already completed handoff tasks t1 (record_auth HMAC verification, commit `6d6f2cc`), t2 (docs for Decisions 1A/2A, `0fdf51f`), t3 (capture→dataset pipeline with staging/dry-run/synthetic WAL, `3043efb`); t4 (live-WAL contract test) was marked blocked pending a Guardian-side privacy decision. This session closed the gap WITHOUT enabling live capture:
@@ -354,7 +363,7 @@ When touching these areas, read the referenced detail docs:
 - ✅ `app/proxy/` process/lifespan/state + `app/config_loader.py` done — **server.py is a thin shell: 5177 → 1667 lines (−68%), 95 delegation markers, 41 routes**
 - 📋 Optional polish: `proxy_v1_get` passthrough, final import cleanup, push to GitHub
 
-### Phase 6 — Operational Hardening 🔄 (In Progress)
+### Phase 6 — Operational Hardening ✅ (complete; soak test recommended, not blocking)
 - ✅ `guardianctl` CLI for capture control (`scripts/guardianctl.py`)
   - `status` — capture subsystem status via API
   - `config` — effective config from settings.yaml
