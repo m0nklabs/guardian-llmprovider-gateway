@@ -25,6 +25,7 @@ context_overrides:
   moonshotai/kimi-k3: 1048576
   gpt-4.1: 1047576
   deepseek/deepseek-chat: 1000000
+  deepseek/deepseek-v4-flash-0731: 1048576
 # Grammar-Constrained Decoding (GCD) — structured output via GBNF / JSON schema.
 # See docs/API_REFERENCE.md → Grammar-Constrained Decoding.
 grammar:
@@ -96,6 +97,7 @@ providers:
       - google/gemini-2.0-flash-exp
       - meta-llama/llama-3.3-70b-instruct
       - deepseek/deepseek-chat
+      - deepseek/deepseek-v4-flash-0731   # DeepSeek Harness (agent harness, like pi) — preview 2026-08-15
       - qwen/qwen-2.5-72b-instruct
       - mistralai/mistral-large
       # ── Failover mirror models (also on NVIDIA NIM / Poolside direct) ──
