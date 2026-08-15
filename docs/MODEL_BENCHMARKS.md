@@ -16,9 +16,11 @@ Sorted by generation speed (fastest first). Failed and pending models are listed
 | Model | KV type | ngl | load+switch (s) | TTFT (s) | gen tok/s | prompt eval tok/s | status |
 | --- | --- | --- | ---: | ---: | ---: | ---: | --- |
 | `llama3.2-3b` | f16 | 99 | 10.906 | 0.127 | 126.27 | 520.1 | ✅ |
+| `qwen3.8-27b-mtp` † | turbo4+mtp | 99 | 28.3 | 6.7 | 115.21 | 12.4 | 🔬 |
 | `Qwen3.6-35B-A3B-HauhauCS-Aggressive` | turbo4 | 99 | 43.914 | 0 | 85.0 | 0 | ✅ |
 | `Qwen3.6-35B-A3B-HauhauCS-Aggressive-Q8KV` | q8_0 | 99 | 12.282 | 0 | 82.92 | 0 | ✅ |
 | `Qwen3.6-35B-A3B-HauhauCS-Aggressive-Turbo4` | turbo4 | 99 | 13.275 | 0 | 81.48 | 0 | ✅ |
+| `qwen3.6-35b-fast-ngram` † | turbo4+ngram | 99 | 17.7 | 0 | 78.17 | 0 | 🔬 |
 | `unsloth-gemma-4-26B-A4B-it-qat-UD-Q4_K_XL-Q8KV` | turbo4 | 99 | 37.255 | 0 | 74.43 | 0 | ✅ |
 | `gemma-4-E4B-it-uncensored` | f16 | 99 | 19.245 | 0 | 69.72 | 0 | ✅ |
 | `qwen3.8-27b-q8kv` | q8_0 | 99 | 16.886 | 9.336 | 64.78 | 8.9 | ✅ |
@@ -26,13 +28,23 @@ Sorted by generation speed (fastest first). Failed and pending models are listed
 | `Huihui-gemma-4-26B-A4B-it-abliterated` | turbo4 | 99 | 29.033 | 0 | 59.84 | 0 | ✅ |
 | `Huihui-gemma-4-26B-A4B-it-abliterated-Q8KV` | turbo4 | 99 | 14.548 | 0 | 57.36 | 0 | ✅ |
 | `granite-4.1-8b` | turbo4 | 99 | 27.133 | 0.145 | 30.97 | 269.6 | ✅ |
+| `qwen3.5-9b-ngram` † | turbo4+ngram | 99 | 14.7 | 0 | 29.44 | 0 | 🔬 |
 | `qwen3.5-9b-coder` | turbo4 | 99 | 14.651 | 0 | 29.87 | 0 | ✅ |
 | `qwen3.5-9b-reasoner` | turbo4 | 99 | 13.795 | 0.304 | 27.7 | 141.6 | ✅ |
 | `qwen3.5-9b-instruct` | turbo4 | 99 | 13.936 | 0.301 | 27.5 | 142.9 | ✅ |
 | `qwen3.5-9b` | turbo4 | 99 | 12.751 | 0 | 26.81 | 0 | ✅ |
 | `Phi-4-reasoning-plus` | f16 | 99 | 70.421 | 33.001 | 23.33 | 8.2 | ✅ |
 | `qwen3.8-27b-instruct` | turbo4 | 99 | 13.894 | 0.541 | 17.64 | 79.5 | ✅ |
+| `qwen3.8-27b-instruct-mtp` † | turbo4+mtp | 99 | 25.1 | 0.519 | 18.83 | 82.9 | 🔬 |
 | `Qwen3.6-35B-A3B-HauhauCS-Aggressive-DFlash-Turbo4` | turbo4 | 99 | 20.581 | 0 | 15.77 | 0 | ✅ |
+
+† **research measurements** (🔬) — speculative-decoding variants from the
+MTP study (`docs/MTP_STUDY.md`), bench session 2026-08-15, ctx = base − 20k.
+Not part of the standard bench rotation; `qwen3.8-27b-mtp` is the only keeper
+(now a permanent config entry). Baselines for comparison: qwen3.8-27b 63.4,
+qwen3.8-27b-instruct 17.64, Qwen3.6-…-Turbo4 81.48, qwen3.5-9b 26.81 t/s.
+Speedups: mtp-thinking 1.82×, mtp-instruct 1.07×, ngram-qwen3.6 0.96×,
+ngram-qwen3.5 1.10× (sampler-confounded — see study §3).
 
 ## Per-model detail
 

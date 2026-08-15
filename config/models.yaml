@@ -227,6 +227,27 @@ models:
     default_enable_thinking: false
     extra_args: "--jinja --reasoning off --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0.0 --presence-penalty 1.5 --repeat-penalty 1.0"
 
+  # MTP variant (PERMANENT, see docs/MTP_STUDY.md): clone of qwen3.8-27b thinking
+  # entry + native Multi-Token Prediction via the model's architectural MTP heads
+  # (--spec-type draft-mtp, no external draft model). Benchmark 2026-08-15:
+  #   115.21 t/s vs 63.4 base = 1.82× speedup; journal acceptance 0.65 (mean
+  #   draft len 2.96). Costs: +13s load (MTP draft-context build) + VRAM for the
+  #   MTP draft context (hence ctx 262144→242144, operator rule: -20k headroom).
+  # Reasoning tokens are formulaic ("Wait,", "Therefore,") → well predicted by
+  # the MTP head. Sampler set identical to the thinking base entry.
+  qwen3.8-27b-mtp:
+    path: /home/flip/models/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_XL.gguf
+    total_layers: 65
+    benchmark_context_limit: 262144
+    context: 242144
+    ngl: 99
+    kv_type: turbo4
+    tensor_split: "0.45,0.55"
+    mmproj: /home/flip/models/qwen3.8-27b/mmproj-F16.gguf
+    default_enable_thinking: true
+    spec_type: draft-mtp
+    extra_args: "--jinja --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
+
   # Qwen3.5-9B (Alibaba Qwen, arch: qwen35; Unsloth UD-Q8_K_XL quant)
   # Native vision-language model (image_count/video_count macros in chat
   # template) — requires the mmproj projector below.
@@ -288,6 +309,11 @@ models:
     mmproj: /home/flip/models/qwen3.5-9b/mmproj-F16.gguf
     default_enable_thinking: false
     extra_args: "--jinja --reasoning off --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 1.5 --repeat-penalty 1.0"
+
+  # MTP/ngram RESEARCH VARIANTS — removed after docs/MTP_STUDY.md measurement;
+  # qwen3.8-27b-mtp is the permanent keeper (entry above). The 3 other research
+  # variants (qwen3.8-27b-instruct-mtp, qwen3.6-35b-fast-ngram, qwen3.5-9b-ngram)
+  # are NOT in config — re-add per-session if desired (see docs/MTP_STUDY.md §6).
 
 # === Model Aliases ===
 # Short names usable in API requests: {"model": "qwen3.6-35b-uncensored"}
