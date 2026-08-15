@@ -43,6 +43,10 @@
                     <div class="text-sm text-slate-400">Refresh Mode</div>
                     <div class="text-cyan-300 font-bold" id="auto-refresh-state">LIVE</div>
                 </div>
+                <div class="text-right">
+                    <div class="text-sm text-slate-400">Dashboard Key</div>
+                    <div class="font-bold cursor-pointer" id="dash-key-status" onclick="showKeyModal()" title="Click to set/clear Guardian API key">—</div>
+                </div>
             </div>
         </header>
 
@@ -541,10 +545,84 @@
         </div>
     </div>
 
+    <!-- Dashboard auth modal (commit 7472d61: Bearer required on /api/*) -->
+    <div id="dash-key-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+        <div class="card w-full max-w-md">
+            <h2 class="text-xl font-bold text-white mb-2">🔑 Guardian Dashboard Key</h2>
+            <p class="text-sm text-slate-400 mb-4" id="dash-key-modal-msg">Paste a Guardian API key to authorize the dashboard. Stored locally in your browser only.</p>
+            <input class="control-input w-full mb-3" id="dash-key-input" type="password" placeholder="flip_…  (Guardian API key)" autocomplete="off">
+            <div class="flex gap-2">
+                <button class="control-button flex-1" id="dash-key-save" type="button">Save</button>
+                <button class="control-button" id="dash-key-clear" type="button">Clear</button>
+                <button class="control-button" id="dash-key-cancel" type="button">Cancel</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Copy toast -->
     <div id="copy-toast" class="hidden fixed bottom-6 right-6 px-4 py-2 bg-cyan-900 border border-cyan-500 rounded-lg shadow-xl z-50 text-sm text-cyan-100"></div>
 
     <script>
+        // ── Dashboard auth (commit 7472d61: dashboard bound to 127.0.0.1, Bearer on /api/*) ──
+        // The UI talks to /api/* which require a Guardian API key. We store the key
+        // in localStorage and inject `Authorization: Bearer <key>` on every same-origin
+        // /api/ fetch via a fetch wrapper — zero changes to call sites.
+        const DASH_KEY_STORAGE = 'guardian_dashboard_api_key';
+        function getDashboardKey() { try { return localStorage.getItem(DASH_KEY_STORAGE) || ''; } catch (e) { return ''; } }
+        function setDashboardKey(key) { try { localStorage.setItem(DASH_KEY_STORAGE, key); } catch (e) {} }
+        function clearDashboardKey() { try { localStorage.removeItem(DASH_KEY_STORAGE); } catch (e) {} }
+        function dashboardKeyFingerprint() {
+            const k = getDashboardKey();
+            if (!k) return '';
+            return k.length > 10 ? (k.slice(0, 6) + '…' + k.slice(-4)) : 'set';
+        }
+        function updateKeyStatus() {
+            const el = document.getElementById('dash-key-status');
+            if (!el) return;
+            const k = getDashboardKey();
+            if (k) {
+                el.textContent = '● ' + dashboardKeyFingerprint();
+                el.className = 'text-green-400 font-bold cursor-pointer';
+            } else {
+                el.textContent = '● No key (click)';
+                el.className = 'text-rose-400 font-bold cursor-pointer';
+            }
+        }
+        function showKeyModal(msg) {
+            const modal = document.getElementById('dash-key-modal');
+            if (!modal) return;
+            document.getElementById('dash-key-modal-msg').textContent = msg || 'Paste a Guardian API key to authorize the dashboard. Stored locally in your browser only.';
+            document.getElementById('dash-key-input').value = getDashboardKey();
+            modal.classList.remove('hidden');
+            setTimeout(() => document.getElementById('dash-key-input').focus(), 50);
+        }
+        function hideKeyModal() { document.getElementById('dash-key-modal').classList.add('hidden'); }
+
+        // Monkey-patch fetch: inject Bearer header for same-origin /api/* calls and
+        // surface 401 by opening the key modal (the caller still receives the response).
+        const _origFetch = window.fetch;
+        window.fetch = function(input, init) {
+            init = init || {};
+            const url = typeof input === 'string' ? input : (input && input.url) || '';
+            const isApiCall = url.indexOf('/api/') !== -1;
+            const key = getDashboardKey();
+            if (isApiCall && key) {
+                const headers = new Headers(init.headers || {});
+                if (!headers.has('Authorization')) headers.set('Authorization', 'Bearer ' + key);
+                init.headers = headers;
+            }
+            const p = _origFetch.call(this, input, init);
+            if (isApiCall) {
+                p.then(function(resp) {
+                    if (resp.status === 401) {
+                        if (getDashboardKey()) { clearDashboardKey(); updateKeyStatus(); }
+                        showKeyModal('Authorization failed — re-enter a valid Guardian API key.');
+                    }
+                }).catch(function() {});
+            }
+            return p;
+        };
+
         let benchmarkChart = null;
         const sparklineCharts = {};
         const STATS_REFRESH_MS = 2000;
@@ -1762,6 +1840,21 @@
                 dashboardState.autoRefresh = !dashboardState.autoRefresh;
                 updateRefreshUi();
             });
+
+            // Dashboard key modal wiring
+            document.getElementById('dash-key-save')?.addEventListener('click', () => {
+                const v = document.getElementById('dash-key-input').value.trim();
+                if (v) { setDashboardKey(v); hideKeyModal(); updateKeyStatus(); updateStats(); }
+            });
+            document.getElementById('dash-key-clear')?.addEventListener('click', () => {
+                clearDashboardKey(); document.getElementById('dash-key-input').value = ''; updateKeyStatus();
+            });
+            document.getElementById('dash-key-cancel')?.addEventListener('click', hideKeyModal);
+            document.getElementById('dash-key-input')?.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') { e.preventDefault(); document.getElementById('dash-key-save').click(); }
+            });
+            updateKeyStatus();
+            if (!getDashboardKey()) showKeyModal();
 
             updateRefreshUi();
             wireCloudControls();
