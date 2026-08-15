@@ -11,24 +11,23 @@ Speed measurements for every local model in `config/models.yaml` served through 
 
 ## Results
 
+Sorted by generation speed (fastest first). Failed and pending models are listed at the bottom.
+
 | Model | KV type | ngl | load+switch (s) | TTFT (s) | gen tok/s | prompt eval tok/s | status |
 | --- | --- | --- | ---: | ---: | ---: | ---: | --- |
-| `Huihui-gemma-4-26B-A4B-it-abliterated` | turbo4 | 99 | 43.331 | 0 | 5.46 | 0 | ✅ |
-| `Huihui-gemma-4-26B-A4B-it-abliterated-Q8KV` | turbo4 | 99 | 22.831 | 0 | 54.11 | 0 | ✅ |
-| `Ministral-3-14B-Reasoning-2512` | turbo4 | 99 | — | — | — | — | ❌ OOM (KV-cache / VRAM) |
-| `Phi-4-reasoning-plus` | f16 | 99 | 70.421 | 33.001 | 23.33 | 8.2 | ✅ |
-| `Qwen3-30B-A3B-Thinking-2507` | turbo4 | 99 | — | — | — | — | ❌ OOM (KV-cache / VRAM) |
+| `llama3.2-3b` | f16 | 99 | 10.906 | 0.127 | 126.27 | 520.1 | ✅ |
 | `Qwen3.6-35B-A3B-HauhauCS-Aggressive` | turbo4 | 99 | 43.914 | 0 | 85.0 | 0 | ✅ |
-| `Qwen3.6-35B-A3B-HauhauCS-Aggressive-DFlash-Turbo4` | turbo4 | 99 | 20.581 | 0 | 15.77 | 0 | ✅ |
 | `Qwen3.6-35B-A3B-HauhauCS-Aggressive-Q8KV` | q8_0 | 99 | 12.282 | 0 | 82.92 | 0 | ✅ |
 | `Qwen3.6-35B-A3B-HauhauCS-Aggressive-Turbo4` | turbo4 | 99 | 13.275 | 0 | 81.48 | 0 | ✅ |
-| `Step3-VL-10B` | turbo4 | 99 | — | — | — | — | ❌ OOM (KV-cache / VRAM) |
-| `gemma-4-E4B-it-uncensored` | f16 | 99 | 17.262 | 0 | 70.49 | 0 | ✅ |
-| `granite-4.1-8b` | turbo4 | 99 | 27.133 | 0.145 | 30.97 | 269.6 | ✅ |
-| `llama3.2-3b` | f16 | 99 | 10.906 | 0.127 | 126.27 | 520.1 | ✅ |
-| `qwen3.8-27b` | turbo4 | 99 | 23.957 | 9.067 | 63.68 | 9.2 | ✅ |
-| `qwen3.8-27b-instruct` | turbo4 | 99 | 15.445 | 0.434 | 17.06 | 99.1 | ✅ |
 | `unsloth-gemma-4-26B-A4B-it-qat-UD-Q4_K_XL-Q8KV` | turbo4 | 99 | 35.923 | 0 | 76.09 | 0 | ✅ |
+| `gemma-4-E4B-it-uncensored` | f16 | 99 | 17.262 | 0 | 70.49 | 0 | ✅ |
+| `qwen3.8-27b` | turbo4 | 99 | 23.957 | 9.067 | 63.68 | 9.2 | ✅ |
+| `Huihui-gemma-4-26B-A4B-it-abliterated-Q8KV` | turbo4 | 99 | 22.831 | 0 | 54.11 | 0 | ✅ |
+| `granite-4.1-8b` | turbo4 | 99 | 27.133 | 0.145 | 30.97 | 269.6 | ✅ |
+| `Phi-4-reasoning-plus` | f16 | 99 | 70.421 | 33.001 | 23.33 | 8.2 | ✅ |
+| `qwen3.8-27b-instruct` | turbo4 | 99 | 15.445 | 0.434 | 17.06 | 99.1 | ✅ |
+| `Qwen3.6-35B-A3B-HauhauCS-Aggressive-DFlash-Turbo4` | turbo4 | 99 | 20.581 | 0 | 15.77 | 0 | ✅ |
+| `Huihui-gemma-4-26B-A4B-it-abliterated` | turbo4 | 99 | 43.331 | 0 | 5.46 | 0 | ✅ |
 
 ## Per-model detail
 
@@ -56,12 +55,6 @@ Speed measurements for every local model in `config/models.yaml` served through 
 - median prompt eval: **0 tok/s**
 - all runs gen tok/s: 55.99, 51.23, 54.11
 
-### `Ministral-3-14B-Reasoning-2512`
-
-- path: `/home/flip/models/Ministral-3-14B-Reasoning-2512-Q8_0.gguf`
-- ngl: 99, kv_type: `turbo4`
-- **status: FAILED — OOM (KV-cache, ctx=262144 + Q8 weights op device 0; cudaMalloc failed 5016 MiB)**
-
 ### `Phi-4-reasoning-plus`
 
 - path: `/home/flip/models/Phi-4-reasoning-plus-Q8_0.gguf`
@@ -73,12 +66,6 @@ Speed measurements for every local model in `config/models.yaml` served through 
 - median gen speed: **23.33 tok/s**
 - median prompt eval: **8.2 tok/s**
 - all runs gen tok/s: 23.28, 23.33, 23.37
-
-### `Qwen3-30B-A3B-Thinking-2507`
-
-- path: `/home/flip/models/Qwen3-30B-A3B-Thinking-2507-Q4_K_M.gguf`
-- ngl: 99, kv_type: `turbo4`
-- **status: FAILED — OOM (KV-cache, ctx=262144 + Q4_K_M weights; cudaMalloc failed 3036 MiB op device 0)**
 
 ### `Qwen3.6-35B-A3B-HauhauCS-Aggressive`
 
@@ -127,12 +114,6 @@ Speed measurements for every local model in `config/models.yaml` served through 
 - median gen speed: **81.48 tok/s**
 - median prompt eval: **0 tok/s**
 - all runs gen tok/s: 81.48, 79.24, 83.44
-
-### `Step3-VL-10B`
-
-- path: `/home/flip/models/Step3-VL-10B-F16.gguf`
-- ngl: 99, kv_type: `turbo4`
-- **status: FAILED — OOM (F16 weights ~20GB + KV-cache; cudaMalloc failed 4896 MiB op device 0)**
 
 ### `gemma-4-E4B-it-uncensored`
 

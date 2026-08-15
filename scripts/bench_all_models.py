@@ -242,13 +242,27 @@ def write_doc(results: dict[str, Any], entries: list[dict[str, Any]]) -> None:
     lines.append("")
     lines.append("## Results")
     lines.append("")
+    lines.append("Sorted by generation speed (fastest first). Failed and pending models are listed at the bottom.")
+    lines.append("")
     lines.append(
         "| Model | KV type | ngl | load+switch (s) | TTFT (s) | gen tok/s | prompt eval tok/s | status |"
     )
     lines.append(
         "| --- | --- | --- | ---: | ---: | ---: | ---: | --- |"
     )
-    for name in sorted(by_name.keys()):
+    # Sort the table by generation speed (fastest first); failed models
+    # next (alphabetical), pending last. The doc's purpose is a speed ranking.
+    def _table_sort_key(name: str) -> tuple:
+        r = results["completed"].get(name)
+        if r and "error" not in r:
+            try:
+                return (0, -float(r.get("gen_tps") or 0.0), name)
+            except (TypeError, ValueError):
+                return (0, 0.0, name)
+        if r and "error" in r:
+            return (1, 0.0, name)
+        return (2, 0.0, name)
+    for name in sorted(by_name.keys(), key=_table_sort_key):
         r = results["completed"].get(name)
         if not r:
             lines.append(f"| `{name}` | — | — | — | — | — | — | pending |")

@@ -45,33 +45,6 @@ models:
     ngl: 99
     kv_type: f16
     tensor_split: "0.45,0.55"
-  Ministral-3-14B-Reasoning-2512:
-    path: /home/flip/models/Ministral-3-14B-Reasoning-2512-Q8_0.gguf
-    total_layers: 40
-    benchmark_context_limit: 262144
-    context: 262144
-    ngl: 99
-    kv_type: turbo4
-    tensor_split: "0.45,0.55"
-  Qwen3-30B-A3B-Thinking-2507:
-    path: /home/flip/models/Qwen3-30B-A3B-Thinking-2507-Q4_K_M.gguf
-    total_layers: 48
-    benchmark_context_limit: 262144
-    context: 262144
-    ngl: 99
-    kv_type: turbo4
-    tensor_split: "0.45,0.55"
-
-  # --- Vision models ---
-  Step3-VL-10B:
-    path: /home/flip/models/Step3-VL-10B-F16.gguf
-    total_layers: 36
-    benchmark_context_limit: 262144
-    context: 262144
-    ngl: 99
-    kv_type: turbo4
-    tensor_split: "0.45,0.55"
-    mmproj: /home/flip/models/mmproj-Step3-VL-10B-F16.gguf
 
   # --- Gemma 4 ---
   Huihui-gemma-4-26B-A4B-it-abliterated:
@@ -206,10 +179,9 @@ models:
     kv_type: turbo4
     extra_args: "--jinja"
 
-  # --- Qwen3.8 (IBM-dense 27B VLM, hybrid SSM+attention, qwen35 arch) ---
-  # Qwen3.8-27B: brand-new model (built on Qwen3.5 arch). Thinking mode is
-  # default-on; disable per-request via /no_think. Native vision-language model
-  # (images + videos) — requires the mmproj projector below.
+  # --- Qwen3.8-27B (Alibaba Qwen, arch: qwen35; Unsloth UD-Q4_K_XL quant) ---
+  # Native vision-language model (images + videos) — requires the mmproj
+  # projector below. Thinking mode is default-on; disable per-request /no_think.
   # Unsloth Qwen3.8-27B thinking-mode samplers: temp 1.0, top_p 0.95, top_k 20,
   # min_p 0.0, presence_penalty 0.0, repetition_penalty 1.0
   qwen3.8-27b:
@@ -250,13 +222,11 @@ aliases:
   qwen3.6-35b-q8kv: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Q8KV"
   qwen3.6-35b-uncensored-q8kv: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Q8KV"
   phi4: "Phi-4-reasoning-plus"
-  ministral: "Ministral-3-14B-Reasoning-2512"
   gemma4: "Huihui-gemma-4-26B-A4B-it-abliterated-Q8KV"
   gemma4-26b: "Huihui-gemma-4-26B-A4B-it-abliterated-Q8KV"
   gemma4-26b-qat: "unsloth-gemma-4-26B-A4B-it-qat-UD-Q4_K_XL-Q8KV"
   gemma4-26b-qat-q8kv: "unsloth-gemma-4-26B-A4B-it-qat-UD-Q4_K_XL-Q8KV"
   gemma4-e4b: "gemma-4-E4B-it-uncensored"
-  step3-vl: "Step3-VL-10B"
   llama3: "llama3.2-3b"
 
 # === Guardian Security Config ===
