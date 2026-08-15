@@ -128,6 +128,8 @@ models:
     ngl: 99
     kv_type: turbo4
     tensor_split: "0.38,0.62"
+    # n_slots: 8 — with smaller client-hinted ctx (-c), 8 parallel slots give higher throughput
+    n_slots: 8
     mmproj: /home/flip/models/Qwen3.6-35B-A3B-mmproj-BF16.gguf
     vision_context: 262144
     vision_ngl: 99

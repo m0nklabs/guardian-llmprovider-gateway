@@ -279,6 +279,21 @@ async def route_v1_post(path: str, request: Request, client_id: str):
             },
         )
 
+    # Client may request a smaller context window than configured. Header is
+    # preferred (no OpenAI-spec clash); body field is a fallback for clients
+    # that can't set custom headers.
+    ctx_hint = request.headers.get("x-guardian-context")
+    if not ctx_hint:
+        ctx_hint = json_body.get("guardian_context")
+    ctx_hint_int: Optional[int] = None
+    if ctx_hint:
+        try:
+            ctx_hint_int = int(str(ctx_hint).strip())
+            if ctx_hint_int < 4096:
+                ctx_hint_int = 4096  # floor
+        except (ValueError, TypeError):
+            ctx_hint_int = None  # invalid hint → ignore
+
     current_model = await _model_manager.get_current_model()
     requested_model = _resolve_or_reject_inference_model(requested_model, current_model)
     json_body["model"] = requested_model
@@ -485,6 +500,7 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                                     reload_model,
                                     has_image_inputs,
                                 ),
+                                context_hint=ctx_hint_int,
                             ),
                             generation=generation,
                         )
@@ -514,7 +530,7 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                         logger.warning(
                             f"🔒 Client '{client_id}' not in switch_allowlist, blocked switch to '{desired_model}'. Forwarding to current model."
                         )
-                    elif needs_model_switch or needs_runtime_reload:
+                    elif needs_model_switch or needs_runtime_reload or ctx_hint_int is not None:
                         phase = "auto_switch" if needs_model_switch else "runtime_reload"
                         generation = _reset_startup_check_status(
                             source="proxy",
@@ -535,7 +551,7 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                             needs_model_switch = desired_model != current_model
                             needs_runtime_reload = desired_model == current_model and desired_vision != current_vision
 
-                            if needs_model_switch or needs_runtime_reload:
+                            if needs_model_switch or needs_runtime_reload or ctx_hint_int is not None:
                                 logger.info(
                                     "🔄 Adjusting backend from %s [%s] to %s [%s] (client: %s)",
                                     current_model,
@@ -550,11 +566,17 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                                             desired_model,
                                             client_id=client_id,
                                             enable_vision=desired_vision,
+                                            context_hint=ctx_hint_int,
                                         ))
-                                        if needs_model_switch
+                                        # A context hint on the already-active model
+                                        # must go through switch_model: its drift check
+                                        # + signature persistence give the same-hint
+                                        # caching (no reload when the hinted sig matches).
+                                        if needs_model_switch or ctx_hint_int is not None
                                         else (lambda: _model_manager.load(
                                             desired_model,
                                             enable_vision=desired_vision,
+                                            context_hint=ctx_hint_int,
                                         ))
                                     )
                                     await _run_guardian_operation(

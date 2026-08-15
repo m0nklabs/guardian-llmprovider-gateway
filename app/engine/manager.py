@@ -255,7 +255,13 @@ class ModelManager:
             return False
         return bool(enable_vision)
 
-    def build_runtime_config(self, model_name: str, *, enable_vision: Optional[bool] = None) -> Dict[str, Any]:
+    def build_runtime_config(
+        self,
+        model_name: str,
+        *,
+        enable_vision: Optional[bool] = None,
+        context_hint: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """Build the effective runtime config for text or vision mode."""
         if model_name not in self.models:
             raise ValueError(f"Model {model_name} not found in configuration")
@@ -265,6 +271,14 @@ class ModelManager:
 
         runtime_config["context"] = self._resolve_runtime_value(runtime_config, "context", enable_vision=vision_enabled)
         runtime_config["ngl"] = self._resolve_runtime_value(runtime_config, "ngl", enable_vision=vision_enabled)
+
+        # Client context hint: clamp to a safe range. Always cap at the configured
+        # context (never enlarge beyond config — clients can't grow the model's KV).
+        # Floor at 4096 (llama-server requires a sane minimum).
+        if context_hint is not None:
+            cfg_ctx = runtime_config.get("context") or 4096
+            hinted = max(4096, min(int(context_hint), int(cfg_ctx)))
+            runtime_config["context"] = hinted
 
         tensor_split = self._resolve_runtime_value(runtime_config, "tensor_split", enable_vision=vision_enabled)
         if tensor_split not in (None, ""):
@@ -311,6 +325,19 @@ class ModelManager:
             return self.current_vision_enabled if target == self.current_model else False
 
         return any(candidate and candidate in args for candidate in mmproj_candidates)
+
+    def current_launch_context(self) -> Optional[int]:
+        """Return the context window (-c) the currently running backend was launched
+        with, or None if the args file is unreadable/unparsable. Convenience accessor
+        for the client context-hint feature (lets clients discover the active ctx)."""
+        try:
+            args = CURRENT_MODEL_ARGS_FILE.read_text()
+        except Exception:
+            return None
+        match = re.search(r"-c (\d+)", args)
+        if not match:
+            return None
+        return int(match.group(1))
 
     def _is_tool_friendly_config(self, config: Dict) -> bool:
         extra_args = str(config.get("extra_args", ""))
@@ -805,6 +832,7 @@ class ModelManager:
         client_id: str = "_system",
         force: bool = False,
         enable_vision: Optional[bool] = None,
+        context_hint: Optional[int] = None,
     ):
         # Re-read models.yaml so config edits take effect without Guardian restart
         self.models = self._load_config()
@@ -833,7 +861,7 @@ class ModelManager:
         desired_vision = self._resolve_runtime_vision_flag(model_name, enable_vision)
         current_vision = self.current_vision_enabled if model_name == self.current_model else self.current_runtime_uses_mmproj(model_name)
 
-        drifted = self._config_drifted(model_name, enable_vision=desired_vision)
+        drifted = self._config_drifted(model_name, enable_vision=desired_vision, context_hint=context_hint)
         if model_name == self.current_model and desired_vision == current_vision and not drifted:
             logger.info(f"Model {model_name} is already active")
             return
@@ -858,7 +886,9 @@ class ModelManager:
         await self._stop_server()
 
         # 3. Write new model args + binary selection
-        target_config = self.build_runtime_config(model_name, enable_vision=desired_vision)
+        target_config = self.build_runtime_config(
+            model_name, enable_vision=desired_vision, context_hint=context_hint
+        )
         logger.info(
             "Runtime config for %s [%s]: context=%s ngl=%s split=%s mmproj=%s",
             model_name,
@@ -898,7 +928,9 @@ class ModelManager:
         self.current_vision_enabled = desired_vision
         # Persist the launch signature so future same-model requests can detect
         # config drift and reload instead of skipping.
-        launch_sig = self._compute_launch_signature(model_name, enable_vision=desired_vision)
+        launch_sig = self._compute_launch_signature(
+            model_name, enable_vision=desired_vision, context_hint=context_hint
+        )
         if launch_sig is not None:
             self._write_persisted_signature(launch_sig)
         self.reset_vision_validation(model_name)
@@ -996,6 +1028,7 @@ class ModelManager:
         model_name: Optional[str] = None,
         enable_vision: Optional[bool] = None,
         runtime_overrides: Optional[Dict[str, Any]] = None,
+        context_hint: Optional[int] = None,
     ) -> None:
         """Reload llama-server with current (or specified) model."""
         # Re-read models.yaml so config edits take effect without Guardian restart
@@ -1010,7 +1043,9 @@ class ModelManager:
             raise ValueError(f"Model '{target}' not found in configuration")
         desired_vision = self._resolve_runtime_vision_flag(target, enable_vision)
         logger.info(f"🔄 Loading model '{target}' in {'vision' if desired_vision else 'text'} mode...")
-        target_config = self.build_runtime_config(target, enable_vision=desired_vision)
+        target_config = self.build_runtime_config(
+            target, enable_vision=desired_vision, context_hint=context_hint
+        )
         if runtime_overrides is not None:
             if not isinstance(runtime_overrides, dict):
                 raise ValueError(
@@ -1259,6 +1294,15 @@ class ModelManager:
                     f"draft={draft_path.name}, n_max={spec_draft_n_max}, n_min={spec_draft_n_min}"
                 )
 
+        # Optional per-model parallel slot count (--parallel). Higher slot counts
+        # pair naturally with client-hinted smaller contexts: more concurrent
+        # requests fit in the freed KV VRAM. Part of args_content, so a n_slots
+        # change also triggers launch-signature drift (correct: launch-param change).
+        n_slots = config.get("n_slots")
+        if n_slots and int(n_slots) > 1:
+            args_content += f" --parallel {int(n_slots)}"
+            logger.info(f"Parallel slots: {n_slots}")
+
         # Pass-through for any extra flags not covered above
         if extra_args:
             args_content += f" {extra_args}"
@@ -1298,13 +1342,21 @@ class ModelManager:
             env_file.unlink()
             logger.info("Cleared model environment file (no CUDA_VISIBLE_DEVICES override)")
 
-    def _compute_launch_signature(self, model_name: str, *, enable_vision: Optional[bool]) -> Optional[dict]:
+    def _compute_launch_signature(
+        self,
+        model_name: str,
+        *,
+        enable_vision: Optional[bool],
+        context_hint: Optional[int] = None,
+    ) -> Optional[dict]:
         """Compute the launch signature for a model+vision-mode from CURRENT models.yaml.
         Returns None if the model is unknown. Uses build_runtime_config (so vision/text
-        overrides resolve correctly)."""
+        overrides and the client context hint resolve correctly)."""
         if model_name not in self.models:
             return None
-        runtime_config = self.build_runtime_config(model_name, enable_vision=enable_vision)
+        runtime_config = self.build_runtime_config(
+            model_name, enable_vision=enable_vision, context_hint=context_hint
+        )
         args_str, env_dict = self._build_args_string(runtime_config)
         return {
             "model": model_name,
@@ -1326,13 +1378,23 @@ class ModelManager:
         except Exception as e:
             logger.warning(f"Failed to persist launch signature: {e}")
 
-    def _config_drifted(self, model_name: str, *, enable_vision: Optional[bool]) -> bool:
+    def _config_drifted(
+        self,
+        model_name: str,
+        *,
+        enable_vision: Optional[bool],
+        context_hint: Optional[int] = None,
+    ) -> bool:
         """True if the model must be reloaded to apply current models.yaml settings.
-        Drift = persisted sig missing, OR model/vision differ, OR args/env hash differ."""
+        Drift = persisted sig missing, OR model/vision differ, OR args/env hash differ.
+        context_hint is folded into the computed signature, so a client-hinted
+        context different from the persisted one counts as drift (triggers reload)."""
         persisted = self._read_persisted_signature()
         if not persisted:
             return True
-        current = self._compute_launch_signature(model_name, enable_vision=enable_vision)
+        current = self._compute_launch_signature(
+            model_name, enable_vision=enable_vision, context_hint=context_hint
+        )
         if not current:
             return True
         return persisted != current

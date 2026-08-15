@@ -1280,3 +1280,142 @@ models:
             mgr._write_server_args(config)
         assert (tmp_path / "written.args").read_text() == expected
         assert (tmp_path / "config" / "current_model.env").read_text() == "export CUDA_VISIBLE_DEVICES=0\n"
+
+
+# ── Client context hint + n_slots ───────────────────────────────────────
+
+
+BIGCTX_YAML = """\
+models:
+    GLM-4.7-Flash:
+        path: /models/GLM-4.7-Flash.gguf
+        context: 8192
+        ngl: 99
+    BigCtx:
+        path: /models/bigctx.gguf
+        context: 393216
+        ngl: 99
+        kv_type: turbo4
+"""
+
+
+class TestClientContextHint:
+    def test_context_hint_clamps_below_config(self, tmp_path: Path):
+        """Config ctx=393216, hint=8192 → runtime context becomes 8192."""
+        mgr = _make_manager(tmp_path, models_yaml=BIGCTX_YAML)
+
+        runtime = mgr.build_runtime_config("BigCtx", context_hint=8192)
+
+        assert runtime["context"] == 8192
+
+    def test_context_hint_clamps_to_config_when_larger(self, tmp_path: Path):
+        """Hint larger than config → capped at config (clients never enlarge)."""
+        mgr = _make_manager(tmp_path, models_yaml=BIGCTX_YAML)
+
+        runtime = mgr.build_runtime_config("BigCtx", context_hint=999999)
+
+        assert runtime["context"] == 393216
+
+    def test_context_hint_floors_at_4096(self, tmp_path: Path):
+        """Tiny hint → floored at 4096 (llama-server sane minimum)."""
+        mgr = _make_manager(tmp_path, models_yaml=BIGCTX_YAML)
+
+        runtime = mgr.build_runtime_config("BigCtx", context_hint=100)
+
+        assert runtime["context"] == 4096
+
+    def test_context_hint_none_uses_config(self, tmp_path: Path):
+        """No hint → config context unchanged (backward compat)."""
+        mgr = _make_manager(tmp_path, models_yaml=BIGCTX_YAML)
+
+        runtime = mgr.build_runtime_config("BigCtx")
+
+        assert runtime["context"] == 393216
+
+    @pytest.mark.asyncio
+    async def test_context_hint_triggers_drift_reload(self, tmp_path: Path):
+        """Persisted sig has -c 393216; hint=8192 → drift → switch_model reloads
+        the same model with the smaller context (backend launch helpers mocked)."""
+        mgr = _make_manager(tmp_path, models_yaml=BIGCTX_YAML)
+        mgr.current_model = "BigCtx"
+        mgr.current_vision_enabled = False
+
+        # Persist the signature the backend was launched with (no hint → -c 393216)
+        sig = mgr._compute_launch_signature("BigCtx", enable_vision=False)
+        assert sig is not None
+        (tmp_path / "config" / "current_model.sig").write_text(json.dumps(sig, sort_keys=True))
+
+        assert mgr._config_drifted("BigCtx", enable_vision=False, context_hint=8192) is True
+
+        with (
+            patch.object(mgr, "_save_context", new_callable=AsyncMock),
+            patch.object(mgr, "_stop_server", new_callable=AsyncMock),
+            patch.object(mgr, "_free_gpu_memory", new_callable=AsyncMock),
+            patch.object(mgr, "_start_server", new_callable=AsyncMock) as mock_start,
+            patch.object(mgr, "_wait_for_health", new_callable=AsyncMock, return_value=True),
+            patch.object(mgr, "verify_backend_model", new_callable=AsyncMock, return_value=True),
+            patch.object(mgr, "_load_context", new_callable=AsyncMock, side_effect=Exception("no save")),
+            patch.object(mgr, "_write_server_args") as mock_write,
+        ):
+            await mgr.switch_model("BigCtx", context_hint=8192)
+
+        mock_start.assert_awaited_once()
+        mock_write.assert_called_once()
+        written_config = mock_write.call_args.args[0]
+        assert written_config["context"] == 8192
+
+    @pytest.mark.asyncio
+    async def test_same_context_hint_no_reload(self, tmp_path: Path):
+        """Persisted sig has -c 8192; same hint=8192 → no drift, no reload (caching)."""
+        mgr = _make_manager(tmp_path, models_yaml=BIGCTX_YAML)
+        mgr.current_model = "BigCtx"
+        mgr.current_vision_enabled = False
+
+        # Persist the signature of a backend already launched with the hinted ctx
+        sig = mgr._compute_launch_signature("BigCtx", enable_vision=False, context_hint=8192)
+        assert sig is not None
+        (tmp_path / "config" / "current_model.sig").write_text(json.dumps(sig, sort_keys=True))
+
+        assert mgr._config_drifted("BigCtx", enable_vision=False, context_hint=8192) is False
+
+        with patch.object(mgr, "_stop_server", new_callable=AsyncMock) as mock_stop:
+            await mgr.switch_model("BigCtx", context_hint=8192)
+
+        mock_stop.assert_not_called()
+
+    def test_n_slots_appends_parallel_flag(self, tmp_path: Path):
+        """n_slots: 8 in config → --parallel 8 appears in the launch args."""
+        mgr = _make_manager(tmp_path)
+        config = {
+            "path": "/models/GLM-4.7-Flash.gguf",
+            "context": 8192,
+            "ngl": 99,
+            "kv_type": "turbo4",
+            "n_slots": 8,
+        }
+
+        args_str, _ = mgr._build_args_string(config)
+
+        assert "--parallel 8" in args_str
+
+    def test_no_n_slots_no_parallel_flag(self, tmp_path: Path):
+        """No n_slots → no --parallel flag (llama-server default, backward compat)."""
+        mgr = _make_manager(tmp_path)
+        config = {
+            "path": "/models/GLM-4.7-Flash.gguf",
+            "context": 8192,
+            "ngl": 99,
+            "kv_type": "turbo4",
+        }
+
+        args_str, _ = mgr._build_args_string(config)
+
+        assert "--parallel" not in args_str
+
+    def test_current_launch_context_accessor(self, tmp_path: Path):
+        """current_launch_context() reads -c from the persisted args file."""
+        mgr = _make_manager(tmp_path)
+        assert mgr.current_launch_context() == 8192  # seeded args file uses -c 8192
+
+        (tmp_path / "config" / "current_model.args").write_text("-m /models/bigctx.gguf -c 16384 -ngl 99")
+        assert mgr.current_launch_context() == 16384
