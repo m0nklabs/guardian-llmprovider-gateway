@@ -16,7 +16,6 @@ Speed measurements for every local model in `config/models.yaml` served through 
 | `Huihui-gemma-4-26B-A4B-it-abliterated` | turbo4 | 99 | 43.331 | 0 | 5.46 | 0 | ✅ |
 | `Huihui-gemma-4-26B-A4B-it-abliterated-Q8KV` | turbo4 | 99 | 22.831 | 0 | 54.11 | 0 | ✅ |
 | `Ministral-3-14B-Reasoning-2512` | turbo4 | 99 | — | — | — | — | ❌ OOM (KV-cache / VRAM) |
-| `Ornith-1.0-35B` | turbo4 | 99 | — | — | — | — | ❌ GGUF laad-fout (corrupt/truncated?) |
 | `Phi-4-reasoning-plus` | f16 | 99 | 70.421 | 33.001 | 23.33 | 8.2 | ✅ |
 | `Qwen3-30B-A3B-Thinking-2507` | turbo4 | 99 | — | — | — | — | ❌ OOM (KV-cache / VRAM) |
 | `Qwen3.6-35B-A3B-HauhauCS-Aggressive` | turbo4 | 99 | 43.914 | 0 | 85.0 | 0 | ✅ |
@@ -25,7 +24,6 @@ Speed measurements for every local model in `config/models.yaml` served through 
 | `Qwen3.6-35B-A3B-HauhauCS-Aggressive-Turbo4` | turbo4 | 99 | 13.275 | 0 | 81.48 | 0 | ✅ |
 | `Step3-VL-10B` | turbo4 | 99 | — | — | — | — | ❌ OOM (KV-cache / VRAM) |
 | `gemma-4-E4B-it-uncensored` | f16 | 99 | 17.262 | 0 | 70.49 | 0 | ✅ |
-| `google-gemma-4-12B-it-qat-q4_0-GPU1` | turbo4 | 99 | — | — | — | — | ❌ OOM (KV-cache / VRAM) |
 | `granite-4.1-8b` | turbo4 | 99 | 27.133 | 0.145 | 30.97 | 269.6 | ✅ |
 | `llama3.2-3b` | f16 | 99 | 10.906 | 0.127 | 126.27 | 520.1 | ✅ |
 | `qwen3.8-27b` | turbo4 | 99 | 23.957 | 9.067 | 63.68 | 9.2 | ✅ |
@@ -63,12 +61,6 @@ Speed measurements for every local model in `config/models.yaml` served through 
 - path: `/home/flip/models/Ministral-3-14B-Reasoning-2512-Q8_0.gguf`
 - ngl: 99, kv_type: `turbo4`
 - **status: FAILED — OOM (KV-cache, ctx=262144 + Q8 weights op device 0; cudaMalloc failed 5016 MiB)**
-
-### `Ornith-1.0-35B`
-
-- path: `/home/flip/models/Ornith-1.0-35B-Q4_K_M.gguf`
-- ngl: 99, kv_type: `turbo4`
-- **status: FAILED — GGUF laad-fout (geen OOM; llama_model_loader: failed to load model — bestand mogelijk corrupt/truncated)**
 
 ### `Phi-4-reasoning-plus`
 
@@ -153,12 +145,6 @@ Speed measurements for every local model in `config/models.yaml` served through 
 - median gen speed: **70.49 tok/s**
 - median prompt eval: **0 tok/s**
 - all runs gen tok/s: 70.49, 70.61, 65.39
-
-### `google-gemma-4-12B-it-qat-q4_0-GPU1`
-
-- path: `/home/flip/models/gemma-4-12b-it-qat-q4_0.gguf`
-- ngl: 99, kv_type: `turbo4`
-- **status: FAILED — OOM (klasse VRAM-fit failure, common_fit_params)**
 
 ### `granite-4.1-8b`
 

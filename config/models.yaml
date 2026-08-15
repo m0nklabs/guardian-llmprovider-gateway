@@ -72,18 +72,6 @@ models:
     kv_type: turbo4
     tensor_split: "0.45,0.55"
     mmproj: /home/flip/models/mmproj-Step3-VL-10B-F16.gguf
-  Ornith-1.0-35B:
-    path: /home/flip/models/Ornith-1.0-35B-Q4_K_M.gguf
-    total_layers: 40
-    benchmark_context_limit: 262144
-    context: 262144
-    ngl: 99
-    kv_type: turbo4
-    tensor_split: "0.42,0.58"
-    mmproj: /home/flip/models/mmproj-Ornith-1.0-35B-bf16.gguf
-    vision_context: 262144
-    vision_ngl: 99
-    vision_tensor_split: "0.42,0.58"
 
   # --- Gemma 4 ---
   Huihui-gemma-4-26B-A4B-it-abliterated:
@@ -122,18 +110,6 @@ models:
     vision_context: 262144
     vision_ngl: 99
     vision_tensor_split: "0.36,0.64"
-  google-gemma-4-12B-it-qat-q4_0-GPU1:
-    path: /home/flip/models/gemma-4-12b-it-qat-q4_0.gguf
-    total_layers: 48
-    benchmark_context_limit: 131072
-    context: 131072
-    ngl: 99
-    kv_type: turbo4
-    cuda_visible_devices: "1"
-    mmproj: /home/flip/models/mmproj-gemma-4-12b-it-qat-q4_0.gguf
-    extra_args: "--main-gpu 1 -sm none --flash-attn on"
-    vision_context: 131072
-    vision_ngl: 99
   gemma-4-E4B-it-uncensored:
     path: /home/flip/models/gemma-4-E4B-it-uncensored-Q4_K_M.gguf
     total_layers: 42
@@ -217,26 +193,6 @@ models:
     draft_cache_type_v: f16
     extra_args: "--flash-attn on --parallel 1 --batch-size 256 --ubatch-size 128 --reasoning on --reasoning-format deepseek --reasoning-budget -1 --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0"
 
-  # --- poolside Laguna-S-2.1 (118B MoE, 57.6 GB in 3 shards) ---
-  # ngl 16: 32/48 layers CPU-offload -> 0.12 tok/s gen; DFlash draft doubles
-  # that to 0.24 tok/s (acceptance 0.167 pays off because decode is DDR4-bound).
-  # ctx capped at 32768: larger KV does not fit alongside 16 GPU layers + draft.
-  # .env sets TURBO_AUTO_ASYMMETRIC=0 for pure turbo4 K (skips K->q8_0 upgrade).
-  laguna-s-2.1-ud-iq4_xs-160k-tq4:
-    path: /home/flip/models/Laguna-S-2.1-UD-IQ4_XS-00001-of-00003.gguf
-    total_layers: 48
-    benchmark_context_limit: 262144
-    context: 32768
-    ngl: 16
-    kv_type: turbo4
-    tensor_split: "0.42,0.58"
-    draft_model_path: /home/flip/models/laguna-s-2.1-DFlash-BF16.gguf
-    spec_type: draft-dflash
-    spec_draft_n_max: 12
-    spec_draft_n_min: 2
-    draft_cache_type_k: f16
-    draft_cache_type_v: f16
-
   # --- Granite (IBM Granite-4.1-8B instruct, Unsloth GGUF) ---
   # UD-Q8_K_XL dynamic quant (original HF filename). TurboQuant turbo4 KV
   # probed COMPATIBLE (see worker report) but kv_type stays f16 as safe
@@ -293,21 +249,15 @@ aliases:
   qwen3.6-35b-dflash-turbo4: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-DFlash-Turbo4"
   qwen3.6-35b-q8kv: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Q8KV"
   qwen3.6-35b-uncensored-q8kv: "Qwen3.6-35B-A3B-HauhauCS-Aggressive-Q8KV"
-  ornith: "Ornith-1.0-35B"
   phi4: "Phi-4-reasoning-plus"
   ministral: "Ministral-3-14B-Reasoning-2512"
   gemma4: "Huihui-gemma-4-26B-A4B-it-abliterated-Q8KV"
   gemma4-26b: "Huihui-gemma-4-26B-A4B-it-abliterated-Q8KV"
   gemma4-26b-qat: "unsloth-gemma-4-26B-A4B-it-qat-UD-Q4_K_XL-Q8KV"
   gemma4-26b-qat-q8kv: "unsloth-gemma-4-26B-A4B-it-qat-UD-Q4_K_XL-Q8KV"
-  gemma4-12b: "google-gemma-4-12B-it-qat-q4_0-GPU1"
-  gemma4-12b-qat: "google-gemma-4-12B-it-qat-q4_0-GPU1"
-  gemma4-12b-gpu1: "google-gemma-4-12B-it-qat-q4_0-GPU1"
   gemma4-e4b: "gemma-4-E4B-it-uncensored"
   step3-vl: "Step3-VL-10B"
   llama3: "llama3.2-3b"
-  laguna-s-2.1: "laguna-s-2.1-ud-iq4_xs-160k-tq4"
-  laguna: "laguna-s-2.1-ud-iq4_xs-160k-tq4"
 
 # === Guardian Security Config ===
 guardian:
