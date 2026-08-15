@@ -262,12 +262,17 @@ def write_doc(results: dict[str, Any], entries: list[dict[str, Any]]) -> None:
         if r and "error" in r:
             return (1, 0.0, name)
         return (2, 0.0, name)
-    for name in sorted(by_name.keys(), key=_table_sort_key):
+    # Iterate over the UNION of configured models and all completed benchmarks
+    # in state.json. This ensures `--only` runs don't erase other models' results
+    # from the doc — every benchmarked model is always shown, plus any configured-
+    # but-unbenchmarked model shows as pending.
+    all_names = set(by_name.keys()) | set(results.get("completed", {}).keys())
+    for name in sorted(all_names, key=_table_sort_key):
         r = results["completed"].get(name)
         if not r:
             lines.append(f"| `{name}` | — | — | — | — | — | — | pending |")
             continue
-        cfg = by_name[name]
+        cfg = by_name.get(name, {})
         kv = cfg.get("kv_type", "—")
         ngl = cfg.get("ngl", "—")
         if "error" in r:
@@ -310,14 +315,14 @@ def write_doc(results: dict[str, Any], entries: list[dict[str, Any]]) -> None:
     lines.append("")
     lines.append("## Per-model detail")
     lines.append("")
-    for name in sorted(by_name.keys()):
+    for name in sorted(set(by_name.keys()) | set(results.get("completed", {}).keys())):
         r = results["completed"].get(name)
         if not r:
             # pending (never attempted) — still list config
             lines.append(f"### `{name}`")
             lines.append("")
-            lines.append(f"- path: `{by_name[name].get('path', '—')}`")
-            lines.append(f"- ngl: {by_name[name].get('ngl', '—')}, kv_type: `{by_name[name].get('kv_type', 'f16')}`")
+            lines.append(f"- path: `{by_name.get(name, {}).get('path', '—')}`")
+            lines.append(f"- ngl: {by_name.get(name, {}).get('ngl', '—')}, kv_type: `{by_name.get(name, {}).get('kv_type', 'f16')}`")
             lines.append("- status: **pending (not benchmarked this run)**")
             lines.append("")
             continue
@@ -325,17 +330,17 @@ def write_doc(results: dict[str, Any], entries: list[dict[str, Any]]) -> None:
             # failed — document config + diagnosis so the failure is actionable
             lines.append(f"### `{name}`")
             lines.append("")
-            lines.append(f"- path: `{by_name[name].get('path', '—')}`")
-            lines.append(f"- ngl: {by_name[name].get('ngl', '—')}, kv_type: `{by_name[name].get('kv_type', 'f16')}`")
+            lines.append(f"- path: `{by_name.get(name, {}).get('path', '—')}`")
+            lines.append(f"- ngl: {by_name.get(name, {}).get('ngl', '—')}, kv_type: `{by_name.get(name, {}).get('kv_type', 'f16')}`")
             lines.append(f"- **status: FAILED — {r['error']}**")
             lines.append("")
             continue
         lines.append(f"### `{name}`")
         lines.append("")
-        lines.append(f"- path: `{by_name[name].get('path', '—')}`")
-        lines.append(f"- mmproj: `{by_name[name].get('mmproj', '—')}`" if by_name[name].get("mmproj") else "- mmproj: none")
-        lines.append(f"- ngl: {by_name[name].get('ngl', '—')}, tensor_split: `{by_name[name].get('tensor_split', '—')}`, kv_type: `{by_name[name].get('kv_type', 'f16')}`")
-        lines.append(f"- extra_args: `{by_name[name].get('extra_args', '—')}`")
+        lines.append(f"- path: `{by_name.get(name, {}).get('path', '—')}`")
+        lines.append(f"- mmproj: `{by_name.get(name, {}).get('mmproj', '—')}`" if by_name.get(name, {}).get("mmproj") else "- mmproj: none")
+        lines.append(f"- ngl: {by_name.get(name, {}).get('ngl', '—')}, tensor_split: `{by_name.get(name, {}).get('tensor_split', '—')}`, kv_type: `{by_name.get(name, {}).get('kv_type', 'f16')}`")
+        lines.append(f"- extra_args: `{by_name.get(name, {}).get('extra_args', '—')}`")
         lines.append(f"- load+switch (first run): **{r.get('load_switch_s', '—')} s**")
         lines.append(f"- median TTFT: **{r.get('ttft_s', '—')} s**")
         lines.append(f"- median gen speed: **{r.get('gen_tps', '—')} tok/s**")
@@ -363,7 +368,8 @@ def main() -> int:
         print("ERROR: set GUARDIAN_KEY or pass --key", file=sys.stderr)
         return 2
 
-    entries = load_model_entries()
+    all_entries = load_model_entries()
+    entries = all_entries
     if args.only:
         wanted = {s.strip() for s in args.only.split(",") if s.strip()}
         entries = [e for e in entries if e["name"] in wanted]
@@ -423,7 +429,7 @@ def main() -> int:
                     "n_predict": args.n_predict,
                 }
                 save_state(state)
-                write_doc(state, entries)
+                write_doc(state, all_entries)
                 errored = True
                 break
             if "error" in res:
@@ -433,7 +439,7 @@ def main() -> int:
                     "n_predict": args.n_predict,
                 }
                 save_state(state)
-                write_doc(state, entries)
+                write_doc(state, all_entries)
                 errored = True
                 break
             print(
@@ -461,12 +467,12 @@ def main() -> int:
         }
         state["finished_at"] = datetime.now(timezone.utc).isoformat()
         save_state(state)
-        write_doc(state, entries)
+        write_doc(state, all_entries)
         # Let Guardian unload / release VRAM before the next model.
         print("  waiting 20s for VRAM release before next model...", flush=True)
         time.sleep(20)
 
-    write_doc(state, entries)
+    write_doc(state, all_entries)
     print(f"\n=== DONE — results in {DOC_FILE} ===", flush=True)
     print(f"State: {STATE_FILE}", flush=True)
     return 0
