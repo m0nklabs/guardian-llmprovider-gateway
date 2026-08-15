@@ -21,6 +21,16 @@
         .progress-bar { background: linear-gradient(90deg, #06b6d4, #38bdf8); height: 100%; border-radius: 9999px; }
         .sparkline-shell { position: relative; height: 7rem; min-height: 7rem; max-height: 7rem; }
         .sparkline-shell canvas { width: 100% !important; height: 100% !important; display: block; }
+
+        /* Fixed overlays — explicit CSS instead of Tailwind utilities (the
+           bundled tailwind.min.css omits inset-0 / bottom-6 / right-6, which
+           left position:fixed elements stranded at their static position). */
+        #dash-key-modal { position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 50; display: flex; align-items: center; justify-content: center; background: rgba(0, 0, 0, 0.6); padding: 1rem; }
+        #dash-key-modal.hidden { display: none; }
+        #copy-toast { position: fixed; bottom: 1.5rem; right: 1.5rem; z-index: 50; }
+        #copy-toast.hidden { display: none; }
+        #new-key-toast { position: fixed; bottom: 1.5rem; right: 1.5rem; z-index: 50; }
+        #new-key-toast.hidden { display: none; }
     </style>
 </head>
 <body class="p-6">
@@ -537,7 +547,7 @@
             </div>
 
             <!-- New key display (toast) -->
-            <div id="new-key-toast" class="hidden fixed bottom-6 right-6 p-4 bg-emerald-900 border border-emerald-600 rounded-lg shadow-xl z-50" style="max-width: 400px;">
+            <div id="new-key-toast" class="hidden p-4 bg-emerald-900 border border-emerald-600 rounded-lg shadow-xl" style="max-width: 400px;">
                 <div class="text-sm text-emerald-300 mb-1 font-semibold">✓ New key generated — click to copy:</div>
                 <div class="text-sm font-mono text-white break-all cursor-pointer" id="new-key-toast-value" onclick="copyToClipboard(this.textContent, 'Key copied!')"></div>
                 <button class="text-xs text-slate-400 mt-2" onclick="document.getElementById('new-key-toast').classList.add('hidden')">Close</button>
@@ -546,8 +556,8 @@
     </div>
 
     <!-- Dashboard auth modal (commit 7472d61: Bearer required on /api/*) -->
-    <div id="dash-key-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-        <div class="card w-full max-w-md">
+    <div id="dash-key-modal" class="hidden">
+        <div class="card w-full" style="max-width: 28rem;">
             <h2 class="text-xl font-bold text-white mb-2">🔑 Guardian Dashboard Key</h2>
             <p class="text-sm text-slate-400 mb-4" id="dash-key-modal-msg">Paste a Guardian API key to authorize the dashboard. Stored locally in your browser only.</p>
             <input class="control-input w-full mb-3" id="dash-key-input" type="password" placeholder="flip_…  (Guardian API key)" autocomplete="off">
@@ -560,7 +570,7 @@
     </div>
 
     <!-- Copy toast -->
-    <div id="copy-toast" class="hidden fixed bottom-6 right-6 px-4 py-2 bg-cyan-900 border border-cyan-500 rounded-lg shadow-xl z-50 text-sm text-cyan-100"></div>
+    <div id="copy-toast" class="hidden px-4 py-2 bg-cyan-900 border border-cyan-500 rounded-lg shadow-xl text-sm text-cyan-100"></div>
 
     <script>
         // ── Dashboard auth (commit 7472d61: dashboard bound to 127.0.0.1, Bearer on /api/*) ──
