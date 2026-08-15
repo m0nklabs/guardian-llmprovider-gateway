@@ -1,0 +1,206 @@
+{
+  "spec_id": "guardian-gcd-grammar-constrained-decoding",
+  "title": "Grammar-Constrained Decoding (GCD) — first-class Guardian option",
+  "purpose": "Add Grammar-Constrained Decoding (GBNF / JSON-schema / response_format) as a documented, first-class option in Guardian. Primary consumer: the Keanu Factory distill pipeline, which needs strict structured JSON output from LLMs. Today the local OpenAI path passes a `grammar` field through to llama-server unmodified (body is forwarded 1:1), but this is undocumented, breaks on cloud routes, is missing on the Ollama bridge, and has no per-model toggle. Make it correct, documented, and configurable.",
+  "repo": "llama_cpp_guardian",
+  "consumer_context": {
+    "who": "Keanu Factory (Route 2 distill pipeline, /home/flip/keanu-factory)",
+    "why": "Distill needs guaranteed-JSON output from local models. Without GCD, distill yields invalid JSON ~5-15% of the time and depends on brittle regex parsing.",
+    "how_called": "Keanu constructs OpenAI-format requests with `response_format: {type: \"json_schema\", json_schema: {...}}` (OpenAI-native structured output) OR a `grammar` GBNF string, POSTed to Guardian /v1/chat/completions."
+  },
+  "current_state": {
+    "local_openai_path": {
+      "status": "WORKS_UNDOCUMENTED",
+      "evidence": "app/gateway/routing.py forwards request body 1:1 to llama-server via `content=body` on lines ~634, ~652, ~879, ~896. No field allowlist strips `grammar`/`json_schema`/`response_format`.",
+      "gap": "Officially unsupported — clients/passing grammar may break on a future code change that begins to normalize/whitelist body fields. Must be guaranteed by a test + explicit pass-through contract."
+    },
+    "local_ollama_bridge": {
+      "status": "BROKEN",
+      "evidence": "app/local_inference/ollama.py builds `openai_body` on lines ~195-203 from explicit fields (model, messages, stream, options). Ollama clients send structured output via `options.format` (a JSON schema map) but this is NOT mapped to llama-server's `grammar`/`json_schema`. The field is silently dropped.",
+      "fix": "Map Ollama `body.options.format` → `openai_body['response_format']` (if it is a JSON-schema dict) and → `openai_body['grammar']` only if a GBNF string is supplied."
+    },
+    "cloud_path": {
+      "status": "WRONG",
+      "evidence": "app/cloud_inference/forwarding.py forwards the raw body. If the client sends `grammar: \"root ::= ...\"`, OpenRouter/NVIDIA/OpenAI will either 400, silently ignore it, or (OpenAI) accept only their own `response_format` JSON-schema form. GBNF strings on cloud routes are never valid.",
+      "fix": "Strip `grammar` from cloud-bound bodies. If `grammar`/`response_format` targets JSON, convert to the OpenAI-native `response_format: {type: \"json_schema\", json_schema: {...}}`. If non-JSON grammar + cloud model, return a clear 400 naming the provider limitation."
+    },
+    "anthropic_bridge": {
+      "status": "N/A_BY_NATURE",
+      "evidence": "Anthropic /v1/messages has no GBNF equivalent; structured output goes via `tools` (tool_use). Out of scope for this spec."
+    },
+    "capture": {
+      "status": "NO_FIELD",
+      "evidence": "app/capture/schema.py has no grammar field. Capture is policy-aware.",
+      "fix": "Add a `grammar_present: bool` metadata flag only (NOT the grammar itself — grammar content may encode sensitive structure). Treat the raw grammar string as `strip` by default in policy, same tier as `response_format`."
+    },
+    "config": {
+      "status": "NO_TOGGLE",
+      "evidence": "config/models.yaml and config/settings.yaml have no grammar-related keys.",
+      "fix": "Add per-model `grammar_decoding` capability flag + a global toggle."
+    },
+    "docs": {
+      "status": "ABSENT",
+      "evidence": "grep -rni 'grammar|gbnf|constrained' app/ config/ docs/ → 0 hits.",
+      "fix": "Document the API, the per-model toggle, and the cloud limitation."
+    }
+  },
+  "design_principles": [
+    "Local OpenAI path stays a transparent pass-through — Guardian must NOT whitelist body fields and break future llama-server fields. A regression test pins this.",
+    "Cloud routes STRIP GBNF (provider-invalid) but ACCEPT OpenAI-native response_format. Optional auto-conversion from JSON-targeting GBNF to response_format.",
+    "Config is opt-in per model. Local models default enabled; cloud models default disabled (provider semantics differ).",
+    "No new hardcoded literals (see AGENTS.md rule). All default values, toggle names, and error messages go through settings.yaml / config_loader.py.",
+    "Deployment invariant: NO restart required for docs-only changes, but a restart IS required for config_loader / models.yaml / code changes (see AGENTS.md). All code changes run through scripts/pre_restart_check.py before any restart."
+  ],
+  "wire_formats": {
+    "supported_request_fields": [
+      {"name": "response_format", "type": "object {type: str, json_schema?: object}", "scope": "openai-compat local + ALL cloud (OpenAI-native), ollama-via-mapping", "notes": "Standard OpenAI structured-output field. Pass through to llama-server on local; forward-as-is on cloud."},
+      {"name": "json_schema", "type": "object or string (GBNF schema spec)", "scope": "local only (llama-server accepts both schema-dict and GBNF-slotted form)", "notes": "llama-server accepts this field directly. Strip on cloud."},
+      {"name": "grammar", "type": "string (GBNF)", "scope": "local only", "notes": "Raw GBNF grammar string. Pass through to llama-server. Strip on cloud (unless auto-convert enabled and grammar targets JSON)."}
+    ],
+    "ollama_client_convention": {
+      "field": "options.format",
+      "form": "either {'type':'object','properties':{...}} (JSON schema — map to response_format) or a GBNF string (map to grammar)",
+      "notes": "Map in app/local_inference/ollama.py when constructing openai_body."
+    }
+  },
+  "implementation": [
+    {
+      "id": "FEAT-1",
+      "title": "Pin local OpenAI passthrough contract with a regression test",
+      "files": ["tests/unit/test_server.py (or new tests/unit/test_grammar_passthrough.py)"],
+      "what": "Write a test that POSTs to /v1/chat/completions on a mocked llama-server with body containing `response_format`, `json_schema`, AND `grammar` fields, and asserts the forwarded request body contains ALL THREE fields byte-identical to the input. This locks in the no-whitelist contract so a future change cannot silently break Keanu.",
+      "acceptance": "Test passes on current code (proving passthrough already works) AND fails if any body-normalization step strips an unknown field (mutation-tested)."
+    },
+    {
+      "id": "FEAT-2",
+      "title": "Fix Ollama bridge: map options.format to response_format/grammar",
+      "files": ["app/local_inference/ollama.py"],
+      "what": [
+        "In chat_ollama (around line 194 where options = body.get('options', {})) and generate_ollama (around line 325), read options.format.",
+        "If options.format is a dict -> set openai_body['response_format'] = options.format (JSON schema path).",
+        "If options.format is a string -> set openai_body['grammar'] = options.format (GBNF path).",
+        "Do NOT shadow an explicit response_format/grammar in body if already present (client intent wins).",
+        "Add unit tests: (a) options.format dict maps to response_format, (b) options.format string maps to grammar, (c) top-level response_format is not overwritten by options.format when both present."
+      ],
+      "acceptance": "An Ollama /api/chat request with options.format reaches llama-server with response_format set; new tests pass."
+    },
+    {
+      "id": "FEAT-3",
+      "title": "Cloud grammar stripping + JSON-schema auto-conversion in forwarding",
+      "files": ["app/cloud_inference/forwarding.py"],
+      "what": [
+        "Before forwarding the body to a cloud provider, call a new helper _strip_cloud_grammar(body, *, allow_json_convert) that returns a new body dict.",
+        "If body has `grammar` (GBNF string): pop it. If allow_json_convert is true AND the cfg.enabled setting grammar.cloud_auto_convert_json is true AND the GPU grammar parses as JSON-proxyable, emit body['response_format'] = {type: 'json_schema', json_schema: <derived>}. Otherwise drop the field and log a warning (do NOT 500 unless strict_mode).",
+        "If body has `json_schema` (non-OpenAI-native form): pop it and (if allow_json_convert) convert to response_format.",
+        "response_format (OpenAI-native) is preserved as-is on cloud.",
+        "New config setting (settings.yaml): grammar.cloud_auto_convert_json: false (default) and grammar.cloud_strict_mode: false (default).",
+        "Add unit tests: (1) grammar stripped from cloud body, (2) response_format preserved on cloud, (3) when cloud_auto_convert_json is true a JSON GBNF becomes response_format, (4) in strict_mode=true an unsupported grammar on a cloud model returns HTTP 400 with an error naming the provider."
+      ],
+      "acceptance": "POST /v1/chat/completions with body.grammar to a guardian/openrouter/... model no longer forwards the GBNF string; tests pass."
+    },
+    {
+      "id": "FEAT-4",
+      "title": "Per-model capability flag in models.yaml + config_loader accessor",
+      "files": ["config/models.yaml", "app/config_loader.py", "app/local_inference/models.py"],
+      "what": [
+        "Add optional per-model key in models.yaml: `grammar_decoding: true|false` (defaults: true for local, false for cloud routes). This is a hint for the dashboard / docs and gates the GraMMAR STripping behavior is gated by this + global grammar.enabled.",
+        "Add global toggle in settings.yaml: `grammar.enabled: true` (default), `grammar.cloud_auto_convert_json: false` (default), `grammar.cloud_strict_mode: false` (default), `grammar.validate_gbnf: false` (default — GBNF parsing is optional).",
+        "Add typed accessors in config_loader.py: get_grammar_enabled(), get_grammar_cloud_auto_convert_json(), get_grammar_cloud_strict_mode(), get_grammar_validate_gbnf().",
+        "When grammar.enabled is false at the process level, ALL grammars are stripped on BOTH local and cloud paths (kill-switch for emergency response)."
+      ],
+      "acceptance": "config_loader returns new fields with defaults when unset; existing tests still pass."
+    },
+    {
+      "id": "FEAT-5",
+      "title": "Optional GBNF pre-validation in normalization",
+      "files": ["app/gateway/normalization.py"],
+      "what": [
+        "When config.grammar.validate_gbnf is true, attempt to parse the `grammar` field's GBNF. On parse error, raise HTTPException(400) with a clear message: 'Invalid GBNF grammar: <detail>'.",
+        "Do NOT validate when flag is false (default) — defer to llama-server's parser.",
+        "If no GBNF parser is importable, skip silently and log (fail-open).",
+        "tests: (1) valid GBNF passes through unchanged, (2) invalid GBNF returns 400 with detail only when flag is true, (3) no-op when flag false."
+      ],
+      "acceptance": "Erroneous grammars return a clean 400 instead of a raw llama-server error."
+    },
+    {
+      "id": "FEAT-6",
+      "title": "Capture grammar_present flag (no grammar content)",
+      "files": ["app/capture/schema.py", "app/capture/policy.py", "app/gateway/capture_dispatch.py"],
+      "what": [
+        "Add metadata field `grammar_present: bool` and `response_format_present: bool` to the capture event schema (NO raw grammar or schema content — treated as sensitive structure).",
+        "Default policy: grammar content is `strip` (same tier as response_format).",
+        "In capture_dispatch (request_received path), set grammar_present = 'grammar' in json_body or 'response_format' in json_body or 'json_schema' in json_body.",
+        "tests: events reflect the boolean without leaking content."
+      ],
+      "acceptance": "Capture events expose the flag; secrets/canaries tests still pass."
+    },
+    {
+      "id": "FEAT-7",
+      "title": "Documentation",
+      "files": ["docs/API_REFERENCE.md", "docs/LLM_ROUTER.md", "AGENTS.md"],
+      "what": [
+        "docs/API_REFERENCE.md: new section 'Grammar-Constrained Decoding' (see content_template below).",
+        "docs/LLM_ROUTER.md: note that cloud routes strip GBNF and (optionally) auto-convert JSON grammars to response_format, citing the config keys.",
+        "AGENTS.md: add a Critical rule summary in the Skills/index and an entry to the Active Handoff describing the feature, the FEAT ids implemented, and the config keys."
+      ],
+      "content_template": [
+        "# Grammar-Constrained Decoding (GCD)",
+        "",
+        "Guardian supports three structured-output fields, mapped to llama-server on the local path and to OpenAI-provider conventions on cloud routes.",
+        "",
+        "## Request fields",
+        "| Field | Type | Local | Cloud (OpenRouter/NVIDIA/OpenAI/Google) |",
+        "| --- | --- | --- | --- |",
+        "| response_format | {type, json_schema} | pass-through (OpenAI-native) | pass-through (provider-native) |",
+        "| json_schema | dict / GBNF schema | pass-through | stripped, optional JSON conversion |",
+        "| grammar | string (GBNF) | pass-through | stripped, optional JSON conversion |",
+        "",
+        "## Ollama protocols (/api/chat, /api/generate)",
+        "Ollama clients send `options.format`. Guardian maps a dict value to `response_format` and a string value to `grammar` before forwarding to llama-server.",
+        "",
+        "## Config",
+        "- settings.yaml: grammar.enabled (default true), grammar.cloud_auto_convert_json (default false), grammar.cloud_strict_mode (default false), grammar.validate_gbnf (default false).",
+        "- models.yaml: optional per-model grammar_decoding: true|false.",
+        "",
+        "## Cloud limitation",
+        "Cloud providers (OpenRouter, NVIDIA, OpenAI, Google) do NOT accept GBNF grammar strings. By default they are stripped silently. Enable grammar.cloud_auto_convert_json:true to auto-convert a JSON-targeting grammar to a response_format JSON-schema; enable grammar.cloud_strict_mode:true to return 400 instead of stripping for non-JSON grammars on cloud models.",
+        "",
+        "## Example",
+        "```json",
+        "POST /v1/chat/completions",
+        "{",
+        "  \"model\": \"llama3.2-3b\",",
+        "  \"messages\": [...],",
+        "  \"response_format\": {\"type\": \"json_schema\", \"json_schema\": {\"name\": \"distill_record\", \"schema\": {\"type\": \"object\", \"properties\": {\"answer\": {\"type\": \"string\"}}, \"required\": [\"answer\"]}}}",
+        "}",
+        "```"
+      ],
+      "acceptance": "Docs readable, examples validate against actual Guardian behavior (test pairs exist)."
+    }
+  ],
+  "verification_protocol": [
+    "py_compile all touched files: ./venv/bin/python -m py_compile app/**/*py",
+    "Run pre-restart gate: ./venv/bin/python scripts/pre_restart_check.py — all 4 gates MUST pass before any restart.",
+    "Full unit suite: ./venv/bin/python -m pytest tests/ -x — no regressions (current baseline 893+ passed).",
+    "New FEAT tests pass individually: pytest tests/unit/test_grammar_passthrough.py tests/unit/test_grammar_cloud_stripping.py tests/unit/test_ollama_grammar_mapping.py",
+    "Manual smoke (after operator restarts Guardian with operator present per Critical rule): curl /v1/chat/completions with response_format JSON-schema to a local model — output parses as valid JSON.",
+    "Manual smoke: same request to a guardian/openrouter/<cloud> model — response_format preserved, grammar (if any) stripped, no 400 unless strict_mode enabled.",
+    "Inspect capture event includes grammar_present:true and does NOT include grammar string."
+  ],
+  "critical_rules_compliance": {
+    "no_hardcoded_vars": "All default values, toggle names, and error strings come from settings.yaml or config_loader accessors — no literals in domain logic. (AGENTS.md rule)",
+    "agents_md_update": "AGENTS.md Active Handoff MUST be updated in the same session as the implementation (AGENTS.md rule).",
+    "restart_safety": "Code changes require a Guardian restart which drops the agent's own session. Implement, run pre_restart_check.py, then ask the operator to restart — DO NOT restart from inside the session. (AGENTS.md Critical rule)",
+    "pre_restart_gate": "Run scripts/pre_restart_check.py before every restart. All 4 gates (py_compile + pyflakes + signature check + pytest) MUST pass.",
+    "secrets": "No API keys in tests or docs. All mock bodies use fake values.",
+    "config_loader_pattern": "YAML is parsed ONCE per process (config_loader.py). Add accessors there — do not re-parse settings.yaml in domain modules."
+  },
+  "acceptance_summary": "GCD is a first-class, documented option: (1) local OpenAI passthrough is guaranteed by a regression test, (2) Ollama bridge maps options.format correctly, (3) cloud routes strip GBNF and optionally auto-convert JSON grammars, (4) per-model + global config toggles exist, (5) capture exposes only a presence flag, (6) docs explain the API and caveats, (7) all gates pass before restart.",
+  "out_of_scope": [
+    "Anthropic /v/messages structured output via tools (Anthropic has no GBNF).",
+    "GBNF authoring tooling or a grammar library — Guardian is a proxy, not an authoring surface.",
+    "Cloud GBNF execution (impossible by provider design).",
+    "Changing the local queue behavior — GCD does not affect scheduling."
+  ],
+  "report_back": "Provide: FEAT id list with status (implemented/skipped), files changed, diff highlights for the passthrough test + cloud stripping + Ollama mapping, pytest output counts, pre_restart_check.py result, and the exact config keys added."
+}

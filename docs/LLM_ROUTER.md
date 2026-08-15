@@ -310,6 +310,23 @@ model IDs through `GET /v1/models` or `GET /api/cloud/models`. Per-key
 `guardian/{provider}/{model}` routes backed by credentials in
 `config/cloud_keys.json` remain discoverable for linked Guardian keys.
 
+### Grammar-Constrained Decoding on cloud routes
+
+Cloud routes strip GBNF `grammar` strings and llama-server's non-OpenAI
+`json_schema` field (providers reject them). OpenAI-native `response_format`
+is preserved as-is. Optional behavior is controlled by the `grammar` block in
+[`config/settings.yaml`](../config/settings.yaml):
+
+- `grammar.cloud_auto_convert_json: true` — convert a JSON-targeting
+  grammar/schema to OpenAI `response_format` before forwarding.
+- `grammar.cloud_strict_mode: true` — return HTTP 400 naming the provider
+  instead of silently stripping.
+- `grammar.enabled: false` — global kill-switch; strips `grammar` and
+  `json_schema` on both local and cloud paths.
+
+See [API_REFERENCE.md](API_REFERENCE.md) → Grammar-Constrained Decoding for
+the full field semantics.
+
 ### Enabling / Disabling Providers
 
 Set `enabled: false` to disable a provider without removing its config:

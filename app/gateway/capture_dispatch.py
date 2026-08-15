@@ -103,6 +103,21 @@ def dispatch_capture_request_received(
     try:
         controller = get_capture_controller()
         client_fingerprint = capture_client_fingerprint(request, client_id)
+        # Grammar-Constrained Decoding presence flags (content is never
+        # stored — only whether a grammar/schema was requested).
+        params = request_parameters if isinstance(request_parameters, dict) else {}
+        # Ollama clients carry grammar/schema under ``options.format`` (not at the
+        # top level). Honor it for the presence flag — the content itself is
+        # stripped by `redact_request_parameters` before storage.
+        options_fmt = params.get("options")
+        options_dict = options_fmt if isinstance(options_fmt, dict) else {}
+        grammar_present = bool(
+            "grammar" in params
+            or "json_schema" in params
+            or "response_format" in params
+            or "format" in options_dict
+        )
+        response_format_present = bool("response_format" in params)
         return controller.maybe_capture_request_received(
             request_id=request_id,
             client_fingerprint=client_fingerprint,
@@ -114,6 +129,8 @@ def dispatch_capture_request_received(
             request_messages=request_messages,
             request_parameters=request_parameters,
             queue_wait_ms=queue_wait_ms,
+            grammar_present=grammar_present,
+            response_format_present=response_format_present,
         )
     except Exception:
         return None

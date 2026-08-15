@@ -144,6 +144,8 @@ class CaptureController:
         *,
         resolved_model: Optional[str] = None,
         duration_ms: Optional[float] = None,
+        grammar_present: bool = False,
+        response_format_present: bool = False,
     ) -> BuildContext:
         """Build a BuildContext from request metadata."""
         return BuildContext(
@@ -157,6 +159,8 @@ class CaptureController:
             client_fingerprint=client_fingerprint,
             resolved_model=resolved_model,
             duration_ms=duration_ms,
+            grammar_present=grammar_present,
+            response_format_present=response_format_present,
         )
 
     def maybe_capture_request_received(
@@ -172,6 +176,8 @@ class CaptureController:
         request_messages: Optional[List[Dict[str, Any]]] = None,
         request_parameters: Optional[Dict[str, Any]] = None,
         queue_wait_ms: Optional[float] = None,
+        grammar_present: bool = False,
+        response_format_present: bool = False,
         sequence: int = 0,
     ) -> Optional[PolicyResult]:
         """Evaluate policy and, if approved, dispatch a request_received event.
@@ -201,6 +207,8 @@ class CaptureController:
             request_id, endpoint, ingress_protocol, route_type,
             requested_model, client_fingerprint,
             resolved_model=resolved_model,
+            grammar_present=grammar_present,
+            response_format_present=response_format_present,
         )
 
         try:

@@ -30,6 +30,12 @@ def load_config() -> dict:
             "stream_close_timeout_seconds": 5,
         },
         "cloud_retry": RateLimitConfig().to_dict(),
+        "grammar": {
+            "enabled": True,
+            "cloud_auto_convert_json": False,
+            "cloud_strict_mode": False,
+            "validate_gbnf": False,
+        },
         "timeouts": {
             "tiers": {
                 "tier_70b": {"min_size_mb": 40000, "timeout_seconds": 3600},
@@ -51,6 +57,8 @@ def load_config() -> dict:
                 default_config["proxy"].update(file_config["proxy"])
             if "cloud_retry" in file_config:
                 default_config["cloud_retry"].update(file_config["cloud_retry"])
+            if "grammar" in file_config:
+                default_config["grammar"].update(file_config["grammar"])
             if "timeouts" in file_config:
                 default_config["timeouts"].update(file_config["timeouts"])
             if "failover_health" in file_config:
@@ -100,3 +108,33 @@ def load_queue_config(config: Optional[Dict[str, Any]] = None) -> dict:
     """Return the ``queue`` section of the configuration."""
     cfg = config if config is not None else CONFIG
     return cfg.get("queue", {}) or {}
+
+
+def load_grammar_config(config: Optional[Dict[str, Any]] = None) -> dict:
+    """Return the ``grammar`` section of the configuration.
+
+    Grammar-Constrained Decoding (GCD) controls. See docs/API_REFERENCE.md
+    for the full field semantics.
+    """
+    cfg = config if config is not None else CONFIG
+    return cfg.get("grammar", {}) or {}
+
+
+def get_grammar_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
+    """Return whether GCD is enabled process-wide (kill-switch)."""
+    return bool(load_grammar_config(config).get("enabled", True))
+
+
+def get_grammar_cloud_auto_convert_json(config: Optional[Dict[str, Any]] = None) -> bool:
+    """Return whether JSON-targeting grammars auto-convert to response_format on cloud."""
+    return bool(load_grammar_config(config).get("cloud_auto_convert_json", False))
+
+
+def get_grammar_cloud_strict_mode(config: Optional[Dict[str, Any]] = None) -> bool:
+    """Return whether cloud routes 400 on unsupported grammars instead of stripping."""
+    return bool(load_grammar_config(config).get("cloud_strict_mode", False))
+
+
+def get_grammar_validate_gbnf(config: Optional[Dict[str, Any]] = None) -> bool:
+    """Return whether GBNF grammars are pre-validated before local forwarding."""
+    return bool(load_grammar_config(config).get("validate_gbnf", False))

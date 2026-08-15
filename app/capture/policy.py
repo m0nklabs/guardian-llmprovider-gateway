@@ -136,6 +136,9 @@ def evaluate_capture_policy(
         "tool_results": config.tool_results,
         "images": config.images,
         "unknown_content_blocks": config.unknown_content_blocks,
+        # Grammar-Constrained Decoding: grammar/schema content is sensitive
+        # structure — strip by default (only presence flags are captured).
+        "structured_output": "strip",
     }
 
     try:

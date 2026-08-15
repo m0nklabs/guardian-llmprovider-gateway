@@ -287,6 +287,10 @@ class BuildContext:
     reasoning_content: Optional[str] = None
     finish_reason: Optional[str] = None
 
+    # Grammar-Constrained Decoding presence flags (content is never stored)
+    grammar_present: bool = False
+    response_format_present: bool = False
+
     def to_config(self) -> CaptureConfig:
         """Reconstruct a minimal CaptureConfig from known context."""
         return CaptureConfig(
@@ -321,6 +325,8 @@ def build_request_received_event(
     event["upstream_model"] = ctx.upstream_model
     event["provider"] = ctx.provider
     event["failover_group"] = ctx.failover_group
+    event["grammar_present"] = bool(ctx.grammar_present)
+    event["response_format_present"] = bool(ctx.response_format_present)
     if request_messages is not None:
         event["request_messages"] = _serialize_for_output(request_messages)
     if request_parameters is not None:

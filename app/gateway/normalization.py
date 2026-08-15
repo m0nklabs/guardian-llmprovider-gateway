@@ -25,6 +25,7 @@ logger = logging.getLogger("Guardian")
 
 # ── Module state ─────────────────────────────────────────────────────
 _VISION_PROBE_IMAGE_DATA_URL: Optional[str] = None
+_grammar_validate_gbnf = False
 
 # ── Injected (set once at startup by init()) ─────────────────────────
 _model_manager = None
@@ -32,12 +33,13 @@ _llama_server_url = None
 _queue_headers = None
 
 
-def init(*, model_manager, llama_server_url, queue_headers) -> None:
+def init(*, model_manager, llama_server_url, queue_headers, grammar_validate_gbnf=False) -> None:
     """Inject all dependencies. Called once at startup."""
-    global _model_manager, _llama_server_url, _queue_headers
+    global _model_manager, _llama_server_url, _queue_headers, _grammar_validate_gbnf
     _model_manager = model_manager
     _llama_server_url = llama_server_url
     _queue_headers = queue_headers
+    _grammar_validate_gbnf = grammar_validate_gbnf
 
 
 def messages_contain_image_input(messages: Any) -> bool:
@@ -106,6 +108,65 @@ def truncate_error_message(message: str, limit: int = 300) -> str:
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[: limit - 3] + "..."
+
+
+def _check_gbnf_structure(grammar: str) -> Optional[str]:
+    """Lightweight structural GBNF sanity check (fail-open, best effort).
+
+    Full GBNF parsing is deferred to llama-server; this catches the most
+    common malformed grammars: empty string, missing rule definition, and
+    unbalanced braces/brackets (ignoring double-quoted string literals).
+    """
+    if not isinstance(grammar, str) or not grammar.strip():
+        return "grammar is empty"
+    if "::=" not in grammar:
+        return "no rule definition found (expected 'root ::= ...')"
+    depth = {"{": 0, "[": 0}
+    in_string = False
+    for ch in grammar:
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch in depth:
+            depth[ch] += 1
+        elif ch == "}":
+            depth["{"] -= 1
+            if depth["{"] < 0:
+                return "unbalanced '}'"
+        elif ch == "]":
+            depth["["] -= 1
+            if depth["["] < 0:
+                return "unbalanced ']'"
+    if depth["{"] != 0:
+        return "unbalanced '{'"
+    if depth["["] != 0:
+        return "unbalanced '['"
+    return None
+
+
+def validate_grammar_field(json_body: Dict[str, Any]) -> Optional[JSONResponse]:
+    """Pre-validate a ``grammar`` field's GBNF syntax when configured.
+
+    Returns a 400 JSONResponse for invalid GBNF when
+    ``grammar.validate_gbnf`` is enabled; None otherwise (fail-open — a
+    missing parser never blocks inference).
+    """
+    if not _grammar_validate_gbnf:
+        return None
+    grammar = json_body.get("grammar")
+    if not isinstance(grammar, str) or not grammar.strip():
+        return None
+    error = _check_gbnf_structure(grammar)
+    if error is None:
+        return None
+    return openai_error_response(
+        status_code=400,
+        message=f"Invalid GBNF grammar: {error}",
+        error_type="invalid_request_error",
+        code="invalid_gbnf",
+    )
 
 
 def openai_error_response(

@@ -58,6 +58,9 @@ cloud_rate_limiter = None
 failover_health = None
 _GuardianRequestCancelled = None
 STREAM_HEARTBEAT_INTERVAL_S = 15.0
+_grammar_cloud_auto_convert_json = False
+_grammar_cloud_strict_mode = False
+_grammar_enabled = True
 
 
 def init(
@@ -90,6 +93,9 @@ def init(
     health_tracker,
     guardian_request_cancelled,
     stream_heartbeat_interval_s,
+    grammar_enabled=True,
+    grammar_cloud_auto_convert_json=False,
+    grammar_cloud_strict_mode=False,
 ) -> None:
     """Inject all dependencies. Called once at startup."""
     global _resolve_cloud_attempts, _prepare_cloud_candidate_request
@@ -106,6 +112,7 @@ def init(
     global _translate_openai_stream_to_anthropic
     global cloud_rate_limiter, failover_health, _GuardianRequestCancelled
     global STREAM_HEARTBEAT_INTERVAL_S
+    global _grammar_cloud_auto_convert_json, _grammar_cloud_strict_mode, _grammar_enabled
     _resolve_cloud_attempts = resolve_cloud_attempts
     _prepare_cloud_candidate_request = prepare_cloud_candidate_request
     _extract_cloud_response_content = extract_cloud_response_content
@@ -134,6 +141,47 @@ def init(
     failover_health = health_tracker
     _GuardianRequestCancelled = guardian_request_cancelled
     STREAM_HEARTBEAT_INTERVAL_S = stream_heartbeat_interval_s
+    _grammar_enabled = grammar_enabled
+    _grammar_cloud_auto_convert_json = grammar_cloud_auto_convert_json
+    _grammar_cloud_strict_mode = grammar_cloud_strict_mode
+
+
+def _derive_response_format_from_grammar(grammar: Any, json_schema: Any) -> Optional[Dict[str, Any]]:
+    """Convert a JSON-targeting grammar/schema to OpenAI-native response_format.
+
+    Returns ``None`` when the payload cannot be converted (a real GBNF
+    grammar string is not convertible without a full GBNF parser).
+    """
+    if isinstance(json_schema, dict):
+        return {"type": "json_schema", "json_schema": json_schema}
+    if isinstance(grammar, str):
+        try:
+            parsed = json.loads(grammar)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if isinstance(parsed, dict):
+            return {"type": "json_schema", "json_schema": parsed}
+    return None
+
+
+def _strip_cloud_grammar(body: Dict[str, Any], *, allow_json_convert: bool) -> Dict[str, Any]:
+    """Strip GBNF/llama-server-specific grammar fields from a cloud-bound body.
+
+    Cloud providers do not accept GBNF grammar strings or llama-server's
+    ``json_schema`` field. OpenAI-native ``response_format`` is preserved
+    as-is. When ``allow_json_convert`` is True, a JSON-targeting grammar
+    or schema is converted to the OpenAI-native ``response_format`` form.
+    """
+    if not isinstance(body, dict):
+        return body
+    stripped = dict(body)
+    grammar = stripped.pop("grammar", None)
+    json_schema = stripped.pop("json_schema", None)
+    if allow_json_convert and (grammar is not None or json_schema is not None):
+        converted = _derive_response_format_from_grammar(grammar, json_schema)
+        if converted is not None and "response_format" not in stripped:
+            stripped["response_format"] = converted
+    return stripped
 
 
 async def forward_to_cloud_provider(
@@ -177,6 +225,32 @@ async def forward_to_cloud_provider(
         client_id,
         requires_vision=requires_vision,
     )
+
+    # ── Grammar-Constrained Decoding (GCD): cloud path ──────────────
+    # Cloud providers do not accept GBNF grammar strings or llama-server's
+    # ``json_schema`` field. Strip them (or, in strict mode, reject the
+    # request outright). OpenAI-native ``response_format`` is preserved.
+    if "grammar" in json_body or "json_schema" in json_body:
+        # Kill-switch takes precedence over strict-mode and auto-convert: when
+        # ``grammar.enabled`` is false, strip unconditionally on both local and
+        # cloud paths (per settings.yaml) — never 400 in kill-switch mode.
+        if not _grammar_enabled:
+            json_body = _strip_cloud_grammar(json_body, allow_json_convert=False)
+        elif _grammar_cloud_strict_mode:
+            provider_name = attempts[0][0].name if attempts else "cloud provider"
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Grammar-Constrained Decoding is not supported by cloud provider "
+                    f"'{provider_name}'. Use OpenAI-native `response_format` instead, "
+                    f"or enable grammar.cloud_auto_convert_json for JSON-targeting grammars."
+                ),
+            )
+        else:
+            json_body = _strip_cloud_grammar(
+                json_body,
+                allow_json_convert=_grammar_cloud_auto_convert_json,
+            )
     cloud_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
 
     is_stream = bool(json_body.get("stream", False))

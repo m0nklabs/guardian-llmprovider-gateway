@@ -90,6 +90,8 @@ _stream_heartbeat_interval_s = None
 _model_manager = None
 _inference_queue = None
 _capture_controller = None
+_grammar_enabled = True
+_validate_grammar_field = None
 
 
 def init(
@@ -150,6 +152,8 @@ def init(
     model_manager,
     inference_queue,
     capture_controller,
+    grammar_enabled=True,
+    validate_grammar_field=None,
 ) -> None:
     """Inject all dependencies. Called once at startup."""
     _vars = [
@@ -187,6 +191,8 @@ def init(
     # underscore-prefixed param that does not map 1:1 via the loop above.
     globals()["_GuardianRequestCancelled"] = guardian_request_cancelled
     globals()["_get_model_timeout"] = get_model_timeout
+    globals()["_grammar_enabled"] = grammar_enabled
+    globals()["_validate_grammar_field"] = validate_grammar_field
 
 
 async def route_v1_post(path: str, request: Request, client_id: str):
@@ -352,6 +358,20 @@ async def route_v1_post(path: str, request: Request, client_id: str):
 
     _apply_anthropic_thinking_to_llama_params(json_body)
     _apply_request_reasoning_defaults(path, json_body, requested_model)
+
+    # ── Grammar-Constrained Decoding (GCD): local path ──────────────
+    # Kill-switch: when grammar.enabled=false, strip llama-server-specific
+    # grammar fields so no GCD reaches the backend.
+    if not _grammar_enabled:
+        json_body.pop("grammar", None)
+        json_body.pop("json_schema", None)
+    # Optional GBNF pre-validation (fail-open, off by default).
+    _grammar_error = None
+    if _validate_grammar_field is not None:
+        _grammar_error = _validate_grammar_field(json_body)
+    if _grammar_error is not None:
+        return _grammar_error
+
     if path in ("chat/completions", "messages"):
         json_body["messages"] = _sanitize_messages_for_qwen_chat_template(
             json_body.get("messages", [])

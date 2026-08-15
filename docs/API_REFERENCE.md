@@ -648,6 +648,66 @@ Representative response:
 
 Current implementation scans `~/llama_slots` for `*.bin` files.
 
+## Grammar-Constrained Decoding (GCD)
+
+Guardian supports three structured-output fields, mapped to llama-server on the
+local path and to OpenAI-provider conventions on cloud routes.
+
+### Request fields
+
+| Field | Type | Local | Cloud (OpenRouter/NVIDIA/OpenAI/Google) |
+| --- | --- | --- | --- |
+| `response_format` | `{type, json_schema}` | pass-through (OpenAI-native) | pass-through (provider-native) |
+| `json_schema` | dict / GBNF schema | pass-through | stripped, optional JSON conversion |
+| `grammar` | string (GBNF) | pass-through | stripped, optional JSON conversion |
+
+### Ollama protocols (/api/chat, /api/generate)
+
+Ollama clients send `options.format`. Guardian maps a dict value to
+`response_format` and a string value to `grammar` before forwarding to
+llama-server. Client's explicit top-level `response_format`/`grammar` in the
+request body wins over `options.format`.
+
+### Config
+
+- `config/settings.yaml` → `grammar`:
+  - `enabled` (default `true`) — kill-switch: when `false`, `grammar` and
+    `json_schema` are stripped on BOTH local and cloud paths.
+  - `cloud_auto_convert_json` (default `false`) — convert a JSON-targeting
+    grammar/schema to OpenAI `response_format` on cloud routes.
+  - `cloud_strict_mode` (default `false`) — return HTTP 400 (naming the
+    provider) instead of silently stripping an unsupported grammar on cloud.
+  - `validate_gbnf` (default `false`) — pre-validate GBNF syntax before
+    forwarding to llama-server (fail-open; structural checks only).
+- `config/models.yaml` → optional per-model `grammar_decoding: true|false`
+  (advisory capability hint only; not consumed by runtime routing logic. The
+  global `grammar.enabled` kill-switch is the enforced control.)
+
+### Cloud limitation
+
+Cloud providers (OpenRouter, NVIDIA, OpenAI, Google) do NOT accept GBNF
+grammar strings. By default they are stripped silently. Enable
+`grammar.cloud_auto_convert_json: true` to auto-convert a JSON-targeting
+grammar to a `response_format` JSON-schema; enable `grammar.cloud_strict_mode:
+true` to return 400 instead of stripping for non-JSON grammars on cloud models.
+
+### Example
+
+```json
+POST /v1/chat/completions
+{
+  "model": "llama3.2-3b",
+  "messages": [],
+  "response_format": {"type": "json_schema", "json_schema": {"name": "distill_record", "schema": {"type": "object", "properties": {"answer": {"type": "string"}}, "required": ["answer"]}}}
+}
+```
+
+### Capture
+
+Capture events include `grammar_present` and `response_format_present` boolean
+flags; the raw grammar/schema content is never stored (`structured_output`
+field policy defaults to `strip`).
+
 ## Dashboard and Monitoring Surface (`:11437`)
 
 These endpoints are served by the separate UI app in `app/main.py`.

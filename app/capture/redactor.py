@@ -259,6 +259,7 @@ def redact_request_parameters(
 
     policies = config_field_policies or {}
     tools_policy = policies.get("tool_definitions", "capture")
+    structured_policy = policies.get("structured_output", "strip")
 
     # Keys that must never be persisted
     SENSITIVE_KEYS = frozenset({
@@ -266,6 +267,10 @@ def redact_request_parameters(
         "bearer", "secret", "password", "headers",
         "x-api-key", "x_forwarded_for", "x_forwarded_proto",
     })
+
+    # Grammar-Constrained Decoding structure: raw grammar/schema content is
+    # sensitive structure — strip by default (presence flags carry the info).
+    STRUCTURED_OUTPUT_KEYS = frozenset({"grammar", "json_schema", "response_format"})
 
     safe_params: Dict[str, Any] = {}
 
@@ -277,8 +282,29 @@ def redact_request_parameters(
             safe_params[key] = "[REDACTED]"
             continue
 
+        # Strip grammar/schema content when policy demands
+        if key_lower in STRUCTURED_OUTPUT_KEYS and structured_policy == "strip":
+            safe_params[key] = "[REDACTED]"
+            continue
+
         # Strip tool definitions when policy demands
         if key_lower == "tools" and tools_policy == "strip":
+            continue
+
+        # Ollama clients send grammar/schema via ``options.format``. The nested
+        # key is literally ``format`` (not in STRUCTURED_OUTPUT_KEYS), so the
+        # generic recursion below would preserve raw grammar/schema content —
+        # a FEAT-6 privacy violation. Strip the nested content while keeping
+        # the rest of ``options`` (temperature, seed, …) intact.
+        if (
+            key_lower == "options"
+            and isinstance(value, dict)
+            and structured_policy == "strip"
+        ):
+            redacted_options = dict(value)
+            if "format" in redacted_options:
+                redacted_options["format"] = "[REDACTED]"
+            safe_params[key] = redacted_options
             continue
 
         # Redact secrets in string values

@@ -25,6 +25,13 @@ context_overrides:
   moonshotai/kimi-k3: 1048576
   gpt-4.1: 1047576
   deepseek/deepseek-chat: 1000000
+# Grammar-Constrained Decoding (GCD) — structured output via GBNF / JSON schema.
+# See docs/API_REFERENCE.md → Grammar-Constrained Decoding.
+grammar:
+  enabled: true                  # kill-switch: false strips grammar/json_schema on local + cloud
+  cloud_auto_convert_json: false # convert JSON-targeting grammars to OpenAI response_format on cloud
+  cloud_strict_mode: false       # 400 on unsupported grammar for cloud models instead of stripping
+  validate_gbnf: false           # pre-validate GBNF syntax before forwarding to llama-server
 # Cloud retry policy for upstream 429 (rate-limited) responses.
 # DISABLED (2026-08-12): Guardian passes upstream 429 responses straight
 # through to the client — the agent harness (Claude Code, goose, …) owns

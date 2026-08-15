@@ -67,6 +67,39 @@ _llama_server_url = None
 _model_manager = None
 _inference_queue = None
 _capture_controller = None
+_grammar_enabled = True
+
+
+def _apply_ollama_format_mapping(body: Dict[str, Any], openai_body: Dict[str, Any]) -> None:
+    """Map Ollama ``options.format`` to llama-server structured-output fields.
+
+    Ollama clients send structured output constraints via ``options.format``:
+    - a dict (JSON schema) → ``response_format`` (OpenAI-native)
+    - a string (GBNF grammar) → ``grammar`` (llama-server native)
+
+    Client's explicit top-level ``response_format``/``grammar`` wins over
+    ``options.format`` when both are present. No-op when the global
+    ``grammar.enabled`` kill-switch is off.
+    """
+    if not _grammar_enabled:
+        return
+    # Client's explicit top-level fields take precedence.
+    for key in ("response_format", "grammar"):
+        if key in body and key not in openai_body:
+            openai_body[key] = body[key]
+    if "response_format" in openai_body or "grammar" in openai_body:
+        return
+    options = body.get("options") or {}
+    fmt = options.get("format")
+    if isinstance(fmt, dict):
+        openai_body["response_format"] = fmt
+    elif fmt == "json":
+        # Ollama JSON-mode sentinel (``format: "json"``) is NOT GBNF — translating
+        # it to ``grammar: "json"`` would cause a llama-server GBNF parse error
+        # (undefined rule). Map to llama-server's OpenAI-native JSON mode instead.
+        openai_body["response_format"] = {"type": "json_object"}
+    elif isinstance(fmt, str):
+        openai_body["grammar"] = fmt
 
 
 def init(
@@ -109,6 +142,7 @@ def init(
     model_manager,
     inference_queue,
     capture_controller,
+    grammar_enabled=True,
 ) -> None:
     """Inject all dependencies. Called once at startup."""
     global _resolve_or_reject_inference_model, _is_cloud_or_guardian_route
@@ -129,6 +163,7 @@ def init(
     global _dispatch_capture_nonstream_completed, _get_model_timeout
     global _GuardianRequestCancelled, _model_switch_lock, _llama_server_url
     global _model_manager, _inference_queue, _capture_controller
+    global _grammar_enabled
     _resolve_or_reject_inference_model = resolve_or_reject_inference_model
     _is_cloud_or_guardian_route = is_cloud_or_guardian_route
     _forward_to_cloud_provider = forward_to_cloud_provider
@@ -167,6 +202,7 @@ def init(
     _model_manager = model_manager
     _inference_queue = inference_queue
     _capture_controller = capture_controller
+    _grammar_enabled = grammar_enabled
 
 
 async def chat_ollama(request: Request, client_id: str):
@@ -198,6 +234,7 @@ async def chat_ollama(request: Request, client_id: str):
             "stream": stream,
             "temperature": options.get("temperature", 0.7),
         }
+        _apply_ollama_format_mapping(body, openai_body)
         return await _forward_to_cloud_provider(
             path="chat/completions",
             body=json.dumps(openai_body).encode("utf-8"),
@@ -331,6 +368,7 @@ async def chat_ollama(request: Request, client_id: str):
             "stream": stream,
             "temperature": temperature
         }
+        _apply_ollama_format_mapping(body, openai_body)
 
         # Forward to Llama Server (OpenAI Endpoint)
         timeout_sec = _get_model_timeout(model)
@@ -574,6 +612,7 @@ async def generate_ollama(request: Request, client_id: str):
             "messages": messages,
             "stream": stream,
         }
+        _apply_ollama_format_mapping(body, openai_body)
         return await _forward_to_cloud_provider(
             path="chat/completions",
             body=json.dumps(openai_body).encode("utf-8"),
@@ -700,6 +739,7 @@ async def generate_ollama(request: Request, client_id: str):
             "stream": stream,
             "temperature": temperature
         }
+        _apply_ollama_format_mapping(body, openai_body)
 
         timeout_sec = _get_model_timeout(model)
         request_timeout = _build_stream_timeout(timeout_sec) if stream else timeout_sec

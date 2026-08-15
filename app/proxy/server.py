@@ -159,6 +159,14 @@ def _load_stream_close_timeout_s() -> float:
 
 STREAM_CLOSE_TIMEOUT_S = _load_stream_close_timeout_s()
 
+
+def _load_grammar_config() -> dict:
+    """Return the grammar section of the configuration (Phase 5: delegated)."""
+    return _config_loader.load_grammar_config(CONFIG)
+
+
+_GRAMMAR_CFG = _load_grammar_config()
+
 # Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Guardian")
@@ -757,6 +765,7 @@ _normalization.init(
     model_manager=model_manager,
     llama_server_url=LLAMA_SERVER_URL,
     queue_headers=_queue_headers,
+    grammar_validate_gbnf=_GRAMMAR_CFG.get("validate_gbnf", False),
 )
 
 
@@ -1015,6 +1024,9 @@ _cloud_forwarding.init(
     health_tracker=failover_health,
     guardian_request_cancelled=_GuardianRequestCancelled,
     stream_heartbeat_interval_s=STREAM_HEARTBEAT_INTERVAL_S,
+    grammar_enabled=_GRAMMAR_CFG.get("enabled", True),
+    grammar_cloud_auto_convert_json=_GRAMMAR_CFG.get("cloud_auto_convert_json", False),
+    grammar_cloud_strict_mode=_GRAMMAR_CFG.get("cloud_strict_mode", False),
 )
 
 
@@ -1493,6 +1505,7 @@ _local_ollama.init(
     model_manager=model_manager,
     inference_queue=inference_queue,
     capture_controller=capture_controller,
+    grammar_enabled=_GRAMMAR_CFG.get("enabled", True),
 )
 
 # Initialize gateway v1 routing with all dependencies
@@ -1553,6 +1566,8 @@ _gw_routing.init(
     model_manager=model_manager,
     inference_queue=inference_queue,
     capture_controller=capture_controller,
+    grammar_enabled=_GRAMMAR_CFG.get("enabled", True),
+    validate_grammar_field=_normalization.validate_grammar_field,
 )
 
 # Initialize model discovery with injected helpers (after _gw_routing.init so

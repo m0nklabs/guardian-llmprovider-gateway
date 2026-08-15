@@ -238,6 +238,33 @@ class TestRequestParameterRedaction:
         result = redact_request_parameters(params)
         assert "sk-or-v1-abcdef1234567890" not in json.dumps(result)
 
+    def test_strips_nested_options_format_schema(self):
+        # FEAT-6 privacy: Ollama clients carry JSON schema via options.format.
+        # The nested ``format`` key is not in STRUCTURED_OUTPUT_KEYS, so the
+        # generic recursion would leak the schema — strip the content while
+        # preserving the other options.
+        schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+        params = {"options": {"format": schema, "temperature": 0.7}}
+        result = redact_request_parameters(params)
+        assert result["options"]["format"] == "[REDACTED]"
+        assert result["options"]["temperature"] == 0.7
+        # No trace of the schema content survives.
+        assert "properties" not in json.dumps(result)
+
+    def test_strips_nested_options_format_grammar_string(self):
+        grammar = 'root ::= "yes" | "no"'
+        params = {"options": {"format": grammar}}
+        result = redact_request_parameters(params)
+        assert result["options"]["format"] == "[REDACTED]"
+        assert grammar not in json.dumps(result)
+
+    def test_preserves_options_format_when_policy_is_capture(self):
+        policies = {"structured_output": "capture"}
+        schema = {"type": "object"}
+        params = {"options": {"format": schema}}
+        result = redact_request_parameters(params, policies)
+        assert result["options"]["format"] == schema
+
 
 class TestReasoningRedaction:
     def test_strips_reasoning_by_default(self):
