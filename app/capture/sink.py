@@ -74,6 +74,22 @@ class CaptureSink:
         self._closed = False
         self._consumers: int = 0
 
+    def _rebind_queue_if_needed(self) -> None:
+        """Recreate the queue when the event loop changed (per-test loops).
+
+        ``asyncio.Queue`` binds to the loop of its first blocking use; a fresh
+        event loop (pytest per-test loops, ``asyncio.run`` reuse) makes queue
+        operations raise ``RuntimeError: ... is bound to a different event loop``.
+        Capture is fail-open, so we rebind and drop any pending items.
+        """
+        try:
+            self._queue._get_loop()  # type: ignore[attr-defined]
+        except RuntimeError:
+            logger.warning(
+                "Capture sink rebound to a new event loop (pending items dropped)"
+            )
+            self._queue = asyncio.Queue(maxsize=self._max_pending)
+
     def register_consumer(self) -> None:
         """Mark that a background consumer is active (for metrics/debugging)."""
         self._consumers += 1
@@ -114,6 +130,7 @@ class CaptureSink:
             self._metrics.events_dropped_total += 1
             return False
 
+        self._rebind_queue_if_needed()
         try:
             self._queue.put_nowait(event)
             self._metrics.events_total += 1
@@ -141,6 +158,7 @@ class CaptureSink:
 
         Returns None when the sink is closed and drained.
         """
+        self._rebind_queue_if_needed()
         while True:
             try:
                 item = await asyncio.wait_for(self._queue.get(), timeout=1.0)
@@ -160,6 +178,7 @@ class CaptureSink:
 
     async def drain_remaining(self) -> list:
         """Drain all currently-queued events without blocking (for shutdown)."""
+        self._rebind_queue_if_needed()
         events: list = []
         while True:
             try:

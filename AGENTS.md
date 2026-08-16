@@ -180,6 +180,19 @@ When touching these areas, read the referenced detail docs:
 - **Subagent-infra decode (belangrijk voor toekomstige sessies):** de default subagent-model-string in `~/.pi/agent/settings.json` was `guardian/openrouter/deepseek/deepseek-v4-flash-0731:high` — die faalde met "Unknown subagent model in active Pi model registry". Root cause: pi's model-registry laadt `models.json` alleen bij startup (NIET via `/reload` of `/reload-runtime`); én de `guardian/`-prefix-vorm moest expliciet toegevoegd worden aan de `providers.guardian.models` array in `~/.pi/agent/models.json`. Fix: entry toegevoegd (gemodelleerd op `guardian/openrouter/deepseek/deepseek-chat`), pi volledig herstart, daarna werkt `guardian/openrouter/deepseek/deepseek-v4-flash-0731:high` voor subagents. De bare vorm `openrouter/deepseek/deepseek-v4-flash-0731` faalt met 401 (pi routeert direct naar OpenRouter i.p.v. via Guardian). OpenRouter-key is disabled → ALLE subagent-traffic via Guardian. Constraint: max 3 simultaneous subagents (Guardian raakt 429-failover bij >3 concurrent reasoning-requests; Novita upstream rate-limits).
 - **Constraints/preferences opgeslagen in project-memory:** subagent-modelconfig (context), max-3-simultaan (constraint).
 
+### Pi session `20260816_1` (capture live, last updated 2026-08-16)
+
+- Working directory: `/home/flip/llama_cpp_guardian`
+- **Capture subsystem ENABLED (operator decision, "schakel in"):** `config/settings.yaml` → `capture.enabled: true`, `local_capture: true` (cloud stays off — provider terms not accepted), `allowed_client_refs` now lists all 33 named API-key refs (HMAC-SHA-256 with the real `GUARDIAN_CAPTURE_CLIENT_REF_SECRET`). `per_client_opt_in` stays true — only known clients are captured.
+- **SECRET FIX:** `.env` `GUARDIAN_CAPTURE_CLIENT_REF_SECRET` was a PLACEHOLDER (literally `generate import secrets; print(secrets.token_hex(32))`) — never a real secret. Generated real 64-hex secrets for both `GUARDIAN_CAPTURE_CLIENT_REF_SECRET` and the new `GUARDIAN_CAPTURE_RECORD_AUTH_SECRET`. Existing `allowed_client_refs` were therefore recomputed; the old placeholder refs were never deployed (list was empty).
+- **Bug found during enablement — event-loop rebind:** with capture on, the WAL writer busy-spun at 100% CPU (2.8 GB RSS!) when a second lifespan start ran on a fresh event loop (pytest per-test loops): `CaptureSink`'s `asyncio.Queue` binds to the loop of its first blocking use, so `get()` raised `RuntimeError: ... is bound to a different event loop` and the writer's catch-all `continue` spun. Fixes in `app/capture/`:
+  - `sink.py::CaptureSink._rebind_queue_if_needed()` — recreates the queue when the running loop changed (fail-open, pending items dropped)
+  - `wal_writer.py::_run()` — consecutive-error counter + 0.5 s backoff; stops after 50 persistent errors instead of spinning forever
+  - `wal_writer.py::_close_active_file()` — now resets `_active_file_size`/`_active_file_start`; a stale size made manual `rotate()` return None after an automatic rotation (real production bug, not just tests)
+  - Tests: `TestSinkEventLoopRebind` (2 regression tests) + the 2 rotation tests were timing-dependent (10 events = 2070 B > 1024 B auto-rotate limit) and now use a roomy per-test `max_file_bytes`
+- **Pre-restart gate: ALL 4 PASS** (950+ passed). Restart required to activate capture; agent traffic routes through Guardian — session drops during restart.
+- To verify after restart: `curl -s localhost:11434/api/capture/status` shows enabled + writer active; `data/capture/guardian_capture_current.jsonl` appears after first opted-in request; Keanu can run the live contract test on the real WAL.
+
 ### Pi session `20260813_1` (session wrap-up, last updated 2026-08-13)
 
 - Working directory: `/home/flip/llama_cpp_guardian`

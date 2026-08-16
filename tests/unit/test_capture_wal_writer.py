@@ -227,6 +227,10 @@ class TestWALWriterRotation:
     @pytest.mark.asyncio
     async def test_manual_rotate_returns_path(self, writer, sink, config):
         """Manual rotate() should return the path of the rotated .gz file."""
+        # NB: use a roomy file limit so the automatic size-based rotation
+        # never fires inside this test (10 events > 1024 bytes would rotate
+        # on their own and make the manual rotate() return None).
+        writer._config = replace(config, max_file_bytes=1 << 20)
         await writer.start()
         # Write some events to have content
         for i in range(10):
@@ -251,6 +255,7 @@ class TestWALWriterRotation:
     @pytest.mark.asyncio
     async def test_manual_rotate_opens_new_active(self, writer, sink, config):
         """After rotation, a new active file should be opened for writes."""
+        writer._config = replace(config, max_file_bytes=1 << 20)
         await writer.start()
         for i in range(10):
             sink.try_put(CaptureEvent(data={"seq": i, "data": "x" * 50}))

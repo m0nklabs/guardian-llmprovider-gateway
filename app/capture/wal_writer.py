@@ -211,6 +211,11 @@ class CaptureWALWriter:
                 pass
             self._active_fd = None
         self._active_file = None
+        # Keep the size/start consistent: a closed file has no pending bytes.
+        # (Bug: after an automatic rotation the stale size made rotate()
+        # refuse to rotate the already-rotated data and report None.)
+        self._active_file_size = 0
+        self._active_file_start = 0.0
 
     def rotate(self) -> Optional[str]:
         """Force rotation of the active file.
@@ -408,6 +413,7 @@ class CaptureWALWriter:
         """Main writer loop — consumes events from the sink."""
         logger.info("Capture WAL writer loop started")
         last_retention_check = 0.0
+        consecutive_errors = 0
 
         while not self._stopping:
             try:
@@ -420,6 +426,7 @@ class CaptureWALWriter:
 
                 # Write the event
                 self._write_event(event)
+                consecutive_errors = 0
 
                 # Check rotation
                 if self._needs_rotation():
@@ -434,9 +441,21 @@ class CaptureWALWriter:
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                # Fail-open: log and continue
-                logger.warning("Capture writer unexpected error (continuing): %s", exc)
+                # Fail-open: log and continue — but never busy-spin on a
+                # persistent error (e.g. a queue bound to a stale event loop).
+                consecutive_errors += 1
                 self._metrics.write_failures += 1
+                logger.warning(
+                    "Capture writer unexpected error (%d consecutive, continuing): %s",
+                    consecutive_errors, exc,
+                )
+                if consecutive_errors >= 50:
+                    logger.error(
+                        "Capture writer stopping after %d consecutive errors (fail-open)",
+                        consecutive_errors,
+                    )
+                    break
+                await asyncio.sleep(0.5)
 
         # Final drain on shutdown
         remaining = await self._sink.drain_remaining()
