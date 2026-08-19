@@ -75,6 +75,32 @@ def load_config() -> dict:
 CONFIG = load_config()
 
 
+def reload_config() -> dict:
+    """Atomically re-read settings.yaml into the module-global CONFIG dict.
+
+    Keeps the *same* dict object (all existing references — e.g. the
+    ``CONFIG = _config_loader.CONFIG`` alias in server.py and every accessor
+    that reads ``CONFIG`` — keep pointing at it) but replaces its contents
+    in place.  On any parse error the previous configuration stays fully
+    intact (fail-safe: no partial swap, no half-loaded state).
+
+    Returns the new configuration dict (may be the previous one when the
+    reload failed).
+    """
+    try:
+        new_config = load_config()
+    except Exception as exc:  # defensive: never propagate a reload failure
+        logger.warning("⚠️  Config reload failed (%s); keeping previous config", exc)
+        return CONFIG
+    if not isinstance(new_config, dict):
+        logger.warning("⚠️  Config reload produced a non-dict; keeping previous config")
+        return CONFIG
+    CONFIG.clear()
+    CONFIG.update(new_config)
+    logger.info("🔄 settings.yaml reloaded (config generation bumped)")
+    return CONFIG
+
+
 def load_vram_limit(config: Optional[Dict[str, Any]] = None) -> int:
     """Return the VRAM budget (MB) from ``proxy.vram_limit_mb``."""
     cfg = config if config is not None else CONFIG

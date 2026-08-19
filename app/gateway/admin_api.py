@@ -46,6 +46,11 @@ _model_switch_lock = None
 _reset_startup_check_status = None
 _run_guardian_operation = None
 
+# Config-reload plumbing (injected at startup; see reload_runtime_config)
+_reload_settings_config = None  # callable() -> reloaded settings dict
+_failover_registry = None
+_failover_health = None
+
 
 def init(
     *,
@@ -75,6 +80,9 @@ def init(
     _model_switch_lock,
     _reset_startup_check_status,
     _run_guardian_operation,
+    _reload_settings_config=None,
+    _failover_registry=None,
+    _failover_health=None,
 ) -> None:
     """Inject all dependencies. Called once at startup."""
     globals().update({k: v for k, v in locals().items() if k != "_init"})
@@ -269,6 +277,47 @@ async def unlink_credential(request: Request, client_id: str) -> Any:
     return {"status": "unlinked", "guardian_key_fingerprint": key_fp, "provider": provider}
 
 
+async def claim_legacy_credential(request: Request, client_id: str) -> Any:
+    """Adopt an owner-less (legacy) cloud credential as its permanent owner.
+
+    Unlocks management of credentials that predate ownership recording and
+    were linked to multiple keys (ambiguous → previously unmanageable by
+    *anyone*). The caller must already hold a link to that credential, so
+    the claim only transfers ownership among keys that provably use it.
+    After the claim the owner can link the credential to other Guardian
+    keys (e.g. a new agent key) through the normal link endpoint.
+    """
+    body = await request.json()
+    provider = str(body.get("provider", "")).strip().lower()
+    cred_id = str(body.get("credential_id", "")).strip()
+    if not provider:
+        raise HTTPException(status_code=400, detail="provider is required")
+    if not cred_id:
+        raise HTTPException(status_code=400, detail="credential_id is required")
+    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
+    claimed = await _cloud_cred_store.claim_legacy_credential(
+        owner_key_fingerprint, provider, cred_id
+    )
+    if not claimed:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Credential claim failed: not found, provider mismatch, "
+                "already owned, or caller has no existing link to it"
+            ),
+        )
+    logger.info(
+        "☁️  Key '%s' claimed legacy credential '%s' (%s) as owner",
+        owner_key_fingerprint, cred_id, provider,
+    )
+    return {
+        "status": "claimed",
+        "guardian_key_fingerprint": owner_key_fingerprint,
+        "provider": provider,
+        "credential_id": cred_id,
+    }
+
+
 
 async def list_cloud_providers(client_id: str) -> Any:
     providers = []
@@ -395,6 +444,118 @@ async def get_server_status(client_id: str) -> Any:
             "enabled": _state.scaler.config.get("enabled", False),
             "profiles": list(_state.scaler.config.get("profiles", {}).keys()),
         },
+    }
+
+
+async def reload_config(client_id: str) -> Any:
+    """Re-read settings.yaml + cloud_keys.json live WITHOUT restarting.
+
+    Reloads every subsystem that can safely swap config at runtime, in
+    dependency order:
+
+    1. settings.yaml: re-parsed into the shared ``CONFIG`` dict (config_loader
+       keeps the same dict object, so all existing accessors see the update).
+    2. ``ProviderRegistry.reload()`` — provider lists / prefixes / models.
+    3. ``FailoverRegistry.reload()`` — ``failover_groups`` from cloud_keys.json.
+    4. ``CloudCredentialStore.reload()`` — credentials + key links.
+    5. ``CaptureController.reload_config()`` — capture config, incl.
+       cloud_capture / cloud_model_prefixes; WAL writer re-initialised when
+       capture becomes active or sink bounds change.
+    6. Failover health thresholds + cloud_retry limits — retuned in place.
+
+    Anything that cannot change at runtime (listen port, pid file, TLS, ...
+    stays as-is and is reported in the ``not_reloaded`` list.  Fail-safe:
+    a YAML/JSON parse error anywhere leaves the previous state intact.
+    """
+    from app.proxy.ratelimit import RateLimitConfig
+
+    reloaded: list[str] = []
+    not_reloaded: list[str] = []
+    errors: list[str] = []
+
+    # 1. settings.yaml → shared CONFIG (atomic in-place swap)
+    try:
+        new_config = _reload_settings_config() if _reload_settings_config else None
+        reloaded.append("settings.yaml (CONFIG)")
+    except Exception as exc:  # pragma: no cover - defensive
+        errors.append(f"settings.yaml: {exc}")
+        not_reloaded.append("settings.yaml")
+
+    # 2. Provider registry (reads settings.yaml itself)
+    try:
+        _provider_registry.reload()
+        reloaded.append("providers")
+    except Exception as exc:  # pragma: no cover - defensive
+        errors.append(f"providers: {exc}")
+        not_reloaded.append("providers")
+
+    # 3. Failover groups (cloud_keys.json)
+    try:
+        _failover_registry.reload()
+        reloaded.append("failover_groups")
+    except Exception as exc:  # pragma: no cover - defensive
+        errors.append(f"failover_groups: {exc}")
+        not_reloaded.append("failover_groups")
+
+    # 4. Cloud credential store (cloud_keys.json — creds + links)
+    try:
+        _cloud_cred_store.reload()
+        reloaded.append("cloud_keys.json (credentials, links)")
+    except Exception as exc:  # pragma: no cover - defensive
+        errors.append(f"cloud_keys.json: {exc}")
+        not_reloaded.append("cloud_keys.json")
+
+    # 5. Capture controller + WAL writer (settings.yaml capture block)
+    try:
+        controller = _get_capture_controller()
+        await controller.reload_config()
+        reloaded.append("capture (cloud_capture, prefixes, policies)")
+    except Exception as exc:  # pragma: no cover - defensive
+        errors.append(f"capture: {exc}")
+        not_reloaded.append("capture")
+
+    # 6a/6b: failover health + cloud_retry apply only when settings.yaml
+    # actually reloaded — otherwise their previous values stay untouched
+    # (avoids defaulting cloud_retry.enabled back to true on a failed parse).
+    if new_config is None:
+        not_reloaded.append("failover_health")
+        not_reloaded.append("cloud_retry")
+    else:
+        try:
+            fh_cfg = new_config.get("failover_health", {}) or {}
+            _failover_health.reconfigure(
+                failure_threshold=fh_cfg.get("failure_threshold"),
+                cooldown_seconds=fh_cfg.get("cooldown_seconds"),
+                rate_limit_cooldown_seconds=fh_cfg.get("rate_limit_cooldown_seconds"),
+            )
+            reloaded.append("failover_health")
+        except Exception as exc:  # pragma: no cover - defensive
+            errors.append(f"failover_health: {exc}")
+            not_reloaded.append("failover_health")
+
+        try:
+            _cloud_rate_limiter.config = RateLimitConfig.from_mapping(
+                new_config.get("cloud_retry", {})
+            )
+            reloaded.append("cloud_retry")
+        except Exception as exc:  # pragma: no cover - defensive
+            errors.append(f"cloud_retry: {exc}")
+            not_reloaded.append("cloud_retry")
+
+    logger.info(
+        "🔄 Config reload by admin '%s': reloaded=%s errors=%s",
+        client_id, reloaded, errors or "none",
+    )
+    finalized_not_reloaded = sorted(set(not_reloaded))
+    return {
+        "status": "ok" if not errors and not finalized_not_reloaded else "partial",
+        "reloaded": reloaded,
+        "not_reloaded": finalized_not_reloaded,
+        "errors": errors,
+        "note": (
+            "Runtime-only value (port/pid/TLS) can NOT be reloaded — "
+            "change those in settings.yaml and restart."
+        ),
     }
 
 

@@ -470,6 +470,67 @@ class CloudCredentialStore:
 
     # ── Links ─────────────────────────────────────────────────────────
 
+    async def claim_legacy_credential(
+        self,
+        guardian_key_fingerprint: str,
+        provider: str,
+        cred_id: str,
+    ) -> bool:
+        """Adopt a legacy (owner-less) cloud credential as its permanent owner.
+
+        Fixes the ambiguous-ownership dead end for credentials created before
+        ownership was recorded and linked to *more than one* key: such a
+        credential is usable for inference but unmanageable through the API
+        for every key (``is_credential_owned_by`` is False for all of them).
+
+        A key claims the credential only when it **already holds a link to
+        it** (so the claimer has proven operational access to that upstream
+        credential). After the claim the credential carries
+        ``owner_key_fingerprint`` and the (new) owner can manage it via the
+        API — including linking it to other Guardian keys.
+
+        Returns ``False`` when the credential does not exist, its provider
+        does not match, it already has an owner, or the caller has no
+        pre-existing link to it.
+        """
+        async with self._write_lock:
+            creds = self._data.get("credentials", {})
+            raw = creds.get(cred_id)
+            if not isinstance(raw, dict):
+                logger.warning("⚠️  claim_legacy_credential: '%s' not found", cred_id)
+                return False
+            if str(raw.get("provider", "")).strip().lower() != provider:
+                logger.warning(
+                    "⚠️  claim_legacy_credential: provider '%s' does not match credential '%s'",
+                    provider,
+                    cred_id,
+                )
+                return False
+            if raw.get("owner_key_fingerprint"):
+                logger.info(
+                    "ℹ️  claim_legacy_credential: '%s' already has an owner", cred_id
+                )
+                return False
+            links = self._data.get("links", {})
+            caller_links = links.get(guardian_key_fingerprint)
+            if not isinstance(caller_links, dict) or caller_links.get(provider) != cred_id:
+                logger.warning(
+                    "⚠️  claim_legacy_credential: key '%s' has no existing %s link to '%s'",
+                    guardian_key_fingerprint,
+                    provider,
+                    cred_id,
+                )
+                return False
+            raw["owner_key_fingerprint"] = guardian_key_fingerprint
+            self._save()
+            logger.info(
+                "☁️  Legacy credential '%s' (%s) claimed by key '%s'",
+                cred_id,
+                provider,
+                guardian_key_fingerprint,
+            )
+            return True
+
     async def link_credential(
         self,
         guardian_key_fingerprint: str,

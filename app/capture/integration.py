@@ -79,16 +79,39 @@ class CaptureController:
     def writer(self) -> Optional[CaptureWALWriter]:
         return self._writer
 
-    def reload_config(self) -> None:
-        """Re-read capture config and rebuild the sink if max_pending changed."""
+    async def reload_config(self) -> None:
+        """Re-read capture config and rebuild sink/writer when needed.
+
+        Live (no-restart) path used by the ``/api/config/reload`` admin
+        endpoint:
+        - config (incl. cloud_capture / cloud_model_prefixes / policies)
+          is swapped immediately — policy evaluation reads
+          :attr:`_config`, so new requests use the new rules at once;
+        - the sink is rebuilt when ``max_pending_events`` changed;
+        - the WAL writer is rebuilt (stop → re-create → start) only when the
+          sink changed or the subsystem (de)activated, so a pure
+          capture-policy/prefix change stays zero-touch for the writer.
+        """
         new_config = load_capture_config()
         old_max = self._config.max_pending_events
+        was_active = self._config.is_active
         self._config = new_config
-        if new_config.max_pending_events != old_max:
+        sink_changed = new_config.max_pending_events != old_max
+        if sink_changed:
             self._sink = CaptureSink(max_pending_events=new_config.max_pending_events)
+        now_active = new_config.is_active
+
+        writer_needs_rebuild = sink_changed or (was_active != now_active)
+        if writer_needs_rebuild:
+            await self.stop_writer()
+            self.initialize_writer()
+            if now_active:
+                await self.start_writer()
         logger.info(
-            "Capture controller reloaded: enabled=%s, local=%s, cloud=%s",
+            "Capture controller reloaded: enabled=%s, local=%s, cloud=%s "
+            "(writer_rebuilt=%s)",
             new_config.enabled, new_config.local_capture, new_config.cloud_capture,
+            writer_needs_rebuild,
         )
 
     def initialize_writer(self, sink: Optional[CaptureSink] = None) -> None:

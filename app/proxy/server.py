@@ -1241,10 +1241,33 @@ async def unlink_credential(request: Request, client_id: str = Depends(verify_ap
     return await _admin_api.unlink_credential(request, client_id)
 
 
+@app.post("/api/cloud/credentials/claim")
+async def claim_legacy_credential(request: Request, client_id: str = Depends(verify_api_key)):
+    """Adopt an owner-less legacy credential (ownership repair, no restart).
+
+    Body: {"provider": "...", "credential_id": "..."}. The caller must
+    already hold a link to that credential. After the claim the (new) owner
+    can link the credential to other Guardian keys via POST /api/cloud/links.
+    """
+    return await _admin_api.claim_legacy_credential(request, client_id)
+
+
 @app.get("/api/cloud/providers")
 async def list_cloud_providers(client_id: str = Depends(verify_api_key)):
     """list_cloud_providers (Phase 5: delegated to app.gateway.admin_api)."""
     return await _admin_api.list_cloud_providers(client_id)
+
+
+@app.post("/api/config/reload")
+async def reload_config(client_id: str = Depends(verify_api_key)):
+    """Live-reload settings.yaml + cloud_keys.json without restarting.
+
+    Admin-only (any valid Guardian key that can reach the admin API).
+    Re-reads provider lists, failover groups, credential links, capture
+    (cloud_capture / cloud_model_prefixes / policies), failover health and
+    cloud_retry. See app/gateway/admin_api.py:reload_config.
+    """
+    return await _admin_api.reload_config(client_id)
 
 
 @app.get("/api/cloud/models")
@@ -1616,6 +1639,9 @@ _admin_api.init(
     _model_switch_lock=_model_switch_lock,
     _reset_startup_check_status=_reset_startup_check_status,
     _run_guardian_operation=_run_guardian_operation,
+    _reload_settings_config=_config_loader.reload_config,
+    _failover_registry=failover_registry,
+    _failover_health=failover_health,
 )
 
 async def start_proxy():

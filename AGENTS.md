@@ -19,7 +19,7 @@
 ## Critical rules
 
 - **Test before claiming fixed:** `./venv/bin/python -m py_compile <file>` then run `./venv/bin/python -m pytest tests/ -x`. Never claim a fix works without verifying.
-- **No hot reload.** The provider registry, queue, and server load at startup. Code changes require `sudo systemctl restart llama-guardian` to take effect. Config-file edits to `settings.yaml` also need a restart (the "hot reload" claim in older docs is incorrect).
+- **Code needs a restart; config can hot-reload (since 2026-08-19).** `app/*.py` code changes require `sudo systemctl restart llama-guardian` — there is NO hot code reload. But `settings.yaml` and `cloud_keys.json` (providers, failover_groups, credential links, capture `cloud_capture`/`cloud_model_prefixes`/policies, failover_health, cloud_retry) now hot-reload WITHOUT restart via `POST /api/config/reload` (admin, any valid key). Port/pid/TLS remain restart-only. Do NOT run the restart for config-only edits anymore; do run it (after the pre-restart gate) for code changes.
 - **Run the pre-restart gate before every restart.** `./venv/bin/python scripts/pre_restart_check.py` runs py_compile + pyflakes (undefined names) + the wrapper-vs-module signature check + the full pytest suite. All four gates must pass before `sudo systemctl restart llama-guardian`; any failure means the restart may not come back up (agent traffic routes through Guardian). Added 2026-08-12 after the post-restart audit caught 6 injection/signature bugs the unit suite had missed.
 - **The agent routes through Guardian — restarting cuts the agent's own model traffic.** This agent harness (Claude Code / goose / pi) reaches its model *through this very service* (nginx `:11434` → TLS `:11435` → app). A `sudo systemctl restart llama-guardian` therefore silences the current session until startup completes; a code/config error that prevents startup is **not self-healable** — the agent's model is unreachable, so it cannot fix its own mistake. Before any restart: (1) validate with `py_compile` + focused pytest, (2) tell the operator a restart is coming and the session will drop, (3) let the operator run the restart from outside the session, (4) if startup fails, the operator must revert (`git stash`/`git checkout` on `app/`, restore previous `settings.yaml`) — never promise in-session recovery. **Known recovery path (proven 2026-08-12):** the operator enables `gh copilot` (routes around Guardian) and uses it to inspect/repair/restart Guardian while the pi session is down.
 - **TLS requires both paths.** `GUARDIAN_TLS_CERTFILE` and `GUARDIAN_TLS_KEYFILE` are an all-or-nothing pair. The production drop-in binds TLS to `127.0.0.1:11435` through `GUARDIAN_TLS_HOST` and `GUARDIAN_TLS_PORT`; nginx's `libnginx-mod-stream` module and a top-level `stream { include /etc/nginx/stream-conf.d/*.conf; }` block are required for the public protocol multiplexer. Keep the private key `0600`.
@@ -203,6 +203,43 @@ When touching these areas, read the referenced detail docs:
   - **Validatie:** YAML+JSON parse clean; `tests/unit/test_manager.py` 107 passed (config-drift detection unaffected). `py_compile` clean (no code touched).
   - **Nog niet live:** config edit vereist `sudo systemctl restart llama-guardian` om de nieuwe entry zichtbaar te maken in `/v1/models` (en `llama-server` zal de nieuwe GGUF bij eerste switch laden — launch-signature-driftdetectie herlaadt automatisch). Operator voert de restart uit (sessie valt tijdens restart). Verifieer na restart: `curl -s localhost:11434/v1/models | grep qwen3.8-27b-uncensored-ymq`; eerste request triggert ~30s laadtijd + MTP draft-context build.
   - **Also in this commit (2026-08-16/19, operator-driven config + CLI fix):** `config/settings.yaml` kreeg `z-ai/glm-5.3` als OpenRouter-only failover-mirror (NVIDIA NIM host nog alleen glm-5.2, gecheckt 2026-08-19) in de `providers.openrouter.models` failover-groep. `scripts/guardianctl.py` `test-event` was broken tegen de capture-refactor (`CaptureSink(config=cfg)` + `sink.write(event)` bestaan niet meer); gefwixt met de nieuwe async lifecycle (`CaptureSink(max_pending_events=…)` + `CaptureWALWriter.start()/stop()` + `sink.try_put()` + `build_request_received_event(cfg, …)`). `llama_cpp_guardian.code-workspace`: `python.analysis.exclude` (venv/models/.config) om Pylance-traffic te scheren.
+
+### DSH session `20260819_1` (config hot-reload + ownership repair, last updated 2026-08-19)
+
+- Working directory: `/home/flip/llama_cpp_guardian`
+- **No-restart config reload implemented** (code-only, NOT yet deployed — needs
+  one operator restart to become live): `POST /api/config/reload` (any valid
+  key) re-reads `settings.yaml` + `cloud_keys.json` and swaps them live:
+  - `config_loader.reload_config()` — atomic in-place CONFIG swap (same dict
+    object, all accessors stay valid); fail-safe: parse error keeps previous
+  - `ProviderRegistry.reload()`, `FailoverRegistry.reload()`,
+    `CloudCredentialStore.reload()`, `CaptureController.reload_config()`
+    (now async; rebuilds the WAL writer only when sink bounds or
+    active-status changed — policy/prefix changes stay zero-touch)
+  - `ProviderHealthTracker.reconfigure()` (new; live threshold tuning) +
+    `cloud_retry` limits — applied ONLY when settings.yaml actually reloaded
+    (avoids defaulting `cloud_retry.enabled` back to true on a failed parse)
+  - Response lists `reloaded` / `not_reloaded` / `errors`; port/pid/TLS stay
+    restart-only. Updated the old "No hot reload" critical rule accordingly.
+- **Legacy cloud-credential ownership repair**: `POST /api/cloud/credentials/claim`
+  (`{"provider", "credential_id"}`) — a key that ALREADY holds a link to an
+  owner-less legacy credential (created before ownership recording) becomes
+  its permanent owner, unlocking management + linking. Unblocks the
+  `keanu-factory` key: after claim, the owner can link it via `POST
+  /api/cloud/links` (was: 403 `no_credential_for_provider` on all cloud
+  routes; the five fully-linked keys are hermes `94062b64e5d5`, goose
+  `286cf1d8b6fc`, pi `c1824126c6fb`, claudekvm2 `17aa6e789057`,
+  open-webui `3c423d5461bc`). Operator decision: NO quick win with another
+  token — wait for this fix, then link keanu's own key.
+- **Verification report delivered**: `docs/free-tier-pool-verification.md`
+  answers the 7 points of `docs/free-tier-pool-request.md` (Operator update:
+  `minimax/minimax-m3:free` does NOT exist on OpenRouter — minimax-m3 group =
+  NVIDIA NIM only; OpenRouter free groups separately; Google via direct
+  google credential only). **Nothing of the pool config is implemented** —
+  no `failover_groups`, no `cloud_capture` flip — until Keanu has run the
+  probe (operator instruction). New tests: `tests/unit/test_config_reload.py`
+  (7) + `tests/unit/test_cloud_keys_claim.py` (5); suite was green before
+  these two files were added (954+ passed), final full-suite re-run pending.
 
 ### Pi session `20260813_1` (session wrap-up, last updated 2026-08-13)
 

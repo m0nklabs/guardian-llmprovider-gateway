@@ -19,8 +19,13 @@ curl -s http://127.0.0.1:11434/healthz
 journalctl -u llama-guardian.service --since "5 min ago" --no-pager | grep -v 'GET /healthz'
 ```
 
-> **No hot reload.** Code changes (`app/*.py`) and provider config changes
-> (`config/settings.yaml`) both require a restart to take effect.
+> **Hot reload (since 2026-08-19).** Code changes (`app/*.py`) still
+> require `sudo systemctl restart llama-guardian` — there is NO hot code
+> reload. But `settings.yaml` + `cloud_keys.json` changes (providers,
+> failover groups, credential links, capture cloud_capture/prefixes,
+> failover_health, cloud_retry) now apply WITHOUT restart via:
+> `curl -X POST -H "Authorization: Bearer <key>" localhost:11434/api/config/reload`
+> (any valid key; port/pid/TLS stay restart-only).
 
 ## Backend (llama-server :11440)
 

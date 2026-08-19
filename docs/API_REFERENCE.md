@@ -460,10 +460,24 @@ The full key is returned only once — store it immediately.
 | `GET` | `/api/cloud/providers` | No | List configured providers and their status |
 | `GET` | `/api/cloud/models` | No | List global + per-key cloud models for the caller |
 | `GET` | `/api/cloud/ratelimit-stats` | No | Per-key 429 counters and provider hints |
+| `POST` | `/api/cloud/credentials/claim` | No | Adopt an owner-less (legacy) credential — caller must already hold a link |
+| `POST` | `/api/config/reload` | No | Hot-reload settings.yaml + cloud_keys.json without restart |
 
 Credentials and links are **owner-scoped**: only the Guardian key that created
 a credential can manage or share it (403/404 otherwise). Google credentials
 automatically fetch their model catalog on create/refresh.
+
+**Legacy ownership repair:** credentials created before ownership was recorded
+and linked to more than one key are unmanageable for every key. A key that
+already holds a link can claim one via `POST /api/cloud/credentials/claim`
+(`{"provider": ..., "credential_id": ...}`); after the claim it becomes the
+permanent owner and can link the credential to other keys.
+
+**Hot config reload (`POST /api/config/reload`):** re-reads settings.yaml +
+cloud_keys.json (providers, failover_groups, credential links, capture
+cloud_capture/prefixes/policies, failover_health, cloud_retry) and swaps them
+live without a restart. Port/pid/TLS remain restart-only. Any valid Guardian
+key can trigger it. Response lists what was reloaded and what could not be.
 
 ### Capture management endpoints (admin)
 

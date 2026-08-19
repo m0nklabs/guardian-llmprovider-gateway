@@ -125,6 +125,30 @@ class ProviderHealthTracker:
         self._tripped_until: Dict[Tuple[str, str], float] = {}
         self._rate_limited_until: Dict[Tuple[str, str], float] = {}
 
+    def reconfigure(
+        self,
+        failure_threshold: Optional[int] = None,
+        cooldown_seconds: Optional[float] = None,
+        rate_limit_cooldown_seconds: Optional[float] = None,
+    ) -> None:
+        """Update health-tracker thresholds in place (config reload, no restart).
+
+        Only the values that are not ``None`` are changed; existing in-memory
+        tripped/rate-limited state is preserved so an in-flight cooldown keeps
+        working across the reload.
+        """
+        with self._lock:
+            if failure_threshold is not None:
+                self._failure_threshold = max(int(failure_threshold), 1)
+            if cooldown_seconds is not None:
+                self._cooldown_seconds = max(float(cooldown_seconds), 0.0)
+            if rate_limit_cooldown_seconds is not None:
+                self._rate_limit_cooldown_seconds = max(float(rate_limit_cooldown_seconds), 0.0)
+        logger.info(
+            "🔧 Failover health tuned live: threshold=%d cooldown=%.0fs rl_cooldown=%.0fs",
+            self._failure_threshold, self._cooldown_seconds, self._rate_limit_cooldown_seconds,
+        )
+
     def record_success(self, provider: str, model: str) -> None:
         """Reset all failure and rate-limit state for *provider*/*model*."""
         key = (provider, model)
