@@ -28,6 +28,24 @@
 			"args": [
 				"-l"
 			]
-		}
+		},
+		"python.analysis.exclude": [
+			"${workspaceFolder:models}/**",
+			"${workspaceFolder:.config}/**",
+			"${workspaceFolder:.vscode}/**",
+			"${workspaceFolder:.vscode-server}/**",
+			"**/.git/**",
+			"**/.config/**",
+			"**/.vscode-server/**",
+			"**/__pycache__/**",
+			"**/build/**",
+			"**/build-*/**",
+			"**/data/**",
+			"**/dist/**",
+			"**/models/**",
+			"**/node_modules/**",
+			"**/venv/**",
+			"**/.venv/**"
+		]
 	}
 }

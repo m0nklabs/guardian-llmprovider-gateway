@@ -193,6 +193,17 @@ When touching these areas, read the referenced detail docs:
 - **Pre-restart gate: ALL 4 PASS** (950+ passed). Restart required to activate capture; agent traffic routes through Guardian — session drops during restart.
 - To verify after restart: `curl -s localhost:11434/api/capture/status` shows enabled + writer active; `data/capture/guardian_capture_current.jsonl` appears after first opted-in request; Keanu can run the live contract test on the real WAL.
 
+### DSH session `20260816_2` (model install, last updated 2026-08-16)
+
+- Working directory: `/home/flip/llama_cpp_guardian`
+- **New model installed: `qwen3.8-27b-uncensored-ymq`** (operator request: HF `zerodigest/Qwen3.8-27B-Uncensored-YMQ-MTP-GGUF`, `Qwen3.8-27B-Uncensored-YMQ-XL.gguf`). Source: YMQ-Compiler v2.0 mixed-precision quant of `JonathanColetti/Qwen3.8-27B-Uncensored` — an abliteration fine-tune of the same qwen35 base (65 layers, hybrid SSM+attention). XL preset ≈19.7 GB (larger than the 17.9 GB UD-Q4_K_XL base). MTP heads preserved natively → `spec_type: draft-mtp` like the sibling `qwen3.8-27b-mtp`.
+  - **Download:** `hf download zerodigest/Qwen3.8-27B-Uncensored-YMQ-MTP-GGUF Qwen3.8-27B-Uncensored-YMQ-XL.gguf --local-dir /home/flip/models/qwen3.8-27b-uncensored-ymq/`.
+  - **mmproj REUSED** from `/home/flip/models/qwen3.8-27b/mmproj-F16.gguf` — abliteration freezes the vision tower, so projector weights are shape-compatible. Created NO new mmproj dir.
+  - **Config (zoals gecommitted op 2026-08-16):** `config/models.yaml` entry `qwen3.8-27b-uncensored-ymq` — turbo4 KV, `context: 150000` (NIET 242144 — de XL-weights zijn ~19.7 GB, dus een kleiner kv-venster om OOM te vermijden; benchmark_context_limit 262144), `ngl: 99`, `tensor_split: "0.42,0.58"`, mmproj van base-qwen3.8-27b, `default_enable_thinking: true`, `spec_type: draft-mtp`, `--jinja` samplers + aliases `qwen3.8-uncensored` / `qwen3.8-ymq`. `~/.pi/agent/models.json` entry added (reasoning true, text+image, ctxWindow 242144).
+  - **Validatie:** YAML+JSON parse clean; `tests/unit/test_manager.py` 107 passed (config-drift detection unaffected). `py_compile` clean (no code touched).
+  - **Nog niet live:** config edit vereist `sudo systemctl restart llama-guardian` om de nieuwe entry zichtbaar te maken in `/v1/models` (en `llama-server` zal de nieuwe GGUF bij eerste switch laden — launch-signature-driftdetectie herlaadt automatisch). Operator voert de restart uit (sessie valt tijdens restart). Verifieer na restart: `curl -s localhost:11434/v1/models | grep qwen3.8-27b-uncensored-ymq`; eerste request triggert ~30s laadtijd + MTP draft-context build.
+  - **Also in this commit (2026-08-16/19, operator-driven config + CLI fix):** `config/settings.yaml` kreeg `z-ai/glm-5.3` als OpenRouter-only failover-mirror (NVIDIA NIM host nog alleen glm-5.2, gecheckt 2026-08-19) in de `providers.openrouter.models` failover-groep. `scripts/guardianctl.py` `test-event` was broken tegen de capture-refactor (`CaptureSink(config=cfg)` + `sink.write(event)` bestaan niet meer); gefwixt met de nieuwe async lifecycle (`CaptureSink(max_pending_events=…)` + `CaptureWALWriter.start()/stop()` + `sink.try_put()` + `build_request_received_event(cfg, …)`). `llama_cpp_guardian.code-workspace`: `python.analysis.exclude` (venv/models/.config) om Pylance-traffic te scheren.
+
 ### Pi session `20260813_1` (session wrap-up, last updated 2026-08-13)
 
 - Working directory: `/home/flip/llama_cpp_guardian`

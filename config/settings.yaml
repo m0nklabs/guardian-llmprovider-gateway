@@ -102,6 +102,7 @@ providers:
       - mistralai/mistral-large
       # ── Failover mirror models (also on NVIDIA NIM / Poolside direct) ──
       - z-ai/glm-5.2
+      - z-ai/glm-5.3   # OpenRouter-only for now: NVIDIA NIM still hosts only glm-5.2 (checked 2026-08-19)
       - minimax/minimax-m3
       # ── OpenRouter-exclusive free models (no NVIDIA equivalent) ──
       - poolside/laguna-s-2.1:free

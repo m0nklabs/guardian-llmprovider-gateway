@@ -220,7 +220,8 @@ def cmd_test_event(args: argparse.Namespace) -> None:
     """Emit a synthetic test event to verify the capture pipeline."""
     from app.capture.config import load_capture_config
     from app.capture.schema import BuildContext, build_request_received_event
-    from app.capture.sink import CaptureSink
+    from app.capture.sink import CaptureSink, CaptureEvent
+    from app.capture.wal_writer import CaptureWALWriter
 
     cfg = load_capture_config()
     if not cfg.is_active:
@@ -228,7 +229,17 @@ def cmd_test_event(args: argparse.Namespace) -> None:
         print("   ./venv/bin/python scripts/guardianctl.py enable --local-only")
         raise SystemExit(1)
 
-    sink = CaptureSink(config=cfg)
+    async def _emit() -> None:
+        import asyncio
+        sink = CaptureSink(max_pending_events=cfg.max_pending_events)
+        writer = CaptureWALWriter(sink, cfg)
+        await writer.start()
+        try:
+            sink.try_put(CaptureEvent(data=event))
+            await asyncio.sleep(0.5)  # let the writer drain
+        finally:
+            await writer.stop()
+
     ctx = BuildContext(
         request_id="test-" + str(int(__import__("time").time())),
         endpoint="/v1/chat/completions",
@@ -241,11 +252,12 @@ def cmd_test_event(args: argparse.Namespace) -> None:
         client_fingerprint="test-fingerprint",
     )
     event = build_request_received_event(
+        cfg,
         ctx,
         request_messages=[{"role": "user", "content": "This is a test message"}],
         request_parameters={"temperature": 0.0},
     )
-    sink.write(event)
+    __import__("asyncio").run(_emit())
     print(f"✅ Test event emitted: {event.get('event_id', '?')}")
     print(f"   Event type: {event.get('event_type', '?')}")
     print(f"   Schema:     {event.get('schema_name', '?')} v{event.get('schema_version', '?')}")
