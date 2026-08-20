@@ -207,30 +207,22 @@ When touching these areas, read the referenced detail docs:
 ### DSH session `20260819_1` (config hot-reload + ownership repair, last updated 2026-08-19)
 
 - Working directory: `/home/flip/llama_cpp_guardian`
-- **No-restart config reload implemented** (code-only, NOT yet deployed — needs
-  one operator restart to become live): `POST /api/config/reload` (any valid
-  key) re-reads `settings.yaml` + `cloud_keys.json` and swaps them live:
-  - `config_loader.reload_config()` — atomic in-place CONFIG swap (same dict
-    object, all accessors stay valid); fail-safe: parse error keeps previous
-  - `ProviderRegistry.reload()`, `FailoverRegistry.reload()`,
-    `CloudCredentialStore.reload()`, `CaptureController.reload_config()`
-    (now async; rebuilds the WAL writer only when sink bounds or
-    active-status changed — policy/prefix changes stay zero-touch)
-  - `ProviderHealthTracker.reconfigure()` (new; live threshold tuning) +
-    `cloud_retry` limits — applied ONLY when settings.yaml actually reloaded
-    (avoids defaulting `cloud_retry.enabled` back to true on a failed parse)
-  - Response lists `reloaded` / `not_reloaded` / `errors`; port/pid/TLS stay
-    restart-only. Updated the old "No hot reload" critical rule accordingly.
-- **Legacy cloud-credential ownership repair**: `POST /api/cloud/credentials/claim`
-  (`{"provider", "credential_id"}`) — a key that ALREADY holds a link to an
-  owner-less legacy credential (created before ownership recording) becomes
-  its permanent owner, unlocking management + linking. Unblocks the
-  `keanu-factory` key: after claim, the owner can link it via `POST
-  /api/cloud/links` (was: 403 `no_credential_for_provider` on all cloud
-  routes; the five fully-linked keys are hermes `94062b64e5d5`, goose
-  `286cf1d8b6fc`, pi `c1824126c6fb`, claudekvm2 `17aa6e789057`,
-  open-webui `3c423d5461bc`). Operator decision: NO quick win with another
-  token — wait for this fix, then link keanu's own key.
+- **LIVE (restarted 2026-08-19, commit `c1c603c` + follow-up):** no-restart
+  config reload (`POST /api/config/reload`) and legacy credential
+  ownership repair (`POST /api/cloud/credentials/claim`) are deployed and
+  verified. The old "No hot reload" critical rule is superseded: config
+  edits to `settings.yaml`/`cloud_keys.json` now hot-reload via the
+  endpoint (code still needs a restart).
+- **keanu-factory key now linked (operator decision: clean way, no token
+  swap):** hermes (`94062b64e5d5`) claimed the owner-less legacy nvidia +
+  openrouter credentials via `/api/cloud/credentials/claim`, then linked
+  keanu-factory (`7e573421cf2a`) to nvidia + openrouter; claudekvm2
+  (`17aa6e789057`, google owner) linked keanu to google. Verified live:
+  keanu token → `guardian/openrouter/moonshotai/kimi-k3` 200,
+  `guardian/google/gemini-3.5-flash` + `gemini-flash-latest` 200 (the old
+  `gemini-2.5-flash` is no longer available to new users upstream).
+  `config/cloud_keys.json` is gitignored (secrets) — ownership/links live
+  in the file only. Helper: `scripts/link_keanu_key.py`.
 - **Verification report delivered**: `docs/free-tier-pool-verification.md`
   answers the 7 points of `docs/free-tier-pool-request.md` (Operator update:
   `minimax/minimax-m3:free` does NOT exist on OpenRouter — minimax-m3 group =
@@ -238,8 +230,8 @@ When touching these areas, read the referenced detail docs:
   google credential only). **Nothing of the pool config is implemented** —
   no `failover_groups`, no `cloud_capture` flip — until Keanu has run the
   probe (operator instruction). New tests: `tests/unit/test_config_reload.py`
-  (7) + `tests/unit/test_cloud_keys_claim.py` (5); suite was green before
-  these two files were added (954+ passed), final full-suite re-run pending.
+  (7) + `tests/unit/test_cloud_keys_claim.py` (5); full suite green
+  (964 passed / 3 skipped, pre-restart gate all 4 PASS).
 
 ### Pi session `20260813_1` (session wrap-up, last updated 2026-08-13)
 
