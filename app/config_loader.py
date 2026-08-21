@@ -2,13 +2,11 @@
 
 Config-schema migration (2026-08-21, docs/CONFIG_SCHEMA.md): the monolith
 ``config/settings.yaml`` is split into domain files.  This module is the
-central read switch: it merges ``global.settings.yaml`` (proxy/queue/timeouts/
-scaler/capture/grammar/cloud_retry/failover_health/services/benchmark/...),
-``providers.settings.yaml`` + ``providers.overrides.yaml`` (provider defaults
-and per-provider overrides, overrides win) into the *same* top-level config
-dict, so every existing ``CONFIG.get("key")`` consumer stays intact.  It loads
-once and exposes typed accessors for the individual settings that used to
-re-read the YAML file on every use.
+central read switch: it deep-merges the full ``global.settings.yaml`` document
+into the shared top-level config dict, then overlays the merged provider config
+(``providers.settings.yaml`` + ``providers.overrides.yaml``, overrides win) as
+the canonical ``providers`` section.  It loads once and exposes typed accessors
+for the individual settings that used to re-read YAML on every use.
 """
 
 from __future__ import annotations
@@ -73,13 +71,11 @@ def _merge_providers() -> Dict[str, Any]:
 def load_config() -> dict:
     """Load configuration from the config-schema files with sensible defaults.
 
-    Merges, in order: built-in defaults → ``global.settings.yaml`` → merged
-    providers (from ``providers.settings.yaml`` + ``providers.overrides.yaml``,
-    overrides win).  As with the legacy loader, the shared dict carries the
-    sections consumed via ``CONFIG`` (proxy, cloud_retry, grammar, timeouts,
-    failover_health, providers); the remaining global sections (queue,
-    services, services_to_stop, benchmark, scaler, capture) are read directly
-    by their own modules, exactly as they were before the split.
+    Merges, in order: built-in defaults → the full ``global.settings.yaml``
+    document → merged providers (from ``providers.settings.yaml`` +
+    ``providers.overrides.yaml``, overrides win).  This keeps shared
+    ``CONFIG.get("key")`` consumers like the inference queue on the configured
+    values while direct readers/writers of the domain files continue to work.
     """
     default_config: Dict[str, Any] = {
         "proxy": {
@@ -106,12 +102,7 @@ def load_config() -> dict:
     }
 
     global_cfg = _load_yaml_map(CONFIG_PATH)
-    # Merge with defaults (file config takes precedence)
-    for key in ("proxy", "cloud_retry", "grammar", "timeouts"):
-        if key in global_cfg:
-            default_config[key].update(global_cfg[key])
-    if "failover_health" in global_cfg:
-        default_config["failover_health"] = global_cfg["failover_health"]
+    default_config = _deep_merge(default_config, global_cfg)
 
     # Provider section merged from settings + overrides is the canonical config
     # (providers.py still reads its own files directly for cold reads; this
