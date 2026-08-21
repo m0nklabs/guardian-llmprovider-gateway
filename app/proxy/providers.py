@@ -419,7 +419,7 @@ class ProviderRegistry:
                 return cached
 
             context_windows: Dict[str, int] = {}
-            catalog_url = f"{provider.base_url}/models"
+            catalog_url = f"{provider.base_url}{provider.catalog_url or '/models'}"
             try:
                 headers = self.build_forward_headers(provider)
                 timeout_seconds = min(max(provider.timeout_seconds, 1.0), 10.0)
