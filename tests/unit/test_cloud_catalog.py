@@ -129,6 +129,8 @@ class TestDiskCache:
             "openrouter": {
                 "fetched_at": 100.0,
                 "models": {"openai/gpt-4o": "openai/gpt-4o"},
+                # endpoint source must match the provider's base_url|catalog_url
+                "source": "https://openrouter.ai/api/v1|/models",
             },
         }))
         registry = ProviderRegistry(settings_path=_write_settings(tmp_path))
@@ -138,6 +140,32 @@ class TestDiskCache:
             overrides_file=tmp_path / "overrides.yaml",
         )
         assert catalog.get_models_for_provider("openrouter") == {"openai/gpt-4o": "openai/gpt-4o"}
+
+    def test_stale_cached_catalog_dropped_on_endpoint_change(self, tmp_path: Path):
+        # Cache written when openrouter pointed at /models; provider now points
+        # at /models/user -> the stale entry must NOT be restored.
+        cache_file = tmp_path / "cache.json"
+        cache_file.write_text(json.dumps({
+            "openrouter": {
+                "fetched_at": 100.0,
+                "models": {"openai/gpt-4o": "openai/gpt-4o"},
+                "source": "https://openrouter.ai/api/v1|/models",
+            },
+        }))
+        settings = _write_settings(
+            tmp_path,
+            SAMPLE_SETTINGS.replace(
+                "base_url: https://openrouter.ai/api/v1\n",
+                "base_url: https://openrouter.ai/api/v1\n    catalog_url: /models/user\n",
+            ),
+        )
+        registry = ProviderRegistry(settings_path=settings)
+        catalog = CloudModelCatalog(
+            provider_registry=registry,
+            cache_file=cache_file,
+            overrides_file=tmp_path / "overrides.yaml",
+        )
+        assert catalog.get_models_for_provider("openrouter") == {}
 
 
 # ── Refresh failure keeps last list ──────────────────────────────────

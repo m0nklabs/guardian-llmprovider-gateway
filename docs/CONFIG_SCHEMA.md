@@ -8,12 +8,21 @@
 
 ## 1. Naamgevingsconventie
 
-Patroon: `<domain>.<kind>.<scope?>.yaml`
+Patroon: `<domain>.<kind>.<scope?>.yaml`, met een uitzondering voor models waar
+de scope vóór het kind staat: `<domain>.<scope>.<kind>.yaml`.
 
 - **domain** — waar het over gaat: `global` (global infra/subsystem), `providers`
   (cloud gateways), `models` (modellen), `guardian` (het product zelf: API keys).
 - **kind** — `settings` (defaults) of `overrides` (afwijkingen). Naam zegt het.
-- **scope** (alleen bij models) — `local` of `cloud`.
+- **scope** (bij models) — `local` of `cloud`, geplaatst ná domain en vóór kind:
+  `models.cloud.settings.yaml`, `models.local.overrides.yaml`.
+- **entity-vorm** (bij guardian): het bestand stelt geen "settings/overrides"
+  voor maar een concrete entiteit (identiteiten/keys): `guardian.keys.yaml`.
+
+Dus de twee schema's:
+- generiek: `<domain>.<kind>.yaml` (bijv. `global.settings.yaml`, `providers.overrides.yaml`)
+- models:  `<domain>.<scope>.<kind>.yaml` (bijv. `models.cloud.overrides.yaml`)
+- entity:  `<domain>.<entity>.yaml`     (bijv. `guardian.keys.yaml`)
 
 Sorteerbaar: per domain gegroepeerd (global → guardian → models → providers),
 binnen models cloud vóór local. Je ziet in één oogopslag wat defaults vs afwijkingen is.
@@ -112,11 +121,23 @@ bestaande config-dict, zodat alle `.get("key")`-reads intact blijven.
 5. **`providers.py`**: leest `providers.settings.yaml` + `providers.overrides.yaml`;
    `CloudProvider` krijgt `catalog_url`.
 6. **`cloud_catalog.py`**: `catalog_url or "/models"`.
-7. **`paths.py`**: update naar nieuwe bestandsnamen; symlinks na succesvolle
+7. **Directe files-lezers/-schrijvers omzetten** (copilot-review pt3 — deze
+   bypassen `config_loader.py` en openen `config/settings.yaml` rechtstreeks;
+   ze breken als de compat-symlink wegvalt, en scaler/guardianctl kunnen naar de
+   verkeerde laag schrijven):
+   - `app/proxy/scaler.py` (regels 73/161/181) — leest én schrijft `:73`+profielen
+   - `app/capture/config.py` (`:254`) — leest capture-blok
+   - `app/scheduler/manager.py` (`:25`) — leest services/services_to_stop/benchmark
+   - `app/proxy/failover.py` (`:283`) — leest failover_groups
+   - `scripts/guardianctl.py` (`:34`) — leest/schrijft capture-cli
+   Elke lezer moet naar de juiste nieuwe file wijzen (global vs providers), elke
+   schrijver naar de juiste overrides-laag. Dit is een expliciete, geteste stap —
+   niet weg te redeneren achter de compat-symlink.
+8. **`paths.py`**: update naar nieuwe bestandsnamen; symlinks na succesvolle
    liveswitch ingekort tot de echte namen en `settings.yaml.bak` verwijderd.
-8. **`pre_restart_check.py`** (4 gates) vóór restart; daarna restart.
-9. Recovery bij falen: `cp settings.yaml.bak config/settings.yaml` terug +
-   legacy paden herstellen (geen self-heal — zie AGENTS.md).
+9. **`pre_restart_check.py`** (4 gates) vóór restart; daarna restart.
+10. Recovery bij falen: `cp settings.yaml.bak config/settings.yaml` terug +
+    legacy paden herstellen (geen self-heal — zie AGENTS.md).
 
 ## 7. Tests
 
