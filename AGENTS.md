@@ -94,7 +94,6 @@ scripts/
 When touching these areas, read the referenced detail docs:
 
 - **Cloud routing / model resolution** → `@docs/LLM_ROUTER.md`
-- **Cloud access redesign plan** → `@docs/CLOUD_ACCESS_REDESIGN.md` (PLAN: one config, one key source, dynamic catalog, unified `guardian/{provider}/{brand}/{model}` format — not yet implemented)
 - **Anthropic API bridge** → `@docs/ANTHROPIC_BRIDGE.md`
 - **System architecture** → `@docs/ARCHITECTURE.md`
 - **API surface** → `@docs/API_REFERENCE.md`
@@ -253,31 +252,6 @@ When touching these areas, read the referenced detail docs:
   so a future session that has to dig into code writes that understanding down
   immediately instead of letting the next session re-derive it.
 - Docs-only change: no code, no restart, no tests affected. Committed + pushed.
-
-### DSH session `20260820_2` (cloud access redesign — PLAN documented, not implemented)
-
-- Working directory: `/home/flip/llama_cpp_guardian`
-- **Operator mandates a cloud-access redesign** after this session exposed the
-  mess (multiple key locations, duplicated/inconsistent `/v1/models`, cloud_keys
-  linking that is not a real security boundary, mixed json/yaml, missing
-  google/poolside `.env` keys). The full plan lives in
-  **`docs/CLOUD_ACCESS_REDESIGN.md`** (Status: PLAN).
-- **Design decisions (operator-approved):**
-  - All YAML (`guardian_apikeys.yaml`, `local_models.yaml`, `cloud_models.yaml`),
-    cloud_keys.json removed.
-  - One key source: `settings.yaml` `providers.*.api_key` via `$ENV` (.env);
-    add google provider + missing `.env` vars.
-  - No credentials/links/ownership; per-key access = `cloud_gateway_access:
-    true|false` (default true) in `guardian_apikeys.yaml`.
-  - Dynamic cloud catalog (`cloud_catalog.py`): fetch each provider's `/v1/models`,
-    cache + auto-refresh; `cloud_models.yaml` = per-model overrides only.
-  - Model format: cloud `guardian/{provider}/{brand}/{model}` (strict-new, bare
-    names removed); local `guardian/{local}` (new primary, old bare name stays
-    accepted as alias). Example: `guardian/google/google/gemini-3.5-flash`.
-- **Reference for implementation** so the next session does not re-derive it:
-  read `docs/CLOUD_ACCESS_REDESIGN.md` and the skills pointer already added.
-- **NOT started.** Implementation awaits operator go-ahead (it ends in a
-  Guardian restart that drops the session — operator runs the final restart).
 
 ### Pi session `20260813_1` (session wrap-up, last updated 2026-08-13)
 
