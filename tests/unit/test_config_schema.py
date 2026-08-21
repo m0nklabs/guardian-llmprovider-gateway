@@ -153,8 +153,8 @@ def test_path_aliases_resolve_schema_names(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(paths, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(paths, "GUARDIAN_KEYS_FILE", tmp_path / "guardian.keys.yaml")
     monkeypatch.setattr(paths, "MODELS_CLOUD_OVERRIDES_FILE", tmp_path / "models.cloud.overrides.yaml")
-    monkeypatch.setattr(paths, "GUARDIAN_APIKEYS_FILE", paths.guardian_apikeys_file())
-    monkeypatch.setattr(paths, "CLOUD_MODELS_OVERRIDES_FILE", paths.models_cloud_overrides_file())
+    monkeypatch.setattr(paths, "GUARDIAN_APIKEYS_FILE", tmp_path / "guardian.keys.yaml")
+    monkeypatch.setattr(paths, "CLOUD_MODELS_OVERRIDES_FILE", tmp_path / "models.cloud.overrides.yaml")
 
     # Existing canonical files -> local_models_file resolves to the new name.
     assert paths.local_models_file().name == "models.local.settings.yaml"
