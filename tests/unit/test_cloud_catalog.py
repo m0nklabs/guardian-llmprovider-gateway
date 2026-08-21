@@ -129,6 +129,8 @@ class TestDiskCache:
             "openrouter": {
                 "fetched_at": 100.0,
                 "models": {"openai/gpt-4o": "openai/gpt-4o"},
+                # endpoint source must match the provider's base_url|catalog_url
+                "source": "https://openrouter.ai/api/v1|/models",
             },
         }))
         registry = ProviderRegistry(settings_path=_write_settings(tmp_path))
@@ -138,6 +140,63 @@ class TestDiskCache:
             overrides_file=tmp_path / "overrides.yaml",
         )
         assert catalog.get_models_for_provider("openrouter") == {"openai/gpt-4o": "openai/gpt-4o"}
+
+    def test_stale_cached_catalog_dropped_on_endpoint_change(self, tmp_path: Path):
+        # Cache written when openrouter pointed at /models; provider now points
+        # at /models/user -> the stale entry must NOT be restored.
+        cache_file = tmp_path / "cache.json"
+        cache_file.write_text(json.dumps({
+            "openrouter": {
+                "fetched_at": 100.0,
+                "models": {"openai/gpt-4o": "openai/gpt-4o"},
+                "source": "https://openrouter.ai/api/v1|/models",
+            },
+        }))
+        settings = _write_settings(
+            tmp_path,
+            SAMPLE_SETTINGS.replace(
+                "base_url: https://openrouter.ai/api/v1\n",
+                "base_url: https://openrouter.ai/api/v1\n    catalog_url: /models/user\n",
+            ),
+        )
+        registry = ProviderRegistry(settings_path=settings)
+        catalog = CloudModelCatalog(
+            provider_registry=registry,
+            cache_file=cache_file,
+            overrides_file=tmp_path / "overrides.yaml",
+        )
+        assert catalog.get_models_for_provider("openrouter") == {}
+
+    def test_reload_drops_stale_cached_catalog_on_endpoint_change(self, tmp_path: Path):
+        # Same as above but through the hot-reload path: the disk cache is
+        # written for `/models`, the registry is pointed at `/models/user`,
+        # and a `reload()` (live config reload, no restart) must drop the
+        # stale entry thanks to the `source` check in `_load_disk_cache`.
+        cache_file = tmp_path / "cache.json"
+        cache_file.write_text(json.dumps({
+            "openrouter": {
+                "fetched_at": 100.0,
+                "models": {"openai/gpt-4o": "openai/gpt-4o"},
+                "source": "https://openrouter.ai/api/v1|/models",
+            },
+        }))
+        settings = _write_settings(
+            tmp_path,
+            SAMPLE_SETTINGS.replace(
+                "base_url: https://openrouter.ai/api/v1\n",
+                "base_url: https://openrouter.ai/api/v1\n    catalog_url: /models/user\n",
+            ),
+        )
+        registry = ProviderRegistry(settings_path=settings)
+
+        # Simulate an in-memory catalog with a stale entry, then a hot reload.
+        catalog = CloudModelCatalog(
+            provider_registry=registry,
+            cache_file=cache_file,
+            overrides_file=tmp_path / "overrides.yaml",
+        )
+        catalog.reload()
+        assert catalog.get_models_for_provider("openrouter") == {}
 
 
 # ── Refresh failure keeps last list ──────────────────────────────────
@@ -170,6 +229,97 @@ class TestRefreshFailure:
             result = await catalog.refresh_provider(provider)
 
         assert result == {"openai/gpt-4o": "openai/gpt-4o"}
+
+
+# ── Catalog URL override ─────────────────────────────────────────────
+
+
+class TestCatalogUrlOverride:
+    @pytest.mark.asyncio
+    async def test_refresh_uses_provider_catalog_url(self, tmp_path: Path):
+        settings = tmp_path / "settings.yaml"
+        settings.write_text(
+            textwrap.dedent(
+                """\
+                providers:
+                  openrouter:
+                    enabled: true
+                    base_url: https://openrouter.ai/api/v1
+                    api_key: sk-or-test-key
+                    timeout_seconds: 300
+                    catalog_url: /models/user
+                """
+            )
+        )
+        registry = ProviderRegistry(settings_path=settings)
+        catalog = CloudModelCatalog(
+            provider_registry=registry,
+            cache_file=tmp_path / "cache.json",
+            overrides_file=tmp_path / "overrides.yaml",
+        )
+        provider = registry.get_provider_for_model("openrouter/deepseek/deepseek-chat")
+        assert provider is not None
+        assert provider.catalog_url == "/models/user"
+
+        captured = {}
+
+        class CapturingClient:
+            def __init__(self, *a, **k):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def get(self, url, headers):
+                captured["url"] = url
+                return _FakeResponse({"data": [{"id": "deepseek/deepseek-chat"}]})
+
+        with patch("app.proxy.cloud_catalog.httpx.AsyncClient", CapturingClient):
+            await catalog.refresh_provider(provider)
+
+        assert captured["url"] == "https://openrouter.ai/api/v1/models/user"
+
+    @pytest.mark.asyncio
+    async def test_refresh_defaults_to_models(self, tmp_path: Path):
+        catalog = _make_catalog(tmp_path)
+        provider = catalog._registry.get_provider_for_model("openai/gpt-4o")
+        assert provider is not None
+        assert provider.catalog_url is None
+        captured = {}
+
+        class CapturingClient:
+            def __init__(self, *a, **k):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def get(self, url, headers):
+                captured["url"] = url
+                return _FakeResponse({"data": [{"id": "gpt-4o"}]})
+
+        with patch("app.proxy.cloud_catalog.httpx.AsyncClient", CapturingClient):
+            await catalog.refresh_provider(provider)
+        assert captured["url"] == "https://openrouter.ai/api/v1/models"
+
+
+class _FakeResponse:
+    """Minimal stand-in for an httpx.Response used in tests."""
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
 
 
 # ── Overrides loading ────────────────────────────────────────────────

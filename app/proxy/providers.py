@@ -47,6 +47,12 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 import yaml
 
+from app.paths import (
+    MODELS_CLOUD_OVERRIDES_FILE,
+    PROVIDERS_OVERRIDES_FILE,
+    PROVIDERS_SETTINGS_FILE,
+)
+
 logger = logging.getLogger("Guardian.Providers")
 
 # Matches ``${ENV_VAR}`` or ``$ENV_VAR`` in config strings.
@@ -73,6 +79,27 @@ def _expand_env(value: str) -> str:
     return _ENV_VAR_PATTERN.sub(_replace, value)
 
 
+def _deep_merge_providers(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge per-provider overrides over defaults (overrides win, recursively).
+
+    Recurses into mapping values so a partial override (e.g. one
+    ``extra_headers`` entry) preserves the other defaults for that provider,
+    matching the same semantics ``config_loader._deep_merge`` applies.
+    """
+    if not isinstance(base, dict):
+        base = {}
+    if not isinstance(override, dict):
+        override = {}
+    merged = {k: (dict(v) if isinstance(v, dict) else v) for k, v in base.items()}
+    for provider_name, cfg in override.items():
+        current = merged.get(provider_name)
+        if isinstance(current, dict) and isinstance(cfg, dict):
+            merged[provider_name] = _deep_merge_providers(current, cfg)
+        else:
+            merged[provider_name] = (dict(cfg) if isinstance(cfg, dict) else cfg)
+    return merged
+
+
 @dataclass
 class CloudProvider:
     """A single upstream cloud LLM provider."""
@@ -85,6 +112,10 @@ class CloudProvider:
     timeout_seconds: float = 600.0
     # Provider-specific extra headers (e.g. OpenRouter ranking headers).
     extra_headers: Dict[str, str] = field(default_factory=dict)
+    # Catalog path override (default "/models"). Lets a provider advertise the
+    # models actually reachable through its guardrails/privacy filters, e.g.
+    # openrouter -> "/models/user". Empty/None -> "/models".
+    catalog_url: Optional[str] = None
 
     @property
     def is_configured(self) -> bool:
@@ -101,10 +132,13 @@ class ProviderRegistry:
     """
 
     def __init__(self, settings_path: Optional[Path] = None) -> None:
+        # When no explicit settings_path is given (production default), read the
+        # config-schema files (providers.settings.yaml + providers.overrides.yaml
+        # + models.cloud.overrides.yaml).  An explicit path (tests/legacy) reads
+        # that single file, keeping its providers + context_overrides keys.
+        self._explicit_settings = settings_path is not None
         if settings_path is None:
-            settings_path = (
-                Path(__file__).parent.parent.parent / "config" / "settings.yaml"
-            )
+            settings_path = PROVIDERS_SETTINGS_FILE
         self._settings_path = settings_path
         self._providers: Dict[str, CloudProvider] = {}
         self._model_to_provider: Dict[str, CloudProvider] = {}
@@ -121,7 +155,7 @@ class ProviderRegistry:
     # ── Loading ──────────────────────────────────────────────────────
 
     def reload(self) -> None:
-        """Re-read provider configuration from ``settings.yaml``."""
+        """Re-read provider configuration from the config-schema files."""
         self._providers.clear()
         self._model_to_provider.clear()
         self._prefix_to_provider.clear()
@@ -160,6 +194,9 @@ class ProviderRegistry:
                     str(k): _expand_env(str(v))
                     for k, v in cfg["extra_headers"].items()
                 }
+            catalog_url = cfg.get("catalog_url")
+            if isinstance(catalog_url, str):
+                catalog_url = catalog_url.strip() or None
 
             provider = CloudProvider(
                 name=provider_name,
@@ -169,6 +206,7 @@ class ProviderRegistry:
                 enabled=enabled,
                 timeout_seconds=timeout,
                 extra_headers=extra_headers,
+                catalog_url=catalog_url,
             )
             self._providers[provider_name] = provider
 
@@ -216,15 +254,58 @@ class ProviderRegistry:
             )
 
     def _load_settings_config(self) -> Dict[str, Any]:
-        """Read the complete Guardian settings document."""
-        try:
-            if not self._settings_path.exists():
+        """Read the complete config document.
+
+        With an explicit ``settings_path`` (tests/legacy single file) this reads
+        that file directly.  Otherwise (production default) it merges
+        ``providers.settings.yaml`` + ``providers.overrides.yaml`` (overrides
+        win) for ``providers``, and derives ``context_overrides`` from
+        ``models.cloud.overrides.yaml`` (the ``context_window`` entries).
+        """
+        if self._explicit_settings:
+            try:
+                if not self._settings_path.exists():
+                    return {}
+                with open(self._settings_path, "r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+                return cfg if isinstance(cfg, dict) else {}
+            except Exception as e:
+                logger.warning(
+                    "Failed to load providers config from %s: %s", self._settings_path, e
+                )
                 return {}
-            with open(self._settings_path, "r", encoding="utf-8") as f:
-                cfg = yaml.safe_load(f) or {}
-            return cfg if isinstance(cfg, dict) else {}
+
+        # Production default: merged provider config.
+        try:
+            default_providers: Dict[str, Any] = {}
+            if PROVIDERS_SETTINGS_FILE.exists():
+                with open(PROVIDERS_SETTINGS_FILE, "r", encoding="utf-8") as f:
+                    raw = yaml.safe_load(f) or {}
+                default_providers = raw.get("providers", {}) if isinstance(raw, dict) else {}
+
+            override_providers: Dict[str, Any] = {}
+            if PROVIDERS_OVERRIDES_FILE.exists():
+                with open(PROVIDERS_OVERRIDES_FILE, "r", encoding="utf-8") as f:
+                    raw = yaml.safe_load(f) or {}
+                override_providers = raw.get("providers", {}) if isinstance(raw, dict) else {}
+
+            merged = _deep_merge_providers(default_providers, override_providers)
+
+            # context_overrides: context_window entries from models.cloud.overrides.yaml
+            context_overrides: Dict[str, int] = {}
+            if MODELS_CLOUD_OVERRIDES_FILE.exists():
+                with open(MODELS_CLOUD_OVERRIDES_FILE, "r", encoding="utf-8") as f:
+                    raw = yaml.safe_load(f) or {}
+                if isinstance(raw, dict):
+                    for model, entry in raw.items():
+                        if isinstance(entry, dict):
+                            cw = entry.get("context_window")
+                            if isinstance(cw, int) and not isinstance(cw, bool) and cw > 0:
+                                context_overrides[model] = cw
+
+            return {"providers": merged, "context_overrides": context_overrides}
         except Exception as e:
-            logger.warning("Failed to load providers config from %s: %s", self._settings_path, e)
+            logger.warning("Failed to load merged providers config: %s", e)
             return {}
 
     @staticmethod
@@ -411,7 +492,7 @@ class ProviderRegistry:
                 return cached
 
             context_windows: Dict[str, int] = {}
-            catalog_url = f"{provider.base_url}/models"
+            catalog_url = f"{provider.base_url}{provider.catalog_url or '/models'}"
             try:
                 headers = self.build_forward_headers(provider)
                 timeout_seconds = min(max(provider.timeout_seconds, 1.0), 10.0)

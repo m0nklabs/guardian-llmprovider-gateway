@@ -94,7 +94,14 @@ class CloudModelCatalog:
             self._overrides = {}
 
     def _load_disk_cache(self) -> None:
-        """Restore a previously persisted catalog for cold-start resilience."""
+        """Restore a previously persisted catalog for cold-start resilience.
+
+        Entries are only restored when their *endpoint signature* (base_url +
+        catalog_url) still matches the current provider config.  A change to
+        either invalidates the stale cache, so e.g. switching openrouter to
+        ``catalog_url=/models/user`` does not keep advertising the old 422-model
+        list until a manual refresh.
+        """
         try:
             if not self._cache_file.exists():
                 return
@@ -103,8 +110,15 @@ class CloudModelCatalog:
                 return
             for provider in self._registry.get_enabled_providers():
                 stored = raw.get(provider.name)
-                if isinstance(stored, dict) and isinstance(stored.get("models"), dict):
-                    self._catalogs[provider.name] = stored
+                if not (isinstance(stored, dict) and isinstance(stored.get("models"), dict)):
+                    continue
+                if stored.get("source") != self._provider_endpoint_key(provider):
+                    logger.info(
+                        "☁️  Cloud catalog cache for '%s' is stale (endpoint changed); dropping",
+                        provider.name,
+                    )
+                    continue
+                self._catalogs[provider.name] = stored
             if self._catalogs:
                 logger.info(
                     "☁️  Restored cold-start cloud catalog from %s (%d provider(s))",
@@ -114,15 +128,24 @@ class CloudModelCatalog:
         except Exception as e:
             logger.debug("Cloud catalog disk cache not restored: %s", e)
 
+    @staticmethod
+    def _provider_endpoint_key(provider: Optional["CloudProvider"]) -> str:
+        """Stable key identifying which catalog endpoint a provider points at."""
+        if provider is None:
+            return ""
+        return f"{provider.base_url}|{provider.catalog_url or '/models'}"
+
     def _persist_cache(self) -> None:
         try:
             self._cache_file.parent.mkdir(parents=True, exist_ok=True)
+            by_name = {p.name: p for p in self._registry.get_enabled_providers()}
             payload = {
-                provider: {
+                provider_name: {
                     "fetched_at": data["fetched_at"],
                     "models": data["models"],
+                    "source": self._provider_endpoint_key(by_name.get(provider_name)),
                 }
-                for provider, data in self._catalogs.items()
+                for provider_name, data in self._catalogs.items()
                 if isinstance(data, dict) and data.get("models")
             }
             with open(self._cache_file, "w", encoding="utf-8") as f:
@@ -131,8 +154,16 @@ class CloudModelCatalog:
             logger.warning("⚠️  Failed to persist cloud catalog cache: %s", e)
 
     def reload(self) -> None:
-        """Re-read overrides and align cached entries with current providers."""
+        """Re-read overrides and align cached entries with current providers.
+
+        Also re-loads the persisted disk cache: its per-provider ``source``
+        (``base_url|catalog_url``) check drops any entry whose endpoint changed
+        (e.g. switching ``catalog_url``), so a hot ``/api/config/reload`` that
+        changes the catalog endpoint stops advertising the stale list without
+        needing a restart or a manual ``/api/cloud/catalog/refresh``.
+        """
         self._load_overrides()
+        self._load_disk_cache()
         enabled_names = {p.name for p in self._registry.get_enabled_providers()}
         for stale in [p for p in self._catalogs if p not in enabled_names]:
             self._catalogs.pop(stale, None)
@@ -176,7 +207,8 @@ class CloudModelCatalog:
         cached list is kept (persisted from last successful run).
         """
         headers = ProviderRegistry.build_forward_headers(provider)
-        url = f"{provider.base_url}/models"
+        catalog_path = provider.catalog_url or "/models"
+        url = f"{provider.base_url}{catalog_path}"
         timeout = min(max(float(provider.timeout_seconds), 1.0), 30.0)
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:

@@ -1,9 +1,12 @@
-"""Configuration loading — single source of truth for settings.yaml.
+"""Configuration loading — single source of truth for the config schema.
 
-Extracted from ``app.proxy.server`` as part of Phase 5 (Structural Separation).
-Pure module (no server dependencies): loads ``config/settings.yaml`` once,
-merges it over the built-in defaults, and exposes typed accessors for the
-individual settings that used to re-read the YAML file on every use.
+Config-schema migration (2026-08-21, docs/CONFIG_SCHEMA.md): the monolith
+``config/settings.yaml`` is split into domain files.  This module is the
+central read switch: it deep-merges the full ``global.settings.yaml`` document
+into the shared top-level config dict, then overlays the merged provider config
+(``providers.settings.yaml`` + ``providers.overrides.yaml``, overrides win) as
+the canonical ``providers`` section.  It loads once and exposes typed accessors
+for the individual settings that used to re-read YAML on every use.
 """
 
 from __future__ import annotations
@@ -14,16 +17,66 @@ from typing import Any, Dict, Optional
 
 import yaml
 
-from app.paths import CONFIG_DIR
+from app.paths import (
+    global_settings_file,
+    providers_defaults_file,
+    providers_overrides_file,
+)
 from app.proxy.ratelimit import RateLimitConfig
 
 logger = logging.getLogger("Guardian")
 
-CONFIG_PATH = CONFIG_DIR / "settings.yaml"
+CONFIG_PATH = global_settings_file()
+
+
+def _load_yaml_map(path: Path) -> dict:
+    """Load a YAML file into a dict, or return {} on absence/parse error."""
+    try:
+        if not path.exists():
+            return {}
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        logger.warning("Failed to load config from %s: %s", path, e)
+        return {}
+
+
+def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge *override* over *base* recursively (override wins)."""
+    out = dict(base)
+    for key, value in override.items():
+        if (
+            key in out
+            and isinstance(out[key], dict)
+            and isinstance(value, dict)
+        ):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def _merge_providers() -> Dict[str, Any]:
+    """Merge providers defaults + overrides (overrides win per provider)."""
+    defaults = _load_yaml_map(providers_defaults_file()).get("providers", {}) or {}
+    overrides = _load_yaml_map(providers_overrides_file()).get("providers", {}) or {}
+    if not isinstance(defaults, dict):
+        defaults = {}
+    if not isinstance(overrides, dict):
+        overrides = {}
+    return _deep_merge(defaults, overrides)
 
 
 def load_config() -> dict:
-    """Load configuration from settings.yaml with sensible defaults."""
+    """Load configuration from the config-schema files with sensible defaults.
+
+    Merges, in order: built-in defaults → the full ``global.settings.yaml``
+    document → merged providers (from ``providers.settings.yaml`` +
+    ``providers.overrides.yaml``, overrides win).  This keeps shared
+    ``CONFIG.get("key")`` consumers like the inference queue on the configured
+    values while direct readers/writers of the domain files continue to work.
+    """
     default_config: Dict[str, Any] = {
         "proxy": {
             "stream_heartbeat_seconds": 15,
@@ -48,24 +101,13 @@ def load_config() -> dict:
         }
     }
 
-    try:
-        if CONFIG_PATH.exists():
-            with open(CONFIG_PATH, 'r') as f:
-                file_config = yaml.safe_load(f) or {}
-            # Merge with defaults (file config takes precedence)
-            if "proxy" in file_config:
-                default_config["proxy"].update(file_config["proxy"])
-            if "cloud_retry" in file_config:
-                default_config["cloud_retry"].update(file_config["cloud_retry"])
-            if "grammar" in file_config:
-                default_config["grammar"].update(file_config["grammar"])
-            if "timeouts" in file_config:
-                default_config["timeouts"].update(file_config["timeouts"])
-            if "failover_health" in file_config:
-                default_config["failover_health"] = file_config["failover_health"]
-            return default_config
-    except Exception as e:
-        logger.warning(f"Failed to load config from {CONFIG_PATH}: {e}. Using defaults.")
+    global_cfg = _load_yaml_map(CONFIG_PATH)
+    default_config = _deep_merge(default_config, global_cfg)
+
+    # Provider section merged from settings + overrides is the canonical config
+    # (providers.py still reads its own files directly for cold reads; this
+    # keeps the shared CONFIG dict carrying the merged providers as well).
+    default_config["providers"] = _merge_providers()
 
     return default_config
 
@@ -97,7 +139,7 @@ def reload_config() -> dict:
         return CONFIG
     CONFIG.clear()
     CONFIG.update(new_config)
-    logger.info("🔄 settings.yaml reloaded (config generation bumped)")
+    logger.info("🔄 config files reloaded (config generation bumped)")
     return CONFIG
 
 

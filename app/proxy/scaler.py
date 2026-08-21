@@ -13,7 +13,8 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
-from pathlib import Path
+
+from app.paths import global_settings_file
 
 logger = logging.getLogger("Scaler")
 
@@ -67,10 +68,10 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
 
 
 def _load_scaler_config() -> Dict[str, Any]:
-    """Load scaler config from settings.yaml, merged with defaults."""
+    """Load scaler config from global.settings.yaml, merged with defaults."""
     config = copy.deepcopy(_DEFAULT_CONFIG)
     try:
-        path = Path(__file__).parent.parent.parent / "config" / "settings.yaml"
+        path = global_settings_file()
         if path.exists():
             with open(path, "r") as f:
                 file_cfg = yaml.safe_load(f) or {}
@@ -157,8 +158,8 @@ class DynamicScaler:
         return copy.deepcopy(self.config)
 
     def _persist_config(self) -> None:
-        """Write current scaler config into settings.yaml."""
-        path = Path(__file__).parent.parent.parent / "config" / "settings.yaml"
+        """Write current scaler config into global.settings.yaml."""
+        path = global_settings_file()
         try:
             if path.exists():
                 with open(path, "r") as f:
@@ -176,9 +177,9 @@ class DynamicScaler:
             logger.error(f"Failed to persist scaler config: {e}")
 
     def reload_config(self) -> None:
-        """Re-read settings.yaml (called on each request for hot-reload)."""
+        """Re-read global.settings.yaml (called on each request for hot-reload)."""
         try:
-            path = Path(__file__).parent.parent.parent / "config" / "settings.yaml"
+            path = global_settings_file()
             if path.exists():
                 mtime = path.stat().st_mtime
                 if mtime > self._config_mtime:

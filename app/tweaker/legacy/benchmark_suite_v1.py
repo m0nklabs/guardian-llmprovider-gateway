@@ -30,10 +30,11 @@ class BenchmarkSuite:
         self.best_tps_cache = {}  # model -> max_tps
 
     def _load_models_from_config(self, config_path: str) -> list:
-        """Load model names from models.yaml instead of hardcoding."""
+        """Load model names from the local model registry instead of hardcoding."""
         try:
             import yaml
-            config_file = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "config", "models.yaml")
+            from app.paths import local_models_file
+            config_file = str(local_models_file())
             if os.path.exists(config_file):
                 with open(config_file, 'r') as f:
                     cfg = yaml.safe_load(f) or {}

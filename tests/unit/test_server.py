@@ -1103,6 +1103,9 @@ def test_cloud_attempts_resolve_google_full_address():
         (
             "google",
             "https://generativelanguage.googleapis.com/v1beta/openai",
+            # cold-start fallback: with no warm catalog entry for google, the
+            # upstream model falls back to the {brand}/{model} remainder of the
+            # address (google/gemini-2.5-flash).
             "google/gemini-2.5-flash",
         )
     ]
@@ -1517,6 +1520,7 @@ async def test_resolve_context_uses_safe_minimum_for_failover_candidates():
     with (
         patch.object(server.provider_registry, "get_context_override", return_value=None),
         patch.object(server.failover_registry, "get_group", return_value=group),
+        patch.object(server.cloud_catalog, "get_override", return_value=None),
         patch.object(
             server.provider_registry,
             "get_cloud_context_window",
@@ -1545,6 +1549,7 @@ async def test_resolve_context_uses_safe_minimum_for_authorized_failover_attempt
 
     with (
         patch.object(server.provider_registry, "get_context_override", return_value=None),
+        patch.object(server.cloud_catalog, "get_override", return_value=None),
         patch.object(
             server.provider_registry,
             "get_cloud_context_window",
