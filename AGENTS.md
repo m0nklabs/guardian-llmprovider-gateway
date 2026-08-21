@@ -253,14 +253,19 @@ When touching these areas, read the referenced detail docs:
   immediately instead of letting the next session re-derive it.
 - Docs-only change: no code, no restart, no tests affected. Committed + pushed.
 
-### DSH session `20260820_cloud_refactor` (cloud access redesign — IMPLEMENTED, awaiting operator restart)
+### DSH session `20260820_cloud_refactor` (cloud access redesign — **LIVE 2026-08-21**)
 
 - Working directory: `/home/flip/llama_cpp_guardian`
-- **Operator mandates a cloud-access redesign** after this session exposed the
-  mess (multiple key locations, duplicated/inconsistent `/v1/models`, cloud_keys
-  linking that is not a real security boundary, mixed json/yaml, missing
-  google/poolside `.env` keys). The full plan lives in
-  **`docs/CLOUD_ACCESS_REDESIGN.md`** (Status: IMPLEMENTED 2026-08-21).
+- **MERGE + RESTART DONE.** PR #7 merged into main (`1f57f12`), working tree switched to main, service restarted 2026-08-21 19:37 UTC. The cloud-access redesign is **live**. `config/cloud_keys.json` still on disk as a backward-compat source for `FailoverRegistry` failover_groups (deletable once live, still present).
+- **Post-restart bug found + fixed (google `models/` prefix, commit `85e0550`).** google's OpenAI-compatible `/v1/models` returns `models/gemini-2.5-flash` (with a literal `models/` prefix). `_normalize_upstream_id` treated that '/'-containing id as already-namespaced and kept it, producing the 2-segment `google/models/gemini-...` instead of the consistent `google/google/gemini-...`. Fixed by stripping a leading `models/` prefix (matching the removed `normalize_google_model_id` behavior). Regression test `test_google_models_prefix_stripped`. This is the only post-restart fix needed so far.
+- **Live verification (all green, 2026-08-21):**
+  - `/v1/models` = **743 models**, provider-global, consistent `{provider}/{brand}/{model}` (openrouter 422, nvidia 102, poolside 2, google 51, openai 123 + ~44 local). google models advertise `google/google/gemini-2.5-flash` etc.
+  - `GET /api/cloud/catalog` + `POST /api/cloud/catalog/refresh` work (cold-start cache populated → live counts above).
+  - Cloud route forwards: `google/google/gemini-3.5-flash` → 200, upstream model echoed as `models/gemini-3.5-flash` (the catalog maps `google/gemini-...` back to the `models/...` upstream id correctly).
+  - Local route intact: `llama3.2-3b` → 200 'OK'.
+  - `cloud_gateway_access`: all 36 keys default `true` (0 on false → everyone keeps cloud access).
+  - Capture attribution intact: downstream of the credential-store removal, capture is keyed on the auth context HMAC `client_ref` — confirmed present in live records (reviewer point 5 closed).
+  - NOTE: bare `openrouter/deepseek/deepseek-chat` → 404 "No endpoints available matching your guardrail restrictions" is the **upstream OpenRouter account privacy setting** (pre-existing, documented), not a Guardian regression — routing itself works.
 - **Design decisions (operator-approved):**
   - All YAML (`guardian_apikeys.yaml`, `local_models.yaml`, `cloud_models.yaml`),
     cloud_keys.json removed (still on disk until the operator-run restart; now
