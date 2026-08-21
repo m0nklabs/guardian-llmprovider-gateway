@@ -71,6 +71,13 @@ class TestBrandNormalization:
         # nvidia upstream already carries the brand -> preserved unchanged
         assert CloudModelCatalog._normalize_upstream_id("minimaxai/minimax-m3", "nvidia") == "minimaxai/minimax-m3"
 
+    def test_google_models_prefix_stripped(self):
+        # google returns models/gemini-... ; the models/ prefix is stripped so it
+        # normalizes to google/gemini-... (real 2026-08-21 bug: it was staying
+        # as the 2-segment google/models/gemini-...).
+        assert CloudModelCatalog._normalize_upstream_id("models/gemini-2.5-flash", "google") == "google/gemini-2.5-flash"
+        assert CloudModelCatalog._normalize_upstream_id("models/gemini-3.5-flash", "google") == "google/gemini-3.5-flash"
+
     def test_empty_id(self):
         assert CloudModelCatalog._normalize_upstream_id("", "google") == ""
         assert CloudModelCatalog._normalize_upstream_id(None, "google") == ""

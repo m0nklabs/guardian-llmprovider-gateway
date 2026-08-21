@@ -149,8 +149,18 @@ class CloudModelCatalog:
         A bare id (no ``/``) gets the *brand* prefix; a namespaced id is kept
         as-is so an already-branded upstream id (e.g. nvidia's
         ``minimaxai/minimax-m3``) is preserved.
+
+        A leading ``models/`` prefix — the format google's OpenAI-compatible
+        /v1/models returns (``models/gemini-2.5-flash``) — is stripped before
+        the brand logic so it normalizes to ``google/gemini-2.5-flash``
+        (→ ``google/google/gemini-2.5-flash``), consistent with how the old
+        ``normalize_google_model_id`` behaved.
         """
         raw_id = (raw_id or "").strip()
+        if not raw_id:
+            return ""
+        if raw_id.lower().startswith("models/"):
+            raw_id = raw_id[len("models/") :]
         if not raw_id:
             return ""
         if "/" in raw_id:
