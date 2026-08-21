@@ -31,7 +31,8 @@ from _paths import CONFIG_DIR, DATA_DIR, REPO_ROOT
 # Helpers
 # ---------------------------------------------------------------------------
 
-SETTINGS_YAML = CONFIG_DIR / "settings.yaml"
+# Capture config lives in the global settings file (config-schema, 2026-08-21).
+SETTINGS_YAML = CONFIG_DIR / "global.settings.yaml"
 CAPTURE_ROOT = DATA_DIR / "capture"
 
 

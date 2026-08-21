@@ -1,0 +1,164 @@
+services_to_stop:
+- caramba-backend
+- agent-forge
+benchmark:
+  schedule:
+    start_hour: 4
+    end_hour: 11
+    days:
+    - mon
+    - tue
+    - wed
+    - thu
+    - fri
+proxy:
+  port: 11434
+  target: http://localhost:11440
+  pid_file: guardian.pid
+  vram_limit_mb: 27000
+  stream_heartbeat_seconds: 15
+grammar:
+  enabled: true
+  cloud_auto_convert_json: false
+  cloud_strict_mode: false
+  validate_gbnf: false
+cloud_retry:
+  enabled: false
+  max_retries: 10
+  max_hold_seconds: 120
+  base_backoff_seconds: 2
+  max_backoff_seconds: 30
+  jitter_factor: 0.3
+  respect_retry_after: true
+failover_health:
+  failure_threshold: 5
+  cooldown_seconds: 30
+  rate_limit_cooldown_seconds: 60
+queue:
+  max_concurrent: 1
+  queue_timeout_seconds: 300
+  history_ttl: 300
+services:
+  comfyui_url: http://127.0.0.1:8188
+timeouts:
+  tiers:
+    tier_70b:
+      min_size_mb: 40000
+      timeout_seconds: 3600
+    tier_32b:
+      min_size_mb: 20000
+      timeout_seconds: 1200
+    tier_13b:
+      min_size_mb: 10000
+      timeout_seconds: 600
+    tier_8b:
+      min_size_mb: 5000
+      timeout_seconds: 360
+    tier_small:
+      min_size_mb: 0
+      timeout_seconds: 600
+  default_timeout: 600
+scaler:
+  enabled: true
+  log_decisions: true
+  profiles:
+    trivial:
+      max_chars: 200
+      max_messages: 2
+      thinking_budget: 256
+      max_tokens: 1024
+    simple:
+      max_chars: 800
+      max_messages: 4
+      thinking_budget: 1024
+      max_tokens: 4096
+    moderate:
+      max_chars: 4000
+      max_messages: 12
+      thinking_budget: 4096
+      max_tokens: 8192
+    complex:
+      max_chars: 15000
+      max_messages: 30
+      thinking_budget: 8192
+      max_tokens: 16384
+    deep:
+      thinking_budget: -1
+      max_tokens: 32768
+  queue_pressure:
+    moderate_threshold: 2
+    heavy_threshold: 4
+    moderate_thinking_factor: 0.5
+    heavy_thinking_factor: 0.25
+    moderate_max_tokens_factor: 0.75
+    heavy_max_tokens_factor: 0.5
+capture:
+  enabled: true
+  local_capture: true
+  cloud_capture: false
+  cloud_allowlist_enabled: true
+  allowed_cloud_models: []
+  cloud_model_prefixes:
+  - openai/
+  - anthropic/
+  - google/
+  - meta-llama/
+  - deepseek/
+  - qwen/
+  - mistralai/
+  - z-ai/
+  - minimax/
+  - poolside/
+  - moonshotai/
+  - nvidia/
+  per_client_opt_in: true
+  allowed_client_refs:
+  - 6ac5d9215776a1bab26ec0c171b3eb03dba9f5757e6a5d7456079a7fff7f2564
+  - a266b4e8321c0cbe967d49403813e4f84accdf91e47874b01e993c11ea3e23b2
+  - 9bb4471bbc4505b16538ffd74466dbdada33092f11cea04bd7d02eadea99e4a2
+  - 433ae335818db75468ecd8e643f4fb0b47ac073ea61aa2bdcfbf3939ba45814d
+  - 82f2d1e7570be5464487c5e877e1c0a43165e51042988a539f6d511a7051f114
+  - ee36bf0afa347f9176ea7f0cf17ac93a8186b3f7e5b5d6a76667f6cc312f7a2a
+  - ed585af47d6041ecbb8d3fe9682f108d81fe54ced2ee70481716b99707679efd
+  - eb7841fa30947f558d83b6316e105ecbbf95261c7b14b68f4043bdb500cb9ea3
+  - 33ab126a7e13b96975d43ea514201e20c363bcc57c0e1aa3e5af5cbad522018f
+  - 51a3e2d2c5dc271ed268b7f22d2c2568c84319b2d6c8c576de0a26c8e2dd8025
+  - ab25e8aca69204cd811fa80ec620a7aadfbc07a7855d6d9c307958c973f6318a
+  - 00acab77980b565335300d2abbee6f784017c6b62551f219b13ae1bfd76a9795
+  - cf42b8c7416efe0c2e2eadf9a5ff7c7d97f9b5b7ed8fea589f6ded8e7fc4e5f1
+  - b5aafa8bca1b9a7b7503d20fa49677fec9ca3e6b938556ef5d041bbb881973af
+  - f1e618f8feffda072c0fc01f653ca445645e2ac94bfd8963ff85bc4253a238a5
+  - 78e5e378846e38b3d251e9dd96cc1e2500553e795bd4b97aa5d430b762c27136
+  - a01daead3d36b65a625e140cb0b6884170059958e555276d05296ee2470cb7a1
+  - 5883452254142387a42579518ade95a6387a3a209ab4d4c500f48bee8fddeded
+  - b1633887677f1d4ff1136ead58e4f2cca4c29d651b46b8f4a889c937b4e15a60
+  - 6cf44138c1662ee39ec02f126e8a3d3f6ce32cb05c8b102a6c8fe1cab5d1a670
+  - 9aa1545277e34bfabf13cb2846ca68b309556996fd12993a383ae78e112d1ae8
+  - 2913f18f86a702d7077bf61b1b9acb11c83be63751aa0bfd672891f1bcf6eb48
+  - fa54eb4b561848734b078c505ce5c0fad6c1e9acddb2d3549dedea1829f8a8f1
+  - 1e08ecb396e6da2309e0b1689e908c1ac905b53e3870648d41c9f6ad2947db44
+  - 72e15f236dccb3540941d5946528b3b058200788cfb204f8bcf9c31b2ae40c14
+  - 4707162cec03046a6dbc729bfd0b20779585cf5b92c3fe9506020830365e02c7
+  - 3ccf20d7d690ff39a2d6e87c821dbf88a6a9159ef232a85988a6e763693d594b
+  - a2576b7e8ea040e8cf2180d327e21df7dfcc50640d431c5e96ba30ee6370ef0d
+  - be16ad5ee7018d4e940e88a6234d0f8d9dfad85a2f1f8dc4bd73456764aa1d7a
+  - 3c16b59aade44f3da3de69f56d012d291f21f31d2e2f7713bec5f3fe6f36fb6e
+  - d6f26f4180b66559f1a5c0e2cb6ec18fef27e0876a4c9c9ede032aca21d25b57
+  - a442f8680dece545520ec910ff5a31061b52c4494727b008658b29bd1a350910
+  - d8d8cc0b877b98cbc3ee6cdca8bf336fc1041c659de0020d696453a4741f1035
+  system_prompts: strip
+  reasoning: strip
+  tool_definitions: capture
+  tool_calls: capture
+  tool_results: strip
+  images: hash_and_metadata
+  unknown_content_blocks: strip
+  capture_root: data/capture
+  retention_days: 7
+  max_capture_bytes: 10737418240
+  max_pending_events: 10000
+  max_file_bytes: 268435456
+  max_file_age_seconds: 3600
+  file_mode: '0640'
+  directory_mode: '0750'
+  policy_version: 1.0.0

@@ -48,7 +48,7 @@ from typing import Dict, List, Optional, Tuple
 
 import yaml
 
-from app.paths import CONFIG_DIR
+from app.paths import global_settings_file
 
 logger = logging.getLogger("Guardian.Failover")
 
@@ -278,9 +278,9 @@ class FailoverRegistry:
         self.reload()
 
     def _load_raw_groups(self) -> dict:
-        """Return the ``failover_groups`` map (settings.yaml, else legacy file)."""
+        """Return the ``failover_groups`` map (global.settings.yaml, else legacy file)."""
         try:
-            settings_path = CONFIG_DIR / "settings.yaml"
+            settings_path = global_settings_file()
             if settings_path.exists():
                 with open(settings_path, "r", encoding="utf-8") as f:
                     settings = yaml.safe_load(f) or {}

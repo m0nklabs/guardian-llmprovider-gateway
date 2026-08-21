@@ -4,7 +4,8 @@ import datetime
 import subprocess
 
 import yaml
-from pathlib import Path
+
+from app.paths import global_settings_file
 
 logger = logging.getLogger("Scheduler")
 
@@ -21,8 +22,8 @@ class SchedulerManager:
         logger.info(f"Scheduler config: hours={self.start_hour}-{self.end_hour}, days={self.allowed_days}, services={self.services_to_manage}")
 
     def _load_config(self) -> dict:
-        """Load scheduler configuration from settings.yaml."""
-        config_path = Path(__file__).parent.parent.parent / "config" / "settings.yaml"
+        """Load scheduler configuration from global.settings.yaml."""
+        config_path = global_settings_file()
         try:
             if config_path.exists():
                 with open(config_path, 'r') as f:

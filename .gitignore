@@ -64,6 +64,7 @@ dashboard/dist/
 # Cloud credentials (contains API keys)
 config/cloud_keys.json
 config/guardian_apikeys.yaml
+config/guardian.keys.yaml
 
 # Dynamic cloud catalog cache (runtime data, gitignored)
 data/cloud_catalog_cache.json

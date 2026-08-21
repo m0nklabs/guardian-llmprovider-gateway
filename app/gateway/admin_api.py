@@ -330,7 +330,9 @@ async def reload_config(client_id: str) -> Any:
     not_reloaded: list[str] = []
     errors: list[str] = []
 
-    # 1. settings.yaml → shared CONFIG (atomic in-place swap)
+    # 1. config files (global.settings.yaml + providers.*) → shared CONFIG
+    #    (atomic in-place swap).  The telemetry label keeps the legacy name so
+    #    dashboards/scripts that grep for it keep working.
     try:
         new_config = _reload_settings_config() if _reload_settings_config else None
         reloaded.append("settings.yaml (CONFIG)")
@@ -338,7 +340,7 @@ async def reload_config(client_id: str) -> Any:
         errors.append(f"settings.yaml: {exc}")
         not_reloaded.append("settings.yaml")
 
-    # 2. Provider registry (reads settings.yaml itself)
+    # 2. Provider registry (reads providers.settings.yaml + overrides itself)
     try:
         _provider_registry.reload()
         reloaded.append("providers")

@@ -1,6 +1,6 @@
 # Guardian Config Schema — plan
 
-> Status: **PLAN** (2026-08-21)
+> Status: **IMPLEMENTED** (2026-08-21, PR #9 op branch `config-schema-catalog-url`)
 > Doel: `config/settings.yaml` strippen tot elke setting een eigen, duidelijk
 > bestand heeft — geen "alles.yaml" meer. Naamgeving: domain-first, sorteerbaar,
 > zelfbeschrijvend (operator: "bestandnamen moeten aan de buitenkant al duidelijk

@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from app.paths import global_settings_file
+
 logger = logging.getLogger("Guardian.Capture.Config")
 
 DEFAULT_CAPTURE_ROOT = "data/capture"
@@ -244,15 +246,13 @@ class CaptureConfig:
 
 
 def load_capture_config(settings_path: Optional[Path] = None) -> CaptureConfig:
-    """Load capture configuration from settings.yaml with env-var overrides.
+    """Load capture configuration from global.settings.yaml with env-var overrides.
 
     Returns a default (disabled) config if the section is absent or the file
     is unreadable.
     """
     if settings_path is None:
-        settings_path = (
-            Path(__file__).parent.parent.parent / "config" / "settings.yaml"
-        )
+        settings_path = global_settings_file()
 
     capture_section: Dict[str, Any] = {}
     try:

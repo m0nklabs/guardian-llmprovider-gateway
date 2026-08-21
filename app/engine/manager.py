@@ -22,6 +22,7 @@ from app.paths import (
     CURRENT_MODEL_SIG_FILE,
     LLAMA_SLOTS_DIR,
     OFFICIAL_LLAMA_SERVER_BIN,
+    global_settings_file,
     local_models_file,
 )
 
@@ -997,9 +998,9 @@ class ModelManager:
             pass
 
     def _get_comfyui_url(self) -> str:
-        """Read ComfyUI URL from settings.yaml, fallback to default."""
+        """Read ComfyUI URL from global.settings.yaml, fallback to default."""
         try:
-            settings_path = self.config_path.parent / "settings.yaml"
+            settings_path = global_settings_file()
             with open(settings_path, "r") as f:
                 cfg = yaml.safe_load(f) or {}
             return cfg.get("services", {}).get("comfyui_url", "http://127.0.0.1:8188")
