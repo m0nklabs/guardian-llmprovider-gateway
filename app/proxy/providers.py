@@ -85,6 +85,10 @@ class CloudProvider:
     timeout_seconds: float = 600.0
     # Provider-specific extra headers (e.g. OpenRouter ranking headers).
     extra_headers: Dict[str, str] = field(default_factory=dict)
+    # Catalog path override (default "/models"). Lets a provider advertise the
+    # models actually reachable through its guardrails/privacy filters, e.g.
+    # openrouter -> "/models/user". Empty/None -> "/models".
+    catalog_url: Optional[str] = None
 
     @property
     def is_configured(self) -> bool:
@@ -160,6 +164,9 @@ class ProviderRegistry:
                     str(k): _expand_env(str(v))
                     for k, v in cfg["extra_headers"].items()
                 }
+            catalog_url = cfg.get("catalog_url")
+            if isinstance(catalog_url, str):
+                catalog_url = catalog_url.strip() or None
 
             provider = CloudProvider(
                 name=provider_name,
@@ -169,6 +176,7 @@ class ProviderRegistry:
                 enabled=enabled,
                 timeout_seconds=timeout,
                 extra_headers=extra_headers,
+                catalog_url=catalog_url,
             )
             self._providers[provider_name] = provider
 

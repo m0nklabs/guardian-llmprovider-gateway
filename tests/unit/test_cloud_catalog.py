@@ -172,6 +172,97 @@ class TestRefreshFailure:
         assert result == {"openai/gpt-4o": "openai/gpt-4o"}
 
 
+# ── Catalog URL override ─────────────────────────────────────────────
+
+
+class TestCatalogUrlOverride:
+    @pytest.mark.asyncio
+    async def test_refresh_uses_provider_catalog_url(self, tmp_path: Path):
+        settings = tmp_path / "settings.yaml"
+        settings.write_text(
+            textwrap.dedent(
+                """\
+                providers:
+                  openrouter:
+                    enabled: true
+                    base_url: https://openrouter.ai/api/v1
+                    api_key: sk-or-test-key
+                    timeout_seconds: 300
+                    catalog_url: /models/user
+                """
+            )
+        )
+        registry = ProviderRegistry(settings_path=settings)
+        catalog = CloudModelCatalog(
+            provider_registry=registry,
+            cache_file=tmp_path / "cache.json",
+            overrides_file=tmp_path / "overrides.yaml",
+        )
+        provider = registry.get_provider_for_model("openrouter/deepseek/deepseek-chat")
+        assert provider is not None
+        assert provider.catalog_url == "/models/user"
+
+        captured = {}
+
+        class CapturingClient:
+            def __init__(self, *a, **k):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def get(self, url, headers):
+                captured["url"] = url
+                return _FakeResponse({"data": [{"id": "deepseek/deepseek-chat"}]})
+
+        with patch("app.proxy.cloud_catalog.httpx.AsyncClient", CapturingClient):
+            await catalog.refresh_provider(provider)
+
+        assert captured["url"] == "https://openrouter.ai/api/v1/models/user"
+
+    @pytest.mark.asyncio
+    async def test_refresh_defaults_to_models(self, tmp_path: Path):
+        catalog = _make_catalog(tmp_path)
+        provider = catalog._registry.get_provider_for_model("openai/gpt-4o")
+        assert provider is not None
+        assert provider.catalog_url is None
+        captured = {}
+
+        class CapturingClient:
+            def __init__(self, *a, **k):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def get(self, url, headers):
+                captured["url"] = url
+                return _FakeResponse({"data": [{"id": "gpt-4o"}]})
+
+        with patch("app.proxy.cloud_catalog.httpx.AsyncClient", CapturingClient):
+            await catalog.refresh_provider(provider)
+        assert captured["url"] == "https://openrouter.ai/api/v1/models"
+
+
+class _FakeResponse:
+    """Minimal stand-in for an httpx.Response used in tests."""
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self._payload
+
+
 # ── Overrides loading ────────────────────────────────────────────────
 
 

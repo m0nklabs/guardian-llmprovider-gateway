@@ -176,7 +176,8 @@ class CloudModelCatalog:
         cached list is kept (persisted from last successful run).
         """
         headers = ProviderRegistry.build_forward_headers(provider)
-        url = f"{provider.base_url}/models"
+        catalog_path = provider.catalog_url or "/models"
+        url = f"{provider.base_url}{catalog_path}"
         timeout = min(max(float(provider.timeout_seconds), 1.0), 30.0)
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:

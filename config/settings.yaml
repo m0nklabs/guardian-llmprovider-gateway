@@ -72,6 +72,10 @@ providers:
     base_url: https://openrouter.ai/api/v1
     api_key: ${OPENROUTER_API_KEY}
     timeout_seconds: 1200   # doubled 2026-08-12: pi owns 429 backoff; long reasoning generations need headroom
+    # Catalog path override: advertise only the models genuinely reachable
+    # through OpenRouter's guardrails/privacy filters (else /v1/models shows
+    # all 422). Default is "/models"; "/models/user" is the filtered list.
+    catalog_url: /models/user
     # Any model whose name starts with one of these namespaces is recognised
     # as an OpenRouter cloud model — key-independent, using the global key
     # above — so clients can send raw upstream names not listed in `models:`.

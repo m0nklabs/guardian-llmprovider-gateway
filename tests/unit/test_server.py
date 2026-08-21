@@ -1103,7 +1103,10 @@ def test_cloud_attempts_resolve_google_full_address():
         (
             "google",
             "https://generativelanguage.googleapis.com/v1beta/openai",
-            "google/gemini-2.5-flash",
+            # google's upstream /v1/models uses a literal 'models/' prefix; the
+            # catalog normalizes to google/gemini-... for addressing but forwards
+            # the raw upstream id (models/gemini-2.5-flash).
+            "models/gemini-2.5-flash",
         )
     ]
 
