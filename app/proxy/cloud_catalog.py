@@ -154,8 +154,16 @@ class CloudModelCatalog:
             logger.warning("⚠️  Failed to persist cloud catalog cache: %s", e)
 
     def reload(self) -> None:
-        """Re-read overrides and align cached entries with current providers."""
+        """Re-read overrides and align cached entries with current providers.
+
+        Also re-loads the persisted disk cache: its per-provider ``source``
+        (``base_url|catalog_url``) check drops any entry whose endpoint changed
+        (e.g. switching ``catalog_url``), so a hot ``/api/config/reload`` that
+        changes the catalog endpoint stops advertising the stale list without
+        needing a restart or a manual ``/api/cloud/catalog/refresh``.
+        """
         self._load_overrides()
+        self._load_disk_cache()
         enabled_names = {p.name for p in self._registry.get_enabled_providers()}
         for stale in [p for p in self._catalogs if p not in enabled_names]:
             self._catalogs.pop(stale, None)

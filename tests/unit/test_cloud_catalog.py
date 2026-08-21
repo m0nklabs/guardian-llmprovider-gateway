@@ -167,6 +167,37 @@ class TestDiskCache:
         )
         assert catalog.get_models_for_provider("openrouter") == {}
 
+    def test_reload_drops_stale_cached_catalog_on_endpoint_change(self, tmp_path: Path):
+        # Same as above but through the hot-reload path: the disk cache is
+        # written for `/models`, the registry is pointed at `/models/user`,
+        # and a `reload()` (live config reload, no restart) must drop the
+        # stale entry thanks to the `source` check in `_load_disk_cache`.
+        cache_file = tmp_path / "cache.json"
+        cache_file.write_text(json.dumps({
+            "openrouter": {
+                "fetched_at": 100.0,
+                "models": {"openai/gpt-4o": "openai/gpt-4o"},
+                "source": "https://openrouter.ai/api/v1|/models",
+            },
+        }))
+        settings = _write_settings(
+            tmp_path,
+            SAMPLE_SETTINGS.replace(
+                "base_url: https://openrouter.ai/api/v1\n",
+                "base_url: https://openrouter.ai/api/v1\n    catalog_url: /models/user\n",
+            ),
+        )
+        registry = ProviderRegistry(settings_path=settings)
+
+        # Simulate an in-memory catalog with a stale entry, then a hot reload.
+        catalog = CloudModelCatalog(
+            provider_registry=registry,
+            cache_file=cache_file,
+            overrides_file=tmp_path / "overrides.yaml",
+        )
+        catalog.reload()
+        assert catalog.get_models_for_provider("openrouter") == {}
+
 
 # ── Refresh failure keeps last list ──────────────────────────────────
 
