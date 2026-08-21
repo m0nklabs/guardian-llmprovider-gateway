@@ -21,6 +21,22 @@ from app.proxy.providers import CloudProvider
 _JSON_SCHEMA = {"type": "object", "properties": {"answer": {"type": "string"}}}
 
 
+def _configured_registry():
+    """A stub ProviderRegistry whose openrouter is configured (settings key).
+
+    The cloud-access redesign routes via the settings provider registry, so
+    these forwarding tests must provide a configured provider for openrouter.
+    """
+    reg = SimpleNamespace()
+    reg._providers = {
+        "openrouter": CloudProvider(
+            "openrouter", "https://openrouter.ai/api/v1", "sk-or-test"
+        ),
+    }
+    reg.get_provider_for_model = lambda m: reg._providers["openrouter"]
+    return reg
+
+
 class TestStripCloudGrammarHelper:
     def test_grammar_stripped_from_cloud_body(self):
         body = {"model": "x", "grammar": 'root ::= "yes" | "no"', "stream": False}
@@ -96,13 +112,14 @@ class TestCloudGrammarStrictMode:
             models=["openai/gpt-4o"],
         )
         request = self._make_fake_request({
-            "model": "openai/gpt-4o",
+            "model": "gpt-4o",
             "messages": [{"role": "user", "content": "hi"}],
             "stream": False,
             "grammar": 'root ::= "yes" | "no"',
         })
         with (
             patch.object(server.provider_registry, "is_cloud_model", return_value=True),
+            patch.object(server._cloud_routing, "_provider_registry", _configured_registry()),
             patch.object(server.provider_registry, "get_provider_for_model", return_value=fake_provider),
             patch.object(server.ProviderRegistry, "build_forward_headers", return_value={"Authorization": "Bearer sk-or-test"}),
             patch.object(server.ProviderRegistry, "build_forward_url", return_value="https://openrouter.ai/api/v1/chat/completions"),
@@ -156,7 +173,7 @@ class TestCloudGrammarStrictMode:
                 return _FakeResponse()
 
         request = self._make_fake_request({
-            "model": "openai/gpt-4o",
+            "model": "gpt-4o",
             "messages": [{"role": "user", "content": "hi"}],
             "stream": False,
             "grammar": 'root ::= "yes" | "no"',
@@ -164,6 +181,7 @@ class TestCloudGrammarStrictMode:
         })
         with (
             patch.object(server.provider_registry, "is_cloud_model", return_value=True),
+            patch.object(server._cloud_routing, "_provider_registry", _configured_registry()),
             patch.object(server.provider_registry, "get_provider_for_model", return_value=fake_provider),
             patch.object(server.ProviderRegistry, "build_forward_headers", return_value={"Authorization": "Bearer sk-or-test"}),
             patch.object(server.ProviderRegistry, "build_forward_url", return_value="https://openrouter.ai/api/v1/chat/completions"),
@@ -219,13 +237,14 @@ class TestCloudGrammarStrictMode:
                 return _FakeResponse()
 
         request = self._make_fake_request({
-            "model": "openai/gpt-4o",
+            "model": "gpt-4o",
             "messages": [{"role": "user", "content": "hi"}],
             "stream": False,
             "grammar": 'root ::= "yes" | "no"',
         })
         with (
             patch.object(server.provider_registry, "is_cloud_model", return_value=True),
+            patch.object(server._cloud_routing, "_provider_registry", _configured_registry()),
             patch.object(server.provider_registry, "get_provider_for_model", return_value=fake_provider),
             patch.object(server.ProviderRegistry, "build_forward_headers", return_value={"Authorization": "Bearer sk-or-test"}),
             patch.object(server.ProviderRegistry, "build_forward_url", return_value="https://openrouter.ai/api/v1/chat/completions"),

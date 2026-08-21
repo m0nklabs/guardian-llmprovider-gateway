@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import httpx
 from fastapi import HTTPException, Request
@@ -21,7 +21,7 @@ logger = logging.getLogger("Guardian")
 # ── Injected (set once at startup by init()) ─────────────────────────
 _model_manager = None
 _provider_registry = None
-_cloud_cred_store = None
+_cloud_catalog = None
 _cloud_rate_limiter = None
 _inference_queue = None
 _state = None
@@ -38,7 +38,6 @@ _get_pid_file_status = None
 _get_capture_controller = None
 _get_gpu_metrics = None
 _get_model_size = None
-_discover_google_models = None
 _load_api_keys = None
 _generate_api_key = None
 _token_fingerprint = None
@@ -56,7 +55,7 @@ def init(
     *,
     _model_manager,
     _provider_registry,
-    _cloud_cred_store,
+    _cloud_catalog,
     _cloud_rate_limiter,
     _inference_queue,
     _state,
@@ -73,7 +72,6 @@ def init(
     _get_capture_controller,
     _get_gpu_metrics,
     _get_model_size,
-    _discover_google_models,
     _load_api_keys,
     _generate_api_key,
     _token_fingerprint,
@@ -122,201 +120,53 @@ async def create_api_key(request: Request, client_id: str) -> Any:
 
 
 
-async def list_cloud_credentials(request: Request, client_id: str) -> Any:
-    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
-    return {"credentials": _cloud_cred_store.list_credentials_for_owner(owner_key_fingerprint)}
+async def list_cloud_catalog(client_id: str) -> Any:
+    """Return the current dynamic cloud catalog state (per provider).
+
+    Cloud-access redesign (2026-08-21): the catalog replaces the removed
+    per-key credential/link model listings. Per provider it reports the
+    model count, the full ``{provider}/{brand}/{model}`` addresses, and the
+    last successful fetch time (``None`` when not yet fetched).
+    """
+    providers = []
+    for p in _provider_registry.get_enabled_providers():
+        data = _cloud_catalog._catalogs.get(p.name)
+        fetched_at = None
+        if isinstance(data, dict) and data.get("fetched_at"):
+            fetched_at = data["fetched_at"]
+        catalog = _cloud_catalog.get_models_for_provider(p.name)
+        providers.append({
+            "name": p.name,
+            "configured": p.is_configured,
+            "model_count": len(catalog),
+            "addresses": [f"{p.name}/{normalized}" for normalized in catalog],
+            "last_fetch": fetched_at,
+        })
+    return {"catalog": providers}
 
 
-
-async def add_cloud_credential(request: Request, client_id: str) -> Any:
-    body = await request.json()
-    provider = str(body.get("provider", "")).strip().lower()
-    name = str(body.get("name", "")).strip()
-    api_key = str(body.get("api_key", "")).strip()
-    models = body.get("models") or []
-    if not provider:
-        raise HTTPException(status_code=400, detail="provider is required")
-    if not name:
-        raise HTTPException(status_code=400, detail="name is required")
-    if not api_key:
-        raise HTTPException(status_code=400, detail="api_key is required")
-    if not isinstance(models, list):
-        raise HTTPException(status_code=400, detail="models must be a list")
-    if provider == "google":
-        models = await _discover_google_models(api_key)
-    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
-    cred = await _cloud_cred_store.add_credential(
-        provider=provider,
-        name=name,
-        api_key=api_key,
-        models=[str(m) for m in models if m],
-        owner_key_fingerprint=owner_key_fingerprint,
-    )
-    logger.info("☁️  Admin '%s' added cloud credential '%s' for provider '%s'", client_id, cred["id"], provider)
-    return cred
-
-
-
-async def refresh_cloud_credential_models(cred_id: str, request: Request, client_id: str) -> Any:
-    credential = _cloud_cred_store.get_credential_by_id(cred_id)
-    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
-    if credential is None or not _cloud_cred_store.is_credential_owned_by(cred_id, owner_key_fingerprint):
-        raise HTTPException(status_code=404, detail=f"Credential '{cred_id}' not found")
-    if credential.provider != "google":
-        raise HTTPException(
-            status_code=400,
-            detail="Automatic model refresh is currently supported only for Google credentials",
-        )
-
-    models = await _discover_google_models(credential.api_key)
-    replaced = await _cloud_cred_store.replace_models_for_credential(cred_id, models)
-    if not replaced:
-        raise HTTPException(status_code=404, detail=f"Credential '{cred_id}' not found")
-    logger.info(
-        "☁️  Admin '%s' refreshed %d Google model(s) for credential '%s'",
-        client_id,
-        len(models),
-        cred_id,
-    )
-    return {
-        "status": "refreshed",
-        "credential_id": cred_id,
-        "model_count": len(models),
-        "models": models,
-    }
-
-
-
-async def delete_cloud_credential(cred_id: str, request: Request, client_id: str) -> Any:
-    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
-    if not _cloud_cred_store.is_credential_owned_by(cred_id, owner_key_fingerprint):
-        raise HTTPException(status_code=404, detail=f"Credential '{cred_id}' not found")
-    deleted = await _cloud_cred_store.delete_credential(cred_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail=f"Credential '{cred_id}' not found")
-    logger.info("☁️  Admin '%s' deleted cloud credential '%s'", client_id, cred_id)
-    return {"status": "deleted", "credential_id": cred_id}
-
-
-
-async def add_model_to_credential(cred_id: str, request: Request, client_id: str) -> Any:
-    body = await request.json()
-    model_name = str(body.get("model", "")).strip()
-    if not model_name:
-        raise HTTPException(status_code=400, detail="model is required")
-    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
-    if not _cloud_cred_store.is_credential_owned_by(cred_id, owner_key_fingerprint):
-        raise HTTPException(status_code=404, detail=f"Credential '{cred_id}' not found")
-    added = await _cloud_cred_store.add_model_to_credential(cred_id, model_name)
-    if not added:
-        raise HTTPException(status_code=404, detail=f"Credential '{cred_id}' not found or model already present")
-    return {"status": "added", "credential_id": cred_id, "model": model_name}
-
-
-
-async def remove_model_from_credential(cred_id: str, model_name: str, request: Request, client_id: str) -> Any:
-    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
-    if not _cloud_cred_store.is_credential_owned_by(cred_id, owner_key_fingerprint):
-        raise HTTPException(status_code=404, detail="Credential or model not found")
-    removed = await _cloud_cred_store.remove_model_from_credential(cred_id, model_name)
-    if not removed:
-        raise HTTPException(status_code=404, detail="Credential or model not found")
-    return {"status": "removed", "credential_id": cred_id, "model": model_name}
-
-
-
-async def list_cloud_links(request: Request, client_id: str) -> Any:
-    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
-    return {"links": _cloud_cred_store.list_links_for_owner(owner_key_fingerprint)}
-
+async def refresh_cloud_catalog(client_id: str) -> Any:
+    """Force a background-fresh fetch of every configured provider's catalog."""
+    await _cloud_catalog.refresh_all()
+    providers = []
+    for p in _provider_registry.get_enabled_providers():
+        data = _cloud_catalog._catalogs.get(p.name)
+        fetched_at = None
+        if isinstance(data, dict) and data.get("fetched_at"):
+            fetched_at = data["fetched_at"]
+        catalog = _cloud_catalog.get_models_for_provider(p.name)
+        providers.append({
+            "name": p.name,
+            "configured": p.is_configured,
+            "model_count": len(catalog),
+            "last_fetch": fetched_at,
+        })
+    return {"status": "refreshed", "catalog": providers}
 
 
 async def get_cloud_ratelimit_stats(request: Request, client_id: str) -> Any:
     key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
     return _cloud_rate_limiter.get_stats(key_fingerprint)
-
-
-
-async def link_credential(request: Request, client_id: str) -> Any:
-    body = await request.json()
-    key_fp = str(body.get("guardian_key_fingerprint", "")).strip()
-    provider = str(body.get("provider", "")).strip().lower()
-    cred_id = str(body.get("credential_id", "")).strip()
-    if not key_fp:
-        raise HTTPException(status_code=400, detail="guardian_key_fingerprint is required")
-    if not provider:
-        raise HTTPException(status_code=400, detail="provider is required")
-    if not cred_id:
-        raise HTTPException(status_code=400, detail="credential_id is required")
-    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
-    if not _cloud_cred_store.is_credential_owned_by(cred_id, owner_key_fingerprint):
-        raise HTTPException(status_code=404, detail="Credential not found")
-    linked = await _cloud_cred_store.link_credential(key_fp, provider, cred_id)
-    if not linked:
-        raise HTTPException(status_code=404, detail="Credential not found")
-    logger.info("☁️  Admin '%s' linked credential '%s' to key '%s' for provider '%s'", client_id, cred_id, key_fp, provider)
-    return {"status": "linked", "guardian_key_fingerprint": key_fp, "provider": provider, "credential_id": cred_id}
-
-
-
-async def unlink_credential(request: Request, client_id: str) -> Any:
-    body = await request.json()
-    key_fp = str(body.get("guardian_key_fingerprint", "")).strip()
-    provider = str(body.get("provider", "")).strip().lower()
-    if not key_fp:
-        raise HTTPException(status_code=400, detail="guardian_key_fingerprint is required")
-    if not provider:
-        raise HTTPException(status_code=400, detail="provider is required")
-    credential = _cloud_cred_store.get_credential_for_key(key_fp, provider)
-    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
-    if credential is None or not _cloud_cred_store.is_credential_owned_by(credential.id, owner_key_fingerprint):
-        raise HTTPException(status_code=404, detail="Link not found")
-    unlinked = await _cloud_cred_store.unlink_credential(key_fp, provider)
-    if not unlinked:
-        raise HTTPException(status_code=404, detail="Link not found")
-    return {"status": "unlinked", "guardian_key_fingerprint": key_fp, "provider": provider}
-
-
-async def claim_legacy_credential(request: Request, client_id: str) -> Any:
-    """Adopt an owner-less (legacy) cloud credential as its permanent owner.
-
-    Unlocks management of credentials that predate ownership recording and
-    were linked to multiple keys (ambiguous → previously unmanageable by
-    *anyone*). The caller must already hold a link to that credential, so
-    the claim only transfers ownership among keys that provably use it.
-    After the claim the owner can link the credential to other Guardian
-    keys (e.g. a new agent key) through the normal link endpoint.
-    """
-    body = await request.json()
-    provider = str(body.get("provider", "")).strip().lower()
-    cred_id = str(body.get("credential_id", "")).strip()
-    if not provider:
-        raise HTTPException(status_code=400, detail="provider is required")
-    if not cred_id:
-        raise HTTPException(status_code=400, detail="credential_id is required")
-    owner_key_fingerprint = _get_cloud_key_fingerprint(request, client_id)
-    claimed = await _cloud_cred_store.claim_legacy_credential(
-        owner_key_fingerprint, provider, cred_id
-    )
-    if not claimed:
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Credential claim failed: not found, provider mismatch, "
-                "already owned, or caller has no existing link to it"
-            ),
-        )
-    logger.info(
-        "☁️  Key '%s' claimed legacy credential '%s' (%s) as owner",
-        owner_key_fingerprint, cred_id, provider,
-    )
-    return {
-        "status": "claimed",
-        "guardian_key_fingerprint": owner_key_fingerprint,
-        "provider": provider,
-        "credential_id": cred_id,
-    }
-
 
 
 async def list_cloud_providers(client_id: str) -> Any:
@@ -339,26 +189,32 @@ async def list_cloud_providers(client_id: str) -> Any:
 
 
 async def list_cloud_models(request: Request, client_id: str) -> Any:
+    """List provider-global cloud models from the dynamic catalog.
+
+    Cloud-access redesign (2026-08-21): the per-key linked-route listing is
+    gone; every enabled + configured provider's catalog is listed.
+    """
     models = []
-    # Global cloud models
-    for model_name in _provider_registry.get_all_cloud_models():
-        entry = _provider_registry.build_model_metadata_entry(model_name)
-        if entry:
+    for p in _provider_registry.get_enabled_providers():
+        if not p.is_configured:
+            continue
+        catalog = _cloud_catalog.get_models_for_provider(p.name)
+        if not catalog:
+            catalog = {m: m for m in p.models}
+        for normalized in catalog:
+            full_id = f"{p.name}/{normalized}"
+            entry = _provider_registry.build_model_metadata_entry(full_id)
+            if entry is None:
+                entry = {
+                    "id": full_id,
+                    "object": "model",
+                    "created": int(time.time()),
+                    "owned_by": p.name,
+                    "permission": [],
+                    "served_by": "cloud",
+                    "provider": p.name,
+                }
             models.append(entry)
-    # Per-key cloud routes
-    auth_ctx = _get_request_auth_context(request) or {}
-    key_fp = auth_ctx.get("key_fingerprint") or client_id
-    for cloud_model in _cloud_cred_store.get_linked_models_for_key(key_fp):
-        models.append({
-            "id": cloud_model["id"],
-            "object": "model",
-            "created": int(time.time()),
-            "owned_by": cloud_model["provider"],
-            "permission": [],
-            "served_by": "cloud",
-            "provider": cloud_model["provider"],
-            "credential_id": cloud_model["credential_id"],
-        })
     return {"models": models}
 
 
@@ -448,7 +304,7 @@ async def get_server_status(client_id: str) -> Any:
 
 
 async def reload_config(client_id: str) -> Any:
-    """Re-read settings.yaml + cloud_keys.json live WITHOUT restarting.
+    """Re-read settings.yaml live WITHOUT restarting.
 
     Reloads every subsystem that can safely swap config at runtime, in
     dependency order:
@@ -456,8 +312,9 @@ async def reload_config(client_id: str) -> Any:
     1. settings.yaml: re-parsed into the shared ``CONFIG`` dict (config_loader
        keeps the same dict object, so all existing accessors see the update).
     2. ``ProviderRegistry.reload()`` — provider lists / prefixes / models.
-    3. ``FailoverRegistry.reload()`` — ``failover_groups`` from cloud_keys.json.
-    4. ``CloudCredentialStore.reload()`` — credentials + key links.
+    3. ``FailoverRegistry.reload()`` — ``failover_groups`` (settings.yaml or
+       legacy cloud_keys.json).
+    4. ``CloudModelCatalog.reload()`` — re-reads cloud_models.yaml overrides.
     5. ``CaptureController.reload_config()`` — capture config, incl.
        cloud_capture / cloud_model_prefixes; WAL writer re-initialised when
        capture becomes active or sink bounds change.
@@ -489,7 +346,7 @@ async def reload_config(client_id: str) -> Any:
         errors.append(f"providers: {exc}")
         not_reloaded.append("providers")
 
-    # 3. Failover groups (cloud_keys.json)
+    # 3. Failover groups (settings.yaml or legacy cloud_keys.json)
     try:
         _failover_registry.reload()
         reloaded.append("failover_groups")
@@ -497,13 +354,14 @@ async def reload_config(client_id: str) -> Any:
         errors.append(f"failover_groups: {exc}")
         not_reloaded.append("failover_groups")
 
-    # 4. Cloud credential store (cloud_keys.json — creds + links)
+    # 4. Cloud model catalog (re-reads cloud_models.yaml overrides; keeps
+    #    fetched per-provider lists, dropping providers no longer configured).
     try:
-        _cloud_cred_store.reload()
-        reloaded.append("cloud_keys.json (credentials, links)")
+        _cloud_catalog.reload()
+        reloaded.append("cloud_catalog")
     except Exception as exc:  # pragma: no cover - defensive
-        errors.append(f"cloud_keys.json: {exc}")
-        not_reloaded.append("cloud_keys.json")
+        errors.append(f"cloud_catalog: {exc}")
+        not_reloaded.append("cloud_catalog")
 
     # 5. Capture controller + WAL writer (settings.yaml capture block)
     try:

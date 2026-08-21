@@ -22,7 +22,6 @@ logger = logging.getLogger("Guardian")
 # ── Injected (set once at startup by init()) ─────────────────────────
 _model_manager = None
 _provider_registry = None
-_parse_guardian_route = None
 _config: Dict[str, Any] = {}
 _safe_vram_limit_mb = 0
 _model_switch_lock = None
@@ -35,7 +34,6 @@ def init(
     *,
     model_manager,
     provider_registry,
-    parse_guardian_route,
     config: Dict[str, Any],
     safe_vram_limit_mb: int,
     model_switch_lock,
@@ -44,11 +42,10 @@ def init(
     model_load_error_cls,
 ) -> None:
     """Inject all dependencies. Called once at startup."""
-    global _model_manager, _provider_registry, _parse_guardian_route, _config, _safe_vram_limit_mb
+    global _model_manager, _provider_registry, _config, _safe_vram_limit_mb
     global _model_switch_lock, _reset_startup_check_status, _run_guardian_operation, _ModelLoadError
     _model_manager = model_manager
     _provider_registry = provider_registry
-    _parse_guardian_route = parse_guardian_route
     _config = config
     _safe_vram_limit_mb = safe_vram_limit_mb
     _model_switch_lock = model_switch_lock
@@ -92,9 +89,9 @@ def resolve_or_reject_inference_model(raw_model: Optional[str], current_model: s
     Cloud-provider models (OpenRouter, NVIDIA, …) are accepted as-is so they
     can be forwarded to their upstream API instead of the local backend.
 
-    Per-key cloud routes using the ``guardian/{provider}/{model}`` convention
-    are also accepted — the actual upstream model name is extracted at
-    forwarding time once the requesting client's linked credential is known.
+    Cloud models addressed as ``{provider}/{brand}/{model}`` (first segment
+    names a configured provider) are also accepted — the actual upstream
+    model name is extracted at forwarding time via the cloud catalog.
     """
     resolved_model = resolve_inference_model(raw_model, current_model)
     if not resolved_model or resolved_model == "__MISMATCH__":
@@ -103,8 +100,8 @@ def resolve_or_reject_inference_model(raw_model: Optional[str], current_model: s
         return resolved_model
     if _provider_registry.is_cloud_model(resolved_model):
         return resolved_model
-    # Per-key cloud route: guardian/{provider}/{model_path}
-    if _parse_guardian_route(resolved_model) is not None:
+    # Cloud address {provider}/{brand}/{model}: first segment is a provider.
+    if _provider_registry._provider_from_address(resolved_model) is not None:
         return resolved_model
     reject_unserved_inference_model(raw_model)
 

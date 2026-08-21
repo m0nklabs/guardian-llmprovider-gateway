@@ -8,30 +8,27 @@ so a degraded or erroring provider is skipped in favour of the next healthy
 candidate, without the caller (Claude Code, etc.) needing to know or care
 which upstream is currently serving the request.
 
-Failover groups are configured in ``config/cloud_keys.json`` under a
-top-level ``failover_groups`` key::
+Failover groups are configured under a top-level ``failover_groups`` key in
+``config/settings.yaml`` (cloud-access redesign; the legacy
+``config/cloud_keys.json`` key is still honoured as a backward-compat
+fallback)::
 
-    {
-      "failover_groups": {
-        "minimax-m3": {
-          "candidates": [
-            {"provider": "nvidia", "model": "minimaxai/minimax-m3"},
-            {"provider": "openrouter", "model": "minimax/minimax-m3"}
-          ]
-        }
-      }
-    }
+    failover_groups:
+      minimax-m3:
+        candidates:
+          - {provider: nvidia, model: minimaxai/minimax-m3}
+          - {provider: openrouter, model: minimaxai/minimax-m3}
 
-A client addresses the group with the ``guardian/failover/{group}`` route,
-e.g. ``guardian/failover/minimax-m3``. Guardian tries each candidate in
+A client addresses the group with the ``failover/{group}`` route,
+e.g. ``failover/minimax-m3``. Guardian tries each candidate in
 priority order — skipping any that are currently tripped by the in-memory
 circuit breaker (:class:`ProviderHealthTracker`) — and automatically retries
 a tripped candidate once its cooldown expires, so it recovers back to the
 preferred provider without manual intervention.
 
-Only providers with a credential linked to the caller's Guardian API key
-(see :mod:`app.proxy.cloud_keys`) are attempted; candidates without a linked
-credential are skipped silently.
+Every candidate is served with its provider's *settings* API key, gated on
+the caller's ``cloud_gateway_access`` boolean; unconfigured or
+poor-health candidates are skipped silently.
 
 This is intentionally a simple, in-process circuit breaker — state resets on
 Guardian restart and is not shared across workers. It is not a substitute for
@@ -49,10 +46,16 @@ from pathlib import Path
 from threading import Lock
 from typing import Dict, List, Optional, Tuple
 
+import yaml
+
+from app.paths import CONFIG_DIR
+
 logger = logging.getLogger("Guardian.Failover")
 
-#: Path to the on-disk store that holds failover group definitions (shared
-#: with the per-key cloud credential store).
+#: Path to the legacy on-disk store that used to hold failover group
+#: definitions (shared with the removed per-key cloud credential store). Since
+#: the cloud-access redesign (2026-08-21) groups come from settings.yaml
+#: ``failover_groups:``; this file remains only as a backward-compat fallback.
 FAILOVER_CONFIG_FILE: Path = Path(__file__).parent.parent.parent / "config" / "cloud_keys.json"
 
 #: Consecutive failures before a (provider, model) candidate is tripped.
@@ -258,10 +261,15 @@ class ProviderHealthTracker:
 
 
 class FailoverRegistry:
-    """Loads ``failover_groups`` definitions from ``cloud_keys.json``.
+    """Loads ``failover_groups`` definitions.
 
-    Cheap to reconstruct; call :meth:`reload` after editing the config file
-    to pick up new/changed groups without restarting Guardian.
+    Since the cloud-access redesign (2026-08-21) groups come from the
+    ``failover_groups:`` key in ``config/settings.yaml``.  For backward
+    compatibility, when settings.yaml lacks it the legacy ``cloud_keys.json``
+    key is used.
+
+    Cheap to reconstruct; call :meth:`reload` after editing the config to
+    pick up new/changed groups without restarting Guardian.
     """
 
     def __init__(self, path: Path = FAILOVER_CONFIG_FILE) -> None:
@@ -269,25 +277,36 @@ class FailoverRegistry:
         self._groups: Dict[str, FailoverGroup] = {}
         self.reload()
 
+    def _load_raw_groups(self) -> dict:
+        """Return the ``failover_groups`` map (settings.yaml, else legacy file)."""
+        try:
+            settings_path = CONFIG_DIR / "settings.yaml"
+            if settings_path.exists():
+                with open(settings_path, "r", encoding="utf-8") as f:
+                    settings = yaml.safe_load(f) or {}
+                if isinstance(settings, dict):
+                    fg = settings.get("failover_groups")
+                    if isinstance(fg, dict):
+                        return fg
+        except Exception as e:
+            logger.warning("⚠️  Failed to read failover_groups from settings.yaml: %s", e)
+
+        try:
+            if self._path.exists():
+                with open(self._path, "r", encoding="utf-8") as f:
+                    data = json.load(f) or {}
+                if isinstance(data, dict):
+                    fg = data.get("failover_groups")
+                    if isinstance(fg, dict):
+                        return fg
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("⚠️  Failed to load failover groups from %s: %s", self._path, e)
+        return {}
+
     def reload(self) -> None:
         """Re-read failover group definitions from disk."""
         self._groups.clear()
-        try:
-            if not self._path.exists():
-                return
-            with open(self._path, "r", encoding="utf-8") as f:
-                data = json.load(f) or {}
-        except (OSError, json.JSONDecodeError) as e:
-            logger.warning("⚠️  Failed to load failover groups from %s: %s", self._path, e)
-            return
-
-        if not isinstance(data, dict):
-            return
-
-        raw_groups = data.get("failover_groups", {})
-        if not isinstance(raw_groups, dict):
-            logger.warning("⚠️  'failover_groups' in %s is not a dict; ignoring", self._path)
-            return
+        raw_groups = self._load_raw_groups()
 
         for group_name, raw_group in raw_groups.items():
             if not isinstance(raw_group, dict):

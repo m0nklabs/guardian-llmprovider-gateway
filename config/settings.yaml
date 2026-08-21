@@ -145,6 +145,22 @@ providers:
     models:
       - poolside/laguna-xs-2.1
       - poolside/laguna-s-2.1
+  google:
+    enabled: true
+    base_url: https://generativelanguage.googleapis.com/v1beta/openai
+    api_key: ${GOOGLE_API_KEY}
+    timeout_seconds: 1200   # doubled 2026-08-12: pi owns 429 backoff; long reasoning generations need headroom
+    # Google AI Studio as a first-class provider (2026-08-21 redesign).
+    # Gemini models are consistently ``google/gemini-…`` (brand always present)
+    # and resolve to ``google/google/gemini-…``.  Previously only reachable as
+    # a bare ``gemini-…`` name or via a linked google credential.
+    model_prefixes:
+      - google/
+    models:
+      - google/gemini-2.5-flash
+      - google/gemini-3.5-flash
+      - google/gemini-flash-latest
+      - google/gemini-2.0-flash-exp
   openai:
     enabled: true
     base_url: https://api.openai.com/v1
@@ -153,10 +169,6 @@ providers:
     # Direct OpenAI access via a service-account key.  OpenAI uses BARE model
     # names (no namespace), so there is no ``model_prefixes`` entry — only the
     # chat/reasoning models explicitly listed below are recognised globally.
-    # Send any other OpenAI model (dated snapshots, etc.) via the per-key
-    # ``guardian/openai/{model}`` route, which does not require listing.
-    # NB: while OpenRouter serves the ``openai/{model}`` SLUG (e.g.
-    # openai/gpt-4o), this direct provider answers the BARE name (gpt-4o).
     # Models verified against GET https://api.openai.com/v1/models on 2026-08-01.
     models:
       - gpt-4o

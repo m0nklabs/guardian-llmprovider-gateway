@@ -233,8 +233,10 @@ class TestRegistryLoading:
         assert provider is not None
         assert provider.name == "openrouter"
         assert reg.is_cloud_model("openrouter/openai/gpt-4o")
-        assert not reg.is_cloud_model("openrouter/xai/grok-4")
-        assert not reg.is_cloud_model("openrouter/openrouter/openai/gpt-4o")
+        # Redesign (2026-08-21): the first segment names the provider, so any
+        # provider-prefixed address routes to that provider.
+        assert reg.is_cloud_model("openrouter/xai/grok-4")
+        assert reg.is_cloud_model("openrouter/openrouter/openai/gpt-4o")
 
     def test_get_provider_returns_none_for_unknown(self, settings_with_providers: Path):
         reg = ProviderRegistry(settings_path=settings_with_providers)
@@ -286,7 +288,6 @@ class TestCloudContextMetadata:
 
         assert registry.get_context_override("moonshotai/kimi-k3") == 1048576
         assert registry.get_context_override("openrouter/moonshotai/kimi-k3") == 1048576
-        assert registry.get_context_override("guardian/openrouter/moonshotai/kimi-k3") == 1048576
 
     @pytest.mark.asyncio
     async def test_cloud_context_catalog_is_cached_by_provider(self, settings_with_providers: Path):
@@ -363,7 +364,7 @@ class TestCloudContextMetadata:
 
         with patch("app.proxy.providers.httpx.AsyncClient", FakeAsyncClient):
             context_window = await registry.get_cloud_context_window(
-                "guardian/openrouter/moonshotai/kimi-k3",
+                "openrouter/moonshotai/kimi-k3",
                 provider=effective_provider,
             )
 

@@ -47,16 +47,12 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 import yaml
 
-from app.proxy.cloud_keys import parse_guardian_route
-
 logger = logging.getLogger("Guardian.Providers")
 
 # Matches ``${ENV_VAR}`` or ``$ENV_VAR`` in config strings.
 _ENV_VAR_PATTERN = re.compile(r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)\}")
 
 CONTEXT_CATALOG_TTL_SECONDS = 3600.0
-
-
 @dataclass(frozen=True)
 class ContextCatalog:
     """A timestamped upstream model catalog reduced to context windows."""
@@ -149,9 +145,9 @@ class ProviderRegistry:
             api_key = _expand_env(str(cfg.get("api_key", "")))
             models = [str(m) for m in (cfg.get("models") or []) if m]
             # Namespace prefixes (e.g. ``nvidia/``) let Guardian recognise a
-            # cloud model by its raw upstream name without an explicit listing
-            # or a per-key ``guardian/...`` route.  A trailing ``/`` is enforced
-            # so prefixes match whole namespace segments, not partial names.
+            # cloud model by its raw upstream name without an explicit listing.
+            # A trailing ``/`` is enforced so prefixes match whole namespace
+            # segments, not partial names.
             prefixes = [
                 (p if p.endswith("/") else p + "/")
                 for p in (cfg.get("model_prefixes") or [])
@@ -245,11 +241,19 @@ class ProviderRegistry:
 
     @classmethod
     def canonical_model_id(cls, model_name: str) -> str:
-        """Normalize supported OpenRouter and Guardian route prefixes."""
+        """Normalize supported OpenRouter and cloud route prefixes.
+
+        Since the cloud-access redesign (2026-08-21) the ``guardian/``
+        prefix is gone; cloud models are addressed as
+        ``{provider}/{brand}/{model}``.  A leading ``openrouter/`` segment
+        (which historically names the serving router *and* the brand
+        namespace degenerates to for OpenRouter-served models) is stripped so
+        ``openrouter/openai/gpt-4o`` canonicalizes to ``openai/gpt-4o`` just
+        like the bare name / context-override key.
+        """
         if not isinstance(model_name, str):
             return ""
-        route = parse_guardian_route(model_name)
-        canonical = route[1] if route is not None else model_name
+        canonical = model_name
         if canonical.startswith("openrouter/"):
             canonical = canonical[len("openrouter/"):]
         return canonical
@@ -292,8 +296,16 @@ class ProviderRegistry:
         explicit disambiguation when a model is listed on more than one
         provider); otherwise the first matching ``model_prefixes`` entry in
         provider declaration order is used, so a cloud model can be reached by
-        its raw upstream name without a per-key ``guardian/...`` route.
+        its raw upstream name.
+
+        Since the cloud-access redesign (2026-08-21) a model may also be
+        addressed as ``{provider}/{brand}/{model}`` where the first segment is
+        the configured provider name (e.g. ``google/google/gemini-3.5-flash``).
+        That explicit provider wins over any prefix/namespace match.
         """
+        provider = self._provider_from_address(model_name)
+        if provider is not None:
+            return provider
         if model_name.startswith("openrouter/"):
             canonical_name = self.canonical_model_id(model_name)
             if canonical_name.startswith("openrouter/"):
@@ -304,6 +316,20 @@ class ProviderRegistry:
             return None
 
         return self._get_configured_provider_for_model(model_name)
+
+    def _provider_from_address(self, model_name: str) -> Optional[CloudProvider]:
+        """Resolve a ``{provider}/{brand}/{model}`` address by its first segment.
+
+        Returns the provider whose configured name matches the first path
+        segment, or ``None`` when the first segment is not a known provider.
+        """
+        if not isinstance(model_name, str) or not model_name:
+            return None
+        first, sep, _ = model_name.partition("/")
+        if not sep or not first:
+            return None
+        provider = self._providers.get(first)
+        return provider if provider is not None and provider.enabled else None
 
     def _get_configured_provider_for_model(self, model_name: str) -> Optional[CloudProvider]:
         """Resolve an unprefixed model against configured exact names and namespaces."""
@@ -342,15 +368,9 @@ class ProviderRegistry:
         model_name: str,
     ) -> Tuple[Optional[CloudProvider], str]:
         """Return the upstream provider and canonical model ID for a cloud route."""
-        route = parse_guardian_route(model_name)
-        if route is not None:
-            provider = self._providers.get(route[0])
-            return provider, self.canonical_model_id(model_name)
-
         canonical_name = self.canonical_model_id(model_name)
-        if model_name.startswith("openrouter/"):
-            return self._providers.get("openrouter"), canonical_name
-        return self.get_provider_for_model(model_name), canonical_name
+        provider = self.get_provider_for_model(model_name)
+        return provider, canonical_name
 
     @classmethod
     def _extract_context_windows(cls, payload: Any) -> Dict[str, int]:

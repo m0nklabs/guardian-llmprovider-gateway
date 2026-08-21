@@ -25,13 +25,10 @@ from app.proxy.server import (
     get_gpu_metrics,
     get_model_size,
     inference_queue,
-    _discover_google_models,
-    _get_cloud_key_fingerprint,
 )
 from app.proxy.auth import load_api_keys, generate_api_key, _token_fingerprint, verify_api_key
-from app.proxy.cloud_keys import CloudCredentialStore, parse_guardian_route, mask_api_key
 from app.proxy.providers import ProviderRegistry
-from app.proxy.server import provider_registry, cloud_cred_store, cloud_rate_limiter
+from app.proxy.server import provider_registry, cloud_catalog, cloud_rate_limiter
 from app.scheduler.manager import SchedulerManager
 
 # Configure logging
@@ -266,104 +263,6 @@ async def create_api_key_ui(request: Request, _client_id: str = Depends(verify_a
     }
 
 
-@app.get("/api/cloud/credentials")
-async def list_cloud_creds_ui(request: Request, _client_id: str = Depends(verify_api_key)):
-    owner_key_fingerprint = _get_cloud_key_fingerprint(request, _client_id)
-    return {"credentials": cloud_cred_store.list_credentials_for_owner(owner_key_fingerprint)}
-
-
-@app.post("/api/cloud/credentials")
-async def add_cloud_cred_ui(request: Request, _client_id: str = Depends(verify_api_key)):
-    body = await request.json()
-    provider = str(body.get("provider", "")).strip().lower()
-    name = str(body.get("name", "")).strip()
-    api_key = str(body.get("api_key", "")).strip()
-    models = body.get("models") or []
-    if not provider or not api_key:
-        raise HTTPException(status_code=400, detail="provider and api_key required")
-    if not isinstance(models, list):
-        raise HTTPException(status_code=400, detail="models must be a list")
-    if not name:
-        name = f"{provider}-credential"
-    if provider == "google":
-        models = await _discover_google_models(api_key)
-    owner_key_fingerprint = _get_cloud_key_fingerprint(request, _client_id)
-    return await cloud_cred_store.add_credential(
-        provider,
-        name,
-        api_key,
-        [str(model) for model in models if model],
-        owner_key_fingerprint=owner_key_fingerprint,
-    )
-
-
-@app.post("/api/cloud/credentials/{cred_id}/refresh-models")
-async def refresh_cloud_cred_ui(
-    cred_id: str,
-    request: Request,
-    _client_id: str = Depends(verify_api_key),
-):
-    owner_key_fingerprint = _get_cloud_key_fingerprint(request, _client_id)
-    credential = cloud_cred_store.get_credential_by_id(cred_id)
-    if credential is None or not cloud_cred_store.is_credential_owned_by(cred_id, owner_key_fingerprint):
-        raise HTTPException(status_code=404, detail="not found")
-    if credential.provider != "google":
-        raise HTTPException(status_code=400, detail="automatic refresh supports Google credentials only")
-    models = await _discover_google_models(credential.api_key)
-    if not await cloud_cred_store.replace_models_for_credential(cred_id, models):
-        raise HTTPException(status_code=404, detail="not found")
-    return {"status": "refreshed", "credential_id": cred_id, "model_count": len(models), "models": models}
-
-
-@app.delete("/api/cloud/credentials/{cred_id}")
-async def delete_cloud_cred_ui(cred_id: str, request: Request, _client_id: str = Depends(verify_api_key)):
-    owner_key_fingerprint = _get_cloud_key_fingerprint(request, _client_id)
-    if not cloud_cred_store.is_credential_owned_by(cred_id, owner_key_fingerprint):
-        raise HTTPException(status_code=404, detail="not found")
-    deleted = await cloud_cred_store.delete_credential(cred_id)
-    if not deleted:
-        raise HTTPException(status_code=404, detail="not found")
-    return {"status": "deleted"}
-
-
-@app.get("/api/cloud/links")
-async def list_cloud_links_ui(request: Request, _client_id: str = Depends(verify_api_key)):
-    owner_key_fingerprint = _get_cloud_key_fingerprint(request, _client_id)
-    return {"links": cloud_cred_store.list_links_for_owner(owner_key_fingerprint)}
-
-
-@app.post("/api/cloud/links")
-async def link_cloud_cred_ui(request: Request, _client_id: str = Depends(verify_api_key)):
-    body = await request.json()
-    key_fp = str(body.get("guardian_key_fingerprint", "")).strip()
-    provider = str(body.get("provider", "")).strip().lower()
-    cred_id = str(body.get("credential_id", "")).strip()
-    if not key_fp or not provider or not cred_id:
-        raise HTTPException(status_code=400, detail="all fields required")
-    owner_key_fingerprint = _get_cloud_key_fingerprint(request, _client_id)
-    if not cloud_cred_store.is_credential_owned_by(cred_id, owner_key_fingerprint):
-        raise HTTPException(status_code=404, detail="credential not found")
-    linked = await cloud_cred_store.link_credential(key_fp, provider, cred_id)
-    if not linked:
-        raise HTTPException(status_code=404, detail="credential not found")
-    return {"status": "linked"}
-
-
-@app.delete("/api/cloud/links")
-async def unlink_cloud_cred_ui(request: Request, _client_id: str = Depends(verify_api_key)):
-    body = await request.json()
-    key_fp = str(body.get("guardian_key_fingerprint", "")).strip()
-    provider = str(body.get("provider", "")).strip().lower()
-    credential = cloud_cred_store.get_credential_for_key(key_fp, provider)
-    owner_key_fingerprint = _get_cloud_key_fingerprint(request, _client_id)
-    if credential is None or not cloud_cred_store.is_credential_owned_by(credential.id, owner_key_fingerprint):
-        raise HTTPException(status_code=404, detail="link not found")
-    unlinked = await cloud_cred_store.unlink_credential(key_fp, provider)
-    if not unlinked:
-        raise HTTPException(status_code=404, detail="link not found")
-    return {"status": "unlinked"}
-
-
 @app.get("/api/cloud/providers")
 async def list_providers_ui(_client_id: str = Depends(verify_api_key)):
     providers = []
@@ -372,22 +271,31 @@ async def list_providers_ui(_client_id: str = Depends(verify_api_key)):
     return {"providers": providers}
 
 
-@app.get("/api/cloud/models")
-async def list_cloud_models_ui(request: Request, _client_id: str = Depends(verify_api_key)):
-    """List global cloud models plus routes available to the current Guardian key."""
-    models = []
-    for model_name in provider_registry.get_all_cloud_models():
-        entry = provider_registry.build_model_metadata_entry(model_name)
-        if entry:
-            models.append(entry)
-    key_fingerprint = _get_cloud_key_fingerprint(request, _client_id)
-    for cloud_model in cloud_cred_store.get_linked_models_for_key(key_fingerprint):
-        credential = cloud_cred_store.get_credential_by_id(cloud_model["credential_id"])
-        models.append({
-            **cloud_model,
-            "credential_name": credential.name if credential is not None else None,
+@app.get("/api/cloud/catalog")
+async def list_cloud_catalog_ui(_client_id: str = Depends(verify_api_key)):
+    """Return the current dynamic cloud catalog state (per provider)."""
+    entries = []
+    for p in provider_registry.get_enabled_providers():
+        data = cloud_catalog._catalogs.get(p.name)
+        fetched_at = None
+        if isinstance(data, dict) and data.get("fetched_at"):
+            fetched_at = data["fetched_at"]
+        catalog = cloud_catalog.get_models_for_provider(p.name)
+        entries.append({
+            "name": p.name,
+            "configured": p.is_configured,
+            "model_count": len(catalog),
+            "addresses": [f"{p.name}/{n}" for n in catalog],
+            "last_fetch": fetched_at,
         })
-    return {"models": models}
+    return {"catalog": entries}
+
+
+@app.post("/api/cloud/catalog/refresh")
+async def refresh_cloud_catalog_ui(_client_id: str = Depends(verify_api_key)):
+    """Force a refresh of every configured provider's dynamic cloud catalog."""
+    await cloud_catalog.refresh_all()
+    return {"status": "refreshed"}
 
 
 class GuardianService:

@@ -18,7 +18,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
-from app.proxy.cloud_keys import parse_guardian_route
 from app.proxy.providers import CloudProvider
 
 logger = logging.getLogger("Guardian")
@@ -41,14 +40,16 @@ _context_fallback_warnings: set[str] = set()
 _model_manager = None  # ModelManager instance
 _provider_registry = None  # ProviderRegistry instance
 _failover_registry = None  # FailoverRegistry instance
+_cloud_catalog = None  # CloudModelCatalog instance
 
 
-def init(model_manager, provider_registry, failover_registry, *, llama_server_url=None) -> None:
+def init(model_manager, provider_registry, failover_registry, *, llama_server_url=None, cloud_catalog=None) -> None:
     """Inject the singleton dependencies.  Called once at startup."""
-    global _model_manager, _provider_registry, _failover_registry, LLAMA_SERVER_URL
+    global _model_manager, _provider_registry, _failover_registry, LLAMA_SERVER_URL, _cloud_catalog
     _model_manager = model_manager
     _provider_registry = provider_registry
     _failover_registry = failover_registry
+    _cloud_catalog = cloud_catalog
     LLAMA_SERVER_URL = llama_server_url
 
 
@@ -132,28 +133,33 @@ async def resolve_context_window(
         if cloud_attempts is not None:
             attempt_contexts: List[int] = []
             for provider, upstream_model in cloud_attempts:
-                candidate_context = await _provider_registry.get_cloud_context_window(
-                    f"guardian/{provider.name}/{upstream_model}",
-                    provider=provider,
-                )
+                candidate_context = _cloud_context_override(upstream_model, provider.name)
                 if candidate_context is None:
-                    warn_context_fallback(f"guardian/{provider.name}/{upstream_model}")
+                    candidate_context = await _provider_registry.get_cloud_context_window(
+                        f"{provider.name}/{upstream_model}",
+                        provider=provider,
+                    )
+                if candidate_context is None:
+                    warn_context_fallback(f"{provider.name}/{upstream_model}")
                     candidate_context = DEFAULT_CONTEXT_WINDOW
                 attempt_contexts.append(candidate_context)
             if attempt_contexts:
                 return min(attempt_contexts)
 
-        failover_route = parse_guardian_route(public_name)
-        if failover_route is not None and failover_route[0] == "failover":
-            group = _failover_registry.get_group(failover_route[1])
+        if _is_failover_address(public_name):
+            group = _failover_registry.get_group(public_name.partition("/")[2])
             if group is not None:
                 candidate_contexts: List[int] = []
                 for candidate in getattr(group, "candidates", ()):
-                    candidate_context = await _provider_registry.get_cloud_context_window(
-                        f"guardian/{candidate.provider}/{candidate.model}"
+                    candidate_context = _cloud_context_override(
+                        candidate.model, candidate.provider
                     )
                     if candidate_context is None:
-                        warn_context_fallback(f"guardian/{candidate.provider}/{candidate.model}")
+                        candidate_context = await _provider_registry.get_cloud_context_window(
+                            f"{candidate.provider}/{candidate.model}"
+                        )
+                    if candidate_context is None:
+                        warn_context_fallback(f"{candidate.provider}/{candidate.model}")
                         candidate_context = DEFAULT_CONTEXT_WINDOW
                     candidate_contexts.append(candidate_context)
                 if candidate_contexts:
@@ -164,6 +170,30 @@ async def resolve_context_window(
 
     warn_context_fallback(canonical_name or public_name)
     return DEFAULT_CONTEXT_WINDOW
+
+
+def _is_failover_address(model_name: str) -> bool:
+    """Return True when *model_name* is a ``failover/{group}`` address."""
+    first, sep, _ = model_name.partition("/")
+    return bool(sep and first == "failover")
+
+
+def _cloud_context_override(upstream_model: str, provider_name: str) -> Optional[int]:
+    """Return a cloud_models.yaml context-window override, or None.
+
+    Checks the full ``{provider}/{brand}/{model}`` address first, then the
+    namespaced ``{brand}/{model}`` / bare upstream id.
+    """
+    if _cloud_catalog is None:
+        return None
+    for key in (f"{provider_name}/{upstream_model}", upstream_model):
+        override = _cloud_catalog.get_override(key)
+        if not isinstance(override, dict):
+            continue
+        cw = override.get("context_window")
+        if isinstance(cw, int) and not isinstance(cw, bool) and cw > 0:
+            return cw
+    return None
 
 
 def warn_context_fallback(model_name: str) -> None:

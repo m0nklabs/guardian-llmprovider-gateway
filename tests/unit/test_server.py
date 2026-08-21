@@ -929,9 +929,9 @@ def test_messages_contain_image_input_ignores_malformed_messages(messages):
 @pytest.mark.parametrize(
     "model_name",
     [
-        "guardian/openrouter/z-ai/glm-5.2",
-        "guardian/nvidia/z-ai/glm-5.2",
-        "guardian/failover/glm-5.2",
+        "openrouter/z-ai/glm-5.2",
+        "nvidia/z-ai/glm-5.2",
+        "failover/glm-5.2",
         "z-ai/glm-5.2",
     ],
 )
@@ -966,7 +966,7 @@ def test_cloud_vision_fallback_ignores_unconfigured_models(tmp_path: Path):
     registry = FailoverRegistry(tmp_path / "cloud_keys.json")
 
     with patch.object(server._cloud_routing, "_failover_registry", registry):
-        fallback = server._resolve_cloud_vision_fallback("guardian/openrouter/openai/gpt-4o")
+        fallback = server._resolve_cloud_vision_fallback("openrouter/openai/gpt-4o")
 
     assert fallback is None
 
@@ -974,8 +974,8 @@ def test_cloud_vision_fallback_ignores_unconfigured_models(tmp_path: Path):
 @pytest.mark.parametrize(
     "model_name",
     [
-        "guardian/openrouter/acme/vision-model",
-        "guardian/failover/vision-model",
+        "openrouter/acme/vision-model",
+        "failover/vision-model",
         "acme/vision-model",
     ],
 )
@@ -1007,6 +1007,38 @@ def test_cloud_vision_fallback_skips_image_capable_models(tmp_path: Path, model_
     assert fallback is None
 
 
+def _routing_configured_registry():
+    """A stub ProviderRegistry whose settings providers are all configured.
+
+    The routing module now resolves the attempt provider from the *settings*
+    provider registry (not a credential store), so tests must provide
+    configured providers for the provider names they exercise.
+    """
+    providers = {
+        "openrouter": CloudProvider(
+            "openrouter", "https://openrouter.ai/api/v1", "sk-or-test"
+        ),
+        "nvidia": CloudProvider(
+            "nvidia", "https://integrate.api.nvidia.com/v1", "nvapi-test"
+        ),
+        "google": CloudProvider(
+            "google",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            "gk-test",
+        ),
+    }
+    reg = SimpleNamespace()
+    reg._providers = providers
+    reg.get_provider_for_model = lambda m: providers.get("openrouter")
+    return reg
+
+
+def _routing_auth_request(cloud_gateway_access: bool = True):
+    return SimpleNamespace(
+        state=SimpleNamespace(auth_context={"cloud_gateway_access": cloud_gateway_access})
+    )
+
+
 def test_cloud_attempts_for_images_skip_text_only_failover_candidates():
     group = FailoverGroup(
         name="mixed-capabilities",
@@ -1015,15 +1047,15 @@ def test_cloud_attempts_for_images_skip_text_only_failover_candidates():
             FailoverCandidate("openrouter", "acme/vision-model", ("text", "image")),
         ],
     )
-    request = SimpleNamespace(state=SimpleNamespace(auth_context={"key_fingerprint": "abc123"}))
+    request = _routing_auth_request()
 
     with (
         patch.object(server.failover_registry, "get_group", return_value=group),
         patch.object(server.failover_health, "order_candidates", return_value=group.candidates),
-        patch.object(server.cloud_cred_store, "get_credential_for_key", return_value=SimpleNamespace(api_key="test")),
+        patch.object(server._cloud_routing, "_provider_registry", _routing_configured_registry()),
     ):
         attempts, failover_group = server._resolve_cloud_attempts(
-            "guardian/failover/mixed-capabilities",
+            "failover/mixed-capabilities",
             request,
             "goose",
             requires_vision=True,
@@ -1036,14 +1068,14 @@ def test_cloud_attempts_for_images_skip_text_only_failover_candidates():
 
 
 def test_cloud_attempts_normalize_openrouter_model_alias():
-    request = SimpleNamespace(state=SimpleNamespace(auth_context={"key_fingerprint": "abc123"}))
+    request = _routing_auth_request()
     provider = CloudProvider(
         name="openrouter",
         base_url="https://openrouter.ai/api/v1",
         api_key="sk-or-test",
     )
 
-    with patch.object(server._cloud_routing, "_cloud_provider_for_request", return_value=provider):
+    with patch.object(server._cloud_routing, "_provider_registry", _routing_configured_registry()):
         attempts, failover_group = server._resolve_cloud_attempts(
             "openrouter/moonshotai/kimi-k3",
             request,
@@ -1056,41 +1088,37 @@ def test_cloud_attempts_normalize_openrouter_model_alias():
     ]
 
 
-def test_cloud_attempts_resolve_google_per_key_route():
-    request = SimpleNamespace(state=SimpleNamespace(auth_context={"key_fingerprint": "abc123"}))
+def test_cloud_attempts_resolve_google_full_address():
+    request = _routing_auth_request()
 
-    with patch.object(
-        server.cloud_cred_store,
-        "get_credential_for_key",
-        return_value=SimpleNamespace(api_key="google-test-key", models=["gemini-2.5-flash"]),
-    ) as get_credential:
+    with patch.object(server._cloud_routing, "_provider_registry", _routing_configured_registry()):
         attempts, failover_group = server._resolve_cloud_attempts(
-            "guardian/google/gemini-2.5-flash",
+            "google/google/gemini-2.5-flash",
             request,
             "goose",
         )
 
     assert failover_group is None
-    assert get_credential.call_args.args == ("abc123", "google")
     assert [(attempt.name, attempt.base_url, upstream_model) for attempt, upstream_model in attempts] == [
         (
             "google",
             "https://generativelanguage.googleapis.com/v1beta/openai",
-            "gemini-2.5-flash",
+            "google/gemini-2.5-flash",
         )
     ]
 
 
-def test_cloud_attempts_reject_unlisted_google_model():
-    request = SimpleNamespace(state=SimpleNamespace(auth_context={"key_fingerprint": "abc123"}))
-    credential = SimpleNamespace(api_key="google-test-key", models=["gemini-2.5-flash"])
+def test_cloud_attempts_reject_unknown_provider_catalog():
+    request = _routing_auth_request()
 
     with (
-        patch.object(server.cloud_cred_store, "get_credential_for_key", return_value=credential),
+        patch.object(server._cloud_routing, "_provider_registry", _routing_configured_registry()),
+        patch.object(server.cloud_catalog, "resolve_cloud_target", return_value=None),
+        patch.object(server._cloud_routing, "_cloud_provider_for_request", return_value=None),
         pytest.raises(server.HTTPException) as exc_info,
     ):
         server._resolve_cloud_attempts(
-            "guardian/google/gemini-2.5-pro",
+            "unknown/brand/model",
             request,
             "goose",
         )
@@ -1098,21 +1126,37 @@ def test_cloud_attempts_reject_unlisted_google_model():
     assert exc_info.value.status_code == 404
 
 
-def test_cloud_attempts_skip_unlisted_google_failover_candidate():
+def test_cloud_attempts_denied_key_raises_403():
+    request = _routing_auth_request(cloud_gateway_access=False)
+
+    with patch.object(server._cloud_routing, "_provider_registry", _routing_configured_registry()):
+        with pytest.raises(server.HTTPException) as exc_info:
+            server._resolve_cloud_attempts(
+                "openrouter/moonshotai/kimi-k3",
+                request,
+                "goose",
+            )
+
+    assert exc_info.value.status_code == 403
+
+
+def test_cloud_attempts_skip_unconfigured_failover_candidate():
     group = FailoverGroup(
         name="google-catalog",
         candidates=[FailoverCandidate("google", "gemini-2.5-pro")],
     )
-    request = SimpleNamespace(state=SimpleNamespace(auth_context={"key_fingerprint": "abc123"}))
-    credential = SimpleNamespace(api_key="google-test-key", models=["gemini-2.5-flash"])
+    request = _routing_auth_request()
+    # Only openrouter/nvidia configured; google is absent -> candidate skipped.
+    reg = _routing_configured_registry()
+    del reg._providers["google"]
 
     with (
         patch.object(server.failover_registry, "get_group", return_value=group),
         patch.object(server.failover_health, "order_candidates", return_value=group.candidates),
-        patch.object(server.cloud_cred_store, "get_credential_for_key", return_value=credential),
+        patch.object(server._cloud_routing, "_provider_registry", reg),
         pytest.raises(server.HTTPException) as exc_info,
     ):
-        server._resolve_cloud_attempts("guardian/failover/google-catalog", request, "goose")
+        server._resolve_cloud_attempts("failover/google-catalog", request, "goose")
 
     assert exc_info.value.status_code == 403
 
@@ -1128,7 +1172,7 @@ async def test_image_fallback_validates_cloud_route_before_local_model_resolutio
         async def body(self) -> bytes:
             return json.dumps(
                 {
-                    "model": "guardian/openrouter/z-ai/glm-5.2",
+                    "model": "openrouter/z-ai/glm-5.2",
                     "messages": [
                         {
                             "role": "user",
@@ -1143,7 +1187,7 @@ async def test_image_fallback_validates_cloud_route_before_local_model_resolutio
 
     with (
         patch.object(server.model_manager, "get_current_model", AsyncMock(return_value="local-model")),
-        patch.object(server._gw_routing, "_resolve_or_reject_inference_model", return_value="guardian/openrouter/z-ai/glm-5.2"),
+        patch.object(server._gw_routing, "_resolve_or_reject_inference_model", return_value="openrouter/z-ai/glm-5.2"),
         patch.object(server._gw_routing, "_resolve_cloud_vision_fallback", return_value="vision-model"),
         patch.object(
             server._gw_routing,
@@ -1276,7 +1320,6 @@ async def test_list_models_adds_context_aliases_to_every_served_model():
         url=SimpleNamespace(path="/v1/models"),
         method="GET",
     )
-    cloud_entry = {"id": "moonshotai/kimi-k3", "object": "model", "served_by": "cloud"}
 
     with (
         patch.object(server.model_manager, "get_public_model_map", return_value={"local": "Local"}),
@@ -1288,29 +1331,20 @@ async def test_list_models_adds_context_aliases_to_every_served_model():
             "get_vision_capability",
             return_value={"configured": False, "status": "text_only", "validated": False},
         ),
-        patch.object(server.provider_registry, "get_all_cloud_models", return_value=["moonshotai/kimi-k3"]),
-        patch.object(server.provider_registry, "build_model_metadata_entry", return_value=cloud_entry),
         patch.object(
             server.provider_registry,
-            "get_provider_for_model",
-            return_value=CloudProvider("openrouter", "https://example.test/v1", "test-key"),
+            "get_enabled_providers",
+            return_value=[CloudProvider("openrouter", "https://example.test/v1", "test-key")],
         ),
         patch.object(
-            server.cloud_cred_store,
-            "get_linked_models_for_key",
-            return_value=[
-                {
-                    "id": "guardian/openrouter/moonshotai/kimi-k3",
-                    "provider": "openrouter",
-                    "model": "moonshotai/kimi-k3",
-                    "credential_id": "cred_test",
-                }
-            ],
+            server.provider_registry,
+            "build_model_metadata_entry",
+            side_effect=lambda name: {"id": name, "object": "model", "served_by": "cloud"},
         ),
         patch.object(
-            server.cloud_cred_store,
-            "get_credential_for_key",
-            return_value=SimpleNamespace(api_key="per-key-credential"),
+            server.cloud_catalog,
+            "get_models_for_provider",
+            return_value={"moonshotai/kimi-k3": "moonshotai/kimi-k3"},
         ),
         patch.object(
             server.failover_registry,
@@ -1322,11 +1356,11 @@ async def test_list_models_adds_context_aliases_to_every_served_model():
     ):
         payload = await server.list_models(request=request, client_id="test-user")
 
-    assert len(payload["data"]) == 5
+    assert len(payload["data"]) == 3
     assert {model["id"] for model in payload["data"]} >= {
-        "moonshotai/kimi-k3",
+        "local",
         "openrouter/moonshotai/kimi-k3",
-        "guardian/openrouter/moonshotai/kimi-k3",
+        "failover/kimi-k3",
     }
     for model in payload["data"]:
         assert model["context_length"] == 1048576
@@ -1338,7 +1372,7 @@ async def test_list_models_adds_context_aliases_to_every_served_model():
 async def test_ollama_show_reports_context_for_cloud_model():
     class Request:
         async def json(self):
-            return {"model": "guardian/openrouter/moonshotai/kimi-k3"}
+            return {"model": "openrouter/moonshotai/kimi-k3"}
 
     with (
         patch.object(server.provider_registry, "is_cloud_model", return_value=True),
@@ -1347,29 +1381,37 @@ async def test_ollama_show_reports_context_for_cloud_model():
     ):
         payload = await server.show_model_ollama(Request(), client_id="test-user")
 
-    assert payload["model"] == "guardian/openrouter/moonshotai/kimi-k3"
+    assert payload["model"] == "openrouter/moonshotai/kimi-k3"
     assert payload["model_info"]["general.context_length"] == 1048576
     assert payload["model_info"]["guardian.context_length"] == 1048576
     assert payload["parameters"] == "num_ctx 1048576"
 
 
 @pytest.mark.asyncio
-async def test_model_metadata_rejects_unlinked_guardian_route():
+async def test_model_metadata_returns_cloud_entry_even_when_resolution_denied():
+    """Cloud metadata is returned even when attempt resolution is denied
+    (cloud_gateway_access=false): the discovery layer stays informative and
+    the denial surfaces only on the actual forwarding path."""
     request = _metadata_request("unlinked-key")
     expected_error = server.HTTPException(
         status_code=403,
-        detail={"error": "cloud_credential_not_linked"},
+        detail={"error": "cloud_gateway_access_denied"},
     )
 
-    with patch.object(server, "_resolve_cloud_attempts", side_effect=expected_error):
-        with pytest.raises(server.HTTPException) as exc_info:
-            await server.get_model_metadata(
-                "guardian/openrouter/moonshotai/kimi-k3",
-                request,
-                client_id="test-user",
-            )
+    with (
+        patch.object(server.provider_registry, "is_cloud_model", return_value=True),
+        patch.object(server.provider_registry, "build_model_metadata_entry",
+                     return_value={"id": "openrouter/moonshotai/kimi-k3", "object": "model", "served_by": "cloud"}),
+        patch.object(server._model_discovery, "resolve_cloud_attempts", side_effect=expected_error),
+    ):
+        result = await server.get_model_metadata(
+            "openrouter/moonshotai/kimi-k3",
+            request,
+            client_id="test-user",
+        )
 
-    assert exc_info.value.status_code == 403
+    assert result["id"] == "openrouter/moonshotai/kimi-k3"
+    assert result["served_by"] == "cloud"
 
 
 @pytest.mark.asyncio
@@ -1481,11 +1523,11 @@ async def test_resolve_context_uses_safe_minimum_for_failover_candidates():
             new=AsyncMock(side_effect=[1048576, None]),
         ) as context_mock,
     ):
-        context_window = await server._resolve_context_window("guardian/failover/kimi-k3")
+        context_window = await server._resolve_context_window("failover/kimi-k3")
 
     assert context_window == server.DEFAULT_CONTEXT_WINDOW
-    assert context_mock.await_args_list[0].args == ("guardian/nvidia/moonshotai/kimi-k3",)
-    assert context_mock.await_args_list[1].args == ("guardian/openrouter/moonshotai/kimi-k3",)
+    assert context_mock.await_args_list[0].args == ("nvidia/moonshotai/kimi-k3",)
+    assert context_mock.await_args_list[1].args == ("openrouter/moonshotai/kimi-k3",)
 
 
 @pytest.mark.asyncio
@@ -1510,7 +1552,7 @@ async def test_resolve_context_uses_safe_minimum_for_authorized_failover_attempt
         ),
     ):
         context_window = await server._resolve_context_window(
-            "guardian/failover/kimi-k3",
+            "failover/kimi-k3",
             cloud_attempts=attempts,
         )
 
@@ -1639,7 +1681,7 @@ async def test_v1_post_forwards_cloud_model_to_provider_not_local():
 
         async def body(self) -> bytes:
             return json.dumps(
-                {"model": "openai/gpt-4o", "messages": [{"role": "user", "content": "hi"}], "stream": False}
+                {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}], "stream": False}
             ).encode("utf-8")
 
     fake_provider = CloudProvider(
@@ -1678,6 +1720,7 @@ async def test_v1_post_forwards_cloud_model_to_provider_not_local():
 
     with (
         patch.object(server.provider_registry, "is_cloud_model", return_value=True),
+        patch.object(server._cloud_routing, "_provider_registry", _routing_configured_registry()),
         patch.object(server.provider_registry, "get_provider_for_model", return_value=fake_provider),
         patch.object(server.ProviderRegistry, "build_forward_headers", return_value={"Authorization": "Bearer sk-or-test", "Content-Type": "application/json"}),
         patch.object(server.ProviderRegistry, "build_forward_url", return_value="https://openrouter.ai/api/v1/chat/completions"),
@@ -1710,7 +1753,7 @@ async def test_v1_post_cloud_model_without_api_key_returns_503():
 
         async def body(self) -> bytes:
             return json.dumps(
-                {"model": "openai/gpt-4o", "messages": [{"role": "user", "content": "hi"}], "stream": False}
+                {"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}], "stream": False}
             ).encode("utf-8")
 
     fake_provider = CloudProvider(
@@ -1740,7 +1783,7 @@ async def test_v1_post_cloud_model_without_api_key_returns_503():
 
 @pytest.mark.asyncio
 async def test_list_models_includes_cloud_models():
-    """The /v1/models endpoint should include cloud-provider models."""
+    """The /v1/models endpoint should include provider-global catalog models."""
     fake_provider = CloudProvider(
         name="openrouter",
         base_url="https://openrouter.ai/api/v1",
@@ -1749,7 +1792,19 @@ async def test_list_models_includes_cloud_models():
     )
 
     with (
-        patch.object(server.provider_registry, "get_all_cloud_models", return_value=["openai/gpt-4o", "anthropic/claude-3.5-sonnet"]),
+        patch.object(
+            server.provider_registry,
+            "get_enabled_providers",
+            return_value=[fake_provider],
+        ),
+        patch.object(
+            server.cloud_catalog,
+            "get_models_for_provider",
+            return_value={
+                "openai/gpt-4o": "openai/gpt-4o",
+                "anthropic/claude-3.5-sonnet": "anthropic/claude-3.5-sonnet",
+            },
+        ),
         patch.object(server.provider_registry, "build_model_metadata_entry") as build_mock,
         patch.object(server.model_manager, "get_public_model_map", return_value={"local-model": "local-model"}),
         patch.object(server._ctx_meta, "build_model_metadata_entry", return_value={"id": "local-model", "object": "model"}),
@@ -1759,8 +1814,8 @@ async def test_list_models_includes_cloud_models():
 
     ids = [m["id"] for m in result["data"]]
     assert "local-model" in ids
-    assert "openai/gpt-4o" in ids
-    assert "anthropic/claude-3.5-sonnet" in ids
+    assert "openrouter/openai/gpt-4o" in ids
+    assert "openrouter/anthropic/claude-3.5-sonnet" in ids
 
 
 @pytest.mark.asyncio
@@ -1784,20 +1839,20 @@ async def test_get_model_metadata_returns_cloud_model():
 
 @pytest.mark.asyncio
 async def test_list_models_includes_failover_groups():
-    """/v1/models must surface failover groups as guardian/failover/{name} entries."""
+    """/v1/models must surface failover groups as failover/{name} entries."""
     fake_group = SimpleNamespace(name="glm-5.2")
 
     with (
         patch.object(server._model_discovery, "_model_manager") as mm_mock,
         patch.object(server._model_discovery, "_provider_registry") as pr_mock,
-        patch.object(server._model_discovery, "_cloud_cred_store") as cc_mock,
+        patch.object(server._model_discovery, "_cloud_catalog") as cat_mock,
         patch.object(server._model_discovery, "_failover_registry") as fr_mock,
         patch.object(server._ctx_meta, "build_model_metadata_entry", return_value={"id": "local", "object": "model"}),
         patch.object(server._model_discovery, "resolve_cloud_attempts", return_value=([], "glm-5.2")),
     ):
         mm_mock.get_public_model_map.return_value = {}
-        pr_mock.get_all_cloud_models.return_value = []
-        cc_mock.get_linked_models_for_key.return_value = []
+        pr_mock.get_enabled_providers.return_value = []
+        cat_mock.get_models_for_provider.return_value = {}
         fr_mock._groups = {"glm-5.2": fake_group}
 
         result = await server.list_models(
@@ -1806,8 +1861,8 @@ async def test_list_models_includes_failover_groups():
         )
 
     ids = [m["id"] for m in result["data"]]
-    assert "guardian/failover/glm-5.2" in ids
-    failover_entry = next(m for m in result["data"] if m["id"] == "guardian/failover/glm-5.2")
+    assert "failover/glm-5.2" in ids
+    failover_entry = next(m for m in result["data"] if m["id"] == "failover/glm-5.2")
     assert failover_entry["served_by"] == "failover"
     assert failover_entry["provider"] == "failover"
     assert failover_entry["owned_by"] == "failover"
@@ -1816,7 +1871,7 @@ async def test_list_models_includes_failover_groups():
 
 @pytest.mark.asyncio
 async def test_get_model_metadata_returns_failover_group():
-    """GET /v1/models/guardian/failover/{name} must resolve the failover entry."""
+    """GET /v1/models/failover/{name} must resolve the failover entry."""
     fake_group = SimpleNamespace(name="glm-5.2")
 
     with (
@@ -1825,12 +1880,12 @@ async def test_get_model_metadata_returns_failover_group():
     ):
         fr_mock.get_group.return_value = fake_group
         result = await server.get_model_metadata(
-            "guardian/failover/glm-5.2",
+            "failover/glm-5.2",
             _metadata_request(),
             client_id="test-user",
         )
 
-    assert result["id"] == "guardian/failover/glm-5.2"
+    assert result["id"] == "failover/glm-5.2"
     assert result["served_by"] == "failover"
     assert result["failover_group"] == "glm-5.2"
     fr_mock.get_group.assert_called_with("glm-5.2")
@@ -1838,12 +1893,12 @@ async def test_get_model_metadata_returns_failover_group():
 
 @pytest.mark.asyncio
 async def test_get_model_metadata_returns_404_for_unknown_failover_group():
-    """GET /v1/models/guardian/failover/{unknown} must 404, not 500."""
+    """GET /v1/models/failover/{unknown} must 404, not 500."""
     with patch.object(server, "failover_registry") as fr_mock:
         fr_mock.get_group.return_value = None
         with pytest.raises(Exception) as excinfo:
             await server.get_model_metadata(
-                "guardian/failover/does-not-exist",
+                "failover/does-not-exist",
                 _metadata_request(),
                 client_id="test-user",
             )
@@ -1865,7 +1920,7 @@ def test_prepare_cloud_candidate_injects_user_for_openrouter():
         api_key="sk-or-test",
         models=["z-ai/glm-5.2"],
     )
-    base_body = {"model": "guardian/openrouter/z-ai/glm-5.2", "messages": [{"role": "user", "content": "hi"}]}
+    base_body = {"model": "openrouter/z-ai/glm-5.2", "messages": [{"role": "user", "content": "hi"}]}
     _path, json_body, _body, _needs_tr = server._prepare_cloud_candidate_request(
         provider, "z-ai/glm-5.2", "chat/completions", base_body, client_user_id="fp_abc123def456",
     )
@@ -1881,7 +1936,7 @@ def test_prepare_cloud_candidate_no_user_for_nvidia():
         api_key="nvapi-test",
         models=["minimaxai/minimax-m3"],
     )
-    base_body = {"model": "guardian/nvidia/minimaxai/minimax-m3", "messages": [{"role": "user", "content": "hi"}]}
+    base_body = {"model": "nvidia/minimaxai/minimax-m3", "messages": [{"role": "user", "content": "hi"}]}
     _path, json_body, _body, _needs_tr = server._prepare_cloud_candidate_request(
         provider, "minimaxai/minimax-m3", "chat/completions", base_body, client_user_id="fp_abc123def456",
     )
@@ -1897,7 +1952,7 @@ def test_prepare_cloud_candidate_respects_existing_user():
         models=["z-ai/glm-5.2"],
     )
     base_body = {
-        "model": "guardian/openrouter/z-ai/glm-5.2",
+        "model": "openrouter/z-ai/glm-5.2",
         "messages": [{"role": "user", "content": "hi"}],
         "user": "client_set_user",
     }
@@ -1915,7 +1970,7 @@ def test_prepare_cloud_candidate_no_user_without_client_id():
         api_key="sk-or-test",
         models=["z-ai/glm-5.2"],
     )
-    base_body = {"model": "guardian/openrouter/z-ai/glm-5.2", "messages": [{"role": "user", "content": "hi"}]}
+    base_body = {"model": "openrouter/z-ai/glm-5.2", "messages": [{"role": "user", "content": "hi"}]}
     _path, json_body, _body, _needs_tr = server._prepare_cloud_candidate_request(
         provider, "z-ai/glm-5.2", "chat/completions", base_body,
     )
@@ -1926,12 +1981,12 @@ def test_prepare_cloud_candidate_no_user_without_client_id():
 
 
 def test_provider_base_url_includes_openai():
-    """The OpenAI base URL must be registered for guardian/openai/ routes."""
+    """The OpenAI base URL must be registered for openai/ cloud routes."""
     assert server._provider_base_url("openai") == "https://api.openai.com/v1"
 
 
 def test_provider_base_url_includes_google():
-    """Google AI Studio must be registered for guardian/google/ routes."""
+    """Google AI Studio must be registered for google/ cloud routes."""
     assert (
         server._provider_base_url("google")
         == "https://generativelanguage.googleapis.com/v1beta/openai"
@@ -1996,8 +2051,8 @@ async def test_discover_google_models_uses_bearer_auth_without_exposing_key():
     http_client.__aenter__.return_value = client
     http_client.__aexit__.return_value = False
 
-    with patch.object(server._ctx_meta.httpx, "AsyncClient", return_value=http_client):
-        models = await server._discover_google_models("google-test-key")
+    with patch.object(server._cloud_inf.httpx, "AsyncClient", return_value=http_client):
+        models = await server._cloud_inf.discover_google_models("google-test-key")
 
     assert models == ["gemini-2.5-flash"]
     response.raise_for_status.assert_called_once_with()
@@ -2022,10 +2077,10 @@ async def test_discover_google_models_converts_upstream_failure_to_generic_502()
     http_client.__aexit__.return_value = False
 
     with (
-        patch.object(server._ctx_meta.httpx, "AsyncClient", return_value=http_client),
+        patch.object(server._cloud_inf.httpx, "AsyncClient", return_value=http_client),
         pytest.raises(server.HTTPException) as exc_info,
     ):
-        await server._discover_google_models("google-test-key")
+        await server._cloud_inf.discover_google_models("google-test-key")
 
     assert exc_info.value.status_code == 502
     assert exc_info.value.detail == {
@@ -2035,96 +2090,40 @@ async def test_discover_google_models_converts_upstream_failure_to_generic_502()
 
 
 @pytest.mark.asyncio
-async def test_add_google_credential_discovers_models_before_storing():
-    class JsonRequest:
-        async def json(self):
-            return {
-                "provider": "google",
-                "name": "Google AI Studio",
-                "api_key": "google-test-key",
-            }
-
-    stored_credential = {"id": "cred_google", "provider": "google", "models": ["gemini-2.5-flash"]}
+async def test_list_cloud_catalog_admin_reports_provider_state():
+    fake_provider = CloudProvider("openrouter", "https://openrouter.ai/api/v1", "sk-test")
     with (
-        patch.object(server._admin_api, "_discover_google_models", AsyncMock(return_value=["gemini-2.5-flash"])) as discover,
-        patch.object(server.cloud_cred_store, "add_credential", AsyncMock(return_value=stored_credential)) as add_credential,
+        patch.object(server._admin_api, "_provider_registry") as pr_mock,
+        patch.object(server._admin_api, "_cloud_catalog") as cat_mock,
     ):
-        result = await server.add_cloud_credential(JsonRequest(), "admin")
+        pr_mock.get_enabled_providers.return_value = [fake_provider]
+        cat_mock.get_models_for_provider.return_value = {"moonshotai/kimi-k3": "moonshotai/kimi-k3"}
+        cat_mock._catalogs = {"openrouter": {"fetched_at": 100.0, "models": {}}}
 
-    assert result == stored_credential
-    discover.assert_awaited_once_with("google-test-key")
-    assert add_credential.call_args.kwargs == {
-        "provider": "google",
-        "name": "Google AI Studio",
-        "api_key": "google-test-key",
-        "models": ["gemini-2.5-flash"],
-        "owner_key_fingerprint": "admin",
-    }
+        result = await server.list_cloud_catalog("admin")
+
+    assert result["catalog"][0]["name"] == "openrouter"
+    assert result["catalog"][0]["configured"] is True
+    assert result["catalog"][0]["model_count"] == 1
+    assert result["catalog"][0]["addresses"] == ["openrouter/moonshotai/kimi-k3"]
+    assert result["catalog"][0]["last_fetch"] == 100.0
 
 
 @pytest.mark.asyncio
-async def test_refresh_google_credential_replaces_catalog():
-    credential = SimpleNamespace(provider="google", api_key="google-test-key")
+async def test_refresh_cloud_catalog_admin_force_refresh():
     with (
-        patch.object(server.cloud_cred_store, "get_credential_by_id", return_value=credential),
-        patch.object(server.cloud_cred_store, "is_credential_owned_by", return_value=True),
-        patch.object(server._admin_api, "_discover_google_models", AsyncMock(return_value=["gemini-2.5-flash"])) as discover,
-        patch.object(server.cloud_cred_store, "replace_models_for_credential", AsyncMock(return_value=True)) as replace_models,
+        patch.object(server._admin_api, "_provider_registry") as pr_mock,
+        patch.object(server._admin_api, "_cloud_catalog") as cat_mock,
     ):
-        result = await server.refresh_cloud_credential_models(
-            "cred_google",
-            _metadata_request("admin"),
-            "admin",
-        )
+        cat_mock.refresh_all = AsyncMock()
+        cat_mock.get_models_for_provider.return_value = {}
+        cat_mock._catalogs = {}
+        pr_mock.get_enabled_providers.return_value = []
 
-    assert result == {
-        "status": "refreshed",
-        "credential_id": "cred_google",
-        "model_count": 1,
-        "models": ["gemini-2.5-flash"],
-    }
-    discover.assert_awaited_once_with("google-test-key")
-    replace_models.assert_awaited_once_with("cred_google", ["gemini-2.5-flash"])
+        result = await server.refresh_cloud_catalog("admin")
 
-
-@pytest.mark.asyncio
-async def test_failed_google_catalog_refresh_preserves_existing_models():
-    credential = SimpleNamespace(provider="google", api_key="google-test-key")
-    discovery_error = server.HTTPException(status_code=502, detail="catalog unavailable")
-    with (
-        patch.object(server.cloud_cred_store, "get_credential_by_id", return_value=credential),
-        patch.object(server.cloud_cred_store, "is_credential_owned_by", return_value=True),
-        patch.object(server._admin_api, "_discover_google_models", AsyncMock(side_effect=discovery_error)),
-        patch.object(server.cloud_cred_store, "replace_models_for_credential", AsyncMock()) as replace_models,
-        pytest.raises(server.HTTPException) as exc_info,
-    ):
-        await server.refresh_cloud_credential_models(
-            "cred_google",
-            _metadata_request("admin"),
-            "admin",
-        )
-
-    assert exc_info.value.status_code == 502
-    replace_models.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_foreign_owner_cannot_refresh_google_catalog():
-    credential = SimpleNamespace(provider="google", api_key="google-test-key")
-    with (
-        patch.object(server.cloud_cred_store, "get_credential_by_id", return_value=credential),
-        patch.object(server.cloud_cred_store, "is_credential_owned_by", return_value=False),
-        patch.object(server._admin_api, "_discover_google_models", AsyncMock()) as discover,
-        pytest.raises(server.HTTPException) as exc_info,
-    ):
-        await server.refresh_cloud_credential_models(
-            "cred_google",
-            _metadata_request("foreign-owner"),
-            "foreign-owner",
-        )
-
-    assert exc_info.value.status_code == 404
-    discover.assert_not_awaited()
+    assert result["status"] == "refreshed"
+    cat_mock.refresh_all.assert_awaited_once()
 
 
 def test_adapt_openai_reasoning_converts_max_tokens_for_o3():
@@ -2229,7 +2228,7 @@ def test_prepare_cloud_adapts_openai_reasoning_end_to_end():
         name="openai", base_url="https://api.openai.com/v1",
         api_key="sk-test", models=["o3-mini"],
     )
-    base_body = {"model": "guardian/openai/o3-mini", "messages": [], "max_tokens": 64, "temperature": 0}
+    base_body = {"model": "openai/openai/o3-mini", "messages": [], "max_tokens": 64, "temperature": 0}
     _path, json_body, _body, _needs_tr = server._prepare_cloud_candidate_request(
         provider, "o3-mini", "chat/completions", base_body,
     )
@@ -2384,18 +2383,11 @@ def test_admin_api_handler_signatures_match_wrappers():
     expectations = {
         "list_api_keys": ["client_id"],
         "create_api_key": ["request", "client_id"],
-        "list_cloud_credentials": ["request", "client_id"],
-        "add_cloud_credential": ["request", "client_id"],
-        "refresh_cloud_credential_models": ["cred_id", "request", "client_id"],
-        "delete_cloud_credential": ["cred_id", "request", "client_id"],
-        "add_model_to_credential": ["cred_id", "request", "client_id"],
-        "remove_model_from_credential": ["cred_id", "model_name", "request", "client_id"],
-        "list_cloud_links": ["request", "client_id"],
         "get_cloud_ratelimit_stats": ["request", "client_id"],
-        "link_credential": ["request", "client_id"],
-        "unlink_credential": ["request", "client_id"],
         "list_cloud_providers": ["client_id"],
         "list_cloud_models": ["request", "client_id"],
+        "list_cloud_catalog": ["client_id"],
+        "refresh_cloud_catalog": ["client_id"],
         "get_crash_history": ["client_id"],
         "get_server_status": ["client_id"],
         "get_capture_status": ["client_id"],

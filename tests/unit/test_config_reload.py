@@ -128,7 +128,7 @@ async def test_admin_reload_config_orchestrates_all_subsystems(monkeypatch):
     from app.gateway import admin_api
 
     registry = MagicMock()
-    cred_store = MagicMock()
+    catalog = MagicMock()
     controller = _FakeController()
     health = MagicMock()
     limiter = _FakeRateLimiter()
@@ -136,7 +136,7 @@ async def test_admin_reload_config_orchestrates_all_subsystems(monkeypatch):
 
     monkeypatch.setattr(admin_api, "_provider_registry", registry)
     monkeypatch.setattr(admin_api, "_failover_registry", registry)
-    monkeypatch.setattr(admin_api, "_cloud_cred_store", cred_store)
+    monkeypatch.setattr(admin_api, "_cloud_catalog", catalog)
     monkeypatch.setattr(admin_api, "_get_capture_controller", lambda: controller)
     monkeypatch.setattr(admin_api, "_failover_health", health)
     monkeypatch.setattr(admin_api, "_cloud_rate_limiter", limiter)
@@ -150,11 +150,11 @@ async def test_admin_reload_config_orchestrates_all_subsystems(monkeypatch):
     assert "settings.yaml (CONFIG)" in result["reloaded"]
     assert "providers" in result["reloaded"]
     assert "failover_groups" in result["reloaded"]
-    assert "cloud_keys.json (credentials, links)" in result["reloaded"]
+    assert "cloud_catalog" in result["reloaded"]
     assert "capture (cloud_capture, prefixes, policies)" in result["reloaded"]
     controller.reload_config.assert_awaited_once()
     registry.reload.assert_called()
-    cred_store.reload.assert_called()
+    catalog.reload.assert_called()
     health.reconfigure.assert_called_once()
     assert limiter.config.enabled is False  # honors the reloaded cloud_retry
 
@@ -165,12 +165,12 @@ async def test_reload_config_skips_retry_defaulting_when_settings_failed(monkeyp
     from app.gateway import admin_api
 
     registry = MagicMock()
-    cred_store = MagicMock()
+    catalog = MagicMock()
     health = MagicMock()
     limiter = _FakeRateLimiter()
     monkeypatch.setattr(admin_api, "_provider_registry", registry)
     monkeypatch.setattr(admin_api, "_failover_registry", registry)
-    monkeypatch.setattr(admin_api, "_cloud_cred_store", cred_store)
+    monkeypatch.setattr(admin_api, "_cloud_catalog", catalog)
     monkeypatch.setattr(admin_api, "_get_capture_controller", lambda: _FakeController())
     monkeypatch.setattr(admin_api, "_failover_health", health)
     monkeypatch.setattr(admin_api, "_cloud_rate_limiter", limiter)

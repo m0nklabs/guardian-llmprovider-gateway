@@ -6,15 +6,20 @@ import time
 import logging
 import re
 import subprocess
-from pathlib import Path
 from typing import Any, Dict, Optional
+import yaml
 from fastapi import HTTPException, Security, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.status import HTTP_401_UNAUTHORIZED
 
+from app.paths import GUARDIAN_APIKEYS_FILE, LEGACY_APIKEYS_FILE
+
 logger = logging.getLogger("Auth")
 
-API_KEYS_FILE = Path(__file__).parent.parent.parent / "config" / "api_keys.json"
+# New ``guardian_apikeys.yaml`` is the canonical write target; the legacy
+# ``api_keys.json`` remains a read-only backward-compat alias that is migrated
+# to the new file the first time keys are saved.
+API_KEYS_FILE = GUARDIAN_APIKEYS_FILE
 DEFAULT_API_KEY_PREFIX = "flip"
 security_scheme = HTTPBearer(auto_error=False)
 
@@ -144,6 +149,7 @@ def _build_auth_context(
         "project_prefix": project_prefix,
         "key_prefix": _token_prefix(token) if token else None,
         "key_fingerprint": _token_fingerprint(token) if token else None,
+        "cloud_gateway_access": bool((user_data or {}).get("cloud_gateway_access", True)),
         "header_name": header_name,
         "source_ip": source_ip,
         "source_port": source_port,
@@ -287,16 +293,63 @@ def _record_unauthorized_api_usage(request: Request, *, status_code: int = HTTP_
     )
     state_obj.guardian_usage_finished = True
 
-def load_api_keys() -> Dict[str, dict]:
-    if not API_KEYS_FILE.exists():
+def _migrate_legacy_keys() -> Dict[str, dict]:
+    """Load keys from the legacy ``api_keys.json`` if the new file is absent.
+
+    The legacy store is a JSON object mapping a token to its metadata dict.
+    On a successful read the store is rewritten to the new YAML file so the
+    whole codebase converges on the single ``guardian_apikeys.yaml`` source.
+    """
+    if not LEGACY_APIKEYS_FILE.exists():
         return {}
     try:
-        _ensure_api_keys_file_permissions()
-        with open(API_KEYS_FILE, "r") as f:
-            return json.load(f)
+        with open(LEGACY_APIKEYS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
     except Exception as e:
-        logger.error(f"Failed to load API keys: {e}")
+        logger.error(f"Failed to load legacy API keys: {e}")
         return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def _normalize_key_entry(token: str, raw: Any) -> Dict[str, Any]:
+    """Coerce a stored key entry to the canonical dict shape.
+
+    Ensures every key carries ``name``, ``created_at``, ``metadata`` and the
+    new ``cloud_gateway_access`` boolean (default ``True``).
+    """
+    if not isinstance(raw, dict):
+        raw = {"name": token}
+    entry = dict(raw)
+    if not entry.get("name"):
+        entry["name"] = token
+    entry.setdefault("created_at", time.time())
+    if not isinstance(entry.get("metadata"), dict):
+        entry["metadata"] = {}
+    entry.setdefault("cloud_gateway_access", True)
+    return entry
+
+
+def load_api_keys() -> Dict[str, dict]:
+    if API_KEYS_FILE.exists():
+        try:
+            _ensure_api_keys_file_permissions()
+            with open(API_KEYS_FILE, "r", encoding="utf-8") as f:
+                raw = yaml.safe_load(f) or {}
+        except Exception as e:
+            logger.error(f"Failed to load API keys: {e}")
+            raw = {}
+        if not isinstance(raw, dict):
+            raw = {}
+    else:
+        raw = _migrate_legacy_keys()
+
+    return {
+        token: _normalize_key_entry(token, entry)
+        for token, entry in raw.items()
+    }
+
 
 def save_api_keys(keys: Dict[str, dict]):
     API_KEYS_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -307,8 +360,8 @@ def save_api_keys(keys: Dict[str, dict]):
         0o600,
     )
     os.fchmod(file_descriptor, 0o600)
-    with os.fdopen(file_descriptor, "w") as f:
-        json.dump(keys, f, indent=2)
+    with os.fdopen(file_descriptor, "w", encoding="utf-8") as f:
+        yaml.safe_dump(keys, f, allow_unicode=True, sort_keys=False)
     tmp_path.replace(API_KEYS_FILE)
 
 
@@ -324,7 +377,8 @@ def generate_api_key(name: str, metadata: dict = None, prefix: Optional[str] = N
     keys[api_key] = {
         "name": name,
         "created_at": time.time(),
-        "metadata": metadata or {}
+        "metadata": metadata or {},
+        "cloud_gateway_access": True,
     }
     save_api_keys(keys)
     logger.info(f"Generated new API key for '{name}'")

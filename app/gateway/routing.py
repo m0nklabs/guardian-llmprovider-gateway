@@ -315,7 +315,7 @@ async def route_v1_post(path: str, request: Request, client_id: str):
             vision_fallback = _resolve_cloud_vision_fallback(requested_model)
             if vision_fallback:
                 # Preserve cloud-route authorization even though the image is
-                # handled locally. This prevents arbitrary guardian/* routes
+                # handled locally. This prevents arbitrary cloud routes
                 # from using a local model fallback.
                 _resolve_cloud_attempts(requested_model, request, client_id)
                 logger.info(

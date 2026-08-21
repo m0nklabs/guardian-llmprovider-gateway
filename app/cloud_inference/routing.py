@@ -16,14 +16,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException, Request
 
-from app.proxy.cloud_keys import parse_guardian_route
+from app.proxy.cloud_catalog import CloudModelCatalog
 from app.proxy.providers import CloudProvider, ProviderRegistry
 
 logger = logging.getLogger("Guardian")
 
 # ── Injected ─────────────────────────────────────────────────────────
 _provider_registry: Optional[ProviderRegistry] = None
-_cloud_cred_store = None
+_cloud_catalog: Optional[CloudModelCatalog] = None
 _failover_registry = None
 _failover_health = None
 _get_request_auth_context = None
@@ -31,7 +31,6 @@ _capture_client_fingerprint = None
 _capture_endpoint_from_request = None
 _dispatch_capture_request_received = None
 _get_capture_controller = None
-_provider_base_url = None
 _cloud_provider_for_request = None
 _cloud_provider_unavailable_error = None
 _adapt_openai_reasoning_params = None
@@ -44,7 +43,7 @@ ROUTE_CLOUD = "cloud"
 
 def init(
     provider_registry: ProviderRegistry,
-    cloud_cred_store,
+    cloud_catalog: CloudModelCatalog,
     failover_registry,
     failover_health,
     get_request_auth_context,
@@ -52,20 +51,19 @@ def init(
     capture_endpoint_from_request,
     dispatch_capture_request_received,
     get_capture_controller,
-    provider_base_url,
     cloud_provider_for_request,
     cloud_provider_unavailable_error,
     adapt_openai_reasoning_params,
 ) -> None:
     """Inject all dependencies. Called once at startup."""
-    global _provider_registry, _cloud_cred_store, _failover_registry, _failover_health
+    global _provider_registry, _cloud_catalog, _failover_registry, _failover_health
     global _get_request_auth_context, _capture_client_fingerprint, _capture_endpoint_from_request
     global _dispatch_capture_request_received, _get_capture_controller
-    global _provider_base_url, _cloud_provider_for_request, _cloud_provider_unavailable_error
+    global _cloud_provider_for_request, _cloud_provider_unavailable_error
     global _adapt_openai_reasoning_params
 
     _provider_registry = provider_registry
-    _cloud_cred_store = cloud_cred_store
+    _cloud_catalog = cloud_catalog
     _failover_registry = failover_registry
     _failover_health = failover_health
     _get_request_auth_context = get_request_auth_context
@@ -73,7 +71,6 @@ def init(
     _capture_endpoint_from_request = capture_endpoint_from_request
     _dispatch_capture_request_received = dispatch_capture_request_received
     _get_capture_controller = get_capture_controller
-    _provider_base_url = provider_base_url
     _cloud_provider_for_request = cloud_provider_for_request
     _cloud_provider_unavailable_error = cloud_provider_unavailable_error
     _adapt_openai_reasoning_params = adapt_openai_reasoning_params
@@ -92,30 +89,32 @@ def resolve_cloud_attempts(
     """Resolve the ordered list of (provider, upstream_model) attempts.
 
     Returns (attempts, failover_group_name). Raises HTTPException on failure.
+
+    Cloud access is gated on the requesting key's ``cloud_gateway_access``
+    boolean (default ``True`` when absent — the redesign's default keeps
+    existing keys on cloud). The provider is always resolved from the
+    *settings* provider key via the dynamic ``CloudModelCatalog`` and
+    ``ProviderRegistry`` — never from a per-key credential store.
     """
-    guardian_route = parse_guardian_route(model_name)
-    if guardian_route is None:
-        # Global cloud model from settings.yaml providers config
-        provider = _cloud_provider_for_request(model_name)
-        if provider is None:
-            raise HTTPException(status_code=404, detail=f"Model '{model_name}' is not a cloud model")
-        if not provider.is_configured:
-            raise _cloud_provider_unavailable_error(provider)
-        return [(provider, ProviderRegistry.canonical_model_id(model_name))], None
-
-    provider_name, model_path = guardian_route
     auth_ctx = _get_request_auth_context(request) or {}
-    key_fingerprint = auth_ctx.get("key_fingerprint") or client_id
+    if not auth_ctx.get("cloud_gateway_access", True):
+        raise HTTPException(
+            status_code=403,
+            detail="cloud access disabled for this Guardian key",
+        )
 
-    if provider_name == "failover":
-        group = _failover_registry.get_group(model_path)
+    first, sep, rest = model_name.partition("/")
+    # Failover group: failover/{group} (guardian/ prefix dropped in redesign).
+    if sep and first == "failover":
+        group_name = rest
+        group = _failover_registry.get_group(group_name)
         if group is None:
             raise HTTPException(
                 status_code=404,
                 detail={
                     "error": "failover_group_not_found",
-                    "group": model_path,
-                    "message": f"No failover group named '{model_path}' is configured.",
+                    "group": group_name,
+                    "message": f"No failover group named '{group_name}' is configured.",
                 },
             )
         ordered = _failover_health.order_candidates(group.candidates)
@@ -123,79 +122,58 @@ def resolve_cloud_attempts(
         for candidate in ordered:
             if requires_vision and "image" not in candidate.modalities:
                 continue
-            cred = _cloud_cred_store.get_credential_for_key(key_fingerprint, candidate.provider)
-            if cred is None:
+            provider = _provider_registry._providers.get(candidate.provider)
+            if provider is None or not provider.enabled or not provider.is_configured:
                 continue
-            if candidate.provider == "google" and candidate.model not in cred.models:
-                continue
-            attempts.append((
-                CloudProvider(
-                    name=candidate.provider,
-                    base_url=_provider_base_url(candidate.provider),
-                    api_key=cred.api_key,
-                    models=[candidate.model],
-                ),
-                candidate.model,
-            ))
+            attempts.append((provider, candidate.model))
         if not attempts:
             raise HTTPException(
                 status_code=403,
                 detail={
-                    "error": "cloud_credential_not_linked",
-                    "reason": "no_credential_for_failover_group",
+                    "error": "cloud_provider_unavailable",
+                    "reason": "no_provider_for_failover_group",
                     "message": (
-                        f"No credential is linked to your Guardian API key for any "
-                        f"provider in failover group '{model_path}'."
+                        f"No configured cloud provider is available for failover "
+                        f"group '{group_name}'."
                     ),
-                    "group": model_path,
+                    "group": group_name,
                 },
             )
-        return attempts, model_path
+        return attempts, group_name
 
-    # Per-key cloud route: guardian/{provider}/{model_path}
-    cred = _cloud_cred_store.get_credential_for_key(key_fingerprint, provider_name)
-    if cred is None:
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "error": "cloud_credential_not_linked",
-                "reason": "no_credential_for_provider",
-                "message": (
-                    f"No {provider_name} credential is linked to your Guardian API key. "
-                    f"Link a credential via the Guardian admin API or dashboard."
-                ),
-                "provider": provider_name,
-                "requested_route": model_name,
-            },
-        )
-    if provider_name == "google" and model_path not in cred.models:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Google model '{model_path}' is not available for this credential",
-        )
-    provider = CloudProvider(
-        name=provider_name,
-        base_url=_provider_base_url(provider_name),
-        api_key=cred.api_key,
-        models=[model_path],
-    )
-    return [(provider, model_path)], None
+    # Non-failover cloud route: resolve via the dynamic catalog, falling back
+    # to the provider registry for bare names not yet present in the catalog.
+    provider = _cloud_provider_for_request(model_name)
+    target = _cloud_catalog.resolve_cloud_target(model_name, fallback=provider)
+    if target is not None:
+        provider_name, upstream_model = target
+        resolved_provider = _provider_registry._providers.get(provider_name)
+        if resolved_provider is not None and resolved_provider.enabled:
+            if not resolved_provider.is_configured:
+                raise _cloud_provider_unavailable_error(resolved_provider)
+            return [(resolved_provider, upstream_model)], None
+    if provider is None:
+        raise HTTPException(status_code=404, detail=f"Model '{model_name}' is not a cloud model")
+    if not provider.is_configured:
+        raise _cloud_provider_unavailable_error(provider)
+    return [(provider, ProviderRegistry.canonical_model_id(model_name))], None
 
 
 def resolve_cloud_vision_fallback(model_name: str) -> Optional[str]:
     """Return a local vision fallback for a text-only cloud model."""
-    guardian_route = parse_guardian_route(model_name)
-    if guardian_route is None:
-        return _failover_registry.get_image_fallback_for_model(
-            ProviderRegistry.canonical_model_id(model_name)
-        )
-    provider_name, model_path = guardian_route
-    if provider_name != "failover":
-        return _failover_registry.get_image_fallback_for_model(model_path)
-    group = _failover_registry.get_group(model_path)
-    if group is None or group.has_image_capable_candidate():
-        return None
-    return group.image_fallback_model
+    first, sep, rest = model_name.partition("/")
+    if sep and first == "failover":
+        group = _failover_registry.get_group(rest)
+        if group is None or group.has_image_capable_candidate():
+            return None
+        return group.image_fallback_model
+    # Non-failover cloud route: look up the failover registry by the
+    # underlying upstream model ({brand}/{model}).
+    if sep and first and first in _provider_registry._providers:
+        underlying = rest
+    else:
+        underlying = ProviderRegistry.canonical_model_id(model_name)
+    return _failover_registry.get_image_fallback_for_model(underlying)
 
 
 # ── Candidate request preparation ──────────────────────────────────
@@ -228,7 +206,7 @@ def prepare_cloud_candidate_request(
         candidate_json_body = translate_anthropic_request_to_openai(candidate_json_body)
         effective_path = "chat/completions"
 
-    model_defaults = _cloud_cred_store.get_model_defaults(upstream_model)
+    model_defaults = _cloud_catalog.get_override(upstream_model) or {}
     if model_defaults:
         missing = {k: v for k, v in model_defaults.items() if k not in candidate_json_body}
         if missing:

@@ -11,21 +11,39 @@ import secrets
 import time
 from pathlib import Path
 
-# Path to the shared api_keys.json
+import yaml
+
+# Canonical Guardian API-key store (guardian_apikeys.yaml).
 CONFIG_DIR = Path(__file__).parent.parent / "config"
-API_KEYS_FILE = CONFIG_DIR / "api_keys.json"
+API_KEYS_FILE = CONFIG_DIR / "guardian_apikeys.yaml"
 DEFAULT_API_KEY_PREFIX = "flip"
+
+def _normalize(entries):
+    out = {}
+    for token, raw in (entries or {}).items():
+        if not isinstance(raw, dict):
+            raw = {"name": token}
+        entry = dict(raw)
+        entry.setdefault("name", token)
+        entry.setdefault("created_at", time.time())
+        entry.setdefault("metadata", {})
+        entry.setdefault("cloud_gateway_access", True)
+        out[token] = entry
+    return out
 
 def load_keys():
     if not API_KEYS_FILE.exists():
         return {}
-    with open(API_KEYS_FILE, 'r') as f:
-        return json.load(f)
+    try:
+        with open(API_KEYS_FILE, 'r') as f:
+            return _normalize(yaml.safe_load(f))
+    except Exception:
+        return {}
 
 def save_keys(keys):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     with open(API_KEYS_FILE, 'w') as f:
-        json.dump(keys, f, indent=2)
+        yaml.safe_dump(keys, f, allow_unicode=True, sort_keys=False)
 
 
 def normalize_prefix(prefix):
@@ -54,7 +72,8 @@ def generate_key(name, metadata=None, prefix=None):
     keys[api_key] = {
         "name": name,
         "created_at": time.time(),
-        "metadata": metadata or {}
+        "metadata": metadata or {},
+        "cloud_gateway_access": True,
     }
     
     save_keys(keys)

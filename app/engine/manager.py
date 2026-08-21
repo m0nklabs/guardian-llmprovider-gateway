@@ -22,6 +22,7 @@ from app.paths import (
     CURRENT_MODEL_SIG_FILE,
     LLAMA_SLOTS_DIR,
     OFFICIAL_LLAMA_SERVER_BIN,
+    local_models_file,
 )
 
 logger = logging.getLogger("model-manager")
@@ -80,7 +81,9 @@ class VisionCapability:
 
 
 class ModelManager:
-    def __init__(self, config_path: str = str(CONFIG_DIR / "models.yaml")):
+    def __init__(self, config_path: Optional[str] = None):
+        if config_path is None:
+            config_path = str(local_models_file())
         self.config_path = Path(config_path)
         self.models = self._load_config()
         self._vision_capabilities: Dict[str, VisionCapability] = {}

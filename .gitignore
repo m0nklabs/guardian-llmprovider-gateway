@@ -63,6 +63,11 @@ dashboard/dist/
 
 # Cloud credentials (contains API keys)
 config/cloud_keys.json
+config/guardian_apikeys.yaml
+
+# Dynamic cloud catalog cache (runtime data, gitignored)
+data/cloud_catalog_cache.json
+data/cloud_catalog_cache.json.lock
 
 # Terminal Paste Image folder
 /.cp-images

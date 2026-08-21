@@ -3,7 +3,7 @@
 from collections import defaultdict
 import logging
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi import FastAPI
 import pytest
@@ -100,59 +100,34 @@ async def test_get_stats_includes_api_usage(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_dashboard_add_google_credential_discovers_catalog_and_assigns_owner():
-    request = JsonRequest(
-        {
-            "provider": "google",
-            "name": "Google AI Studio",
-            "api_key": "google-test-key",
-        }
+async def test_dashboard_cloud_catalog_lists_provider_state(monkeypatch):
+    fake_provider = SimpleNamespace(name="openrouter", is_configured=True)
+    fake_catalog = MagicMock()
+    fake_catalog._catalogs.get.return_value = {"fetched_at": 123.0}
+    fake_catalog.get_models_for_provider.return_value = {
+        "deepseek/deepseek-v4-flash-0731": "deepseek/deepseek-v4-flash-0731"
+    }
+    monkeypatch.setattr(
+        main, "provider_registry", SimpleNamespace(get_enabled_providers=lambda: [fake_provider])
     )
-    stored_credential = {"id": "cred_google", "provider": "google", "models": ["gemini-2.5-flash"]}
-    with (
-        patch.object(main, "_discover_google_models", AsyncMock(return_value=["gemini-2.5-flash"])) as discover,
-        patch.object(main.cloud_cred_store, "add_credential", AsyncMock(return_value=stored_credential)) as add_credential,
-    ):
-        result = await main.add_cloud_cred_ui(request, "owner-client")
+    monkeypatch.setattr(main, "cloud_catalog", fake_catalog)
 
-    assert result == stored_credential
-    discover.assert_awaited_once_with("google-test-key")
-    assert add_credential.call_args.args == (
-        "google",
-        "Google AI Studio",
-        "google-test-key",
-        ["gemini-2.5-flash"],
-    )
-    assert add_credential.call_args.kwargs == {"owner_key_fingerprint": "owner-key"}
+    result = await main.list_cloud_catalog_ui("client")
+
+    assert result["catalog"][0]["name"] == "openrouter"
+    assert result["catalog"][0]["configured"] is True
+    assert result["catalog"][0]["model_count"] == 1
+    assert result["catalog"][0]["addresses"] == ["openrouter/deepseek/deepseek-v4-flash-0731"]
+    assert result["catalog"][0]["last_fetch"] == 123.0
 
 
 @pytest.mark.asyncio
-async def test_dashboard_rejects_linking_foreign_credential():
-    request = JsonRequest(
-        {
-            "guardian_key_fingerprint": "shared-key",
-            "provider": "google",
-            "credential_id": "cred_google",
-        },
-        key_fingerprint="foreign-key",
-    )
-    with (
-        patch.object(main.cloud_cred_store, "is_credential_owned_by", return_value=False),
-        patch.object(main.cloud_cred_store, "link_credential", AsyncMock()) as link_credential,
-        pytest.raises(main.HTTPException) as exc_info,
-    ):
-        await main.link_cloud_cred_ui(request, "foreign-client")
+async def test_dashboard_cloud_catalog_refresh(monkeypatch):
+    fake_catalog = MagicMock()
+    fake_catalog.refresh_all = AsyncMock()
+    monkeypatch.setattr(main, "cloud_catalog", fake_catalog)
 
-    assert exc_info.value.status_code == 404
-    link_credential.assert_not_awaited()
+    result = await main.refresh_cloud_catalog_ui("client")
 
-
-@pytest.mark.asyncio
-async def test_dashboard_lists_only_credentials_owned_by_current_key():
-    request = JsonRequest({}, key_fingerprint="owner-key")
-    credentials = [{"id": "cred_google", "provider": "google"}]
-    with patch.object(main.cloud_cred_store, "list_credentials_for_owner", return_value=credentials) as list_credentials:
-        result = await main.list_cloud_creds_ui(request, "owner-client")
-
-    assert result == {"credentials": credentials}
-    list_credentials.assert_called_once_with("owner-key")
+    assert result["status"] == "refreshed"
+    fake_catalog.refresh_all.assert_awaited_once()

@@ -3,6 +3,12 @@
 Extracted from ``app.proxy.server`` as part of Phase 5 (Structural Separation).
 The route decorators and thin wrappers stay in server.py; the handler logic
 lives here.
+
+Since the cloud-access redesign (2026-08-21) the cloud section of
+``/v1/models`` is provider-global (not per-key): every enabled + configured
+provider contributes its dynamic ``CloudModelCatalog`` entries as
+``{provider}/{brand}/{model}`` addresses.  A Guardian key with
+``cloud_gateway_access=false`` sees no cloud entries.
 """
 
 from __future__ import annotations
@@ -19,12 +25,9 @@ logger = logging.getLogger("Guardian")
 # ── Injected (set once at startup by init()) ─────────────────────────
 _model_manager = None
 _provider_registry = None
-_cloud_cred_store = None
+_cloud_catalog = None
 _failover_registry = None
 _get_request_auth_context = None
-_parse_guardian_route = None
-_CloudProvider = None
-provider_base_url = None
 resolve_cloud_attempts = None
 build_model_metadata_entry = None
 enrich_model_context_metadata = None
@@ -36,12 +39,9 @@ def init(
     *,
     _model_manager,
     _provider_registry,
-    _cloud_cred_store,
+    _cloud_catalog,
     _failover_registry,
     _get_request_auth_context,
-    _parse_guardian_route,
-    _CloudProvider,
-    _provider_base_url,
     _resolve_cloud_attempts,
     _build_model_metadata_entry,
     _enrich_model_context_metadata,
@@ -51,17 +51,57 @@ def init(
     """Inject all dependencies. Called once at startup."""
     globals()["_model_manager"] = _model_manager
     globals()["_provider_registry"] = _provider_registry
-    globals()["_cloud_cred_store"] = _cloud_cred_store
+    globals()["_cloud_catalog"] = _cloud_catalog
     globals()["_failover_registry"] = _failover_registry
     globals()["_get_request_auth_context"] = _get_request_auth_context
-    globals()["_parse_guardian_route"] = _parse_guardian_route
-    globals()["_CloudProvider"] = _CloudProvider
-    globals()["provider_base_url"] = _provider_base_url
     globals()["resolve_cloud_attempts"] = _resolve_cloud_attempts
     globals()["build_model_metadata_entry"] = _build_model_metadata_entry
     globals()["enrich_model_context_metadata"] = _enrich_model_context_metadata
     globals()["resolve_context_window"] = _resolve_context_window
     globals()["get_model_size"] = _get_model_size
+
+
+def _is_failover_address(model_name: str) -> bool:
+    """Return True when *model_name* is a ``failover/{group}`` address."""
+    first, sep, _ = (model_name or "").partition("/")
+    return bool(sep and first == "failover")
+
+
+def _key_can_access_cloud(request: Request, client_id: str) -> bool:
+    """Return whether the requesting key may see / use cloud entries."""
+    auth_ctx = _get_request_auth_context(request) or {}
+    return bool(auth_ctx.get("cloud_gateway_access", True))
+
+
+def _cloud_entries_for_provider(provider_name: str) -> List[str]:
+    """Return the full ``{provider}/{brand}/{model}`` addresses for a provider.
+
+    Uses the dynamic catalog when available; falls back to the configured
+    ``models:`` names (with their ``{provider}`` prefix) on cold start.
+    """
+    catalog = _cloud_catalog.get_models_for_provider(provider_name)
+    if catalog:
+        return [f"{provider_name}/{normalized}" for normalized in catalog]
+    provider = _provider_registry._providers.get(provider_name)
+    if provider is None:
+        return []
+    return [f"{provider_name}/{m}" for m in provider.models]
+
+
+async def _build_cloud_entry(full_id: str, provider_name: str) -> Dict[str, Any]:
+    """Build and context-enrich a single cloud model entry."""
+    entry = _provider_registry.build_model_metadata_entry(full_id)
+    if entry is None:
+        entry = {
+            "id": full_id,
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": provider_name,
+            "permission": [],
+            "served_by": "cloud",
+            "provider": provider_name,
+        }
+    return await enrich_model_context_metadata(entry)
 
 
 async def tags_ollama() -> Dict[str, Any]:
@@ -73,7 +113,7 @@ async def tags_ollama() -> Dict[str, Any]:
         if not hasattr(_model_manager, 'models') or _model_manager.models is None:
             logger.error("_model_manager.models is missing or None")
             return {"models": []}
-            
+
         for name in _model_manager.models.keys():
             models.append({
                 "name": name,
@@ -107,54 +147,19 @@ async def list_models(request: Request, client_id: str) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Failed to list models: {e}")
 
-    # Append global cloud-provider models (OpenRouter, NVIDIA, …)
-    try:
-        for cloud_model in _provider_registry.get_all_cloud_models():
-            entry = _provider_registry.build_model_metadata_entry(cloud_model)
-            if entry is not None:
-                models_list.append(await enrich_model_context_metadata(entry))
-                provider = _provider_registry.get_provider_for_model(cloud_model)
-                if provider is not None and provider.name == "openrouter":
-                    alias_entry = dict(entry)
-                    alias_entry["id"] = f"openrouter/{cloud_model}"
-                    models_list.append(await enrich_model_context_metadata(alias_entry))
-    except Exception as e:
-        logger.error(f"Failed to list cloud models: {e}")
+    # Append provider-global cloud models from the dynamic catalog
+    # ({provider}/{brand}/{model}). Per-key gated on cloud_gateway_access.
+    if _key_can_access_cloud(request, client_id):
+        try:
+            for provider_name in [
+                p.name for p in _provider_registry.get_enabled_providers() if p.is_configured
+            ]:
+                for full_id in _cloud_entries_for_provider(provider_name):
+                    models_list.append(await _build_cloud_entry(full_id, provider_name))
+        except Exception as e:
+            logger.error(f"Failed to list cloud models: {e}")
 
-    # Append per-key cloud routes (guardian/{provider}/{model})
-    try:
-        auth_ctx = _get_request_auth_context(request) or {}
-        key_fp = auth_ctx.get("key_fingerprint") or client_id
-        for cloud_model in _cloud_cred_store.get_linked_models_for_key(key_fp):
-            entry = {
-                "id": cloud_model["id"],
-                "object": "model",
-                "created": int(time.time()),
-                "owned_by": cloud_model["provider"],
-                "permission": [],
-                "served_by": "cloud",
-                "provider": cloud_model["provider"],
-                "credential_id": cloud_model["credential_id"],
-            }
-            credential = _cloud_cred_store.get_credential_for_key(key_fp, cloud_model["provider"])
-            cloud_attempts = None
-            if credential is not None:
-                cloud_attempts = [
-                    (
-                        _CloudProvider(
-                            name=cloud_model["provider"],
-                            base_url=provider_base_url(cloud_model["provider"]),
-                            api_key=credential.api_key,
-                            models=[cloud_model["model"]],
-                        ),
-                        cloud_model["model"],
-                    )
-                ]
-            models_list.append(await enrich_model_context_metadata(entry, cloud_attempts=cloud_attempts))
-    except Exception as e:
-        logger.error(f"Failed to list per-key cloud models: {e}")
-
-    # Append failover groups as synthetic model entries (guardian/failover/{group}).
+    # Append failover groups as synthetic model entries (failover/{group}).
     # A failover group spans multiple providers; surface it so discovery clients
     # (Goose, Open WebUI, etc.) can offer cross-provider failover routes without
     # the caller needing to know the underlying (provider, model) candidates.
@@ -162,7 +167,7 @@ async def list_models(request: Request, client_id: str) -> Dict[str, Any]:
         for group_name in _failover_registry._groups.keys():
             try:
                 cloud_attempts, _ = resolve_cloud_attempts(
-                    f"guardian/failover/{group_name}",
+                    f"failover/{group_name}",
                     request,
                     client_id,
                 )
@@ -172,7 +177,7 @@ async def list_models(request: Request, client_id: str) -> Dict[str, Any]:
                     continue
                 raise
             entry = {
-                "id": f"guardian/failover/{group_name}",
+                "id": f"failover/{group_name}",
                 "object": "model",
                 "created": int(time.time()),
                 "owned_by": "failover",
@@ -192,11 +197,11 @@ async def list_models(request: Request, client_id: str) -> Dict[str, Any]:
 
 async def model_metadata(model_id: str, request: Request, client_id: str) -> Dict[str, Any]:
     """Return metadata for a configured canonical model, public alias, or cloud model (Phase 5: delegated)."""
-    # Failover groups surface as guardian/failover/{group}; resolve them here so
+    # Failover groups surface as failover/{group}; resolve them here so
     # /v1/models/<id> returns a stable shape rather than 404'ing on the discovery
     # entry the list endpoint just advertised.
-    if model_id.startswith("guardian/failover/"):
-        group_name = model_id[len("guardian/failover/"):]
+    if _is_failover_address(model_id):
+        group_name = model_id.partition("/")[2]
         if _failover_registry.get_group(group_name) is not None:
             cloud_attempts, _ = resolve_cloud_attempts(model_id, request, client_id)
             return await enrich_model_context_metadata({
@@ -211,25 +216,19 @@ async def model_metadata(model_id: str, request: Request, client_id: str) -> Dic
             }, cloud_attempts=cloud_attempts)
         raise HTTPException(status_code=404, detail=f"Failover group '{group_name}' not found")
 
-    # Cloud-provider models first (they may contain slashes like "openai/gpt-4o")
-    if _provider_registry.is_cloud_model(model_id):
+    # Cloud-provider models first (they may contain slashes like "openai/gpt-4o").
+    if (
+        _provider_registry.is_cloud_model(model_id)
+        or _provider_registry._provider_from_address(model_id) is not None
+    ):
         entry = _provider_registry.build_model_metadata_entry(model_id)
         if entry is not None:
-            return await enrich_model_context_metadata(entry)
-
-    guardian_route = _parse_guardian_route(model_id)
-    if guardian_route is not None:
-        provider_name, _ = guardian_route
-        cloud_attempts, _ = resolve_cloud_attempts(model_id, request, client_id)
-        return await enrich_model_context_metadata({
-            "id": model_id,
-            "object": "model",
-            "created": int(time.time()),
-            "owned_by": provider_name,
-            "permission": [],
-            "served_by": "cloud",
-            "provider": provider_name,
-        }, cloud_attempts=cloud_attempts)
+            cloud_attempts = None
+            try:
+                cloud_attempts, _ = resolve_cloud_attempts(model_id, request, client_id)
+            except HTTPException:
+                cloud_attempts = None
+            return await enrich_model_context_metadata(entry, cloud_attempts=cloud_attempts)
 
     public_models = _model_manager.get_public_model_map()
     canonical_name = public_models.get(model_id)
@@ -256,16 +255,18 @@ async def show_model(request: Request, client_id: str) -> Dict[str, Any]:
     model_name = model_name.strip()
 
     canonical_name: Optional[str] = None
-    cloud_attempts: Optional[List[Tuple[_CloudProvider, str]]] = None
-    guardian_route = _parse_guardian_route(model_name)
-    if model_name.startswith("guardian/failover/"):
-        group_name = model_name[len("guardian/failover/"):]
+    cloud_attempts: Optional[List[Tuple[Any, str]]] = None
+    if _is_failover_address(model_name):
+        group_name = model_name.partition("/")[2]
         if _failover_registry.get_group(group_name) is None:
             raise HTTPException(status_code=404, detail=f"Failover group '{group_name}' not found")
         cloud_attempts, _ = resolve_cloud_attempts(model_name, request, client_id)
-    elif guardian_route is not None:
+    elif (
+        _provider_registry.is_cloud_model(model_name)
+        or _provider_registry._provider_from_address(model_name) is not None
+    ):
         cloud_attempts, _ = resolve_cloud_attempts(model_name, request, client_id)
-    elif not _provider_registry.is_cloud_model(model_name):
+    else:
         try:
             canonical_name = _model_manager.resolve_model(model_name)
         except ValueError as exc:
@@ -288,5 +289,3 @@ async def show_model(request: Request, client_id: str) -> Dict[str, Any]:
         "model": model_name,
         "context_window": context_window,
     }
-
-

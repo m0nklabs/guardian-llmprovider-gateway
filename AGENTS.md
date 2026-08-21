@@ -25,10 +25,9 @@
 - **TLS requires both paths.** `GUARDIAN_TLS_CERTFILE` and `GUARDIAN_TLS_KEYFILE` are an all-or-nothing pair. The production drop-in binds TLS to `127.0.0.1:11435` through `GUARDIAN_TLS_HOST` and `GUARDIAN_TLS_PORT`; nginx's `libnginx-mod-stream` module and a top-level `stream { include /etc/nginx/stream-conf.d/*.conf; }` block are required for the public protocol multiplexer. Keep the private key `0600`.
 - **Secrets in `.env`.** API keys use `${ENV_VAR}` expansion. Never inline keys in YAML or Python. Use `scripts/generate_key.py` to mint new Guardian keys.
 - **Model resolution is name-based and key-independent.** A model is cloud-hosted when it matches an explicit `models:` entry or a `model_prefixes:` namespace (e.g. `anthropic/`, `nvidia/`). Local models are aliases from `config/models.yaml`. Unknown models return `404 model_not_served`. See `@docs/LLM_ROUTER.md`.
-- **Google AI Studio is per-key only.** Registering a `google` credential retrieves its current OpenAI-compatible catalog and publishes linked routes as `guardian/google/<model>`. Only the creating Guardian key can manage or share that credential. Use the credential refresh endpoint to update the stored catalog; a failed refresh preserves the last successful list.
+- **Cloud access redesign (2026-08-21) governs cloud routing.** Since commits `4329d7c`/`28e97ad` there is NO credential/link/ownership layer, NO `guardian/` prefix, and NO `cloud_keys.json` credential store (it remains on disk only as a backward-compat `failover_groups` source). Cloud models are addressed `{provider}/{brand}/{model}` and resolved from each provider's settings API key via the dynamic `CloudModelCatalog` (`app/proxy/cloud_catalog.py`), which fetches `/v1/models`, normalizes to `{brand}/{model}`, and caches with TTL + cold-start disk cache. Per-key cloud access = `cloud_gateway_access: true|false` (default **true**) in `config/guardian_apikeys.yaml`; a key set `false` gets 403 on cloud routes and sees no cloud entries in `/v1/models`. Keys live in `guardian_apikeys.yaml` (legacy `api_keys.json` migrated on first save). New admin endpoints: `GET /api/cloud/catalog`, `POST /api/cloud/catalog/refresh`. Failover groups are `failover/{group}` and read `failover_groups:` from `settings.yaml`.
 - **Cloud vision fallback is capability-based.** Guardian uses a local vision model only when an image request targets a configured text-only cloud model with an `image_fallback`. Image-capable cloud candidates remain cloud-routed; failover groups filter image requests to image-capable candidates.
-- **Model discovery always includes context metadata.** Every `/v1/models` entry and `/api/show` response reports a positive context size. Resolve `context_overrides` first, then cloud catalog or local `/props`, and log before using the `131072` fallback.
-- **`/v1/models` has four sources and is per-key.** `list_models` (in `app/gateway/model_discovery.py`) merges: (1) local models from `config/models.yaml` via `get_public_model_map()`, (2) bare cloud names from `settings.yaml` `providers.*.models` via `get_all_cloud_models()` (this is the only source truly gated on `settings.yaml`), (3) **per-key** `guardian/{provider}/{model}` routes from `cloud_keys.json` via `get_linked_models_for_key(key_fp)`, and (4) `guardian/failover/{group}` entries from the failover registry. So the exact list differs per API key: a key with no linked credentials (e.g. `mindcraft`, fp `43ed9e97823f`) returns only sources 1+2 (~118 models), while a key linked to google+nvidia+openai+openrouter+poolside (e.g. `pi`, fp `c1824126c6fb`) returns all four (~217). `model_prefixes` also expose `nvidia/...`-style bare names that are not in `models:`. The `guardian/` routes only exist once a credential is linked — an unlinked key has **zero** `guardian/` routes and any cloud call fails. **Do not assume every key sees the same `/v1/models`; fingerprint the key first.** (This is why earlier AGENTS.md handoffs noted the counts: 106/118/217.)
+- **Model discovery always includes context metadata.** Every `/v1/models` entry and `/api/show` response reports a positive context size. Resolve `context_overrides` first, then `cloud_models.yaml` overrides, then the cloud catalog or local `/props`, and log before using the `131072` fallback.
 - **Streaming keepalives required.** All streaming paths (local + cloud) must pass `heartbeat_interval_s=STREAM_HEARTBEAT_INTERVAL_S` (15s default) to `_iter_sse_lines_with_watchdog`. Missing this causes client idle-timeout errors on reasoning models.
 - **Don't duplicate docs.** Detailed architecture lives in `docs/`. `AGENTS.md` is the index — reference, don't re-explain.
 - **GCD is a pass-through contract, cloud-stripped.** The local OpenAI path forwards `response_format`/`json_schema`/`grammar` (GBNF) byte-identical to llama-server (pinned by `tests/unit/test_grammar_passthrough.py`) — never whitelist body fields. Cloud routes strip GBNF/`json_schema` (providers reject them) and preserve OpenAI-native `response_format`; the `grammar` block in `settings.yaml` (`enabled` kill-switch, `cloud_auto_convert_json`, `cloud_strict_mode`, `validate_gbnf`) controls the optional behavior. Ollama `options.format` maps to `response_format`/`grammar` in the bridge. Capture stores only `grammar_present`/`response_format_present` flags — never the grammar content.
@@ -94,6 +93,7 @@ scripts/
 When touching these areas, read the referenced detail docs:
 
 - **Cloud routing / model resolution** → `@docs/LLM_ROUTER.md`
+- **Cloud access redesign plan** → `@docs/CLOUD_ACCESS_REDESIGN.md` (IMPLEMENTED 2026-08-21: one config, one key source, dynamic catalog, consistent `{provider}/{brand}/{model}` cloud format — `guardian/` prefix dropped so bare-name clients keep working; per-key `cloud_gateway_access` boolean replaces credential linking)
 - **Anthropic API bridge** → `@docs/ANTHROPIC_BRIDGE.md`
 - **System architecture** → `@docs/ARCHITECTURE.md`
 - **API surface** → `@docs/API_REFERENCE.md`
@@ -252,6 +252,64 @@ When touching these areas, read the referenced detail docs:
   so a future session that has to dig into code writes that understanding down
   immediately instead of letting the next session re-derive it.
 - Docs-only change: no code, no restart, no tests affected. Committed + pushed.
+
+### DSH session `20260820_cloud_refactor` (cloud access redesign — IMPLEMENTED, awaiting operator restart)
+
+- Working directory: `/home/flip/llama_cpp_guardian`
+- **Operator mandates a cloud-access redesign** after this session exposed the
+  mess (multiple key locations, duplicated/inconsistent `/v1/models`, cloud_keys
+  linking that is not a real security boundary, mixed json/yaml, missing
+  google/poolside `.env` keys). The full plan lives in
+  **`docs/CLOUD_ACCESS_REDESIGN.md`** (Status: IMPLEMENTED 2026-08-21).
+- **Design decisions (operator-approved):**
+  - All YAML (`guardian_apikeys.yaml`, `local_models.yaml`, `cloud_models.yaml`),
+    cloud_keys.json removed (still on disk until the operator-run restart; now
+    only a backward-compat source for `FailoverRegistry` failover_groups).
+  - One key source: `settings.yaml` `providers.*.api_key` via `$ENV` (.env);
+    google added as a first-class provider + `GOOGLE_API_KEY`/`POOLSIDE_API_KEY`
+    migrated into `.env` from cloud_keys.json.
+  - No credentials/links/ownership; per-key access = `cloud_gateway_access:
+    true|false` (default true) in `guardian_apikeys.yaml`.
+  - Dynamic cloud catalog (`app/proxy/cloud_catalog.py`): fetches each
+    provider's `/v1/models`, normalizes to `{brand}/{model}`, TTL + cold-start
+    disk cache (`data/cloud_catalog_cache.json`) + auto-refresh;
+    `config/cloud_models.yaml` = per-model overrides only.
+  - Model format: cloud `{provider}/{brand}/{model}` — `guardian/` prefix
+    **dropped** (2026-08-21, after copilot review #7 point 1) so existing
+    bare-name clients keep working; only the `{brand}` segment is the real
+    change (openai/google previously omitted it). Local keeps its bare name.
+    Example: `google/google/gemini-3.5-flash`, `openrouter/deepseek/deepseek-v4-flash-0731`.
+- **Implementations made on `cloud-access-redesign` (commits `4329d7c`, `28e97ad`):**
+  - Key store: `guardian_apikeys.yaml` (YAML) standard; `api_keys.json` is a
+    read-only legacy alias migrated on first save. `models.yaml` is now a
+    symlink to `local_models.yaml`.
+  - `CloudCredentialStore` + `parse_guardian_route` deleted; all
+    credential/link/claim/refresh admin + UI endpoints removed.
+  - New admin endpoints: `GET /api/cloud/catalog`, `POST /api/cloud/catalog/refresh`.
+  - `/v1/models` is provider-global from the dynamic catalog, gated per-key on
+    `cloud_gateway_access`; failover groups are `failover/{group}` and now read
+    `failover_groups:` from `settings.yaml` (cloud_keys.json fallback).
+  - `cloud_gateway_access` default `True` when absent → existing keys keep cloud
+    access; a key set `false` is local-only (cloud routes 403).
+  - Context metadata resolves `cloud_models.yaml` context overrides first.
+- **Reviewer (copilot-swe-agent) notes on PR #7:** (1) no breaking change for
+  bare-name clients (addressed by dropping `guardian/`); (2) cold-start fallback
+  catalog implemented (disk cache + keep-last-on-failure); (3) `cloud_models.yaml`
+  scope example shipped; (4) poolside `/v1/models` — the dynamic catalog fetches
+  all configured providers incl. poolside via the same `httpx` helper (verify a
+  live refresh at `POST /api/cloud/catalog/refresh` after restart);
+  (5) capture attribution — capture is keyed on auth context (client_fingerprint),
+  not the credential store, so it is unaffected by credential removal (verify a
+  live cloud request's capture event after restart).
+- **Live verification (operator task after the restart):** confirm
+  `/v1/models` shows the unified `{provider}/{brand}/{model}` list (~217 global),
+  a linked key like pi still returns cloud entries, `GET /api/cloud/catalog`
+  reports per-provider counts, and `POST /api/cloud/catalog/refresh` populates
+  the catalog. `config/cloud_keys.json` can be deleted once live.
+- **IMPORTANT:** implementation ends in a Guardian restart that drops the
+  session. All code/config on `cloud-access-redesign` is committed; pre-restart
+  gate PASSED (930 passed / 3 skipped). Operator runs `sudo systemctl restart
+  llama-guardian`.
 
 ### Pi session `20260813_1` (session wrap-up, last updated 2026-08-13)
 

@@ -20,7 +20,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 from fastapi import HTTPException
 
-from app.proxy.cloud_keys import parse_guardian_route
 from app.proxy.providers import CloudProvider, ProviderRegistry
 
 logger = logging.getLogger("Guardian")
@@ -117,10 +116,17 @@ def cloud_provider_for_request(model_name: str) -> Optional[CloudProvider]:
 
 
 def is_cloud_or_guardian_route(model_name: str) -> bool:
-    """Check if a model name is a cloud model or a per-key guardian route."""
+    """Return True for a cloud model or a ``{provider}/{brand}/{model}`` address.
+
+    Since the cloud-access redesign (2026-08-21) the ``guardian/`` prefix is
+    gone; a model is cloud-routed when its first path segment names a
+    configured provider (e.g. ``openrouter/deepseek/...``,
+    ``google/google/gemini-...``) or it matches a configured cloud model by
+    name/prefix.
+    """
     if _provider_registry.is_cloud_model(model_name):
         return True
-    return parse_guardian_route(model_name) is not None
+    return _provider_registry._provider_from_address(model_name) is not None
 
 
 def cloud_provider_unavailable_error(provider: CloudProvider) -> HTTPException:

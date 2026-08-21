@@ -207,11 +207,10 @@ async def forward_to_cloud_provider(
     Supports three routing modes:
     - **Global cloud models** (e.g. ``openai/gpt-4o``): routed via the
       ``ProviderRegistry`` using the provider's global API key from settings.yaml.
-    - **Per-key cloud routes** (e.g. ``guardian/nvidia/minimax/minimax-m3``):
-      routed via the ``CloudCredentialStore`` using the credential linked to
-      the requesting client's Guardian API key. The upstream model name is
-      extracted from the route prefix.
-    - **Failover groups** (``guardian/failover/{group}``): tries each provider
+    - **Cloud addresses** (e.g. ``openrouter/deepseek/deepseek-v4-flash-0731``):
+      routed via the dynamic ``CloudModelCatalog`` using the provider's settings
+      API key, gated on the requesting key's ``cloud_gateway_access``.
+    - **Failover groups** (``failover/{group}``): tries each provider
       candidate configured for *group* in health-ordered priority, skipping a
       candidate that is currently tripped (see :mod:`app.proxy.failover`) and
       falling through to the next one on a connection failure or retryable

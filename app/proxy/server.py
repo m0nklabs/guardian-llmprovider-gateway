@@ -15,7 +15,7 @@ from app.paths import LLAMA_SLOTS_DIR
 from app.engine.manager import ModelManager, ModelLoadError
 from app.proxy.auth import get_request_auth_context, verify_api_key, generate_api_key, load_api_keys, _token_fingerprint
 from app.proxy.providers import CloudProvider, ProviderRegistry
-from app.proxy.cloud_keys import CloudCredentialStore, parse_guardian_route
+from app.proxy.cloud_catalog import CloudModelCatalog
 from app.proxy.failover import FailoverRegistry, ProviderHealthTracker, FAILURE_THRESHOLD, COOLDOWN_SECONDS, RATE_LIMIT_COOLDOWN_SECONDS
 from app.proxy.ratelimit import RateLimitConfig, RateLimitRetryManager
 from app.proxy.anthropic_bridge import (
@@ -114,13 +114,12 @@ provider_registry = ProviderRegistry()
 # Initialize cloud_inference helpers with singleton registry
 _cloud_inf.init(provider_registry)
 
-# Per-key cloud credential store — allows linking cloud provider credentials
-# (NVIDIA, OpenRouter) to individual Guardian API keys so each key can route
-# to its own cloud backend via guardian/{provider}/{model} routes.
-cloud_cred_store = CloudCredentialStore()
+# Dynamic cloud model catalog — fetches/normalizes/caches each provider's
+# /v1/models into {provider}/{brand}/{model} addresses (cloud-access redesign).
+cloud_catalog = CloudModelCatalog(provider_registry)
 
 # Cross-provider failover — lets a single logical model (e.g. minimax-m3) be
-# served by multiple cloud providers via guardian/failover/{group} routes,
+# served by multiple cloud providers via failover/{group} routes,
 # automatically skipping a provider that is currently erroring/degraded.
 failover_registry = FailoverRegistry()
 _failover_health_cfg = CONFIG.get("failover_health", {}) or {}
@@ -694,7 +693,13 @@ app.add_middleware(
 model_manager = ModelManager()
 
 # Initialize gateway context_metadata with singleton dependencies
-_ctx_meta.init(model_manager, provider_registry, failover_registry, llama_server_url=LLAMA_SERVER_URL)
+_ctx_meta.init(
+    model_manager,
+    provider_registry,
+    failover_registry,
+    llama_server_url=LLAMA_SERVER_URL,
+    cloud_catalog=cloud_catalog,
+)
 
 DEFAULT_CONTEXT_WINDOW = _ctx_meta.DEFAULT_CONTEXT_WINDOW
 BACKEND_CONTEXT_CACHE_SECONDS = 5.0
@@ -742,7 +747,6 @@ _process.init(
 _local_models.init(
     model_manager=model_manager,
     provider_registry=provider_registry,
-    parse_guardian_route=parse_guardian_route,
     config=CONFIG,
     safe_vram_limit_mb=SAFE_VRAM_LIMIT_MB,
     model_switch_lock=_model_switch_lock,
@@ -800,13 +804,12 @@ _capture_dispatch.init(get_request_auth_context, _coerce_usage_int)
 
 # Initialize cloud routing with all dependencies
 _cloud_routing.init(
-    provider_registry, cloud_cred_store, failover_registry, failover_health,
+    provider_registry, cloud_catalog, failover_registry, failover_health,
     get_request_auth_context,
     _capture_dispatch.capture_client_fingerprint,
     _capture_dispatch.capture_endpoint_from_request,
     _capture_dispatch.dispatch_capture_request_received,
     get_capture_controller,
-    _cloud_inf.provider_base_url,
     _cloud_inf.cloud_provider_for_request,
     _cloud_inf.cloud_provider_unavailable_error,
     _cloud_inf.adapt_openai_reasoning_params,
@@ -1168,88 +1171,10 @@ async def create_api_key(request: Request, client_id: str = Depends(verify_api_k
 
 
 
-@app.get("/api/cloud/credentials")
-async def list_cloud_credentials(request: Request, client_id: str = Depends(verify_api_key)):
-    """list_cloud_credentials (Phase 5: delegated to app.gateway.admin_api)."""
-    return await _admin_api.list_cloud_credentials(request, client_id)
-
-
-@app.post("/api/cloud/credentials")
-async def add_cloud_credential(request: Request, client_id: str = Depends(verify_api_key)):
-    """add_cloud_credential (Phase 5: delegated to app.gateway.admin_api)."""
-    return await _admin_api.add_cloud_credential(request, client_id)
-
-
-@app.post("/api/cloud/credentials/{cred_id}/refresh-models")
-async def refresh_cloud_credential_models(
-    cred_id: str,
-    request: Request,
-    client_id: str = Depends(verify_api_key),
-):
-    """refresh_cloud_credential_models (Phase 5: delegated to app.gateway.admin_api)."""
-    return await _admin_api.refresh_cloud_credential_models(cred_id, request, client_id)
-
-
-@app.delete("/api/cloud/credentials/{cred_id}")
-async def delete_cloud_credential(
-    cred_id: str,
-    request: Request,
-    client_id: str = Depends(verify_api_key),
-):
-    """delete_cloud_credential (Phase 5: delegated to app.gateway.admin_api)."""
-    return await _admin_api.delete_cloud_credential(cred_id, request, client_id)
-
-
-@app.post("/api/cloud/credentials/{cred_id}/models")
-async def add_model_to_credential(cred_id: str, request: Request, client_id: str = Depends(verify_api_key)):
-    """add_model_to_credential (Phase 5: delegated to app.gateway.admin_api)."""
-    return await _admin_api.add_model_to_credential(cred_id, request, client_id)
-
-
-@app.delete("/api/cloud/credentials/{cred_id}/models/{model_name:path}")
-async def remove_model_from_credential(
-    cred_id: str,
-    model_name: str,
-    request: Request,
-    client_id: str = Depends(verify_api_key),
-):
-    """remove_model_from_credential (Phase 5: delegated to app.gateway.admin_api)."""
-    return await _admin_api.remove_model_from_credential(cred_id, model_name, request, client_id)
-
-
-@app.get("/api/cloud/links")
-async def list_cloud_links(request: Request, client_id: str = Depends(verify_api_key)):
-    """list_cloud_links (Phase 5: delegated to app.gateway.admin_api)."""
-    return await _admin_api.list_cloud_links(request, client_id)
-
-
 @app.get("/api/cloud/ratelimit-stats")
 async def get_cloud_ratelimit_stats(request: Request, client_id: str = Depends(verify_api_key)):
     """get_cloud_ratelimit_stats (Phase 5: delegated to app.gateway.admin_api)."""
     return await _admin_api.get_cloud_ratelimit_stats(request, client_id)
-
-
-@app.post("/api/cloud/links")
-async def link_credential(request: Request, client_id: str = Depends(verify_api_key)):
-    """link_credential (Phase 5: delegated to app.gateway.admin_api)."""
-    return await _admin_api.link_credential(request, client_id)
-
-
-@app.delete("/api/cloud/links")
-async def unlink_credential(request: Request, client_id: str = Depends(verify_api_key)):
-    """unlink_credential (Phase 5: delegated to app.gateway.admin_api)."""
-    return await _admin_api.unlink_credential(request, client_id)
-
-
-@app.post("/api/cloud/credentials/claim")
-async def claim_legacy_credential(request: Request, client_id: str = Depends(verify_api_key)):
-    """Adopt an owner-less legacy credential (ownership repair, no restart).
-
-    Body: {"provider": "...", "credential_id": "..."}. The caller must
-    already hold a link to that credential. After the claim the (new) owner
-    can link the credential to other Guardian keys via POST /api/cloud/links.
-    """
-    return await _admin_api.claim_legacy_credential(request, client_id)
 
 
 @app.get("/api/cloud/providers")
@@ -1258,14 +1183,26 @@ async def list_cloud_providers(client_id: str = Depends(verify_api_key)):
     return await _admin_api.list_cloud_providers(client_id)
 
 
+@app.get("/api/cloud/catalog")
+async def list_cloud_catalog(client_id: str = Depends(verify_api_key)):
+    """Return the current dynamic cloud catalog state (per provider)."""
+    return await _admin_api.list_cloud_catalog(client_id)
+
+
+@app.post("/api/cloud/catalog/refresh")
+async def refresh_cloud_catalog(client_id: str = Depends(verify_api_key)):
+    """Force a refresh of every configured provider's dynamic cloud catalog."""
+    return await _admin_api.refresh_cloud_catalog(client_id)
+
+
 @app.post("/api/config/reload")
 async def reload_config(client_id: str = Depends(verify_api_key)):
-    """Live-reload settings.yaml + cloud_keys.json without restarting.
+    """Live-reload settings.yaml without restarting.
 
     Admin-only (any valid Guardian key that can reach the admin API).
-    Re-reads provider lists, failover groups, credential links, capture
-    (cloud_capture / cloud_model_prefixes / policies), failover health and
-    cloud_retry. See app/gateway/admin_api.py:reload_config.
+    Re-reads provider lists, failover groups, the cloud model catalog,
+    capture (cloud_capture / cloud_model_prefixes / policies), failover
+    health and cloud_retry. See app/gateway/admin_api.py:reload_config.
     """
     return await _admin_api.reload_config(client_id)
 
@@ -1389,9 +1326,6 @@ def _normalize_google_model_id(model_id: str) -> str:
 
 def _parse_google_model_catalog(payload: Any) -> List[str]:
     return _cloud_inf.parse_google_model_catalog(payload)
-
-async def _discover_google_models(api_key: str) -> List[str]:
-    return await _cloud_inf.discover_google_models(api_key)
 
 def _provider_base_url(provider_name: str) -> str:
     return _cloud_inf.provider_base_url(provider_name)
@@ -1598,12 +1532,9 @@ _gw_routing.init(
 _model_discovery.init(
     _model_manager=model_manager,
     _provider_registry=provider_registry,
-    _cloud_cred_store=cloud_cred_store,
+    _cloud_catalog=cloud_catalog,
     _failover_registry=failover_registry,
     _get_request_auth_context=get_request_auth_context,
-    _parse_guardian_route=parse_guardian_route,
-    _CloudProvider=CloudProvider,
-    _provider_base_url=_cloud_inf.provider_base_url,
     _resolve_cloud_attempts=_cloud_routing.resolve_cloud_attempts,
     _build_model_metadata_entry=_build_model_metadata_entry,
     _enrich_model_context_metadata=_enrich_model_context_metadata,
@@ -1615,7 +1546,7 @@ _model_discovery.init(
 _admin_api.init(
     _model_manager=model_manager,
     _provider_registry=provider_registry,
-    _cloud_cred_store=cloud_cred_store,
+    _cloud_catalog=cloud_catalog,
     _cloud_rate_limiter=cloud_rate_limiter,
     _inference_queue=inference_queue,
     _state=state,
@@ -1632,7 +1563,6 @@ _admin_api.init(
     _get_capture_controller=get_capture_controller,
     _get_gpu_metrics=get_gpu_metrics,
     _get_model_size=get_model_size,
-    _discover_google_models=_discover_google_models,
     _load_api_keys=load_api_keys,
     _generate_api_key=generate_api_key,
     _token_fingerprint=_token_fingerprint,

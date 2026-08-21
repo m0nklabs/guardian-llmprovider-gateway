@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from tests.conftest import SAMPLE_API_KEYS
 
@@ -20,8 +21,16 @@ def _load_auth_with_path(keys_path: Path):
     import app.proxy.auth as auth_mod
 
     original = auth_mod.API_KEYS_FILE
+    original_legacy = auth_mod.LEGACY_APIKEYS_FILE
     auth_mod.API_KEYS_FILE = keys_path
-    return auth_mod, original
+    # Point the legacy alias at a path that does not exist so the missing-file
+    # tests do not accidentally read the real legacy store from the repo.
+    auth_mod.LEGACY_APIKEYS_FILE = keys_path.parent / "no_legacy_api_keys.json"
+    return auth_mod, (original, original_legacy)
+
+
+def _restore_auth_path(auth_mod, orig):
+    auth_mod.API_KEYS_FILE, auth_mod.LEGACY_APIKEYS_FILE = orig
 
 
 # ── load_api_keys ──────────────────────────────────────────────────────
@@ -36,7 +45,7 @@ class TestLoadApiKeys:
             assert "flip_aabbccdd11223344aabbccdd11223344" in keys
             assert keys["flip_aabbccdd11223344aabbccdd11223344"]["name"] == "test-user"
         finally:
-            auth.API_KEYS_FILE = orig
+            _restore_auth_path(auth, orig)
 
     def test_returns_empty_when_missing(self, tmp_path: Path):
         auth, orig = _load_auth_with_path(tmp_path / "nonexistent.json")
@@ -44,7 +53,7 @@ class TestLoadApiKeys:
             keys = auth.load_api_keys()
             assert keys == {}
         finally:
-            auth.API_KEYS_FILE = orig
+            _restore_auth_path(auth, orig)
 
     def test_returns_empty_on_corrupt_json(self, tmp_path: Path):
         bad_file = tmp_path / "bad.json"
@@ -54,25 +63,25 @@ class TestLoadApiKeys:
             keys = auth.load_api_keys()
             assert keys == {}
         finally:
-            auth.API_KEYS_FILE = orig
+            _restore_auth_path(auth, orig)
 
 
 # ── save_api_keys ──────────────────────────────────────────────────────
 
 
 class TestSaveApiKeys:
-    def test_writes_json(self, tmp_path: Path):
-        out = tmp_path / "config" / "keys.json"
+    def test_writes_yaml(self, tmp_path: Path):
+        out = tmp_path / "config" / "keys.yaml"
         auth, orig = _load_auth_with_path(out)
         try:
             auth.save_api_keys({"test_key": {"name": "tester", "created_at": 0, "metadata": {}}})
             assert out.exists()
             assert S_IMODE(out.stat().st_mode) == 0o600
-            data = json.loads(out.read_text())
+            data = yaml.safe_load(out.read_text())
             assert "test_key" in data
             assert data["test_key"]["name"] == "tester"
         finally:
-            auth.API_KEYS_FILE = orig
+            _restore_auth_path(auth, orig)
 
     def test_creates_parent_dirs(self, tmp_path: Path):
         deep = tmp_path / "a" / "b" / "c" / "keys.json"
@@ -81,7 +90,7 @@ class TestSaveApiKeys:
             auth.save_api_keys({"k": {"name": "x"}})
             assert deep.exists()
         finally:
-            auth.API_KEYS_FILE = orig
+            _restore_auth_path(auth, orig)
 
 
 # ── generate_api_key ───────────────────────────────────────────────────
@@ -94,7 +103,7 @@ class TestGenerateApiKey:
             key = auth.generate_api_key("new-client")
             assert key.startswith("flip_")
         finally:
-            auth.API_KEYS_FILE = orig
+            _restore_auth_path(auth, orig)
 
     def test_key_length(self, api_keys_file: Path):
         auth, orig = _load_auth_with_path(api_keys_file)
@@ -103,7 +112,7 @@ class TestGenerateApiKey:
             # flip_ (5 chars) + 32 hex chars = 37
             assert len(key) == 37
         finally:
-            auth.API_KEYS_FILE = orig
+            _restore_auth_path(auth, orig)
 
     def test_custom_prefix_is_normalized(self, api_keys_file: Path):
         auth, orig = _load_auth_with_path(api_keys_file)
@@ -112,18 +121,19 @@ class TestGenerateApiKey:
             assert key.startswith("hermes_")
             assert len(key) == len("hermes_") + 32
         finally:
-            auth.API_KEYS_FILE = orig
+            _restore_auth_path(auth, orig)
 
     def test_key_persisted(self, api_keys_file: Path):
         auth, orig = _load_auth_with_path(api_keys_file)
         try:
             key = auth.generate_api_key("persisted-client", metadata={"env": "test"})
-            stored = json.loads(api_keys_file.read_text())
+            stored = yaml.safe_load(api_keys_file.read_text())
             assert key in stored
             assert stored[key]["name"] == "persisted-client"
             assert stored[key]["metadata"]["env"] == "test"
+            assert stored[key]["cloud_gateway_access"] is True
         finally:
-            auth.API_KEYS_FILE = orig
+            _restore_auth_path(auth, orig)
 
     def test_unique_keys(self, api_keys_file: Path):
         auth, orig = _load_auth_with_path(api_keys_file)
@@ -132,7 +142,7 @@ class TestGenerateApiKey:
             k2 = auth.generate_api_key("b")
             assert k1 != k2
         finally:
-            auth.API_KEYS_FILE = orig
+            _restore_auth_path(auth, orig)
 
 
 # ── verify_api_key ─────────────────────────────────────────────────────
@@ -151,7 +161,7 @@ class TestVerifyApiKey:
             result = await auth.verify_api_key(request, creds)
             assert result == "test-user"
         finally:
-            auth.API_KEYS_FILE = orig
+            _restore_auth_path(auth, orig)
 
     @pytest.mark.asyncio
     async def test_invalid_key_raises_401(self, api_keys_file: Path):
@@ -168,7 +178,7 @@ class TestVerifyApiKey:
                 await auth.verify_api_key(request, creds)
             assert exc_info.value.status_code == 401
         finally:
-            auth.API_KEYS_FILE = orig
+            _restore_auth_path(auth, orig)
 
     @pytest.mark.asyncio
     async def test_invalid_key_logs_only_token_fingerprint(self, api_keys_file: Path, caplog: pytest.LogCaptureFixture):
@@ -193,7 +203,7 @@ class TestVerifyApiKey:
             assert "token_fingerprint=" in caplog.text
             assert "reason=invalid_api_key" in caplog.text
         finally:
-            auth.API_KEYS_FILE = orig
+            _restore_auth_path(auth, orig)
 
     @pytest.mark.asyncio
     async def test_no_credentials_raises_401(self, api_keys_file: Path):
@@ -206,7 +216,7 @@ class TestVerifyApiKey:
                 await auth.verify_api_key(request, None)
             assert exc_info.value.status_code == 401
         finally:
-            auth.API_KEYS_FILE = orig
+            _restore_auth_path(auth, orig)
 
     @pytest.mark.asyncio
     async def test_missing_credentials_logs_unauthorized_attempt(
@@ -232,7 +242,7 @@ class TestVerifyApiKey:
             assert "path=/api/chat" in caplog.text
             assert "token_fingerprint=-" in caplog.text
         finally:
-            auth.API_KEYS_FILE = orig
+            _restore_auth_path(auth, orig)
 
     @pytest.mark.asyncio
     async def test_missing_credentials_sets_request_auth_context(
@@ -261,7 +271,7 @@ class TestVerifyApiKey:
             assert request.state.auth_context["valid"] is False
             assert request.scope["guardian_auth_context"]["source_ip"] == "10.0.0.8"
         finally:
-            auth.API_KEYS_FILE = orig
+            _restore_auth_path(auth, orig)
 
     @pytest.mark.asyncio
     async def test_missing_credentials_finalize_usage_with_attribution(self, api_keys_file: Path, tmp_path: Path):
@@ -301,7 +311,7 @@ class TestVerifyApiKey:
             assert recent["user_agent"] == "guardian-missing-key-test/1.0"
             assert request.state.guardian_usage_finished is True
         finally:
-            auth.API_KEYS_FILE = orig
+            _restore_auth_path(auth, orig)
 
     @pytest.mark.asyncio
     async def test_non_prefixed_key_allowed(self, api_keys_file: Path):
@@ -321,7 +331,7 @@ class TestVerifyApiKey:
             result = await auth.verify_api_key(request, creds)
             assert result == "legacy"
         finally:
-            auth.API_KEYS_FILE = orig
+            _restore_auth_path(auth, orig)
 
     @pytest.mark.asyncio
     async def test_sets_request_state(self, api_keys_file: Path):
@@ -335,4 +345,4 @@ class TestVerifyApiKey:
             # verify_api_key sets request.state.user to the key's user data
             assert request.state.user["name"] == "oelala"
         finally:
-            auth.API_KEYS_FILE = orig
+            _restore_auth_path(auth, orig)

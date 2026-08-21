@@ -35,8 +35,6 @@ EXCLUDED_PATH_PREFIXES: tuple[str, ...] = (
     "/metrics",
     "/version",
     "/api/keys",
-    "/api/cloud/credentials",
-    "/api/cloud/links",
     "/admin/",
     "/api/session/",
     "/v1/models",
