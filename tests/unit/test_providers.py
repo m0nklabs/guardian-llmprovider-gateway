@@ -332,6 +332,65 @@ class TestCloudContextMetadata:
         assert requested_urls == ["https://openrouter.ai/api/v1/models"]
 
     @pytest.mark.asyncio
+    async def test_cloud_context_catalog_respects_catalog_url(self, tmp_path: Path):
+        # Regression: ProviderRegistry._refresh_context_catalog used a hard-coded
+        # '/models' and ignored provider.catalog_url (providers.py:422). It must
+        # fetch base_url + catalog_url (or '/models') like cloud_catalog.py.
+        settings = tmp_path / "settings.yaml"
+        settings.write_text(
+            textwrap.dedent(
+                """\
+                providers:
+                  openrouter:
+                    enabled: true
+                    base_url: https://openrouter.ai/api/v1
+                    api_key: sk-or-test
+                    timeout_seconds: 300
+                    catalog_url: /models/user
+                    models:
+                      - openai/gpt-4o
+                """
+            )
+        )
+        registry = ProviderRegistry(settings_path=settings)
+        requested_urls = []
+
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "data": [
+                        {
+                            "id": "openai/gpt-4o",
+                            "context_length": None,
+                            "max_input_tokens": 1048576,
+                        },
+                    ]
+                }
+
+        class FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+            async def get(self, url, headers):
+                requested_urls.append(url)
+                return FakeResponse()
+
+        with patch("app.proxy.providers.httpx.AsyncClient", FakeAsyncClient):
+            ctx = await registry.get_cloud_context_window("openai/gpt-4o")
+
+        assert ctx == 1048576
+        assert requested_urls == ["https://openrouter.ai/api/v1/models/user"]
+
+    @pytest.mark.asyncio
     async def test_cloud_catalog_uses_effective_per_key_credential(self, settings_with_providers: Path):
         registry = ProviderRegistry(settings_path=settings_with_providers)
         effective_provider = CloudProvider(
