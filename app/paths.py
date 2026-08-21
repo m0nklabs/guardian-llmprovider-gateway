@@ -33,10 +33,9 @@ LEGACY_SETTINGS_FILE = CONFIG_DIR / "settings.yaml"
 PROVIDERS_SETTINGS_FILE = CONFIG_DIR / "providers.settings.yaml"
 PROVIDERS_OVERRIDES_FILE = CONFIG_DIR / "providers.overrides.yaml"
 
-# Models: local registry defaults/overrides + cloud model defaults/overrides.
+# Models: local registry + cloud model overrides (settings/overrides for the
+# other model files are reserved — no runtime consumer yet, see CONFIG_SCHEMA).)
 MODELS_LOCAL_SETTINGS_FILE = CONFIG_DIR / "models.local.settings.yaml"
-MODELS_LOCAL_OVERRIDES_FILE = CONFIG_DIR / "models.local.overrides.yaml"
-MODELS_CLOUD_SETTINGS_FILE = CONFIG_DIR / "models.cloud.settings.yaml"
 MODELS_CLOUD_OVERRIDES_FILE = CONFIG_DIR / "models.cloud.overrides.yaml"
 
 # Guardian API keys (entity file).
@@ -54,10 +53,9 @@ LEGACY_APIKEYS_FILE = CONFIG_DIR / "api_keys.json"
 LEGACY_CLOUD_MODELS_OVERRIDES_FILE = CONFIG_DIR / "cloud_models.yaml"
 
 # Backward-compat aliases for callers that reference the legacy constant
-# names directly.  Resolve to the canonical new file when present.
-CLOUD_MODELS_OVERRIDES_FILE = MODELS_CLOUD_OVERRIDES_FILE
-GUARDIAN_APIKEYS_FILE = GUARDIAN_KEYS_FILE
-LEGACY_APIKEYS_FILE = CONFIG_DIR / "api_keys.json"
+# names directly.  These resolve at import time via the helpers below so an
+# installation still on a legacy filename keeps reading its current file
+# rather than silently falling back to an even older format.
 
 # Cloud catalog runtime cache (data, gitignored).
 CLOUD_CATALOG_CACHE_FILE = DATA_DIR / "cloud_catalog_cache.json"
@@ -102,6 +100,14 @@ def local_models_file() -> "Path":
 def guardian_apikeys_file() -> "Path":
     """Resolve the Guardian API key store path (new name first, legacy alias)."""
     return resolve_config_file("guardian.keys.yaml", "guardian_apikeys.yaml", "api_keys.json")
+
+
+# Backward-compat constant aliases for callers that import the legacy names
+# directly (e.g. app/proxy/auth.py, app/proxy/cloud_catalog.py).  These are
+# resolved at import time so a deployment still on the legacy filename keeps
+# reading its current file instead of falling back to an even older format.
+GUARDIAN_APIKEYS_FILE = guardian_apikeys_file()
+CLOUD_MODELS_OVERRIDES_FILE = models_cloud_overrides_file()
 
 LLAMA_SLOTS_DIR = _expand_path(
     os.getenv("LLAMA_CPP_GUARDIAN_SLOTS_DIR", str(Path.home() / "llama_slots"))

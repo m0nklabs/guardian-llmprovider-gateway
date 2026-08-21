@@ -75,10 +75,11 @@ def load_config() -> dict:
 
     Merges, in order: built-in defaults → ``global.settings.yaml`` → merged
     providers (from ``providers.settings.yaml`` + ``providers.overrides.yaml``,
-    overrides win).  The returned dict keeps the same top-level keys as the
-    legacy ``settings.yaml`` (proxy, cloud_retry, grammar, timeouts,
-    failover_health, providers, queue, services, ...) so all consumers of the
-    shared ``CONFIG`` dict continue to work unchanged.
+    overrides win).  As with the legacy loader, the shared dict carries the
+    sections consumed via ``CONFIG`` (proxy, cloud_retry, grammar, timeouts,
+    failover_health, providers); the remaining global sections (queue,
+    services, services_to_stop, benchmark, scaler, capture) are read directly
+    by their own modules, exactly as they were before the split.
     """
     default_config: Dict[str, Any] = {
         "proxy": {

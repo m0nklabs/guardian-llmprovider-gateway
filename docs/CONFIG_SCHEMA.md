@@ -32,12 +32,14 @@ config/
 ├─ .env                            # SECRETS + machine-paden (${VAR}-expansie)
 ├─ global.settings.yaml            # GLOBAL: proxy/queue/timeouts/scaler/capture/grammar/cloud_retry/failover/benchmark/services
 ├─ guardian.keys.yaml              # Guardian API keys (36, cloud_gateway_access)
-├─ models.cloud.settings.yaml      # CLOUD MODEL DEFAULTS (context/thinking/sampling)
-├─ models.cloud.overrides.yaml     # CLOUD MODEL AFWIJKINGEN (exceptions)
+├─ models.cloud.overrides.yaml     # CLOUD MODEL AFWIJKINGEN (exceptions, incl. context_window + sampling)
 ├─ models.local.settings.yaml      # LOKALE MODEL DEFAULTS (registry: models/aliases/guardian)
-├─ models.local.overrides.yaml     # LOKALE MODEL AFWIJKINGEN
-├─ providers.settings.yaml         # PROVIDER DEFAULTS (5: base_url/api_key/timeout/model_prefixes/catalog_url)
+├─ providers.settings.yaml         # PROVIDER DEFAULTS (5: base_url/api_key/timeout/model_prefixes)
 └─ providers.overrides.yaml        # PROVIDER AFWIJKINGEN (bv. openrouter catalog_url=/models/user)
+
+# Gereserveerd (nog NIET meegeleverd — nog geen runtime-consumer):
+#   models.cloud.settings.yaml  (cloud model defaults)
+#   models.local.overrides.yaml (lokale model afwijkingen)
 ```
 
 ## 2. Volledig config-landschap (huidig → nieuw)
@@ -47,9 +49,9 @@ config/
 | `.env` | `.env` (ongewijzigd) | secrets + machine |
 | `guardian_apikeys.yaml` | `guardian.keys.yaml` | Guardian keys |
 | `local_models.yaml` (+ symlink `models.yaml`) | `models.local.settings.yaml` | lokale registry |
-| `cloud_models.yaml` | `models.cloud.overrides.yaml` | cloud model afwijkingen |
-| *(nieuw)* | `models.cloud.settings.yaml` | cloud model defaults |
-| *(nieuw)* | `models.local.overrides.yaml` | lokale model afwijkingen |
+| `cloud_models.yaml` | `models.cloud.overrides.yaml` | cloud model afwijkingen + sampling/context |
+| *(nieuw, gereserveerd)* | `models.cloud.settings.yaml` | cloud model defaults — **nog geen consumer, nog niet geleverd** |
+| *(nieuw, gereserveerd)* | `models.local.overrides.yaml` | lokale model afwijkingen — **nog geen consumer, nog niet geleverd** |
 | `providers.*` in settings.yaml | `providers.settings.yaml` + `providers.overrides.yaml` | provider config |
 | `settings.yaml` | `global.settings.yaml` | global infra + subsystem |
 | `api_keys.json`, `cloud_keys.json` | *(verwijderen na migratie)* | legacy |

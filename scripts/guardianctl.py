@@ -27,12 +27,13 @@ from pathlib import Path
 
 from _paths import CONFIG_DIR, DATA_DIR, REPO_ROOT
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
 # Capture config lives in the global settings file (config-schema, 2026-08-21).
-SETTINGS_YAML = CONFIG_DIR / "global.settings.yaml"
+# Resolve through app.paths.global_settings_file() so an installation still on
+# the legacy settings.yaml keeps reading/writing its current file instead of a
+# divergent new one (matches the migrated readers).
+from app.paths import global_settings_file
+
+SETTINGS_YAML = global_settings_file()
 CAPTURE_ROOT = DATA_DIR / "capture"
 
 

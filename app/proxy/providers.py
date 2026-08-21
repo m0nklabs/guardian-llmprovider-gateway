@@ -80,19 +80,21 @@ def _expand_env(value: str) -> str:
 
 
 def _deep_merge_providers(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
-    """Merge per-provider overrides over defaults (overrides win, deep)."""
+    """Merge per-provider overrides over defaults (overrides win, recursively).
+
+    Recurses into mapping values so a partial override (e.g. one
+    ``extra_headers`` entry) preserves the other defaults for that provider,
+    matching the same semantics ``config_loader._deep_merge`` applies.
+    """
     if not isinstance(base, dict):
         base = {}
     if not isinstance(override, dict):
         override = {}
     merged = {k: (dict(v) if isinstance(v, dict) else v) for k, v in base.items()}
     for provider_name, cfg in override.items():
-        if (
-            provider_name in merged
-            and isinstance(merged[provider_name], dict)
-            and isinstance(cfg, dict)
-        ):
-            merged[provider_name].update(cfg)
+        current = merged.get(provider_name)
+        if isinstance(current, dict) and isinstance(cfg, dict):
+            merged[provider_name] = _deep_merge_providers(current, cfg)
         else:
             merged[provider_name] = (dict(cfg) if isinstance(cfg, dict) else cfg)
     return merged
