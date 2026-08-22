@@ -1982,6 +1982,39 @@ def test_prepare_cloud_candidate_no_user_without_client_id():
     assert "user" not in json_body
 
 
+def test_prepare_cloud_candidate_strips_context_metadata_from_defaults():
+    """Guardian metadata keys (context_window, …) must never be forwarded to a
+    cloud provider as request params. Cloud APIs reject unknown parameters —
+    NVIDIA returns HTTP 400 on ``context_window``. Real OpenAI params such as
+    ``max_tokens`` must still be applied."""
+    provider = CloudProvider(
+        name="nvidia",
+        base_url="https://integrate.api.nvidia.com/v1",
+        api_key="nvapi-test",
+        models=["moonshotai/kimi-k3"],
+    )
+    base_body = {"model": "nvidia/moonshotai/kimi-k3", "messages": [{"role": "user", "content": "hi"}]}
+    override = {
+        "context_window": 1048576,
+        "context_length": 1048576,
+        "max_input_tokens": 1048576,
+        "max_tokens": 4096,
+        "temperature": 0.7,
+    }
+    with patch.object(server.cloud_catalog, "get_override", return_value=override):
+        _path, json_body, _body, _needs_tr = server._prepare_cloud_candidate_request(
+            provider, "moonshotai/kimi-k3", "chat/completions", base_body,
+        )
+    # Metadata-only keys are stripped…
+    assert "context_window" not in json_body
+    assert "context_length" not in json_body
+    assert "max_input_tokens" not in json_body
+    # …while real OpenAI request parameters are applied.
+    assert json_body["max_tokens"] == 4096
+    assert json_body["temperature"] == 0.7
+
+
+
 # ── OpenAI reasoning-model parameter adaptation ───────────────────────
 
 

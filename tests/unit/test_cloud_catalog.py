@@ -40,6 +40,22 @@ providers:
 """
 
 
+ALLOWLIST_SETTINGS = """\
+providers:
+  nvidia:
+    enabled: true
+    base_url: https://integrate.api.nvidia.com/v1
+    api_key: nvapi-test-key
+    timeout_seconds: 300
+    catalog_allowlist:
+      - minimaxai/minimax-m3
+      - nvidia/nemotron-3-nano-30b-a3b
+      - moonshotai/kimi-k3
+    models:
+      - minimaxai/minimax-m3
+"""
+
+
 def _write_settings(tmp_path: Path, content: str = SAMPLE_SETTINGS) -> Path:
     path = tmp_path / "settings.yaml"
     path.write_text(textwrap.dedent(content))
@@ -307,6 +323,66 @@ class TestCatalogUrlOverride:
         with patch("app.proxy.cloud_catalog.httpx.AsyncClient", CapturingClient):
             await catalog.refresh_provider(provider)
         assert captured["url"] == "https://openrouter.ai/api/v1/models"
+
+
+class TestCatalogAllowlist:
+    """catalog_allowlist must filter advertised + routed models to a subset
+    (used e.g. for NVIDIA's free tier, whose /v1/models lists every model)."""
+
+    def _make(self, tmp_path: Path) -> CloudModelCatalog:
+        settings = tmp_path / "settings.yaml"
+        settings.write_text(textwrap.dedent(ALLOWLIST_SETTINGS))
+        registry = ProviderRegistry(settings_path=settings)
+        catalog = CloudModelCatalog(
+            provider_registry=registry,
+            cache_file=tmp_path / "cache.json",
+            overrides_file=tmp_path / "overrides.yaml",
+        )
+        # Simulate a fetched catalog with more models than the allowlist allows.
+        catalog._catalogs["nvidia"] = {
+            "fetched_at": 0,
+            "models": {
+                "minimaxai/minimax-m3": "minimaxai/minimax-m3",
+                "nvidia/nemotron-3-nano-30b-a3b": "nvidia/nemotron-3-nano-30b-a3b",
+                "moonshotai/kimi-k3": "moonshotai/kimi-k3",
+                "nvidia/llama-3.1-nemotron-70b-instruct": "nvidia/llama-3.1-nemotron-70b-instruct",
+                "wi/{7b-many-others-too": "wi/{7b-many-others-too",
+            },
+        }
+        return catalog
+
+    def test_allowlist_filters_advertised_models(self, tmp_path: Path):
+        catalog = self._make(tmp_path)
+        models = catalog.get_models_for_provider("nvidia")
+        # only the allowlisted ids are surfaced
+        assert set(models.keys()) == {
+            "minimaxai/minimax-m3",
+            "nvidia/nemotron-3-nano-30b-a3b",
+            "moonshotai/kimi-k3",
+        }
+
+    def test_provider_parses_allowlist(self, tmp_path: Path):
+        settings = tmp_path / "settings.yaml"
+        settings.write_text(textwrap.dedent(ALLOWLIST_SETTINGS))
+        registry = ProviderRegistry(settings_path=settings)
+        provider = registry._providers["nvidia"]
+        assert provider.catalog_allowlist == [
+            "minimaxai/minimax-m3",
+            "nvidia/nemotron-3-nano-30b-a3b",
+            "moonshotai/kimi-k3",
+        ]
+
+    def test_provider_without_allowlist_returns_all(self, tmp_path: Path):
+        catalog = _make_catalog(tmp_path)
+        catalog._catalogs["openrouter"] = {
+            "fetched_at": 0,
+            "models": {"openai/gpt-4o": "gpt-4o", "deepseek/deepseek-v4-flash-0731": "deepseek/deepseek-v4-flash-0731"},
+        }
+        # no allowlist declared -> everything is advertised
+        assert set(catalog.get_models_for_provider("openrouter").keys()) == {
+            "openai/gpt-4o",
+            "deepseek/deepseek-v4-flash-0731",
+        }
 
 
 class _FakeResponse:

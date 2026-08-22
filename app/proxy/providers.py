@@ -116,6 +116,11 @@ class CloudProvider:
     # models actually reachable through its guardrails/privacy filters, e.g.
     # openrouter -> "/models/user". Empty/None -> "/models".
     catalog_url: Optional[str] = None
+    # Optional allowlist of normalized {brand}/{model} ids to advertise from the
+    # dynamic catalog. Used e.g. for NVIDIA's free tier, whose /v1/models lists
+    # every model regardless of what the free token can actually reach. When
+    # non-empty, only these ids are surfaced in discovery and routed.
+    catalog_allowlist: Optional[List[str]] = None
 
     @property
     def is_configured(self) -> bool:
@@ -197,6 +202,11 @@ class ProviderRegistry:
             catalog_url = cfg.get("catalog_url")
             if isinstance(catalog_url, str):
                 catalog_url = catalog_url.strip() or None
+            allowlist = cfg.get("catalog_allowlist")
+            if isinstance(allowlist, list):
+                allowlist = [str(a).strip() for a in allowlist if isinstance(a, str) and a.strip()] or None
+            else:
+                allowlist = None
 
             provider = CloudProvider(
                 name=provider_name,
@@ -207,6 +217,7 @@ class ProviderRegistry:
                 timeout_seconds=timeout,
                 extra_headers=extra_headers,
                 catalog_url=catalog_url,
+                catalog_allowlist=allowlist,
             )
             self._providers[provider_name] = provider
 

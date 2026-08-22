@@ -206,9 +206,25 @@ def prepare_cloud_candidate_request(
         candidate_json_body = translate_anthropic_request_to_openai(candidate_json_body)
         effective_path = "chat/completions"
 
+    # Model defaults from models.cloud.overrides.yaml may mix real OpenAI
+    # request parameters (max_tokens, temperature, …) with Guardian metadata
+    # (context_window, …) that is only meant for the /v1/models advertisement.
+    # Never forward the metadata keys to the upstream provider — cloud APIs
+    # reject unknown parameters (e.g. NVIDIA returns 400 on `context_window`).
+    metadata_keys = {
+        "context_window",
+        "context_length",
+        "max_input_tokens",
+        "max_context",
+        "benchmark_context_limit",
+        "advertised_context",
+    }
     model_defaults = _cloud_catalog.get_override(upstream_model) or {}
     if model_defaults:
-        missing = {k: v for k, v in model_defaults.items() if k not in candidate_json_body}
+        missing = {
+            k: v for k, v in model_defaults.items()
+            if k not in candidate_json_body and k not in metadata_keys
+        }
         if missing:
             candidate_json_body = {**candidate_json_body, **missing}
             logger.info("☁️  Applied model defaults for '%s': %s", upstream_model, missing)

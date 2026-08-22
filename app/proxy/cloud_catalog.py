@@ -287,11 +287,22 @@ class CloudModelCatalog:
     # ── Queries ───────────────────────────────────────────────────────
 
     def get_models_for_provider(self, provider_name: str) -> Dict[str, str]:
-        """Return ``{normalized_id: upstream_id}`` for a provider (cached view)."""
+        """Return ``{normalized_id: upstream_id}`` for a provider (cached view).
+
+        When the provider declares a ``catalog_allowlist`` (e.g. NVIDIA's free
+        tier), only the advertised ids are returned — both for discovery and for
+        routing — so modellen that the token cannot actually reach stay hidden.
+        """
         data = self._catalogs.get(provider_name)
         if not isinstance(data, dict):
             return {}
-        return dict(data.get("models", {}))
+        models = dict(data.get("models", {}))
+
+        provider = self._registry._providers.get(provider_name)
+        allowlist = getattr(provider, "catalog_allowlist", None)
+        if allowlist:
+            models = {k: v for k, v in models.items() if k in allowlist}
+        return models
 
     def get_model_overrides(self, normalized_id: str, provider_name: str = "") -> Dict[str, Any]:
         """Return per-model overrides layered from cloud_models.yaml.
