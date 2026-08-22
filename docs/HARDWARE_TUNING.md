@@ -47,8 +47,6 @@ same queue, reload, VRAM fencing, and backend lifecycle that production uses.
 | [../scripts/start_llama.sh](../scripts/start_llama.sh) | Loads `current_model.args`, sources `current_model.env`, starts official backend | Yes |
 | [../data/model_finetune_v2_results.json](../data/model_finetune_v2_results.json) | Canonical append-only result log | Yes |
 | `data/model_finetune_v2_results.json.active` | In-progress run snapshot sidecar created during live runs | Ephemeral |
-| [../scripts/benchmark_context.py](../scripts/benchmark_context.py) | Historical benchmark helper | Legacy |
-| [../scripts/analyze_benchmark.py](../scripts/analyze_benchmark.py) | Historical benchmark analysis | Legacy |
 | [../scripts/recommend_context.py](../scripts/recommend_context.py) | Historical benchmark recommendation helper | Legacy |
 | [../scripts/update_guardian_config.py](../scripts/update_guardian_config.py) | Config editing helper | Secondary |
 
@@ -478,8 +476,6 @@ That log is the canonical audit trail for host tuning.
 
 Historical helpers still exist, but they are not the live runtime path:
 
-- `scripts/benchmark_context.py`
-- `scripts/analyze_benchmark.py`
 - `scripts/recommend_context.py`
 - `app/tweaker/legacy/benchmark_suite_v1.py`
 
