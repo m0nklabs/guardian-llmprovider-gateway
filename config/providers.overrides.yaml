@@ -7,7 +7,7 @@ providers:
     # + routing to the models NVIDIA treats as free ("Free Endpoint" on
     # build.nvidia.com, filter nimType:nim_type_preview), plus moonshotai/kimi-k3
     # which the API serves even though it is not (yet) marked free on the page.
-    # Refreshed by scripts/sync_nvidia_free_models.py.
+    # Refreshed by scripts/sync_nvidia_free_models.js.
     catalog_allowlist:
       - deepseek-ai/deepseek-v4-flash-0731
       - google/diffusiongemma-26b-a4b-it

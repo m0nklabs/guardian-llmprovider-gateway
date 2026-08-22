@@ -17,25 +17,6 @@ providers:
     - poolside/
     - moonshotai/
     - nvidia/
-    models:
-    - anthropic/claude-3.5-sonnet
-    - openai/gpt-4o
-    - openai/gpt-4o-mini
-    - google/gemini-2.0-flash-exp
-    - meta-llama/llama-3.3-70b-instruct
-    - deepseek/deepseek-chat
-    - deepseek/deepseek-v4-flash-0731
-    - qwen/qwen-2.5-72b-instruct
-    - mistralai/mistral-large
-    - z-ai/glm-5.2
-    - z-ai/glm-5.3
-    - minimax/minimax-m3
-    - poolside/laguna-s-2.1:free
-    - poolside/laguna-xs-2.1:free
-    - nvidia/nemotron-3-nano-30b-a3b:free
-    - nvidia/nemotron-3-super-120b-a12b:free
-    - nvidia/nemotron-3-ultra-550b-a55b:free
-    - moonshotai/kimi-k3
   nvidia:
     enabled: true
     base_url: https://integrate.api.nvidia.com/v1
@@ -46,14 +27,6 @@ providers:
     - deepseek-ai/
     - minimaxai/
     - z-ai/
-    models:
-    - minimaxai/minimax-m3
-    - nvidia/llama-3.1-nemotron-70b-instruct
-    - nvidia/llama-3.1-nemotron-ultra-253b-v1
-    - deepseek-ai/deepseek-v4-pro
-    - nvidia/nemotron-3-nano-30b-a3b
-    - nvidia/nemotron-3-super-120b-a12b
-    - z-ai/glm-5.2
   poolside:
     enabled: true
     base_url: https://inference.poolside.ai/v1
@@ -61,9 +34,6 @@ providers:
     timeout_seconds: 1200
     model_prefixes:
     - poolside/
-    models:
-    - poolside/laguna-xs-2.1
-    - poolside/laguna-s-2.1
   google:
     enabled: true
     base_url: https://generativelanguage.googleapis.com/v1beta/openai
@@ -71,47 +41,8 @@ providers:
     timeout_seconds: 1200
     model_prefixes:
     - google/
-    models:
-    - google/gemini-2.5-flash
-    - google/gemini-3.5-flash
-    - google/gemini-flash-latest
-    - google/gemini-2.0-flash-exp
   openai:
     enabled: true
     base_url: https://api.openai.com/v1
     api_key: ${OPENAI_API_KEY}
     timeout_seconds: 1200
-    models:
-    - gpt-4o
-    - gpt-4o-mini
-    - gpt-4.1
-    - gpt-4.1-mini
-    - gpt-4.1-nano
-    - gpt-4-turbo
-    - gpt-3.5-turbo
-    - gpt-5
-    - gpt-5-mini
-    - gpt-5-nano
-    - gpt-5-pro
-    - gpt-5-codex
-    - gpt-5.1
-    - gpt-5.1-codex
-    - gpt-5.1-codex-max
-    - gpt-5.1-codex-mini
-    - gpt-5.2
-    - gpt-5.2-codex
-    - gpt-5.2-pro
-    - gpt-5.3-codex
-    - gpt-5.4
-    - gpt-5.4-mini
-    - gpt-5.4-nano
-    - gpt-5.4-pro
-    - gpt-5.5
-    - gpt-5.5-pro
-    - gpt-5.6-luna
-    - gpt-5.6-sol
-    - gpt-5.6-terra
-    - o3
-    - o3-mini
-    - o4-mini
-    - chat-latest
