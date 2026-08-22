@@ -44,8 +44,10 @@ from typing import Any
 import httpx
 import yaml
 
+from app.paths import local_models_file
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
-MODELS_YAML = REPO_ROOT / "config" / "models.yaml"
+MODELS_YAML = local_models_file()
 OUT_DIR = REPO_ROOT / "data" / "bench-models"
 STATE_FILE = OUT_DIR / "state.json"
 DOC_FILE = REPO_ROOT / "docs" / "MODEL_BENCHMARKS.md"

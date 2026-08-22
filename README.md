@@ -32,7 +32,7 @@ instead of hard-crashing into CUDA OOM loops or restart storms.
   enter the queue, each API key may own multiple waiting requests but only one
   running GPU slot, and unknown model names fail fast with clear `404` payloads
 - Model lifecycle ownership through `sudo systemctl start|stop llama-server`
-- Hot-reloaded model registry from [config/models.yaml](config/models.yaml),
+- Hot-reloaded model registry from [config/models.local.settings.yaml](config/models.local.settings.yaml),
   including aliases, text and vision runtime fields, and switch policy
 - Cooperative VRAM fencing via `POST {comfyui_url}/free` before every load or
   switch
@@ -41,7 +41,7 @@ instead of hard-crashing into CUDA OOM loops or restart storms.
 - Dashboard and monitoring surfaces on `:11437`, plus `/metrics` and
   `/api/status`
 - Host-specific finetune v2 workflow that tunes `context`, `ngl`, and
-  `tensor_split` without mutating `models.yaml` until `--apply`
+  `tensor_split` without mutating the model registry until `--apply`
 
 ## Runtime Topology
 
@@ -73,7 +73,7 @@ Guardian UI :11437
 Guardian is currently configured for a shared dual-GPU host with:
 
 - `proxy.vram_limit_mb: 27000` in [config/settings.yaml](config/settings.yaml)
-- mixed `tensor_split` profiles in [config/models.yaml](config/models.yaml)
+- mixed `tensor_split` profiles in [config/models.local.settings.yaml](config/models.local.settings.yaml)
 - optional ComfyUI integration at `http://127.0.0.1:8188/free`
 - backend path resolution via [app/paths.py](app/paths.py) and
   [scripts/start_llama.sh](scripts/start_llama.sh)
@@ -115,12 +115,12 @@ the dashboard on `:11437`.
 
 Edit these files before the first load:
 
-- [config/models.yaml](config/models.yaml): model paths, aliases, runtime
+- [config/models.local.settings.yaml](config/models.local.settings.yaml): model paths, aliases, runtime
   fields, pinning, switch allowlist, idle unload
 - [config/settings.yaml](config/settings.yaml): queue wait budget telemetry,
   VRAM budget, timeout tiers, cloud routing, context overrides, ComfyUI URL,
   maintenance window
-- [config/api_keys.json](config/api_keys.json): API keys used by clients
+- [config/guardian.keys.yaml](config/guardian.keys.yaml): API keys used by clients
 
 Create the first key with the bundled helper:
 
@@ -221,9 +221,9 @@ Browse to `http://127.0.0.1:11437/`.
 
 | File | Purpose |
 | --- | --- |
-| [config/models.yaml](config/models.yaml) | Model registry, aliases, text and vision runtime fields, Guardian policy |
+| [config/models.local.settings.yaml](config/models.local.settings.yaml) | Model registry, aliases, text and vision runtime fields, Guardian policy |
 | [config/settings.yaml](config/settings.yaml) | Queue, timeouts, VRAM budget, ComfyUI URL, maintenance schedule |
-| [config/api_keys.json](config/api_keys.json) | Bearer and x-api-key registry |
+| [config/guardian.keys.yaml](config/guardian.keys.yaml) | Bearer and x-api-key registry |
 | [config/current_model.args](config/current_model.args) | Generated `llama-server` arguments for the active runtime |
 | [scripts/start_llama.sh](scripts/start_llama.sh) | Backend launcher used by the `llama-server` service |
 | [data/api_usage_state.json](data/api_usage_state.json) | Persistent usage snapshot for the dashboard |

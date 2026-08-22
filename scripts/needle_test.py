@@ -15,6 +15,10 @@ import time
 import urllib.request
 import urllib.error
 
+import yaml
+
+from app.paths import guardian_apikeys_file
+
 SOURCES = [
     "/home/flip/llama_cpp_official/src/llama-model.cpp",
     "/home/flip/llama_cpp_official/src/llama-context.cpp",
@@ -37,7 +41,7 @@ def main() -> int:
 
     headers = {"Content-Type": "application/json"}
     if args.guardian:
-        keys = json.loads(open("config/api_keys.json").read())
+        keys = yaml.safe_load(guardian_apikeys_file().read_text()) or {}
         token = next(k for k, v in keys.items()
                      if isinstance(v, dict) and v.get("name") == "goose")
         headers["Authorization"] = "Bearer " + token

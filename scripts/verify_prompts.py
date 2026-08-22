@@ -12,12 +12,13 @@ import sys
 import yaml
 
 from _auth import build_auth_headers, resolve_api_key
-from _paths import CONFIG_DIR
+import _paths  # noqa: F401  (adds repo root to sys.path)
+from app.paths import local_models_file
 
 # Configuration
 GUARDIAN_URL = "http://127.0.0.1:11434"
 API_KEY = resolve_api_key()
-MODELS_CONFIG = CONFIG_DIR / "models.yaml"
+MODELS_CONFIG = local_models_file()
 
 HEADERS = {
     **build_auth_headers(API_KEY),

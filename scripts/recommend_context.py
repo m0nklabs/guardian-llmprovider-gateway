@@ -2,10 +2,12 @@ import json
 import os
 import yaml
 
-from _paths import CONFIG_DIR, DOCS_DIR
+import _paths  # noqa: F401  (adds repo root to sys.path)
+from _paths import DOCS_DIR
+from app.paths import local_models_file
 
 BENCHMARK_FILE = DOCS_DIR / 'benchmark_results.json'
-CONFIG_FILE = CONFIG_DIR / 'models.yaml'
+CONFIG_FILE = local_models_file()
 
 def get_optimal_context():
     if not os.path.exists(BENCHMARK_FILE):

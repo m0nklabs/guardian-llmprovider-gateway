@@ -4,14 +4,16 @@ import yaml
 from pathlib import Path
 import logging
 
-from _paths import CONFIG_DIR, MODELS_DIR as DEFAULT_MODELS_DIR
+import _paths  # noqa: F401  (adds repo root to sys.path)
+from _paths import MODELS_DIR as DEFAULT_MODELS_DIR
+from app.paths import local_models_file
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 MODELS_DIR = Path(os.getenv("MODELS_DIR", str(DEFAULT_MODELS_DIR)))
-CONFIG_FILE = CONFIG_DIR / "models.yaml"
+CONFIG_FILE = local_models_file()
 
 # Intelligent defaults based on filename/size
 DEFAULT_CONTEXT = 32768

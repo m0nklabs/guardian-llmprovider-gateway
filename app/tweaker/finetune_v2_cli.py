@@ -10,7 +10,7 @@ from typing import Optional, Sequence
 
 import yaml
 
-from app.paths import CONFIG_DIR, DATA_DIR
+from app.paths import DATA_DIR, guardian_apikeys_file, local_models_file
 from app.tweaker.finetune_v2_runner import (
     DEFAULT_V2_RESULTS_FILE,
     FinetuneV2Runner,
@@ -19,16 +19,16 @@ from app.tweaker.finetune_v2_runner import (
 
 
 def resolve_api_key(explicit_key: Optional[str]) -> str:
-    """Resolve the Guardian bearer token from CLI input or config/api_keys.json."""
+    """Resolve the Guardian bearer token from CLI input or the key store."""
     if explicit_key:
         return explicit_key
-    api_keys_path = CONFIG_DIR / "api_keys.json"
-    if api_keys_path.exists():
-        keys = json.loads(api_keys_path.read_text())
-        if keys:
+    keys_path = guardian_apikeys_file()
+    if keys_path.exists():
+        keys = yaml.safe_load(keys_path.read_text()) or {}
+        if isinstance(keys, dict) and keys:
             return next(iter(keys))
-        raise SystemExit("config/api_keys.json exists but contains no Guardian API keys. Use --api-key or add one.")
-    raise SystemExit("No Guardian API key found. Use --api-key or create config/api_keys.json.")
+        raise SystemExit(f"{keys_path.name} exists but contains no Guardian API keys. Use --api-key or add one.")
+    raise SystemExit("No Guardian API key found. Use --api-key or create the Guardian key file.")
 
 
 def _load_model_catalog(models_config: str | Path) -> tuple[list[str], dict[str, str]]:
@@ -82,7 +82,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--list-models", action="store_true", help="Show configured models and aliases, then exit")
     parser.add_argument("--guardian-url", default="http://127.0.0.1:11434", help="Guardian base URL")
     parser.add_argument("--api-key", default=None, help="Guardian bearer token")
-    parser.add_argument("--models-config", default=str(CONFIG_DIR / "models.yaml"), help="Path to models.yaml")
+    parser.add_argument("--models-config", default=str(local_models_file()), help="Path to the local model registry")
     parser.add_argument(
         "--results-file",
         default=str(DATA_DIR / Path(DEFAULT_V2_RESULTS_FILE).name),

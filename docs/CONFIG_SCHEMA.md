@@ -54,8 +54,8 @@ config/
 | *(nieuw, gereserveerd)* | `models.local.overrides.yaml` | lokale model afwijkingen — **nog geen consumer, nog niet geleverd** |
 | `providers.*` in settings.yaml | `providers.settings.yaml` + `providers.overrides.yaml` | provider config |
 | `settings.yaml` | `global.settings.yaml` | global infra + subsystem |
-| `api_keys.json`, `cloud_keys.json` | *(verwijderen na migratie)* | legacy |
-| `current_model.args/.sig`, `benchmark_models.json`, `data/cloud_catalog_cache.json` | ongew. | runtime, niet hand-editeerbaar |
+| `api_keys.json`, `cloud_keys.json`, `models.yaml`, `benchmark_models.json` | *(verwijderd 2026-08-22)* | legacy — vervangen door `guardian.keys.yaml` resp. `models.local.settings.yaml`; zie `.scratch/cleanup/legacy-config/` |
+| `current_model.args/.sig`, `data/cloud_catalog_cache.json` | ongew. | runtime, niet hand-editeerbaar |
 
 ## 3. Mapping: waar elke settings.yaml-key heen gaat
 

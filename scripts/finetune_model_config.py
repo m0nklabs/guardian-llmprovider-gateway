@@ -12,20 +12,24 @@ import argparse
 import json
 from typing import Optional, Sequence
 
-from _paths import CONFIG_DIR, DATA_DIR
+import yaml
+
+import _paths  # noqa: F401  (adds repo root to sys.path)
+from _paths import DATA_DIR
+from app.paths import guardian_apikeys_file, local_models_file
 from app.tweaker.legacy.model_finetune_v1 import GuardianModelFinetuner
 
 
 def resolve_api_key(explicit_key: Optional[str]) -> str:
-    """Resolve the Guardian API key from CLI or config/api_keys.json."""
+    """Resolve the Guardian API key from CLI or the key store."""
     if explicit_key:
         return explicit_key
-    api_keys_path = CONFIG_DIR / "api_keys.json"
-    if api_keys_path.exists():
-        keys = json.loads(api_keys_path.read_text())
-        if keys:
+    keys_path = guardian_apikeys_file()
+    if keys_path.exists():
+        keys = yaml.safe_load(keys_path.read_text()) or {}
+        if isinstance(keys, dict) and keys:
             return next(iter(keys))
-    raise SystemExit("No Guardian API key found. Use --api-key or populate config/api_keys.json.")
+    raise SystemExit("No Guardian API key found. Use --api-key or populate the Guardian key file.")
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
@@ -33,10 +37,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Tune a Guardian model for speed, context, or a balanced context/ngl equilibrium."
     )
-    parser.add_argument("model", help="Canonical model name or configured alias from models.yaml")
+    parser.add_argument("model", help="Canonical model name or configured alias from the local model registry")
     parser.add_argument("--guardian-url", default="http://127.0.0.1:11434", help="Guardian base URL")
     parser.add_argument("--api-key", default=None, help="Guardian bearer token")
-    parser.add_argument("--models-config", default=str(CONFIG_DIR / "models.yaml"), help="Path to models.yaml")
+    parser.add_argument("--models-config", default=str(local_models_file()), help="Path to the local model registry")
     parser.add_argument(
         "--results-file",
         default=str(DATA_DIR / "model_finetune_results.json"),

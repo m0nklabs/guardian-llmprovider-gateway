@@ -46,7 +46,7 @@ journalctl -u llama-server.service --since "5 min ago" --no-pager | tail -20
 ./venv/bin/python scripts/generate_key.py
 
 # List keys (structure, masked)
-python3 -c "import json; [print(k) for k in json.load(open('config/api_keys.json'))]"
+./venv/bin/python -c "import yaml; [print(k) for k in yaml.safe_load(open('config/guardian.keys.yaml'))]"
 
 # Named keys exist for: goose, oelala, hydroponics, and others.
 ```
@@ -59,7 +59,7 @@ curl -s -H "Authorization: Bearer $KEY" \
   http://192.168.1.G:11434/v1/models | python3 -m json.tool
 ```
 
-The served list is built from `config/models.yaml` (local aliases) +
+The served list is built from `config/models.local.settings.yaml` (local aliases) +
 `config/settings.yaml` (`providers.*.models`, cloud). Prefix-based
 cloud models (via `model_prefixes`) are routable but don't appear in
 the discovery list — see `docs/LLM_ROUTER.md`.
@@ -69,7 +69,7 @@ the discovery list — see `docs/LLM_ROUTER.md`.
 ### `404 model_not_served`
 
 The client sent a model name not in the served set. Check:
-1. Is it a local alias? → `config/models.yaml`
+1. Is it a local alias? → `config/models.local.settings.yaml`
 2. Is it a cloud model? → matches a `model_prefixes` namespace or
    explicit `models:` entry in `config/settings.yaml`
 3. Is it a `guardian/{provider}/{model}` per-key route? → requires a
@@ -101,8 +101,8 @@ grep -E 'OPENROUTER_API_KEY|NVIDIA_API_KEY|POOLSIDE_API_KEY' .env
 | File | Purpose | Edit + restart? |
 |---|---|---|
 | `config/settings.yaml` | Proxy port, providers, queue, timeout tiers | restart |
-| `config/models.yaml` | Model registry (aliases, runtime, tensor_split) | restart |
-| `config/api_keys.json` | Named API keys | restart |
+| `config/models.local.settings.yaml` | Model registry (aliases, runtime, tensor_split) | restart |
+| `config/guardian.keys.yaml` | Named API keys | restart |
 | `.env` | Secrets (env var expansion) | restart |
 | `scripts/start_llama.sh` | llama-server launch args | restart llama-server |
 

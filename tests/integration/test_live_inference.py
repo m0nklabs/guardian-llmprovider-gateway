@@ -41,19 +41,24 @@ FAST_TIMEOUT = 15.0
 
 
 def _resolve_api_key() -> str:
-    """Resolve API key from env or config file."""
+    """Resolve API key from env or the Guardian key file."""
     if API_KEY:
         return API_KEY
-    keys_path = os.path.join(
-        os.path.dirname(__file__), "..", "..", "config", "api_keys.json"
+    import yaml  # local import: kept out of the hot collect path
+
+    keys_path = os.path.normpath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "config", "guardian.keys.yaml")
     )
-    keys_path = os.path.normpath(keys_path)
     if os.path.exists(keys_path):
-        with open(keys_path) as f:
-            keys = json.load(f)
-        if keys:
+        try:
+            keys = yaml.safe_load(open(keys_path)) or {}
+        except Exception:
+            keys = {}
+        if isinstance(keys, dict) and keys:
             return next(iter(keys))
-    pytest.skip("No API key available — set GUARDIAN_TEST_KEY or add to config/api_keys.json")
+    raise SystemExit(
+        "No Guardian API key available — set GUARDIAN_TEST_KEY or create guardian.keys.yaml"
+    )
 
 
 def _auth_headers() -> dict:
