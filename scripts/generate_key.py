@@ -13,9 +13,9 @@ from pathlib import Path
 
 import yaml
 
-# Canonical Guardian API-key store (guardian_apikeys.yaml).
+# Canonical Guardian API-key store (guardian.keys.yaml).
 CONFIG_DIR = Path(__file__).parent.parent / "config"
-API_KEYS_FILE = CONFIG_DIR / "guardian_apikeys.yaml"
+API_KEYS_FILE = CONFIG_DIR / "guardian.keys.yaml"
 DEFAULT_API_KEY_PREFIX = "flip"
 
 def _normalize(entries):

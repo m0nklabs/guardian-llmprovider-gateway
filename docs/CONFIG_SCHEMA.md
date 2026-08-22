@@ -47,9 +47,9 @@ config/
 | Huidig | Nieuw | Rol |
 |---|---|---|
 | `.env` | `.env` (ongewijzigd) | secrets + machine |
-| `guardian_apikeys.yaml` | `guardian.keys.yaml` | Guardian keys |
-| `local_models.yaml` (+ symlink `models.yaml`) | `models.local.settings.yaml` | lokale registry |
-| `cloud_models.yaml` | `models.cloud.overrides.yaml` | cloud model afwijkingen + sampling/context |
+| `guardian_apikeys.yaml` | `guardian.keys.yaml` | Guardian keys — compat-symlink verwijderd 2026-08-22 |
+| `local_models.yaml` (+ symlink `models.yaml`) | `models.local.settings.yaml` | lokale registry (`local_models.yaml` symlink blijft) |
+| `cloud_models.yaml` | `models.cloud.overrides.yaml` | cloud model afwijkingen + sampling/context — compat-symlink verwijderd 2026-08-22 |
 | *(nieuw, gereserveerd)* | `models.cloud.settings.yaml` | cloud model defaults — **nog geen consumer, nog niet geleverd** |
 | *(nieuw, gereserveerd)* | `models.local.overrides.yaml` | lokale model afwijkingen — **nog geen consumer, nog niet geleverd** |
 | `providers.*` in settings.yaml | `providers.settings.yaml` + `providers.overrides.yaml` | provider config |
@@ -117,6 +117,10 @@ bestaande config-dict, zodat alle `.get("key")`-reads intact blijven.
 3. **Compat-symlinks** (kortstondig) zodat hardcoded `paths.py`-verwijzingen
    blijven werken: `models.yaml`, `local_models.yaml`, `cloud_models.yaml`,
    `settings.yaml`, `guardian_apikeys.yaml` → symlink naar nieuwe namen.
+   (**Uiteindelijke stand 2026-08-22:** alleen `local_models.yaml` en
+   `settings.yaml` bestaan nog als compat-symlink; `models.yaml`,
+   `cloud_models.yaml`, `guardian_apikeys.yaml` zijn verwijderd — de code
+   wijst via de `app/paths.py`-resolvers naar de canonieke namen.)
 4. **`config_loader.py`**: lees + merge `global.settings.yaml` →
    `providers.settings.yaml` → `providers.overrides.yaml` (overrides winnen)
    tot hetzelfde config-dict. Alle consumers blijven werken.
