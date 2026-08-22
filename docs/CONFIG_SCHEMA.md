@@ -117,8 +117,8 @@ bestaande config-dict, zodat alle `.get("key")`-reads intact blijven.
 3. **Compat-symlinks** (kortstondig) zodat hardcoded `paths.py`-verwijzingen
    blijven werken: `models.yaml`, `local_models.yaml`, `cloud_models.yaml`,
    `settings.yaml`, `guardian_apikeys.yaml` → symlink naar nieuwe namen.
-   (**Uiteindelijke stand 2026-08-22:** alleen `local_models.yaml` en
-   `settings.yaml` bestaan nog als compat-symlink; `models.yaml`,
+   (**Uiteindelijke stand 2026-08-22:** alleen `local_models.yaml` bestaat
+   nog als compat-symlink; `models.yaml`, `settings.yaml`,
    `cloud_models.yaml`, `guardian_apikeys.yaml` zijn verwijderd — de code
    wijst via de `app/paths.py`-resolvers naar de canonieke namen.)
 4. **`config_loader.py`**: lees + merge `global.settings.yaml` →

@@ -12,7 +12,7 @@ logger = logging.getLogger("Tweaker")
 
 
 class BenchmarkSuite:
-    def __init__(self, data_dir="data", config_path="config/settings.yaml"):
+    def __init__(self, data_dir="data", config_path=None):
         self.data_dir = data_dir
         self.results_file = os.path.join(data_dir, "benchmark_results.json")
         self.state_file = os.path.join(data_dir, "benchmark_state.json")
