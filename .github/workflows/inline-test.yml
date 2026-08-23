@@ -1,0 +1,7 @@
+name: Inline self-hosted test
+on: workflow_dispatch
+jobs:
+  t:
+    runs-on: [self-hosted, Linux]
+    steps:
+      - run: echo "inline self-hosted ok"
