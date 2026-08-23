@@ -1,8 +1,0 @@
-name: Cite CodeQL test
-on: workflow_dispatch
-jobs:
-  codeql:
-    uses: m0nklabs/github-action-runners/.github/workflows/codeql-ci.yml@main
-    with:
-      languages: '["python"]'
-    secrets: inherit
