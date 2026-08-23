@@ -1,5 +1,0 @@
-name: Caller secevents
-on: workflow_dispatch
-jobs:
-  m:
-    uses: m0nklabs/github-action-runners/.github/workflows/secevent-reusable.yml@main
