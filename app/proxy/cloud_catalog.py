@@ -118,6 +118,9 @@ class CloudModelCatalog:
                         provider.name,
                     )
                     continue
+                # Restore reasoning metadata when present (older caches lack it).
+                if not isinstance(stored.get("reasoning"), dict):
+                    stored["reasoning"] = {}
                 self._catalogs[provider.name] = stored
             if self._catalogs:
                 logger.info(
@@ -143,6 +146,7 @@ class CloudModelCatalog:
                 provider_name: {
                     "fetched_at": data["fetched_at"],
                     "models": data["models"],
+                    "reasoning": data.get("reasoning") or {},
                     "source": self._provider_endpoint_key(by_name.get(provider_name)),
                 }
                 for provider_name, data in self._catalogs.items()
@@ -198,7 +202,60 @@ class CloudModelCatalog:
             return raw_id
         return f"{brand}/{raw_id}"
 
+    @staticmethod
+    def _extract_reasoning(entry: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract reasoning-effort metadata from one catalog entry.
+
+        OpenRouter (and providers that mirror its catalog shape) advertise per
+        model ``reasoning: {mandatory, default_enabled, supported_efforts,
+        default_effort}`` in ``/v1/models``.  Guardian only forwards a safe
+        subset — the effort stages and defaults a client needs to render a
+        reasoning-effort selector — and ignores everything else.  Providers
+        without a ``reasoning`` block (google, openai, nvidia, …) yield ``{}``
+        so their entries stay unannotated.
+        """
+        if not isinstance(entry, dict):
+            return {}
+        raw = entry.get("reasoning")
+        if not isinstance(raw, dict):
+            return {}
+        supported = raw.get("supported_efforts")
+        if not isinstance(supported, list):
+            return {}
+        efforts = [s for s in supported if isinstance(s, str) and s]
+        if not efforts:
+            return {}
+        result: Dict[str, Any] = {"supported_efforts": efforts}
+        if isinstance(raw.get("default_effort"), str) and raw.get("default_effort"):
+            result["default_effort"] = raw["default_effort"]
+        if isinstance(raw.get("mandatory"), bool):
+            result["mandatory"] = raw["mandatory"]
+        if isinstance(raw.get("default_enabled"), bool):
+            result["default_enabled"] = raw["default_enabled"]
+        return result
+
     # ── Fetching ──────────────────────────────────────────────────────
+
+    def _set_auth_error(self, provider_name: str, value: bool) -> None:
+        """Record whether a provider's credentials are broken (401/403).
+
+        In-memory only (not persisted to the disk cache): the flag is cleared
+        on the next successful fetch, and a fresh process re-detects it.
+        """
+        data = self._catalogs.setdefault(provider_name, {})
+        if isinstance(data, dict):
+            data["auth_error"] = bool(value)
+
+    def is_auth_error(self, provider_name: str) -> bool:
+        """Return True when the provider's last catalog fetch failed with 401/403.
+
+        Used by the admin surface to surface ``broken-credentials`` loudly
+        instead of a silent ``model_count: 0``.
+        """
+        data = self._catalogs.get(provider_name)
+        if not isinstance(data, dict):
+            return False
+        return bool(data.get("auth_error"))
 
     async def refresh_provider(self, provider: CloudProvider) -> Dict[str, str]:
         """Fetch and normalize one provider's catalog.
@@ -216,17 +273,28 @@ class CloudModelCatalog:
             response.raise_for_status()
             payload = response.json()
         except Exception as exc:
+            # Distinguish auth failures (401/403 = broken credentials) from
+            # transient errors so the admin surface can flag them loudly
+            # instead of silently showing `model_count:0`.
+            auth_error: bool = False
+            resp = getattr(exc, "response", None)
+            if resp is not None and getattr(resp, "status_code", None) in (401, 403):
+                auth_error = True
+            self._set_auth_error(provider.name, auth_error)
             logger.warning(
-                "⚠️  Cloud catalog fetch failed for provider '%s' (%s); keeping last successful list",
+                "⚠️  Cloud catalog fetch failed for provider '%s' (%s)%s; keeping last successful list",
                 provider.name,
                 exc,
+                " — BROKEN CREDENTIALS (401/403)" if auth_error else "",
             )
             return dict(self._catalogs.get(provider.name, {}).get("models", {}))
 
         brand = self._default_brand(provider)
         normalized: Dict[str, str] = {}
+        reasoning_by_model: Dict[str, Dict[str, Any]] = {}
         entries = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(entries, list):
+            self._set_auth_error(provider.name, False)
             logger.warning("⚠️  Provider '%s' /v1/models returned no 'data' list", provider.name)
             return dict(self._catalogs.get(provider.name, {}).get("models", {}))
 
@@ -237,21 +305,29 @@ class CloudModelCatalog:
             if not isinstance(raw_id, str) or not raw_id.strip():
                 continue
             norm = self._normalize_upstream_id(raw_id, brand)
-            if norm:
-                normalized[norm] = raw_id.strip()
+            if not norm:
+                continue
+            normalized[norm] = raw_id.strip()
+            reasoning = self._extract_reasoning(entry)
+            if reasoning:
+                reasoning_by_model[norm] = reasoning
         if not normalized:
+            self._set_auth_error(provider.name, False)
             logger.warning("⚠️  Provider '%s' /v1/models returned an empty catalog", provider.name)
             return dict(self._catalogs.get(provider.name, {}).get("models", {}))
 
         self._catalogs[provider.name] = {
             "fetched_at": time.time(),
             "models": normalized,
+            "reasoning": reasoning_by_model,
+            "auth_error": False,
         }
         self._persist_cache()
         logger.info(
-            "☁️  Cloud catalog refreshed for provider '%s': %d model(s)",
+            "☁️  Cloud catalog refreshed for provider '%s': %d model(s), %d with reasoning metadata",
             provider.name,
             len(normalized),
+            len(reasoning_by_model),
         )
         return normalized
 
@@ -303,6 +379,28 @@ class CloudModelCatalog:
         if allowlist:
             models = {k: v for k, v in models.items() if k in allowlist}
         return models
+
+    def get_model_reasoning(self, provider_name: str, normalized_id: str) -> Dict[str, Any]:
+        """Return reasoning-effort metadata for a ``{brand}/{model}`` id.
+
+        Returns an empty dict when the provider does not advertise reasoning
+        info (or the model is not in the provider's catalog).  Respects the
+        provider's ``catalog_allowlist`` so models hidden from discovery are
+        also hidden here.
+        """
+        data = self._catalogs.get(provider_name)
+        if not isinstance(data, dict):
+            return {}
+        models = data.get("models", {})
+        if not isinstance(models, dict) or normalized_id not in models:
+            return {}
+        provider = self._registry._providers.get(provider_name)
+        allowlist = getattr(provider, "catalog_allowlist", None)
+        if allowlist and normalized_id not in allowlist:
+            return {}
+        reasoning = data.get("reasoning") or {}
+        raw = reasoning.get(normalized_id) if isinstance(reasoning, dict) else None
+        return dict(raw) if isinstance(raw, dict) else {}
 
     def get_model_overrides(self, normalized_id: str, provider_name: str = "") -> Dict[str, Any]:
         """Return per-model overrides layered from cloud_models.yaml.

@@ -246,6 +246,69 @@ class TestRefreshFailure:
 
         assert result == {"openai/gpt-4o": "openai/gpt-4o"}
 
+    @pytest.mark.asyncio
+    async def test_401_refresh_marks_broken_credentials(self, tmp_path: Path):
+        catalog = _make_catalog(tmp_path)
+        provider = catalog._registry.get_provider_for_model("openai/gpt-4o")
+
+        class HttpStatusError(Exception):
+            def __init__(self):
+                super().__init__("Client error '401 Unauthorized'")
+
+                class _Resp:
+                    status_code = 401
+
+                self.response = _Resp()
+
+        class Auth401Client:
+            def __init__(self, *a, **k):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def get(self, url, headers):
+                raise HttpStatusError()
+
+        assert catalog.is_auth_error("openrouter") is False
+        with patch("app.proxy.cloud_catalog.httpx.AsyncClient", Auth401Client):
+            await catalog.refresh_provider(provider)
+
+        assert catalog.is_auth_error("openrouter") is True
+
+    @pytest.mark.asyncio
+    async def test_successful_refresh_clears_broken_credentials(self, tmp_path: Path):
+        catalog = _make_catalog(tmp_path)
+        catalog._catalogs["openrouter"] = {
+            "fetched_at": 1.0,
+            "models": {"openai/gpt-4o": "openai/gpt-4o"},
+            "reasoning": {},
+            "auth_error": True,
+        }
+        provider = catalog._registry.get_provider_for_model("openai/gpt-4o")
+
+        class OkClient:
+            def __init__(self, *a, **k):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def get(self, url, headers):
+                return _FakeResponse({"data": [{"id": "openai/gpt-4o"}]})
+
+        assert catalog.is_auth_error("openrouter") is True
+        with patch("app.proxy.cloud_catalog.httpx.AsyncClient", OkClient):
+            await catalog.refresh_provider(provider)
+
+        assert catalog.is_auth_error("openrouter") is False
+
 
 # ── Catalog URL override ─────────────────────────────────────────────
 
@@ -396,6 +459,128 @@ class _FakeResponse:
 
     def json(self):
         return self._payload
+
+
+# ── Reasoning-effort metadata ─────────────────────────────────────────
+
+
+class TestReasoningMetadata:
+    """_extract_reasoning + get_model_reasoning + disk-cache round-trip."""
+
+    def test_extract_keeps_safe_subset(self):
+        entry = {
+            "id": "deepseek/deepseek-v4-flash-0731",
+            "reasoning": {
+                "mandatory": False,
+                "default_enabled": True,
+                "supported_efforts": ["max", "high", "low"],
+                "default_effort": "high",
+                "unrelated": {"nested": True},
+            },
+        }
+        got = CloudModelCatalog._extract_reasoning(entry)
+        assert got == {
+            "supported_efforts": ["max", "high", "low"],
+            "default_effort": "high",
+            "mandatory": False,
+            "default_enabled": True,
+        }
+
+    def test_extract_ignores_provider_without_reasoning(self):
+        assert CloudModelCatalog._extract_reasoning({"id": "gpt-4o"}) == {}
+        assert CloudModelCatalog._extract_reasoning({"id": "gemini-2.5-flash", "reasoning": {"junk": 1}}) == {}
+
+    def test_extract_requires_non_empty_efforts(self):
+        assert CloudModelCatalog._extract_reasoning(
+            {"id": "x", "reasoning": {"supported_efforts": []}}
+        ) == {}
+        assert CloudModelCatalog._extract_reasoning(
+            {"id": "x", "reasoning": {"supported_efforts": ["high", 42, ""]}}
+        ) == {"supported_efforts": ["high"]}
+
+    @pytest.mark.asyncio
+    async def test_refresh_stores_reasoning_and_accessor_reads_it(self, tmp_path: Path):
+        catalog = _make_catalog(tmp_path)
+        provider = catalog._registry.get_provider_for_model("openai/gpt-4o")
+        assert provider is not None
+
+        class ReasoningClient:
+            def __init__(self, *a, **k):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def get(self, url, headers):
+                return _FakeResponse({
+                    "data": [
+                        {
+                            "id": "deepseek/deepseek-v4-flash-0731",
+                            "reasoning": {
+                                "mandatory": False,
+                                "default_enabled": True,
+                                "supported_efforts": ["max", "high", "low"],
+                                "default_effort": "high",
+                            },
+                        },
+                        {"id": "gpt-4o"},
+                    ]
+                })
+
+        with patch("app.proxy.cloud_catalog.httpx.AsyncClient", ReasoningClient):
+            await catalog.refresh_provider(provider)
+
+        assert catalog.get_model_reasoning(
+            "openrouter", "deepseek/deepseek-v4-flash-0731"
+        ) == {
+            "supported_efforts": ["max", "high", "low"],
+            "default_effort": "high",
+            "mandatory": False,
+            "default_enabled": True,
+        }
+        # Model without a reasoning block stays unannotated.
+        assert catalog.get_model_reasoning("openrouter", "gpt-4o") == {}
+        # Unknown model / provider returns {}.
+        assert catalog.get_model_reasoning("openrouter", "nope/x") == {}
+        assert catalog.get_model_reasoning("missing", "x/y") == {}
+
+    def test_disk_cache_round_trip_preserves_reasoning(self, tmp_path: Path):
+        catalog = _make_catalog(tmp_path)
+        catalog._catalogs["openrouter"] = {
+            "fetched_at": 1.0,
+            "models": {"deepseek/deepseek-v4-flash-0731": "deepseek/deepseek-v4-flash-0731"},
+            "reasoning": {
+                "deepseek/deepseek-v4-flash-0731": {
+                    "supported_efforts": ["max", "high", "low"],
+                    "default_effort": "high",
+                }
+            },
+        }
+        catalog._persist_cache()
+
+        catalog2 = _make_catalog(tmp_path)
+        assert catalog2.get_model_reasoning(
+            "openrouter", "deepseek/deepseek-v4-flash-0731"
+        ) == {
+            "supported_efforts": ["max", "high", "low"],
+            "default_effort": "high",
+        }
+
+    def test_disk_cache_without_reasoning_is_compatible(self, tmp_path: Path):
+        legacy = tmp_path / "cache.json"
+        legacy.write_text(json.dumps({
+            "openrouter": {
+                "fetched_at": 1.0,
+                "models": {"gpt-4o": "gpt-4o"},
+                "source": "https://openrouter.ai/api/v1|/models",
+            }
+        }))
+        catalog = _make_catalog(tmp_path)
+        # Old cache restored; reasoning accessor returns {} without crashing.
+        assert catalog.get_model_reasoning("openrouter", "gpt-4o") == {}
 
 
 # ── Overrides loading ────────────────────────────────────────────────

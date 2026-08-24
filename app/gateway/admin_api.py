@@ -138,6 +138,10 @@ async def list_cloud_catalog(client_id: str) -> Any:
         providers.append({
             "name": p.name,
             "configured": p.is_configured,
+            "credential_status": (
+                "broken" if _cloud_catalog.is_auth_error(p.name) else
+                ("ok" if p.is_configured else "unconfigured")
+            ),
             "model_count": len(catalog),
             "addresses": [f"{p.name}/{normalized}" for normalized in catalog],
             "last_fetch": fetched_at,
@@ -158,6 +162,10 @@ async def refresh_cloud_catalog(client_id: str) -> Any:
         providers.append({
             "name": p.name,
             "configured": p.is_configured,
+            "credential_status": (
+                "broken" if _cloud_catalog.is_auth_error(p.name) else
+                ("ok" if p.is_configured else "unconfigured")
+            ),
             "model_count": len(catalog),
             "last_fetch": fetched_at,
         })
@@ -176,6 +184,10 @@ async def list_cloud_providers(client_id: str) -> Any:
             "name": p.name,
             "base_url": p.base_url,
             "configured": p.is_configured,
+            "credential_status": (
+                "broken" if _cloud_catalog.is_auth_error(p.name) else
+                ("ok" if p.is_configured else "unconfigured")
+            ),
             "model_count": len(p.models),
             "models": p.models,
         })
@@ -183,7 +195,7 @@ async def list_cloud_providers(client_id: str) -> Any:
     known = set(_PROVIDER_BASE_URLS.keys())
     configured = {p["name"] for p in providers}
     for name in known - configured:
-        providers.append({"name": name, "base_url": _PROVIDER_BASE_URLS[name], "configured": False, "model_count": 0, "models": []})
+        providers.append({"name": name, "base_url": _PROVIDER_BASE_URLS[name], "configured": False, "credential_status": "unconfigured", "model_count": 0, "models": []})
     return {"providers": providers}
 
 

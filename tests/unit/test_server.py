@@ -1824,6 +1824,84 @@ async def test_list_models_includes_cloud_models():
 
 
 @pytest.mark.asyncio
+async def test_list_models_annotates_reasoning_effort_metadata():
+    """Cloud /v1/models entries carry reasoning effort metadata when the catalog advertises it."""
+    fake_provider = CloudProvider(
+        name="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-or-test",
+        models=["deepseek/deepseek-v4-flash-0731", "openai/gpt-4o"],
+    )
+    reasoning = {
+        "deepseek/deepseek-v4-flash-0731": {
+            "supported_efforts": ["max", "high", "low"],
+            "default_effort": "high",
+        },
+    }
+
+    with (
+        patch.object(
+            server.provider_registry,
+            "get_enabled_providers",
+            return_value=[fake_provider],
+        ),
+        patch.object(
+            server.cloud_catalog,
+            "get_models_for_provider",
+            return_value={
+                "deepseek/deepseek-v4-flash-0731": "deepseek/deepseek-v4-flash-0731",
+                "openai/gpt-4o": "openai/gpt-4o",
+            },
+        ),
+        patch.object(server.cloud_catalog, "get_model_reasoning") as reasoning_mock,
+        patch.object(server.provider_registry, "build_model_metadata_entry") as build_mock,
+        patch.object(server.model_manager, "get_public_model_map", return_value={}),
+    ):
+        reasoning_mock.side_effect = lambda p, n: reasoning.get(n, {})
+        build_mock.side_effect = lambda name: {"id": name, "object": "model", "owned_by": "openrouter", "served_by": "cloud"}
+        result = await server.list_models(
+            request=SimpleNamespace(headers={}, state=SimpleNamespace(), url=SimpleNamespace(path="/v1/models"), method="GET"),
+            client_id="test-user",
+        )
+
+    by_id = {m["id"]: m for m in result["data"]}
+    annotated = by_id.get("openrouter/deepseek/deepseek-v4-flash-0731")
+    assert annotated is not None
+    assert annotated["reasoning"] == {
+        "supported_efforts": ["max", "high", "low"],
+        "default_effort": "high",
+    }
+    # Models without advertised reasoning stay unannotated.
+    assert "reasoning" not in by_id["openrouter/openai/gpt-4o"]
+
+
+@pytest.mark.asyncio
+async def test_get_model_metadata_annotates_reasoning_for_cloud_model():
+    """GET /v1/models/{id} for a cloud model includes reasoning metadata."""
+    reasoning = {"supported_efforts": ["max", "high", "low"], "default_effort": "high"}
+    with (
+        patch.object(server.provider_registry, "is_cloud_model", return_value=True),
+        patch.object(server.provider_registry, "build_model_metadata_entry") as build_mock,
+        patch.object(server._model_discovery, "_cloud_catalog") as cat_mock,
+    ):
+        build_mock.return_value = {
+            "id": "openrouter/deepseek/deepseek-v4-flash-0731",
+            "object": "model",
+            "owned_by": "openrouter",
+            "served_by": "cloud",
+            "provider": "openrouter",
+        }
+        cat_mock.get_model_reasoning.return_value = reasoning
+        result = await server.get_model_metadata(
+            "openrouter/deepseek/deepseek-v4-flash-0731",
+            _metadata_request(),
+            client_id="test-user",
+        )
+
+    assert result["reasoning"] == reasoning
+
+
+@pytest.mark.asyncio
 async def test_get_model_metadata_returns_cloud_model():
     """GET /v1/models/{model_id} should return cloud metadata for cloud models."""
     with (

@@ -101,7 +101,27 @@ async def _build_cloud_entry(full_id: str, provider_name: str) -> Dict[str, Any]
             "served_by": "cloud",
             "provider": provider_name,
         }
-    return await enrich_model_context_metadata(entry)
+    entry = await enrich_model_context_metadata(entry)
+    _attach_reasoning_metadata(entry, provider_name)
+    return entry
+
+
+def _attach_reasoning_metadata(model_entry: Dict[str, Any], provider_name: str) -> None:
+    """Attach per-model reasoning-effort metadata when the catalog has it.
+
+    Uses the ``{brand}/{model}`` remainder of the full ``{provider}/...``
+    address as the catalog key and only annotates entries whose provider
+    catalog actually advertised a ``reasoning`` block (OpenRouter-style).
+    Local / failover entries never carry the field.
+    """
+    full_id = model_entry.get("id")
+    if not isinstance(full_id, str):
+        return
+    _prefix = f"{provider_name}/"
+    normalized = full_id[len(_prefix) :] if full_id.startswith(_prefix) else full_id
+    reasoning = _cloud_catalog.get_model_reasoning(provider_name, normalized)
+    if reasoning:
+        model_entry["reasoning"] = reasoning
 
 
 async def tags_ollama() -> Dict[str, Any]:
@@ -228,7 +248,10 @@ async def model_metadata(model_id: str, request: Request, client_id: str) -> Dic
                 cloud_attempts, _ = resolve_cloud_attempts(model_id, request, client_id)
             except HTTPException:
                 cloud_attempts = None
-            return await enrich_model_context_metadata(entry, cloud_attempts=cloud_attempts)
+            entry = await enrich_model_context_metadata(entry, cloud_attempts=cloud_attempts)
+            provider_name = entry.get("provider") or model_id.partition("/")[0]
+            _attach_reasoning_metadata(entry, provider_name)
+            return entry
 
     public_models = _model_manager.get_public_model_map()
     canonical_name = public_models.get(model_id)

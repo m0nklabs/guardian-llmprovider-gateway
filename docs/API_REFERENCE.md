@@ -126,6 +126,12 @@ Representative item:
     "configured": true,
     "status": "supported",
     "validated": true
+  },
+  "reasoning": {
+    "supported_efforts": ["max", "high", "low"],
+    "default_effort": "high",
+    "mandatory": false,
+    "default_enabled": true
   }
 }
 ```
@@ -141,9 +147,18 @@ Notes:
   `max_input_tokens`. Guardian resolves manual `context_overrides`, then a
   cached cloud catalog or the active local backend's `/props`, before using a
   conservative `131072` fallback.
-- cloud models matched by namespace prefix (e.g. `anthropic/claude-...`) are
-  routable but do **not** appear in this list — only explicitly configured
-  models and local aliases are listed. See `@docs/LLM_ROUTER.md`.
+- `reasoning` (optional, cloud models only): present when the upstream provider
+  catalog advertises reasoning-effort information (currently OpenRouter).
+  `supported_efforts` lists the advertised effort levels, `default_effort` the
+  provider default, and `mandatory`/`default_enabled` any required/opt-in
+  flags. When absent, the model exposes no reasoning-effort metadata. Guardian
+  strips the metadata fields down to this safe subset (never forwards unknown
+  keys in the block). Effort *values* are passed through unchanged to the
+  provider on every request; this field is the machine-readable listing that
+  clients (dsh/pi/goose) can use to pick a valid `reasoning_effort`.
+- Since the cloud-access redesign, `/v1/models` also lists cloud models from
+  the dynamic catalog (`{provider}/{brand}/{model}` addresses); local models
+  and aliases always appear. See `@docs/LLM_ROUTER.md`.
 
 #### `GET /api/tags`
 
