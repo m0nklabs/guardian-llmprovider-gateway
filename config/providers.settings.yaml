@@ -46,3 +46,8 @@ providers:
     base_url: https://api.openai.com/v1
     api_key: ${OPENAI_API_KEY}
     timeout_seconds: 1200
+  groq:
+    enabled: true
+    base_url: https://api.groq.com/openai/v1
+    api_key: ${GROQ_API_KEY}
+    timeout_seconds: 1200
