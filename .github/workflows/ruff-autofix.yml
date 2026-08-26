@@ -1,0 +1,21 @@
+name: Ruff autofix
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: ruff-autofix-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  autofix:
+    uses: m0nklabs/github-action-runners/.github/workflows/python-autofix.yml@main
+    with:
+      python-version: "3.12"
+      lint-path: "app scripts tests"
+    secrets: inherit
