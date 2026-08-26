@@ -121,14 +121,16 @@ When touching these areas, read the referenced detail docs:
 
 ## Active Handoff
 
-### DSH session `20260826_rename` (repo/dir hernoemd naar guardian-llmprovider-gateway, last updated 2026-08-26)
+### DSH session `20260826_rename` (repo-split: legacy + nieuwe bouwplaats, last updated 2026-08-26)
 
-- Working directory: `/home/flip/guardian-llmprovider-gateway` (was `/home/flip/llama_cpp_guardian`)
-- **GitHub-repo hernoemd:** `m0nklabs/llama-cpp-guardian` → **`m0nklabs/guardian-llmprovider-gateway`** (gh repo rename, redirect ingesteld). Remote bijgewerkt. Git-geschiedenis behouden.
-- **Nieuwe manager-repo (apart, leeg):** **`m0nklabs/caretaker-llama-cpp`** (private) — de per-GPU-host lifecycle-manager (spawn/health/unload/VRAM). Naamkeuze (operator-traject): fantasy-rol "caretaker" = verzorger/onderhouder, spiegelbeeld van guardian=gatekeeper; naamvorm `caretaker-llama-cpp` (zonder "for", llama in het midden). Nog GEEN code — alleen repo aangemaakt.
-- **Pad-referenties bijgewerkt (docs-only):** README.md + docs/CLIENT_KEY_LINKING.md (cd-paden), docs/GUARDIAN_KEANU_CAPTURE_PLAN.json + docs/GCD_IMPLEMENTATION_SPEC.json (repo-naam), docs/GATEWAY_MANAGER_SPLIT.md (oude manager-naam `guardian-llama-cpp-manager` → `caretaker-llama-cpp` overal, incl. service-naam + topologie-ASCII). AGENTS.md Skills-bullet split-plan bijgewerkt.
-- **NIET gedaan (bewust):** de directory op de host staat nog op `/home/flip/llama_cpp_guardian`; systemd-unit `llama-guardian.service` + venv-shebang verwijzen nog naar het oude pad. **Dir-rename + unit-pad-update + daemon-reload zijn nog OPEN** — pas doen als de operator het vraagt (restart nodig; agent-verkeer loopt door Guardian).
-- **Let op (volgende sessies):** AGENTS.md, docs en scripts kunnen nog oude paden/namen bevatten waar deze sessie niet langsging; bij een echte dir-rename moeten alle `WorkingDirectory`/`ExecStart`/shebang-verwijzingen mee.
+- Working directory (nieuw, bouwplaats): `/home/flip/guardian-llmprovider-gateway`
+- **DRIE repos, definitief:**
+  - `m0nklabs/llama-cpp-guardian` = **LEGACY/archief** (beschrijving gemarkeerd; teruggerenoemd). De **productie-installatie draait nog uit `/home/flip/llama_cpp_guardian`** (systemd `llama-guardian.service` + venv wijzen daarheen); die oude dir is aan deze legacy-repo gekoppeld.
+  - `m0nklabs/guardian-llmprovider-gateway` = **NIEUW (bouwplaats)**. Schone herstart: lokale clone van de oude repo met **volledige git-history (326 commits)**; gitignored troep (venv, data/, .env, .scratch/, logs, caches) is NIET meegekomen. Remote + main staan.
+  - `m0nklabs/caretaker-llama-cpp` = lege private repo voor de per-GPU-host manager (naamkeuze: fantasy-rol "caretaker" = verzorger, spiegelbeeld van guardian=gatekeeper; vorm `caretaker-llama-cpp` zonder "for").
+- **History-oplossing (operator-vraag "gaat de commit history verloren?"):** nee — git-history zit in `.git`, niet in de bestanden. De nieuwe repo is een clone van de oude: alle 326 commits mee, boom alleen de 192 tracked bestanden.
+- **OPERATIONEEL CRITIEK voor sessies in de nieuwe dir:** er is GEEN `venv`, GEEN `.env`, GEEN `data/`, GEEN `config/guardian.keys.yaml` (allemaal gitignored) in `/home/flip/guardian-llmprovider-gateway`. Dus: (a) geen restarts/deploys vanuit deze dir — productie draait uit de oude dir; (b) pytest/gate lopen via het OUDE venv: `/home/flip/llama_cpp_guardian/venv/bin/python -m pytest tests/` (of eerst een venv aanmaken); (c) secrets (`.env`, keys) niet committen — bij een draaiende nieuwe installatie kopiëren vanuit de oude dir.
+- Docs-referenties (README/CLIENT_KEY_LINKING/JSON-specs/split-plan) zijn al naar `guardian-llmprovider-gateway` gefixt (commit `5e02c78`); die kloppen nu voor de nieuwe repo.
 
 ### DSH session `20260826_muse_catalog` (nieuw OpenRouter-model zichtbaar maken, last updated 2026-08-26)
 
