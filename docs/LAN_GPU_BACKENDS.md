@@ -2,6 +2,9 @@
 
 > Status: **plan only** (operator-keuze 2026-08-26: "alleen plan vastleggen").
 > Doel: de GPU van de Windows-PC inzetten naast de lokale GPU.
+> **Architectuurprincipe (operator-correctie 2026-08-26):** alles wat
+> modellen serveert hoort in `providers.settings.yaml` te leven — dus óók
+> de lokale llama-server, niet alleen cloud/Windows. Zie §Unificatie.
 
 ## Aanleiding / doel
 
@@ -23,6 +26,61 @@ voor RPC tóch leuk genoeg is (antwoord: ja, zie §Optie B).
   catalog_allowlist) → dynamische catalogus (`/v1/models`), routing,
   streaming (SSE), capture en failover werken daar al generiek
   (`app/proxy/cloud_catalog.py`, `app/cloud_inference/`).
+
+## Unificatie — alle model-servers in providers (operator-principe)
+
+De operator stelt terecht: als de Windows-llama een provider-entry wordt,
+moet **alles wat modellen serveert** door dezelfde providers-registratie
+lopen. Doelbeeld:
+
+```
+providers.settings.yaml
+  providers:
+    local:      # ⭐ door Guardian beheerd (de enige managed entry)
+      base_url: http://127.0.0.1:11440/v1
+      managed: true        # engine/manager.py spawnt/schakelt deze
+      catalog_url: /v1/models     # llama-server adverteert z'n model
+    windows:    # extern, ongebeheerd — operator draait de server zelf
+      base_url: http://192.168.1.x:11440/v1
+      api_key:  ${WINDOWS_LAN_KEY}
+      catalog_url: /v1/models
+    openrouter: # bestaande cloud-entries, ongewijzigd
+      ...
+```
+
+**Wat wél blijft verschillen (bewust):** `managed: true` op `local` = de
+enige entry waarvan Guardian de levenscyclus bezit (spawn/stop, VRAM-
+scheduler, idle-unload, auto-switch, tweaker-aanpassingen). Alle andere
+entries (Windows, cloud) zijn passieve endpoints — Guardian stuurt er alleen
+verkeer naartoe. `models.local.settings.yaml` blijft bestaan als de
+runtime/args-metadata van de `local`-entry (GGUF-pad, context, ngl,
+tensor_split, switch-policy) — niet als een apart serverregister.
+
+**Implicaties / werk (geschat, NIET begonnen):**
+1. `app/proxy/providers.py`: `CloudProvider` krijgt `managed: bool`
+   (default False); `is_cloud_model`/`get_provider_for_model` en de
+   route-dispatch moeten `local/...`-adressen als provider-resolutie zien.
+2. `app/gateway/routing.py` + `app/local_inference/models.py`: lokale
+   routing blijft via de bestaande aliases werken, maar de
+   lokale-herkenning komt uit de providers-registratie i.p.v. een
+   parallelle branch ("is cloud" = "provider entry zonder managed").
+3. Catalogus: `local` krijgt een eigen catalog-refresh (llama-server
+   `/v1/models` — geverifieerd: werkt, adverteert het geladen model).
+4. Discovery (`/v1/models`): Windows-modellen verschijnen als
+   `windows/<model>`; lokale als nu (aliases), maar consistent uit dezelfde
+   registry.
+5. Backwards-compat: alle bestaande lokale aliases + cloud-addressen
+   blijven ongewijzigd werken (routing-herkenning is een superset).
+6. Failover-groepen: `local` en `windows` kunnen straks in dezelfde
+   failover-groep (lokaal → Windows-fallback of omgekeerd) — nieuw voordeel
+   van de unificatie.
+
+**Risico/grenzen:** dit is een routing-refactor (raakt providers, routing,
+model_discovery, local_inference) — géén config-only wijziging, dus code +
+gate + restart. De engine-manager-laag zelf (spawn/scheduler) verandert
+niet van gedrag; alleen de registratie/herkenning wordt unificeerd.
+Stap 1 = `local` als managed provider-entry; stap 2 = Windows-entry; cloud
+blijft zoals het is.
 
 ## Optie A — Windows als extra model-server (KEUZE)
 
@@ -94,10 +152,20 @@ enige manier om één model te draaien dat niet op één GPU past.
 
 ## Beslissing
 
-- **Nu: Optie A** (meerdere modellen parallel op LAN) — past bij het doel,
-  minimale Guardian-impact, geen netwerkgevoeligheid.
-- **Later optioneel: Optie B** voor één model dat nergens past — haalbaar
-  op 1 Gbit voor chat, niet voor prefill-zware workloads.
+- **Principe (operator 2026-08-26): unificatie** — alle model-serverende
+  endpoints in `providers.settings.yaml`; `local` wordt de enige `managed`
+  entry (Guardian bezit de levenscyclus), Windows + cloud zijn externe
+  entries. Zie §Unificatie.
+- **Stap 1: `local` als managed provider-entry** (routing-refactor, code +
+  gate + restart) — vereist operator-akkoord; hierna is het register
+  uniform en is `windows` triviaal.
+- **Stap 2: Windows-PC als externe provider-entry** (config-only,
+  hot-reload) — Optie A, past bij het doel (meerdere modellen parallel op
+  LAN), geen netwerkgevoeligheid.
+- **Later optioneel: Optie B** (llama.cpp RPC) voor één model dat nergens
+  past — haalbaar op 1 Gbit voor chat, niet voor prefill-zware workloads.
+  B blijft buiten de providers-registratie (het is een engine-start-arg,
+  geen endpoint).
 
 ## Openstaande vragen (voor implementatie)
 

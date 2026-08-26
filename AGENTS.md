@@ -104,7 +104,7 @@ When touching these areas, read the referenced detail docs:
 - **Client setup** → `@docs/CLIENT_INTEGRATION.md`
 - **GPU/hardware tuning** → `@docs/HARDWARE_TUNING.md`
 - **Deployment & operations** → `@docs/skills/operator-runbook.md`
-- **LAN GPU backends (PLAN 2026-08-26, niet gebouwd)** → `@docs/LAN_GPU_BACKENDS.md` — Windows-PC-GPU als extra model-server via een provider-entry (`base_url` LAN + `catalog_url: /models`); optie B = llama.cpp `--rpc` (haalbaar op 1 Gbit voor chat, ~5–15% overhead). Operator: "alleen plan vastleggen".
+- **LAN GPU backends + provider-unificatie (PLAN 2026-08-26, niet gebouwd)** → `@docs/LAN_GPU_BACKENDS.md` — operator-principe: **alles wat modellen serveert leeft in `providers.settings.yaml`**; `local` wordt de enige `managed` provider-entry (engine/manager.py behoudt spawn/VRAM/switch), Windows-PC + cloud zijn externe entries (`base_url` LAN + `catalog_url: /v1/models`; llama-server adverteert zelf `/v1/models` — geverifieerd). Stap 1 = local-als-provider (routing-refactor, code+gate+restart), stap 2 = Windows-entry (config-only, hot-reload). Optie B = llama.cpp `--rpc` (haalbaar op 1 Gbit voor chat, ~5–15% overhead; blijft engine-arg, geen provider). Operator: "alleen plan vastleggen".
 
 ## References
 
