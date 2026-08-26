@@ -2,8 +2,11 @@
 /**
  * sync_nvidia_free_models.js
  *
- * Refreshes the NVIDIA free-model allowlist in config/providers.overrides.yaml
- * (providers.nvidia.catalog_allowlist).
+ * Refreshes the NVIDIA free-model allowlist in
+ * config/providers/nvidia.settings.yaml (nvidia.catalog_allowlist).  Since F2
+ * (docs/CONFIG_PROVIDER_FILES.md) each provider has one file; this script only
+ * patches the `catalog_allowlist:` block of the nvidia provider file and
+ * preserves all its other keys (base_url/api_key/prefixes/models).
  *
  * NVIDIA's hosted /v1/models lists every model (102) regardless of what the free
  * token can reach, and gives no free/price marker. The authoritative source for
@@ -35,7 +38,7 @@ const http = require('node:http');
 const path = require('node:path');
 
 const REPO = path.resolve(__dirname, '..');
-const OVERRIDES_FILE = path.join(REPO, 'config', 'providers.overrides.yaml');
+const NVIDIA_FILE = path.join(REPO, 'config', 'providers', 'nvidia.settings.yaml');
 const PROFILE_DIR = path.join(REPO, 'data', 'nvidia-sync-chrome-profile');
 const CDP_PORT = 0; // 0 -> let the OS pick; we discover it from the log
 
@@ -171,7 +174,7 @@ async function main() {
   // Load current allowlist so we can preserve entries (e.g. kimi-k3) not on the page.
   let existing = [];
   try {
-    const raw = fs.readFileSync(OVERRIDES_FILE, 'utf8');
+    const raw = fs.readFileSync(NVIDIA_FILE, 'utf8');
     const m = raw.match(/catalog_allowlist:\s*((?:\n\s*-[^\n]*)+)/);
     if (m) {
       existing = [...m[1].matchAll(/-\s*([^\s#]+)/g)].map((x) => x[1]);
@@ -248,18 +251,28 @@ async function main() {
       process.exit(0);
     }
 
-    // Write the overrides file, preserving the openrouter.catalog_url block.
-    const yamlLines = [];
-    yamlLines.push('providers:');
-    yamlLines.push('  openrouter:');
-    yamlLines.push('    catalog_url: /models/user');
-    yamlLines.push('  nvidia:');
-    yamlLines.push('    # AWS WAF-gated NVIDIA free catalog (build.nvidia.com filtered by');
-    yamlLines.push('    # nimType:nim_type_preview). Auto-refreshed by scripts/sync_nvidia_free_models.js.');
-    yamlLines.push('    catalog_allowlist:');
-    for (const m of merged) yamlLines.push(`      - ${m}`);
-    fs.writeFileSync(OVERRIDES_FILE, yamlLines.join('\n') + '\n');
-    console.log(`Wrote ${OVERRIDES_FILE}`);
+    // Patch only the `catalog_allowlist:` block in config/providers/nvidia.settings.yaml,
+    // preserving every other key of the nvidia provider (F2: one file per provider).
+    let nvidiaRaw = '';
+    try { nvidiaRaw = fs.readFileSync(NVIDIA_FILE, 'utf8'); } catch {}
+    const allowlistLines = [];
+    allowlistLines.push('    # AWS WAF-gated NVIDIA free catalog (build.nvidia.com filtered by');
+    allowlistLines.push('    # nimType:nim_type_preview). Auto-refreshed by scripts/sync_nvidia_free_models.js.');
+    allowlistLines.push('    catalog_allowlist:');
+    for (const m of merged) allowlistLines.push(`      - ${m}`);
+
+    if (/\bcatalog_allowlist:\s*(?:\n\s*-[^\n]*)*/.test(nvidiaRaw)) {
+      // Replace the existing allowlist block (keeps its indentation context).
+      nvidiaRaw = nvidiaRaw.replace(
+        /\bcatalog_allowlist:\s*(?:\n\s*-[^\n]*)*/,
+        allowlistLines.join('\n'),
+      );
+    } else {
+      // No allowlist yet: append it at the end of the nvidia provider file.
+      nvidiaRaw = nvidiaRaw.replace(/\s*$/, '\n') + '\n' + allowlistLines.join('\n') + '\n';
+    }
+    fs.writeFileSync(NVIDIA_FILE, nvidiaRaw + '\n');
+    console.log(`Wrote ${NVIDIA_FILE}`);
   } finally {
     child.kill();
   }
