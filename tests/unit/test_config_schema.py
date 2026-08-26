@@ -1,16 +1,18 @@
 """Regression tests for the config-schema split (docs/CONFIG_SCHEMA.md).
 
-The monolith ``config/settings.yaml`` is split into domain files:
-``global.settings.yaml`` (+ legacy alias), ``providers.settings.yaml`` +
-``providers.overrides.yaml``, ``models.local.settings.yaml`` + overrides,
-``models.cloud.settings.yaml`` + ``models.cloud.overrides.yaml``, and
-``guardian.keys.yaml``.  These tests pin the two behaviours that the split
-must preserve:
+The monolith ``config/settings.yaml`` is split into domain files.  Since F2
+(docs/CONFIG_PROVIDER_FILES.md) the provider split is a single file per
+provider in ``config/providers/<name>.settings.yaml``, replacing the old
+``providers.settings.yaml`` + ``providers.overrides.yaml`` +
+``models.local.settings.yaml`` + ``models.cloud.overrides.yaml`` layout.
 
-1. ``config_loader.load_config()`` merges providers defaults + overrides with
-   overrides winning, and still carries the same top-level keys.
+These tests pin the behaviours the split must preserve:
+
+1. ``config_loader.load_config()`` carries the per-provider documents keyed by
+   provider name (directory scan, one document per provider).
 2. Production-default ``ProviderRegistry`` (no explicit settings_path) reads
-   the merged providers + context overrides from the new files.
+   the ``providers/`` directory, excluding the local provider, and derives
+   ``context_overrides`` from the cloud providers' ``models:`` blocks.
 """
 
 import yaml
@@ -27,8 +29,48 @@ def _write(tmp_path: Path, name: str, content: str) -> Path:
     return p
 
 
-def test_load_config_merges_providers_overrides_over_defaults(monkeypatch, tmp_path: Path):
-    """providers.settings.yaml defaults + providers.overrides.yaml (override wins)."""
+def _make_provider_dir(tmp_path: Path) -> Path:
+    """Create a config/providers/ directory with a couple of provider files."""
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    _write(
+        providers_dir,
+        "openrouter.settings.yaml",
+        yaml.safe_dump(
+            {
+                "enabled": True,
+                "base_url": "https://openrouter.ai/api/v1",
+                "api_key": "sk-or-test",
+                "timeout_seconds": 1200,
+                "model_prefixes": ["anthropic/"],
+                "catalog_url": "/models/user",
+                "models": {
+                    "moonshotai/kimi-k3": {"context_window": 1048576},
+                    "gpt-4o": {"max_tokens": 4096, "temperature": 0.7},
+                },
+            },
+            sort_keys=False,
+        ),
+    )
+    _write(
+        providers_dir,
+        "nvidia.settings.yaml",
+        yaml.safe_dump(
+            {
+                "enabled": True,
+                "base_url": "https://integrate.api.nvidia.com/v1",
+                "api_key": "nv-test",
+                "catalog_allowlist": ["moonshotai/kimi-k3"],
+                "models": {"minimaxai/minimax-m3": {"max_tokens": 8192}},
+            },
+            sort_keys=False,
+        ),
+    )
+    return providers_dir
+
+
+def test_load_config_scans_providers_directory(monkeypatch, tmp_path: Path):
+    """config_loader.load_config() carries one document per provider."""
     global_f = tmp_path / "global.settings.yaml"
     global_f.write_text(
         yaml.safe_dump(
@@ -40,36 +82,10 @@ def test_load_config_merges_providers_overrides_over_defaults(monkeypatch, tmp_p
             sort_keys=False,
         )
     )
-    defaults_f = _write(
-        tmp_path,
-        "providers.settings.yaml",
-        yaml.safe_dump(
-            {
-                "providers": {
-                    "openrouter": {
-                        "enabled": True,
-                        "base_url": "https://openrouter.ai/api/v1",
-                        "api_key": "sk-or-test",
-                        "timeout_seconds": 1200,
-                        "model_prefixes": ["anthropic/"],
-                    }
-                }
-            },
-            sort_keys=False,
-        ),
-    )
-    overrides_f = _write(
-        tmp_path,
-        "providers.overrides.yaml",
-        yaml.safe_dump(
-            {"providers": {"openrouter": {"catalog_url": "/models/user"}}},
-            sort_keys=False,
-        ),
-    )
+    _make_provider_dir(tmp_path)
 
     monkeypatch.setattr(config_loader, "CONFIG_PATH", global_f)
-    monkeypatch.setattr(config_loader, "providers_defaults_file", lambda: defaults_f)
-    monkeypatch.setattr(config_loader, "providers_overrides_file", lambda: overrides_f)
+    monkeypatch.setattr("app.paths.PROVIDERS_DIR", tmp_path / "providers")
 
     cfg = config_loader.load_config()
 
@@ -80,61 +96,53 @@ def test_load_config_merges_providers_overrides_over_defaults(monkeypatch, tmp_p
     assert "providers" in cfg
     assert cfg["queue"]["max_concurrent"] == 7
     assert cfg["queue"]["queue_timeout_seconds"] == 123
+    # Per-provider documents, keyed by provider name.
+    assert "openrouter" in cfg["providers"]
+    assert "nvidia" in cfg["providers"]
     or_cfg = cfg["providers"]["openrouter"]
-    # defaults preserved
     assert or_cfg["base_url"] == "https://openrouter.ai/api/v1"
     assert or_cfg["timeout_seconds"] == 1200
-    # override wins
     assert or_cfg["catalog_url"] == "/models/user"
+    # The provider's own models: block is preserved.
+    assert or_cfg["models"]["gpt-4o"] == {"max_tokens": 4096, "temperature": 0.7}
 
 
-def test_provider_registry_production_default_reads_merged_providers(monkeypatch, tmp_path: Path):
-    """ProviderRegistry() (no explicit settings_path) reads the new files."""
-    defaults_f = _write(
-        tmp_path,
-        "providers.settings.yaml",
-        yaml.safe_dump(
-            {
-                "providers": {
-                    "openrouter": {
-                        "enabled": True,
-                        "base_url": "https://openrouter.ai/api/v1",
-                        "api_key": "sk-or-test",
-                        "models": ["openai/gpt-4o"],
-                    }
-                }
-            },
-            sort_keys=False,
-        ),
-    )
-    overrides_f = _write(
-        tmp_path,
-        "providers.overrides.yaml",
-        yaml.safe_dump(
-            {"providers": {"openrouter": {"catalog_url": "/models/user"}}},
-            sort_keys=False,
-        ),
-    )
-    cloud_ov_f = _write(
-        tmp_path,
-        "models.cloud.overrides.yaml",
-        yaml.safe_dump(
-            {"moonshotai/kimi-k3": {"context_window": 1048576}},
-            sort_keys=False,
-        ),
-    )
+def test_provider_registry_production_default_reads_provider_directory(monkeypatch, tmp_path: Path):
+    """ProviderRegistry() (no explicit settings_path) reads the providers/ dir."""
+    _make_provider_dir(tmp_path)
 
-    import app.proxy.providers as pmod
+    monkeypatch.setattr("app.paths.PROVIDERS_DIR", tmp_path / "providers")
 
-    monkeypatch.setattr(pmod, "PROVIDERS_SETTINGS_FILE", defaults_f)
-    monkeypatch.setattr(pmod, "PROVIDERS_OVERRIDES_FILE", overrides_f)
-    monkeypatch.setattr(pmod, "MODELS_CLOUD_OVERRIDES_FILE", cloud_ov_f)
-
-    reg = ProviderRegistry()  # no explicit settings_path -> merged production default
+    reg = ProviderRegistry()  # no explicit settings_path -> directory scan
 
     assert "openrouter" in reg._providers
     assert reg._providers["openrouter"].catalog_url == "/models/user"
     assert reg.get_context_override("moonshotai/kimi-k3") == 1048576
+    assert reg.get_context_override("gpt-4o") is None  # gpt-4o has no context_window
+
+
+def test_provider_registry_excludes_local_provider(monkeypatch, tmp_path: Path):
+    """A *-local provider is not treated as a cloud gateway."""
+    _make_provider_dir(tmp_path)
+    _write(
+        tmp_path / "providers",
+        "ai-kvm2-local.settings.yaml",
+        yaml.safe_dump(
+            {
+                "enabled": True,
+                "base_url": "http://127.0.0.1:11440/v1",
+                "local": True,
+                "models": {"llama3.2-3b": {"path": "/home/flip/models/llama3.2-3b.gguf"}},
+            },
+            sort_keys=False,
+        ),
+    )
+
+    monkeypatch.setattr("app.paths.PROVIDERS_DIR", tmp_path / "providers")
+
+    reg = ProviderRegistry()
+    assert "ai-kvm2-local" not in reg._providers
+    assert "llama3.2-3b" not in reg._model_to_provider
 
 
 def test_path_aliases_resolve_schema_names(monkeypatch, tmp_path: Path):
@@ -148,18 +156,41 @@ def test_path_aliases_resolve_schema_names(monkeypatch, tmp_path: Path):
         "guardian.keys.yaml",
     ):
         (tmp_path / name).write_text("{}", encoding="utf-8")
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    (providers_dir / "ai-kvm2-local.settings.yaml").write_text("{}", encoding="utf-8")
 
     monkeypatch.setattr(paths, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(paths, "PROVIDERS_DIR", providers_dir)
     monkeypatch.setattr(paths, "GUARDIAN_KEYS_FILE", tmp_path / "guardian.keys.yaml")
     monkeypatch.setattr(paths, "MODELS_CLOUD_OVERRIDES_FILE", tmp_path / "models.cloud.overrides.yaml")
     monkeypatch.setattr(paths, "GUARDIAN_APIKEYS_FILE", tmp_path / "guardian.keys.yaml")
     monkeypatch.setattr(paths, "CLOUD_MODELS_OVERRIDES_FILE", tmp_path / "models.cloud.overrides.yaml")
 
-    # Existing canonical files -> local_models_file resolves to the new name.
-    assert paths.local_models_file().name == "models.local.settings.yaml"
+    # local_models_file now resolves to the per-provider local file (F2).
+    assert paths.local_models_file() == providers_dir / "ai-kvm2-local.settings.yaml"
     assert paths.guardian_apikeys_file().name == "guardian.keys.yaml"
     assert paths.global_settings_file().name == "global.settings.yaml"
     assert paths.models_cloud_overrides_file().name == "models.cloud.overrides.yaml"
     # Alias constants point at the canonical files.
     assert paths.CLOUD_MODELS_OVERRIDES_FILE == paths.MODELS_CLOUD_OVERRIDES_FILE
     assert paths.GUARDIAN_APIKEYS_FILE == paths.GUARDIAN_KEYS_FILE
+
+
+def test_provider_names_and_local_marker(monkeypatch, tmp_path: Path):
+    """provider_names() scans providers/*.settings.yaml; *-local is the local marker."""
+    import app.paths as paths
+
+    providers_dir = tmp_path / "providers"
+    providers_dir.mkdir()
+    for name in ("openrouter", "nvidia", "ai-kvm2-local"):
+        (providers_dir / f"{name}.settings.yaml").write_text("{}", encoding="utf-8")
+    # A non-settings file is ignored.
+    (providers_dir / "notes.txt").write_text("x", encoding="utf-8")
+
+    monkeypatch.setattr(paths, "PROVIDERS_DIR", providers_dir)
+
+    assert paths.provider_names() == ["ai-kvm2-local", "nvidia", "openrouter"]
+    assert paths.is_local_provider_name("ai-kvm2-local") is True
+    assert paths.is_local_provider_name("14700k-local") is True
+    assert paths.is_local_provider_name("openrouter") is False
