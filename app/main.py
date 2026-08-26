@@ -3,7 +3,6 @@ import json
 import logging
 import os
 import pathlib
-import signal
 import sys
 import time
 from fastapi import FastAPI, Depends, Request
@@ -27,7 +26,6 @@ from app.proxy.server import (
     inference_queue,
 )
 from app.proxy.auth import load_api_keys, generate_api_key, _token_fingerprint, verify_api_key
-from app.proxy.providers import ProviderRegistry
 from app.proxy.server import provider_registry, cloud_catalog, cloud_rate_limiter
 from app.scheduler.manager import SchedulerManager
 

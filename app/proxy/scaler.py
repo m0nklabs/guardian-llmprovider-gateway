@@ -10,7 +10,7 @@ Configurable via ``config/settings.yaml`` under the ``scaler`` key.
 
 import copy
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import yaml
 

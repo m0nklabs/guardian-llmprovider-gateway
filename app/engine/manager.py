@@ -12,11 +12,10 @@ import shlex
 import httpx
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from app.paths import (
-    CONFIG_DIR,
     CURRENT_MODEL_ARGS_FILE,
     CURRENT_MODEL_ENV_FILE,
     CURRENT_MODEL_SIG_FILE,

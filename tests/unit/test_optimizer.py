@@ -3,7 +3,6 @@
 import json
 from pathlib import Path
 
-import pytest
 
 from tests.conftest import SAMPLE_BENCHMARK_STATE, SAMPLE_CONTEXT_RESULTS
 

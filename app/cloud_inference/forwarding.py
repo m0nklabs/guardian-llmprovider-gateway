@@ -14,13 +14,13 @@ import json
 import logging
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional
 
 import httpx
 from fastapi import HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
-from app.proxy.providers import CloudProvider, ProviderRegistry
+from app.proxy.providers import ProviderRegistry
 from app.capture.schema import BuildContext
 from app.capture.policy import PolicyResult
 from app.capture.stream_assembler import StreamResponseAssembler

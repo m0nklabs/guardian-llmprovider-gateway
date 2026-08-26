@@ -5,7 +5,6 @@ import base64
 import json
 import urllib.request
 import urllib.error
-import sys
 
 from _auth import resolve_api_key
 

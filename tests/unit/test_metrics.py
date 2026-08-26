@@ -3,7 +3,6 @@
 import time
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from app.proxy.metrics import (
     track_request,
@@ -11,10 +10,8 @@ from app.proxy.metrics import (
     update_system_metrics,
     get_metrics_output,
     REQUEST_COUNT,
-    REQUEST_DURATION,
     ACTIVE_REQUESTS,
     QUEUE_WAITING,
-    MODEL_CURRENT,
     UNLOADED,
     IDLE_SECONDS,
     MODEL_SWITCHES,

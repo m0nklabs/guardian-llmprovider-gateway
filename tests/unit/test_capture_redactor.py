@@ -1,9 +1,7 @@
 """Unit tests for the capture redactor module."""
 
 import base64
-import hashlib
 import json
-import re
 
 import pytest
 
@@ -19,7 +17,6 @@ from app.capture.redactor import (
     redact_authorization_header,
     scan_for_secrets,
 )
-from app.capture.config import CaptureConfig
 
 
 @pytest.fixture

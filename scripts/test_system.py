@@ -1,8 +1,5 @@
 
 import requests
-import json
-import sys
-import time
 
 from _auth import build_auth_headers, resolve_api_key
 
@@ -31,7 +28,7 @@ def test_endpoint(name, method, url, data=None, headers=None, expect_status=200)
         print(f"❌ ERROR: {e}")
         return False
 
-print(f"🔍 Starting Comprehensive System Test for Llama Guardian")
+print("🔍 Starting Comprehensive System Test for Llama Guardian")
 print(f"📍 Target: {BASE_URL}")
 print(f"🔑 Key: {API_KEY[:10]}...")
 print("-" * 50)

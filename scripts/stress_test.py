@@ -1,7 +1,6 @@
 import asyncio
 import httpx
 import time
-import sys
 
 URL = "http://localhost:11434/api/generate"
 AUTH = ("caramba", "caramba_secret")

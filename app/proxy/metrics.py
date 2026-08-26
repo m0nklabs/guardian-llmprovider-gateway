@@ -16,7 +16,6 @@ from prometheus_client import (
     Info,
     generate_latest,
     CONTENT_TYPE_LATEST,
-    CollectorRegistry,
     REGISTRY,
 )
 
