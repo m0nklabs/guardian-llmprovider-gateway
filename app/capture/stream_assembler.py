@@ -81,8 +81,11 @@ class StreamResponseAssembler:
                     if isinstance(content, str) and content:
                         self._content_parts.append(content)
                         self._has_content = True
-                    # Reasoning content
+                    # Reasoning content — OpenAI sends `reasoning_content`,
+                    # OpenRouter proxies `reasoning` (same text; never both).
                     reasoning = delta.get("reasoning_content")
+                    if not isinstance(reasoning, str) or not reasoning:
+                        reasoning = delta.get("reasoning")
                     if isinstance(reasoning, str) and reasoning:
                         self._reasoning_parts.append(reasoning)
                     # Tool calls

@@ -70,6 +70,23 @@ class TestStreamAssemblerOpenAI:
         result = asm.assemble()
         assert result["content"] == "Hi"
 
+    def test_accumulates_openrouter_reasoning_field(self):
+        # OpenRouter proxies reasoning deltas as `delta.reasoning`
+        # (DeepInfra-style), not `reasoning_content`.
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"choices":[{"delta":{"reasoning":"1."}}]}')
+        asm.add_sse_line('data: {"choices":[{"delta":{"reasoning":" Let me think"}}]}')
+        asm.add_sse_line('data: {"choices":[{"delta":{"content":"Answer"},"finish_reason":"stop"}]}')
+        result = asm.assemble()
+        assert result["content"] == "Answer"
+        assert result["reasoning_content"] == "1. Let me think"
+
+    def test_reasoning_content_takes_precedence_over_reasoning(self):
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"choices":[{"delta":{"reasoning_content":"A","reasoning":"B"}}]}')
+        result = asm.assemble()
+        assert result["reasoning_content"] == "A"
+
 
 class TestStreamAssemblerAnthropic:
     def test_accumulates_anthropic_deltas(self):
