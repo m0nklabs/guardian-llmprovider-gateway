@@ -1,10 +1,11 @@
-# Per-provider configuratiebestanden — plan (2026-08-26, NIET geïmplementeerd)
+# Per-provider configuratiebestanden — plan (2026-08-26, GEÏMPLEMENTEERD)
 
-> Status: **plan only** (operator-richting 2026-08-26).
-> Doel: één configuratiebestand per provider in plaats van de huidige
+> Status: **geïmplementeerd** (2026-08-26, PR #3 / issue #1 fase F2).
+> Doel bereikt: één configuratiebestand per provider in plaats van de huidige
 > defaults/overrides-split tussen lokale en cloud-settings. Het
 > local/cloud-onderscheid is dan aan de **providernaam** te zien
 > (`ai-kvm2-local`, `14700k-local` vs `openrouter`, `google`, …).
+> Zie `docs/CONFIG_SCHEMA.md` (migratietabel) voor de eindstand.
 
 ## Huidige situatie (geverifieerd 2026-08-26)
 
