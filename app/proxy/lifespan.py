@@ -176,7 +176,7 @@ async def run_lifespan(app):
     )
 
     # Start capture writer (fail-open: disabled by default, errors are logged not raised)
-    capture_writer_task: Optional[asyncio.Task] = None
+    _capture_writer_task: Optional[asyncio.Task] = None  # writer task owned by _capture_controller
     try:
         _capture_controller.initialize_writer()
         if _capture_controller.config.is_active:

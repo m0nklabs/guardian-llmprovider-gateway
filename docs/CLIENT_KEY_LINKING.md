@@ -45,7 +45,7 @@ onafhankelijk en worden per credential uit `cloud_keys.json` gebouwd.
    ```
 4. Herstart Guardian (de credential store leest alleen bij startup):
    ```bash
-   sudo systemctl restart llama-guardian.service
+   sudo systemctl restart guardian-llmprovider-gateway.service
    ```
 5. Verifieer dat de routes zichtbaar zijn:
    ```bash

@@ -5,9 +5,7 @@ it without a trailer and a restart appends a NEW gzip member.  These tests
 pin the reader's recovery behavior across those layouts.
 """
 
-import json
 import zlib
-from pathlib import Path
 
 import pytest
 

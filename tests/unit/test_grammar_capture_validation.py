@@ -6,7 +6,9 @@ FEAT-6: capture events expose ``grammar_present``/``response_format_present``
 boolean flags and never leak raw grammar/schema content.
 """
 
-import pytest
+
+import json
+
 
 from app.capture import schema as capture_schema
 from app.capture import redactor as redactor_mod
@@ -112,9 +114,6 @@ class TestCaptureGrammarFlags:
         assert result["response_format"] == "[REDACTED]"
         assert "yes" not in json_dumps(result)
         assert result["temperature"] == 0.7
-
-
-import json
 
 
 def json_dumps(obj):

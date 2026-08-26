@@ -1,5 +1,4 @@
 import json
-import re
 import os
 
 import _paths  # noqa: F401  (adds repo root to sys.path)
@@ -101,8 +100,10 @@ def verify_key_start(line):
     # Simple check: does it contain a colon and start with a char?
     # Or start with '-' for list items?
     s = line.strip()
-    if not s: return False
-    if s.startswith('#'): return False
+    if not s:
+        return False
+    if s.startswith('#'):
+        return False
     # If it is a key: value pair
     if ':' in s:
         key = s.split(':', 1)[0].strip()

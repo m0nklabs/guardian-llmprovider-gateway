@@ -209,7 +209,7 @@ async def chat_ollama(request: Request, client_id: str):
     """Bridge Ollama-style chat requests to OpenAI-style Llama Server"""
     try:
         body = await request.json()
-    except:
+    except Exception:
         body = {}
         
     model = body.get("model")
@@ -461,7 +461,7 @@ async def chat_ollama(request: Request, client_id: str):
                                             response_bytes_delta=len(payload.encode("utf-8")),
                                         )
                                         yield payload
-                            except:
+                            except Exception:
                                 pass
                     if not _inference_queue.is_cancel_requested(request_id):
                         yield json.dumps({
@@ -589,7 +589,7 @@ async def generate_ollama(request: Request, client_id: str):
     """Bridge Ollama /api/generate (prompt-based) to /api/chat logic"""
     try:
         body = await request.json()
-    except:
+    except Exception:
         body = {}
         
     prompt = body.get("prompt", "")
@@ -831,7 +831,7 @@ async def generate_ollama(request: Request, client_id: str):
                                             response_bytes_delta=len(payload.encode("utf-8")),
                                         )
                                         yield payload
-                            except:
+                            except Exception:
                                 pass
                     if not _inference_queue.is_cancel_requested(request_id):
                         yield json.dumps({

@@ -102,7 +102,7 @@ class BenchmarkSuite:
                 encoding="utf-8"
             )
             return sum(int(x) for x in result.strip().split('\n'))
-        except:
+        except Exception:
             return 0
 
     async def run_suite(self):
@@ -162,8 +162,8 @@ class BenchmarkSuite:
     def run_single_test(self, test_case):
         """Run a single benchmark test using OpenAI-compatible /v1/chat/completions."""
         model = test_case["model"]
-        ctx = test_case["ctx"]
-        batch = test_case["batch"]
+        _ctx = test_case["ctx"]
+        _batch = test_case["batch"]
         
         payload = {
             "model": model,

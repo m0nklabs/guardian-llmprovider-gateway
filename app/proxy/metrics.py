@@ -16,7 +16,6 @@ from prometheus_client import (
     Info,
     generate_latest,
     CONTENT_TYPE_LATEST,
-    CollectorRegistry,
     REGISTRY,
 )
 
@@ -170,7 +169,7 @@ def update_capture_metrics(snap: Optional[Dict[str, Any]] = None) -> None:
     if snap is None:
         return
     sink_m = snap.get("metrics", {}).get("metrics", {})
-    writer_m = snap.get("writer", {})
+    _writer_m = snap.get("writer", {})  # writer snapshot reserved for future gauges
 
     queue_depth = sink_m.get("guardian_capture_queue_depth", 0)
     CAPTURE_QUEUE_DEPTH.set(queue_depth)

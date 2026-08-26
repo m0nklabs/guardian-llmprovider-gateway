@@ -13,11 +13,11 @@ import asyncio
 import json
 import time
 from contextlib import suppress
-from typing import Any, Dict, Optional
+from typing import Optional
 
 import httpx
 from fastapi import HTTPException, Request, Response
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 
 from app.engine.manager import ModelLoadError
 from app.capture.config import PROTOCOL_ANTHROPIC, PROTOCOL_OPENAI, ROUTE_LOCAL
@@ -896,7 +896,6 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                         _capture_policy_result, _local_capture_assembler,
                         usage_totals, path, resp.status_code,
                     )
-                    capture_dispatched = True
 
                     _model_manager.last_request_time = time.time()
                     _inference_queue.finish(request_id, outcome=_request_outcome(request_id))

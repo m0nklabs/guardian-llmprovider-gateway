@@ -11,7 +11,6 @@ from app.proxy.anthropic_bridge import (
     translate_openai_stream_to_anthropic,
     _format_sse_event,
     _convert_content_blocks_to_openai,
-    _convert_anthropic_tools_to_openai,
 )
 
 

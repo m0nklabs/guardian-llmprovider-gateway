@@ -2,11 +2,11 @@
 # Wrapper script to load dynamic model arguments for the official llama.cpp binary
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT_DIR="${LLAMA_CPP_GUARDIAN_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+ROOT_DIR="${GUARDIAN_LLMPROVIDER_GATEWAY_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 CONFIG_DIR="$ROOT_DIR/config"
 OFFICIAL_ROOT="${LLAMA_CPP_OFFICIAL_ROOT:-$ROOT_DIR/../llama_cpp_official}"
 MODELS_DIR="${MODELS_DIR:-$ROOT_DIR/../models}"
-SLOTS_DIR="${LLAMA_CPP_GUARDIAN_SLOTS_DIR:-$HOME/llama_slots}"
+SLOTS_DIR="${GUARDIAN_LLMPROVIDER_GATEWAY_SLOTS_DIR:-$HOME/llama_slots}"
 
 CONFIG_FILE="$CONFIG_DIR/current_model.args"
 ENV_FILE="$CONFIG_DIR/current_model.env"

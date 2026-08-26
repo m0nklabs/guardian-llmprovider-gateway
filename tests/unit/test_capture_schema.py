@@ -5,8 +5,7 @@ import hmac
 import json
 import os
 import re
-from datetime import datetime, timezone
-from unittest.mock import patch
+from datetime import datetime
 
 import pytest
 
@@ -309,7 +308,7 @@ class TestJsonlSerialization:
             os.path.dirname(__file__), "..", "fixtures", "capture_fixtures.jsonl"
         )
         with open(fixture_path) as f:
-            lines = [l.strip() for l in f if l.strip()]
+            lines = [line.strip() for line in f if line.strip()]
         assert len(lines) >= 3  # At least request_received, completed, failed
 
         for i, line in enumerate(lines):

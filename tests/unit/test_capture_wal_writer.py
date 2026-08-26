@@ -132,7 +132,7 @@ class TestWALWriterWriting:
         active = root / "guardian_capture_current.jsonl.gz"
         assert active.exists()
         content = _read_active_text(active)
-        lines = [l for l in content.strip().split("\n") if l]
+        lines = [line for line in content.strip().split("\n") if line]
         assert len(lines) >= 1
         for line in lines:
             parsed = json.loads(line)
@@ -150,7 +150,7 @@ class TestWALWriterWriting:
         active = root / "guardian_capture_current.jsonl.gz"
         assert active.exists()
         content = _read_active_text(active)
-        lines = [json.loads(l) for l in content.strip().split("\n") if l]
+        lines = [json.loads(line) for line in content.strip().split("\n") if line]
         assert len(lines) == 5
         for i, line in enumerate(lines):
             assert line["seq"] == i
@@ -163,7 +163,7 @@ class TestWALWriterWriting:
 
         # Patch the write to fail
         with patch.object(writer, "_write_event", side_effect=OSError("disk full")):
-            write_error = writer._write_event  # This will fail
+            _write_error = writer._write_event  # This will fail
             # The writer loop catches exceptions
             await asyncio.sleep(0.2)
 
@@ -379,8 +379,8 @@ class TestWALWriterPartialLineRecovery:
         # dropped.  Both the pre-crash record (seq 1) and the crashed
         # complete record (seq 2) must be present and valid.
         content = _read_active_text(active)
-        lines = [json.loads(l) for l in content.strip().split("\n") if l.strip()]
-        seqs = [l["seq"] for l in lines]
+        lines = [json.loads(line) for line in content.strip().split("\n") if line.strip()]
+        seqs = [line["seq"] for line in lines]
         assert 1 in seqs
         assert 2 in seqs
 
@@ -405,7 +405,7 @@ class TestWALWriterLifecycle:
         root = Path(config.capture_root)
         active = root / "guardian_capture_current.jsonl.gz"
         content = _read_active_text(active)
-        lines = [json.loads(l) for l in content.strip().split("\n") if l]
+        lines = [json.loads(line) for line in content.strip().split("\n") if line]
         assert len(lines) == 3
         for i, line in enumerate(lines):
             assert line["seq"] == i
@@ -498,7 +498,7 @@ class TestWALRecordAuth:
 
         root = Path(config.capture_root)
         active = root / "guardian_capture_current.jsonl.gz"
-        lines = [json.loads(l) for l in _read_active_text(active).strip().split("\n")]
+        lines = [json.loads(line) for line in _read_active_text(active).strip().split("\n")]
         assert len(lines) == 2
         key_ids = {line["record_auth"]["key_id"] for line in lines}
         assert len(key_ids) == 1
@@ -530,7 +530,7 @@ class TestWALWriterCrashRecovery:
         await writer2.stop()
 
         active = tmp_capture_root / "guardian_capture_current.jsonl.gz"
-        lines = [json.loads(l) for l in _read_active_text(active).strip().split("\n") if l.strip()]
+        lines = [json.loads(line) for line in _read_active_text(active).strip().split("\n") if line.strip()]
         seqs = [e["seq"] for e in lines]
         assert seqs == [1, 2, 3]
 
@@ -558,11 +558,11 @@ class TestWALWriterCrashRecovery:
         # Reader recovers the pre-crash complete record AND the post-restart
         # record; the partial crash tail is dropped.
         seqs = []
-        for l in _read_active_text(active).strip().split("\n"):
-            if not l.strip():
+        for line in _read_active_text(active).strip().split("\n"):
+            if not line.strip():
                 continue
             try:
-                seqs.append(json.loads(l)["seq"])
+                seqs.append(json.loads(line)["seq"])
             except (json.JSONDecodeError, KeyError):
                 continue  # partial record — reader may surface or drop it
         assert 1 in seqs
@@ -639,7 +639,7 @@ class TestWALWriterCrashRecovery:
         await writer2.stop()
 
         assert active.exists()
-        lines = [json.loads(l) for l in _read_active_text(active).strip().split("\n") if l.strip()]
+        lines = [json.loads(line) for line in _read_active_text(active).strip().split("\n") if line.strip()]
         assert len(lines) == 1
         assert lines[0]["seq"] == 2
 
@@ -663,11 +663,11 @@ class TestWALWriterCrashRecovery:
         await writer2.stop()
 
         seqs = []
-        for l in _read_active_text(active).strip().split("\n"):
-            if not l.strip():
+        for line in _read_active_text(active).strip().split("\n"):
+            if not line.strip():
                 continue
             try:
-                seqs.append(json.loads(l)["seq"])
+                seqs.append(json.loads(line)["seq"])
             except (json.JSONDecodeError, KeyError):
                 continue
         assert 1 in seqs
@@ -691,7 +691,7 @@ class TestWALWriterCrashRecovery:
         sink2.try_put(CaptureEvent(data={"seq": 1}))
         await writer2.stop()
 
-        lines = [l for l in _read_active_text(active).strip().split("\n") if l.strip()]
+        lines = [line for line in _read_active_text(active).strip().split("\n") if line.strip()]
         assert len(lines) == 1
         assert json.loads(lines[0])["seq"] == 1
 
@@ -719,7 +719,7 @@ class TestWALWriterCrashRecovery:
         await writer.stop()
 
         active = tmp_capture_root / "guardian_capture_current.jsonl.gz"
-        lines = [json.loads(l) for l in _read_active_text(active).strip().split("\n") if l.strip()]
+        lines = [json.loads(line) for line in _read_active_text(active).strip().split("\n") if line.strip()]
         seqs = [e["seq"] for e in lines]
         # seq 1 was written before failure; seq 2 was lost; seq 3 recovered
         assert 1 in seqs
@@ -742,7 +742,7 @@ class TestWALWriterCrashRecovery:
         await writer2.stop()
 
         active = tmp_capture_root / "guardian_capture_current.jsonl.gz"
-        lines = [json.loads(l) for l in _read_active_text(active).strip().split("\n") if l.strip()]
+        lines = [json.loads(line) for line in _read_active_text(active).strip().split("\n") if line.strip()]
         assert len(lines) == 2
         for line in lines:
             assert "record_auth" in line

@@ -3,7 +3,7 @@
 import asyncio
 import pytest
 
-from app.capture.sink import CaptureSink, CaptureEvent, SinkMetrics
+from app.capture.sink import CaptureSink, CaptureEvent
 
 
 @pytest.fixture
@@ -158,7 +158,6 @@ class TestSinkEventLoopRebind:
     def test_writer_loop_does_not_spin_on_persistent_errors(self, event):
         """The WAL writer loop must back off and stop, never busy-spin."""
         import time
-        from unittest.mock import patch
         from app.capture.wal_writer import CaptureWALWriter
         from app.capture.config import CaptureConfig
 

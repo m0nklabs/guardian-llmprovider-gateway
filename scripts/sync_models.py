@@ -22,8 +22,10 @@ DEFAULT_NGL = 99
 def get_model_defaults(filename):
     """Return context size based on model heuristics"""
     name = filename.lower()
-    if "70b" in name: return 8192  # Large model, limit context
-    if "command-r" in name: return 16384
+    if "70b" in name:
+        return 8192  # Large model, limit context
+    if "command-r" in name:
+        return 16384
     return DEFAULT_CONTEXT
 
 def load_config():
@@ -51,7 +53,8 @@ def sync_models():
     
     config = load_config()
     current_models = config.get("models", {})
-    if current_models is None: current_models = {}
+    if current_models is None:
+        current_models = {}
 
     # 1. Identify and remove stale entries
     stale_keys = []
@@ -77,9 +80,11 @@ def sync_models():
     # Prefer the shortest key name (usually the cleanest)
     path_to_keys = {}
     for k, v in list(current_models.items()):
-        if not isinstance(v, dict): continue
+        if not isinstance(v, dict):
+            continue
         p = v.get('path')
-        if not p: continue
+        if not p:
+            continue
         try:
             path_canon = str(Path(p).resolve())
             if path_canon not in path_to_keys:
