@@ -7,17 +7,17 @@ instead of silently resolving wrong paths.
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-VENV_PY = REPO_ROOT / "venv" / "bin" / "python"
 
 
 def _run(code: str, extra_env: dict) -> subprocess.CompletedProcess:
     full_env = dict(os.environ)
     full_env.update(extra_env)
     return subprocess.run(
-        [str(VENV_PY), "-c", code],
+        [sys.executable, "-c", code],
         capture_output=True,
         text=True,
         env=full_env,
