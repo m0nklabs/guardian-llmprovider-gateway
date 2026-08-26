@@ -1,0 +1,16 @@
+# OpenAI cloud provider.
+# Per-model overrides (context_window / model_defaults) live in the `models:`
+# block; they were formerly part of config/models.cloud.overrides.yaml.
+enabled: true
+base_url: https://api.openai.com/v1
+api_key: ${OPENAI_API_KEY}
+timeout_seconds: 1200
+models:
+  gpt-4.1:
+    context_window: 1047576
+  gpt-4o:
+    max_tokens: 4096
+    temperature: 0.7
+  gpt-4o-mini:
+    max_tokens: 4096
+    temperature: 0.7

@@ -1,0 +1,43 @@
+# OpenRouter cloud provider.
+# Per-model overrides (context_window / model_defaults) live in the `models:`
+# block; they were formerly part of config/models.cloud.overrides.yaml.
+enabled: true
+base_url: https://openrouter.ai/api/v1
+api_key: ${OPENROUTER_API_KEY}
+timeout_seconds: 1200
+model_prefixes:
+- anthropic/
+- openai/
+- google/
+- meta-llama/
+- deepseek/
+- qwen/
+- mistralai/
+- z-ai/
+- minimax/
+- poolside/
+- moonshotai/
+- nvidia/
+# OpenRouter applies guardrails on inference only, not on the plain /v1/models
+# listing (which returns every model). /models/user restricts discovery to the
+# models genuinely reachable through the account's guardrails/privacy filters.
+catalog_url: /models/user
+models:
+  deepseek/deepseek-chat:
+    context_window: 1000000
+  deepseek/deepseek-v4-flash-0731:
+    context_window: 1048576
+  # minimax/minimax-m3: brand `minimax/` matches openrouter's model_prefixes
+  # (the `minimaxai/` brand is served by nvidia — see nvidia.settings.yaml).
+  minimax/minimax-m3:
+    max_tokens: 8192
+    temperature: 1.0
+    top_p: 0.95
+  # z-ai/glm-5.2: brand `z-ai/` is declared on both openrouter and nvidia, but
+  # nvidia's catalog_allowlist contains no z-ai model, so the free token cannot
+  # actually route it there — served via openrouter.
+  z-ai/glm-5.2:
+    max_tokens: 16384
+    seed: 42
+    temperature: 1
+    top_p: 1
