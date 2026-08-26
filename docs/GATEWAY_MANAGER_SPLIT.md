@@ -124,6 +124,37 @@ providers:
   zinvol zodra er GPU-hosts zonder Guardian (Windows) zijn. Contract +
   swap-latentie + 404/503-herstelpaden moeten expliciet gemaakt worden.
 
+## Deployment-topologie (operator-vraag 2026-08-26: draait de manager ook op de homelab?)
+
+**Ja — de manager is per GPU-host.** Eén instantie op ai-kvm-2 (naast de
+bestaande llama-server :11440) én één op de Windows-PC (homelab, naast de
+Windows-llama-server). De gateway draait alleen op ai-kvm-2 en praat met
+beide managers via `management_url`.
+
+```
+ai-kvm-2 (Linux, GPU #1)                homelab (Windows, GPU #2)
+┌──────────────────────────────┐        ┌──────────────────────────────┐
+│ guardian-llmprovider-gateway │        │ guardian-llama-cpp-manager   │
+│  (proxy/routing/capture)     │        │  (eigen proces)              │
+│        │                     │        │        │                     │
+│  guardian-llama-cpp-manager  │  HTTP  │  llama-server.exe (CUDA)     │
+│  (eigen proces)              │ ◄────► │  :11440  (per model evt.     │
+│        │                     │        │           :11441, …)         │
+│  llama-server :11440         │        │                              │
+└──────────────────────────────┘        └──────────────────────────────┘
+```
+
+**Windows-specifieke verschillen (bewust):**
+1. Geen systemd → manager als Windows-service (NSSM / scheduled task bij
+   startup).
+2. **Elke manager leest zijn eigen `models.local.settings.yaml`** — de
+   Windows-manager heeft een eigen lijst (de GGUFs op de homelab, met
+   Windows-paden), géén kopie van de Linux-lijst. `providers.settings.yaml`
+   op ai-kvm-2 verwijst naar beide `management_url`s
+   (`http://192.168.1.G:11441` + `http://192.168.1.x:11441`).
+3. Geen queue in de manager → idle-unload-beslissing komt via het contract
+   van de gateway (zelfde op Windows als op Linux).
+
 ## Volgorde (fasen, voorstel — herzien n.a.v. ontleding)
 
 0. **Eerst: ontdraaien.** Verhuis de ~509 regels registry/keuze/discovery
