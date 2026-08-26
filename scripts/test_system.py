@@ -54,7 +54,7 @@ models_ok = test_endpoint(
 try:
     direct = requests.get("http://127.0.0.1:11440/health", timeout=2)
     print(f"Backend Llama-Server (11440): {'✅ UP' if direct.status_code == 200 else '⚠️ UP (Status ' + str(direct.status_code) + ')'}")
-except:
+except Exception:
     print("Backend Llama-Server (11440): ⚠️ NOT REACHABLE (might be protected or down)")
 
 # 4. Test Chat (Simple)

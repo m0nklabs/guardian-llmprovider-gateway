@@ -40,7 +40,8 @@ class RequestOptimizer:
                 
                 completed = data.get("completed", [])
                 for result in completed:
-                    if not result.get("success"): continue
+                    if not result.get("success"):
+                        continue
                     
                     config = result.get("config", {})
                     metrics = result.get("metrics", {})
@@ -48,7 +49,8 @@ class RequestOptimizer:
                     tps = metrics.get("tps", 0)
                     ctx = config.get("ctx", 0)
                     
-                    if not model: continue
+                    if not model:
+                        continue
                     
                     # Logic: Maximize TPS
                     if model not in self.best_configs or tps > self.best_configs[model]["tps"]:
@@ -67,10 +69,12 @@ class RequestOptimizer:
                 completed = data if isinstance(data, list) else []
                 
                 for result in completed:
-                    if result.get("status") != "success": continue
+                    if result.get("status") != "success":
+                        continue
                     
                     model = result.get("model_name")
-                    if not model: continue
+                    if not model:
+                        continue
                     
                     tps = result.get("tokens_per_second", 0)
                     ctx = result.get("context_size", 0)

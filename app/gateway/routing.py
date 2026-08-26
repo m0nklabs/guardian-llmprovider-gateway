@@ -896,7 +896,6 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                         _capture_policy_result, _local_capture_assembler,
                         usage_totals, path, resp.status_code,
                     )
-                    capture_dispatched = True
 
                     _model_manager.last_request_time = time.time()
                     _inference_queue.finish(request_id, outcome=_request_outcome(request_id))

@@ -7,6 +7,9 @@ boolean flags and never leak raw grammar/schema content.
 """
 
 
+import json
+
+
 from app.capture import schema as capture_schema
 from app.capture import redactor as redactor_mod
 from app.gateway import normalization as _normalization
@@ -111,9 +114,6 @@ class TestCaptureGrammarFlags:
         assert result["response_format"] == "[REDACTED]"
         assert "yes" not in json_dumps(result)
         assert result["temperature"] == 0.7
-
-
-import json
 
 
 def json_dumps(obj):

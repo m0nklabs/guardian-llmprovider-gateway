@@ -132,30 +132,47 @@ def get_gpu_metrics():
         return {'used': 0, 'free': _safe_vram_limit_mb, 'total': _safe_vram_limit_mb}
 
 def get_model_size(model_name: str) -> int:
-    if not model_name: return 0
+    if not model_name:
+        return 0
     model_lower = model_name.lower()
     # Specific overrides for new models
-    if "glm-4" in model_lower: return 26000  # ~24GB
-    if "35b" in model_lower: return 22000
-    if "31b" in model_lower: return 20000
-    if "qwen3" in model_lower and "30b" in model_lower: return 20000 # ~18GB
-    if "deepseek-r1" in model_lower and "32b" in model_lower: return 22000 # ~19GB
-    
+    if "glm-4" in model_lower:
+        return 26000  # ~24GB
+    if "35b" in model_lower:
+        return 22000
+    if "31b" in model_lower:
+        return 20000
+    if "qwen3" in model_lower and "30b" in model_lower:
+        return 20000  # ~18GB
+    if "deepseek-r1" in model_lower and "32b" in model_lower:
+        return 22000  # ~19GB
+
     # Generic heuristics
-    if "70b" in model_lower: return 40000
-    if "32b" in model_lower: return 20000
-    if "30b" in model_lower: return 20000
-    if "27b" in model_lower: return 18000
-    if "13b" in model_lower: return 10000
-    if "14b" in model_lower: return 11000
-    if "8b" in model_lower: return 6000
-    if "7b" in model_lower: return 5000
-    if "1.5b" in model_lower: return 1500
-    
+    if "70b" in model_lower:
+        return 40000
+    if "32b" in model_lower:
+        return 20000
+    if "30b" in model_lower:
+        return 20000
+    if "27b" in model_lower:
+        return 18000
+    if "13b" in model_lower:
+        return 10000
+    if "14b" in model_lower:
+        return 11000
+    if "8b" in model_lower:
+        return 6000
+    if "7b" in model_lower:
+        return 5000
+    if "1.5b" in model_lower:
+        return 1500
+
     # Small models
-    if "0.5b" in model_lower: return 600
-    if "embed" in model_lower: return 500
-    
+    if "0.5b" in model_lower:
+        return 600
+    if "embed" in model_lower:
+        return 500
+
     # Default fallback
     return 4000
 

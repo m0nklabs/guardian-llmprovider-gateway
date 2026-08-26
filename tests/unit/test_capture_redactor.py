@@ -323,8 +323,8 @@ class TestToolCallsRedaction:
 class TestImageBlockRedaction:
     def test_hash_and_metadata_replaces_raw_image(self):
         # Create a minimal valid PNG
-        png_header = b'\x89PNG\r\n\x1a\n'
-        ihdr = b'\x00\x00\x00\x0dIHDR' + b'\x00\x00\x00\x01' + b'\x00\x00\x00\x01' + b'\x08\x02\x00\x00\x00'
+        _png_header = b'\x89PNG\r\n\x1a\n'
+        _ihdr = b'\x00\x00\x00\x0dIHDR' + b'\x00\x00\x00\x01' + b'\x00\x00\x00\x01' + b'\x08\x02\x00\x00\x00'
         # This is not a valid PNG but tests the structure
         # Use a real minimal approach: just test with a simple image
         raw = base64.b64encode(b'\x89PNG\r\n\x1a\n' + b'\x00' * 20).decode("ascii")
