@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pre-restart gate for llama-guardian.
+"""Pre-restart gate for guardian-llmprovider-gateway.
 
 Runs every cheap static check that has caught real bugs before:
   1. py_compile on all app/**/*.py
@@ -8,7 +8,7 @@ Runs every cheap static check that has caught real bugs before:
   3. The wrapper-vs-module signature regression test
   4. Full pytest suite
 
-Exit code 0 = safe to `sudo systemctl restart llama-guardian`.
+Exit code 0 = safe to `sudo systemctl restart guardian-llmprovider-gateway`.
 Any failure = fix first; a startup-breaking error is NOT self-healable
 because the agent's own model traffic routes through Guardian.
 
@@ -328,7 +328,7 @@ def check_pytest() -> bool:
 
 
 def main() -> int:
-    print(f"Pre-restart gate for llama-guardian ({REPO})")
+    print(f"Pre-restart gate for guardian-llmprovider-gateway ({REPO})")
     results = [
         ("py_compile", check_compile()),
         ("pyflakes", check_pyflakes()),
@@ -341,7 +341,7 @@ def main() -> int:
     for name, r in results:
         print(f"  {name}: {'PASS' if r else 'FAIL'}")
     if ok:
-        print("✅ ALL GATES PASSED — safe to restart llama-guardian")
+        print("✅ ALL GATES PASSED — safe to restart guardian-llmprovider-gateway")
     else:
         print("❌ GATE FAILURES — fix before restarting (session drops on restart)")
     return 0 if ok else 1

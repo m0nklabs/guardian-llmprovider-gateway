@@ -77,7 +77,7 @@ def _run(cmd: list, env: dict, root_override: Path | None = None) -> subprocess.
     full_env = dict(os.environ)
     full_env.update(env)
     if root_override is not None:
-        full_env["LLAMA_CPP_GUARDIAN_ROOT"] = str(root_override)
+        full_env["GUARDIAN_LLMPROVIDER_GATEWAY_ROOT"] = str(root_override)
     return subprocess.run(
         [str(VENV_PY), *cmd],
         capture_output=True,

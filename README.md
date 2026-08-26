@@ -100,7 +100,7 @@ expects:
 - on this host, the current CUDA 13.2 validation target is
   `/home/flip/llama_cpp_official/worktrees/cuda132-master/build-cuda132/bin/llama-server`
 - the live systemd drop-ins for `llama-server.service` and
-  `llama-guardian.service` pin that b1295 binary through `LLAMA_SERVER_BINARY`
+  `guardian-llmprovider-gateway.service` pin that b1295 binary through `LLAMA_SERVER_BINARY`
 - GGUFs in `${MODELS_DIR}` (default: sibling `../models`)
 - a `llama-server` systemd unit that starts
   [scripts/start_llama.sh](scripts/start_llama.sh)
