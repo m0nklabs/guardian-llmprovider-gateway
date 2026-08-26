@@ -6,27 +6,27 @@ operations in try/except so that capture failures NEVER block or alter
 inference behavior.  They are called from ``app/proxy/server.py`` at
 strategic points in the request lifecycle.
 
-For the first delivery slice, capture only applies to **local OpenAI chat
-requests** (``/v1/chat/completions`` and ``/api/chat`` with local models).
-Cloud, Anthropic, Ollama, embeddings, and admin endpoints are excluded.
+Architecture (operator decision 2026-08-26): **Guardian stores RAW events**.
+Redaction is NOT applied in the capture pipeline anymore — the raw
+request/response content (system prompts, reasoning, tool results included)
+goes into the WAL exactly as seen.  Redaction/processing is Keanu's job
+(``scripts/keanu_redact.py``), consuming the replayable WAL.  The only
+in-pipeline transformation is *media extraction*: binary image payloads are
+written to separate files under ``data/capture/media/`` and replaced in the
+event by a reference block (see ``app.capture.media``) — base64 bytes never
+enter the WAL.
+
+Capture applies to both local and cloud chat routes (OpenAI, Anthropic,
+Ollama protocols); admin/health/metrics endpoints are excluded by policy.
 """
 
 from __future__ import annotations
 
 import logging
-import time
-import traceback
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from app.capture.config import (
-    CaptureConfig,
-    load_capture_config,
-    PROTOCOL_OPENAI,
-    PROTOCOL_ANTHROPIC,
-    PROTOCOL_OLLAMA,
-    ROUTE_LOCAL,
-    ROUTE_CLOUD,
-)
+from app.capture.config import CaptureConfig, load_capture_config
 from app.capture.schema import (
     BuildContext,
     build_request_received_event,
@@ -36,16 +36,7 @@ from app.capture.schema import (
     compute_client_ref,
 )
 from app.capture.policy import PolicyResult, evaluate_capture_policy
-from app.capture.redactor import (
-    redact_request_messages,
-    redact_response_content,
-    redact_request_parameters,
-    redact_reasoning_content,
-    redact_tool_results,
-    redact_tool_calls,
-    redact_image_blocks,
-)
-from app.capture.stream_assembler import StreamResponseAssembler
+from app.capture.media import extract_media_from_messages
 from app.capture.sink import CaptureSink, CaptureEvent
 from app.capture.wal_writer import CaptureWALWriter
 
@@ -166,11 +157,15 @@ class CaptureController:
         client_fingerprint: Optional[str],
         *,
         resolved_model: Optional[str] = None,
-        duration_ms: Optional[float] = None,
         grammar_present: bool = False,
         response_format_present: bool = False,
     ) -> BuildContext:
-        """Build a BuildContext from request metadata."""
+        """Build a BuildContext from request metadata.
+
+        ``duration_ms`` is intentionally not set here: BuildContext carries
+        lifecycle metadata only, and event builders take ``duration_ms`` as a
+        direct argument (the completed/failed paths do).
+        """
         return BuildContext(
             request_id=request_id,
             endpoint=endpoint,
@@ -181,7 +176,6 @@ class CaptureController:
             instance_id=self._config.instance_id,
             client_fingerprint=client_fingerprint,
             resolved_model=resolved_model,
-            duration_ms=duration_ms,
             grammar_present=grammar_present,
             response_format_present=response_format_present,
         )
@@ -235,21 +229,21 @@ class CaptureController:
         )
 
         try:
-            redacted_messages = None
-            if request_messages is not None:
-                redacted_messages = redact_request_messages(
-                    request_messages, policy_result.field_policies
-                )
-            redacted_params = None
-            if request_parameters is not None:
-                redacted_params = redact_request_parameters(
-                    request_parameters, policy_result.field_policies
+            # Raw capture: messages go into the WAL as-is, with only binary
+            # image payloads extracted to media files (references stay in the
+            # event).  Redaction is Keanu's job — NOT applied here.
+            raw_messages = request_messages
+            if isinstance(request_messages, list):
+                raw_messages = extract_media_from_messages(
+                    request_messages,
+                    Path(self._config.capture_root),
+                    request_id,
                 )
 
             event = build_request_received_event(
                 self._config, ctx,
-                request_messages=redacted_messages,
-                request_parameters=redacted_params,
+                request_messages=raw_messages,
+                request_parameters=request_parameters,
                 queue_wait_ms=queue_wait_ms,
                 sequence=sequence,
             )
@@ -285,28 +279,14 @@ class CaptureController:
             return
 
         try:
-            field_policies = {
-                "system_prompts": self._config.system_prompts,
-                "reasoning": self._config.reasoning,
-                "tool_definitions": self._config.tool_definitions,
-                "tool_calls": self._config.tool_calls,
-                "tool_results": self._config.tool_results,
-                "images": self._config.images,
-                "unknown_content_blocks": self._config.unknown_content_blocks,
-            }
-
-            # Redact response content
-            safe_content = redact_response_content(response_content) if response_content else None
-            safe_reasoning = redact_reasoning_content(reasoning_content, self._config.reasoning) if reasoning_content else None
-            safe_tool_calls = redact_tool_calls(tool_calls, self._config.tool_calls) if tool_calls else None
-            safe_tool_results = redact_tool_results(tool_results, self._config.tool_results) if tool_results else None
-
+            # Raw capture: response content is stored unredacted (Keanu
+            # processes it downstream).  No in-pipeline redaction anymore.
             event = build_request_completed_event(
                 self._config, ctx,
-                response_content=safe_content,
-                tool_calls=safe_tool_calls,
-                tool_results=safe_tool_results,
-                reasoning_content=safe_reasoning,
+                response_content=response_content,
+                tool_calls=tool_calls,
+                tool_results=tool_results,
+                reasoning_content=reasoning_content,
                 finish_reason=finish_reason,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
@@ -340,12 +320,13 @@ class CaptureController:
             return
 
         try:
-            safe_message = redact_response_content(sanitized_message) if sanitized_message else None
+            # Raw capture: the sanitized error message is stored as-is
+            # (it is already sanitized by the caller for client safety).
             event = build_request_failed_event(
                 self._config, ctx,
                 error_code=error_code,
                 http_status=http_status,
-                sanitized_message=safe_message,
+                sanitized_message=sanitized_message,
                 queue_wait_ms=queue_wait_ms,
                 duration_ms=duration_ms,
                 attempts=attempts,

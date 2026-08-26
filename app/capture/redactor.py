@@ -186,6 +186,13 @@ def redact_request_messages(
                         continue
                     else:
                         continue
+                elif block_type in ("image_media", "image_metadata"):
+                    # Raw-capture media references (2026-08-26): payload-free
+                    # blocks pointing at files under the capture root (or
+                    # carrying only hash/metadata).  They never contain
+                    # secrets and are never stripped as "unknown" — Keanu's
+                    # dataset tool decides what to do with them.
+                    redacted_blocks.append(block)
                 else:
                     # Unknown content block type
                     if unknown_policy == "capture":

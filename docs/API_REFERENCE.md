@@ -501,11 +501,26 @@ key can trigger it. Response lists what was reloaded and what could not be.
 | `GET` | `/api/capture/status` | No | Capture subsystem status, config summary, writer metrics, disk usage |
 | `POST` | `/api/capture/rotate` | No | Force rotation of the active WAL file |
 
-Capture is **disabled by default** (`GUARDIAN_CAPTURE_ENABLED=false`).
-`/api/capture/status` shows the effective policy (field policies, retention,
-opt-in counts) without secrets; `/api/capture/rotate` closes the active WAL
-file and opens a new one (returns the rotated + active paths). See
-`scripts/guardianctl.py` for the operator CLI mirroring these endpoints.
+The capture subsystem stores **raw request/response events** in a gzip WAL under
+`data/capture/` (`guardian_capture_current.jsonl.gz` active; rotated files
+`guardian_capture_<timestamp>_<seq>.jsonl.gz` are already gzip-compressed and
+get a `.sha256` sidecar). Since the 2026-08-26 raw-capture redesign the only
+in-pipeline transformation is **media extraction**: inline image payloads are
+written as separate files under `data/capture/media/` and replaced in the event
+by a reference block (base64 never lands in the WAL). Redaction/dataset work is
+done offline by `scripts/keanu_redact.py`; replay with integrity verification is
+`guardianctl export`. Capture is enabled by default for all authenticated
+clients (`cloud_capture: true`, `per_client_opt_in: false`); `retention_days: -1`
+means keep everything indefinitely and `max_capture_bytes: -1` is an unlimited
+byte budget.
+
+`/api/capture/status` shows the effective config (enabled/active, local/cloud,
+opt-in mode, retention, byte budget) plus the sink/writer metrics and disk usage
+— the `field_policies` block it reports are **Keanu defaults** for the offline
+redaction tool, not per-request Guardian filtering. `/api/capture/rotate` closes
+the active WAL file and opens a new one (returns the rotated + active paths). See
+`scripts/guardianctl.py` for the operator CLI mirroring these endpoints
+(`status`, `rotate`, `files`, plus the `export` replay/verify subcommand).
 
 #### `POST /admin/load`
 

@@ -125,6 +125,31 @@ def main() -> int:
     except Exception as e:  # noqa: BLE001
         results.append(check("openrouter catalog carries reasoning-effort metadata", False, str(e)))
 
+    # 6. Capture: enabled for all authenticated clients, infinite retention,
+    #    unlimited byte budget, writer running (raw-capture config).
+    try:
+        status, body = _fetch("/api/capture/status")
+        cfg = body.get("config", {}) if isinstance(body, dict) else {}
+        writer = body.get("writer", {}) if isinstance(body, dict) else {}
+        ok = (
+            status == 200
+            and cfg.get("enabled") is True
+            and cfg.get("active") is True
+            and cfg.get("cloud_capture") is True
+            and cfg.get("per_client_opt_in") is False
+            and cfg.get("retention_days") == -1
+            and cfg.get("max_capture_bytes") == -1
+            and writer.get("running") is True
+        )
+        results.append(
+            check("capture enabled, all clients, infinite retention, writer running",
+                  ok,
+                  f"cloud={cfg.get('cloud_capture')} opt_in={cfg.get('per_client_opt_in')} "
+                  f"retention={cfg.get('retention_days')} budget={cfg.get('max_capture_bytes')} "
+                  f"writer_running={writer.get('running')}"))
+    except Exception as e:  # noqa: BLE001
+        results.append(check("capture enabled, all clients, infinite retention, writer running", False, str(e)))
+
     ok_all = all(results)
     print("\n" + ("✅ ALL CHECKS PASSED" if ok_all else "⚠️ SOME CHECKS FAILED"))
     return 0 if ok_all else 1

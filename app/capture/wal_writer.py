@@ -2,41 +2,48 @@
 
 The writer runs as a single background task that consumes from the
 :class:`CaptureSink` queue and appends complete JSON lines to the active
-JSONL file.  When the file reaches ``max_file_bytes`` or ``max_file_age_seconds``,
-it is atomically closed, compressed, and rotated.  Each completed file gets
-a SHA-256 checksum stored alongside it so Keanu can validate integrity.
+gzip-compressed JSONL file.  When the file reaches ``max_file_bytes`` or
+``max_file_age_seconds``, it is atomically closed (gzip trailer finished),
+and rotated.  Each completed file gets a SHA-256 checksum stored alongside
+it so Keanu can validate integrity.
+
+Compression (since 2026-08-26): the ACTIVE file is written as a gzip stream
+with ``Z_SYNC_FLUSH`` after every record, so the on-disk log is compressed
+at all times — not only after rotation.  After a process restart the writer
+appends a second gzip member to an existing active file (multi-member gzip
+is valid and readable by Python's ``gzip`` module).  Rotation thresholds
+count *uncompressed* bytes so rotation cadence stays data-driven.
 
 Key invariants:
 - One writer only (no concurrent file access).
 - All writes are anchored beneath the capture root (no symlink traversal).
-- Completed files are gzipped; the active file is plain JSONL (read only by
-  Keanu after completion).
+- All capture files are gzipped; the active file is read by Keanu only
+  after rotation (or directly via ``gzip``, multi-member aware).
 - Rotation and retention are enforced atomically.
 """
 
 from __future__ import annotations
 
 import asyncio
-import gzip
 import hashlib
 import json
 import logging
 import os
-import shutil
 import time
-from dataclasses import dataclass, field
+import zlib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.capture.config import CaptureConfig
-from app.capture.sink import CaptureSink, CaptureEvent, SinkMetrics
+from app.capture.sink import CaptureSink, CaptureEvent
 from app.capture.schema import compute_record_auth
 
 logger = logging.getLogger("Guardian.Capture.WAL")
 
-ACTIVE_FILENAME = "guardian_capture_current.jsonl"
+ACTIVE_FILENAME = "guardian_capture_current.jsonl.gz"
 STATE_FILENAME = ".capture_state.json"
-COMPLETED_PATTERN = "guardian_capture_{timestamp}_{seq}.jsonl"
+COMPLETED_PATTERN = "guardian_capture_{timestamp}_{seq}.jsonl.gz"
 
 
 @dataclass
@@ -78,8 +85,9 @@ class CaptureWALWriter:
         self._rotation_seq = 0
         self._active_file: Optional[Path] = None
         self._active_fd = None  # raw file descriptor for append-only writes
-        self._active_file_size = 0
+        self._active_file_size = 0  # UNCOMPRESSED bytes written this session
         self._active_file_start = 0.0  # monotonic time of file creation
+        self._gzip_compressor: Optional[Any] = None  # zlib compressobj (gzip)
 
         # State file (persisted across restarts)
         self._state_path = Path(config.capture_root) / STATE_FILENAME
@@ -184,27 +192,49 @@ class CaptureWALWriter:
             pass
 
         try:
-            # Open with O_APPEND for atomic appends; create if needed
+            # Open with O_APPEND for atomic appends; create if needed.
+            # Binary mode: writes are gzip-compressed records (Z_SYNC_FLUSH
+            # per record), so the active file is compressed at all times.
             fd = os.open(
                 str(active_path),
                 os.O_WRONLY | os.O_CREAT | os.O_APPEND,
                 self._config.file_mode,
             )
             os.chmod(str(active_path), self._config.file_mode)
-            self._active_fd = os.fdopen(fd, "a", encoding="utf-8", errors="replace")
+            self._active_fd = os.fdopen(fd, "ab")
             self._active_file = active_path
-            self._active_file_size = active_path.stat().st_size if active_path.exists() else 0
+            # Uncompressed byte count resets per session; a pre-existing file
+            # (restart) gets a fresh gzip member, which is valid multi-member
+            # gzip. Rotation thresholds stay data-driven per session.
+            self._active_file_size = 0
             self._active_file_start = time.monotonic()
-            logger.debug("Opened active capture file: %s (size=%d)", active_path, self._active_file_size)
+            # New compressor → new gzip member when appending to an existing
+            # file; 16+zlib.MAX_WBITS = gzip wrapper, level 6 default.
+            self._gzip_compressor = zlib.compressobj(6, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+            logger.debug("Opened active capture file: %s (session bytes=0)", active_path)
         except OSError as exc:
             logger.error("Failed to open active capture file %s: %s", active_path, exc)
             self._metrics.write_failures += 1
             self._active_fd = None
             self._active_file = None
 
+    def _finish_gzip_stream(self) -> None:
+        """Write the gzip trailer (Z_FINISH) and drop the compressor."""
+        if self._gzip_compressor is None or self._active_fd is None:
+            self._gzip_compressor = None
+            return
+        try:
+            tail = self._gzip_compressor.flush(zlib.Z_FINISH)
+            if tail:
+                self._active_fd.write(tail)
+        except Exception:
+            pass
+        self._gzip_compressor = None
+
     def _close_active_file(self) -> None:
-        """Close the active file descriptor without rotating."""
+        """Finish the gzip stream and close the active file without rotating."""
         if self._active_fd is not None:
+            self._finish_gzip_stream()
             try:
                 self._active_fd.close()
             except Exception:
@@ -225,20 +255,10 @@ class CaptureWALWriter:
         """
         if self._active_file is None or self._active_file_size == 0:
             return None
-        self._rotate_file()
+        rotated = self._rotate_file()
         # Re-open a new active file for subsequent writes
         self._open_active_file()
-        # Return the most recent gz path — _rotate_file logs it but doesn't
-        # return it, so we find it from the capture root.
-        try:
-            gz_files = sorted(
-                self._capture_root.glob("*.jsonl.gz"),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-            return str(gz_files[0]) if gz_files else None
-        except (OSError, IndexError):
-            return None
+        return rotated
 
     def _needs_rotation(self) -> bool:
         """Check if the active file needs rotation (size or age limit)."""
@@ -250,10 +270,14 @@ class CaptureWALWriter:
             return True
         return False
 
-    def _rotate_file(self) -> None:
-        """Atomically close, compress, checksum, and rename the active file."""
+    def _rotate_file(self) -> Optional[str]:
+        """Atomically finish, checksum, and rename the active gzip file.
+
+        Returns the path of the rotated (gzipped) file, or ``None`` if there
+        was nothing to rotate.
+        """
         if self._active_file is None:
-            return
+            return None
 
         # Save the path before closing — _close_active_file sets _active_file to None
         active_path = self._active_file
@@ -265,33 +289,21 @@ class CaptureWALWriter:
 
         completed_name = COMPLETED_PATTERN.format(timestamp=timestamp, seq=self._rotation_seq)
         completed_path = self._capture_root / completed_name
-        gz_path = self._capture_root / f"{completed_name}.gz"
 
         try:
-            # Rename the active file to its completed name (atomic on same filesystem)
+            # Rename the active (already gzipped, trailer finished) file to its
+            # completed name (atomic on same filesystem).
             os.replace(str(active_path), str(completed_path))
 
-            # Compress
-            with open(completed_path, "rb") as src:
-                with gzip.GzipFile(
-                    filename=str(gz_path),
-                    mode="wb",
-                    mtime=timestamp,
-                ) as dst:
-                    shutil.copyfileobj(src, dst)
-
-            # Compute checksum
-            checksum = self._compute_file_checksum(gz_path)
-
-            # Remove uncompressed intermediate
-            completed_path.unlink(missing_ok=True)
+            # Compute checksum over the gzipped file
+            checksum = self._compute_file_checksum(completed_path)
 
             # Write checksum sidecar
-            checksum_path = gz_path.with_suffix(".sha256")
+            checksum_path = completed_path.with_suffix(".sha256")
             with open(checksum_path, "w") as f:
-                f.write(f"{checksum}  {gz_path.name}\n")
+                f.write(f"{checksum}  {completed_path.name}\n")
 
-            os.chmod(str(gz_path), self._config.file_mode)
+            os.chmod(str(completed_path), self._config.file_mode)
             os.chmod(str(checksum_path), self._config.file_mode)
 
             self._metrics.files_rotated += 1
@@ -300,14 +312,15 @@ class CaptureWALWriter:
             # Persist state after successful rotation
             self._save_state()
 
-            logger.info("Rotated capture file -> %s (checksum=%s)", gz_path.name, checksum[:16])
+            logger.info("Rotated capture file -> %s (checksum=%s)", completed_path.name, checksum[:16])
+            return str(completed_path)
 
         except OSError as exc:
             logger.error("Failed to rotate capture file: %s", exc)
             self._metrics.write_failures += 1
             # Try to clean up partial files
             completed_path.unlink(missing_ok=True)
-            gz_path.unlink(missing_ok=True)
+            return None
 
     def _compute_file_checksum(self, path: Path) -> str:
         """Compute SHA-256 checksum of a file."""
@@ -359,16 +372,19 @@ class CaptureWALWriter:
                     except OSError:
                         pass
 
-            # If still over the byte limit, remove oldest until under quota
-            while total_size > cut_bytes and files:
-                path, mtime, size = files.pop(0)
-                try:
-                    path.unlink()
-                    self._metrics.files_retired += 1
-                    total_size -= size
-                    logger.debug("Retention: removed for byte quota %s", path.name)
-                except OSError:
-                    pass
+            # If still over the byte limit, remove oldest until under quota.
+            # max_capture_bytes < 0 = unlimited budget (matches infinite
+            # retention, operator decision 2026-08-26).
+            if cut_bytes >= 0:
+                while total_size > cut_bytes and files:
+                    path, mtime, size = files.pop(0)
+                    try:
+                        path.unlink()
+                        self._metrics.files_retired += 1
+                        total_size -= size
+                        logger.debug("Retention: removed for byte quota %s", path.name)
+                    except OSError:
+                        pass
 
         except OSError as exc:
             logger.warning("Retention enforcement error: %s", exc)
@@ -394,10 +410,20 @@ class CaptureWALWriter:
             else:
                 line = line_no_auth
             line += "\n"
-            self._active_fd.write(line)
+            line_bytes = line.encode("utf-8")
+
+            # Gzip-compress the record with a sync flush so every record is
+            # independently decodable even while the file is still active.
+            if self._gzip_compressor is None:
+                self._gzip_compressor = zlib.compressobj(6, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+            data = (
+                self._gzip_compressor.compress(line_bytes)
+                + self._gzip_compressor.flush(zlib.Z_SYNC_FLUSH)
+            )
+            self._active_fd.write(data)
             self._active_fd.flush()
             os.fsync(self._active_fd.fileno())
-            line_bytes = line.encode("utf-8")
+            # Rotation thresholds count UNCOMPRESSED bytes (data-driven).
             self._active_file_size += len(line_bytes)
             self._metrics.bytes_written += len(line_bytes)
             self._metrics.files_written = max(self._metrics.files_written, 1)

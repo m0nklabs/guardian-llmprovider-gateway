@@ -176,11 +176,15 @@ class CaptureConfig:
                 f"capture.images='{self.images}' must be 'strip' or 'hash_and_metadata'"
             )
 
-        if self.retention_days < 0:
-            raise ValueError("capture.retention_days must be >= 0")
+        # -1 = keep everything forever (operator decision 2026-08-26:
+        # retention is Keanu's consumption concern, not a Guardian timer).
+        # _enforce_retention() already treats retention_days < 0 as "disabled".
+        if self.retention_days < -1:
+            raise ValueError("capture.retention_days must be -1 (infinite) or >= 0")
 
-        if self.max_capture_bytes < 0:
-            raise ValueError("capture.max_capture_bytes must be >= 0")
+        # -1 = unlimited capture budget (matches infinite retention).
+        if self.max_capture_bytes < -1:
+            raise ValueError("capture.max_capture_bytes must be -1 (unlimited) or >= 0")
 
         if self.max_pending_events < 1:
             raise ValueError("capture.max_pending_events must be >= 1")

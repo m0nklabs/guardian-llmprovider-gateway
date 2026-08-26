@@ -16,6 +16,31 @@ from app.capture.sink import CaptureSink, CaptureEvent
 from app.capture.wal_writer import CaptureWALWriter
 
 
+def _read_active_text(active: Path) -> str:
+    """Read the active gzip WAL via the shared crash-tolerant reader."""
+    from app.capture.gzip_reader import read_all_text
+
+    return read_all_text(active)
+
+
+def _append_truncated_member(active: Path, text: str) -> None:
+    """Simulate a crash mid-write: append a gzip member WITHOUT its trailer.
+
+    ``text`` is the raw decompressed content (records separated by \n; a
+    partial record has no trailing newline).  The writer flushes every
+    record with Z_SYNC_FLUSH and only writes the gzip trailer (Z_FINISH) on
+    rotation/close — a crash therefore leaves a member whose complete
+    records are decodable but which has no trailer.
+    """
+    import zlib
+
+    comp = zlib.compressobj(6, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
+    with open(active, "ab") as fh:
+        fh.write(comp.compress(text.encode("utf-8")))
+        fh.write(comp.flush(zlib.Z_SYNC_FLUSH))
+    # no Z_FINISH -> truncated (crash)
+
+
 @pytest.fixture
 def tmp_capture_root(tmp_path):
     root = tmp_path / "capture"
@@ -104,9 +129,9 @@ class TestWALWriterWriting:
         await writer.stop()
 
         root = Path(config.capture_root)
-        active = root / "guardian_capture_current.jsonl"
+        active = root / "guardian_capture_current.jsonl.gz"
         assert active.exists()
-        content = active.read_text()
+        content = _read_active_text(active)
         lines = [l for l in content.strip().split("\n") if l]
         assert len(lines) >= 1
         for line in lines:
@@ -122,9 +147,9 @@ class TestWALWriterWriting:
         await writer.stop()
 
         root = Path(config.capture_root)
-        active = root / "guardian_capture_current.jsonl"
+        active = root / "guardian_capture_current.jsonl.gz"
         assert active.exists()
-        content = active.read_text()
+        content = _read_active_text(active)
         lines = [json.loads(l) for l in content.strip().split("\n") if l]
         assert len(lines) == 5
         for i, line in enumerate(lines):
@@ -215,11 +240,15 @@ class TestWALWriterRotation:
         await asyncio.sleep(0.1)
 
         root = Path(config.capture_root)
-        active = root / "guardian_capture_current.jsonl"
+        active = root / "guardian_capture_current.jsonl.gz"
         assert active.exists()
 
-        # No completed files yet (no rotation)
-        completed = list(root.glob("guardian_capture_*.jsonl.gz"))
+        # No completed files yet (no rotation) — the active file matches the
+        # pattern too now (it is gzip), so exclude it by name.
+        completed = [
+            f for f in root.glob("guardian_capture_*.jsonl.gz")
+            if f.name != "guardian_capture_current.jsonl.gz"
+        ]
         assert len(completed) == 0
 
         await writer.stop()
@@ -269,9 +298,9 @@ class TestWALWriterRotation:
         await asyncio.sleep(0.2)
 
         root = Path(config.capture_root)
-        active = root / "guardian_capture_current.jsonl"
+        active = root / "guardian_capture_current.jsonl.gz"
         assert active.exists()
-        active_content = active.read_text()
+        active_content = _read_active_text(active)
         assert '"seq":100' in active_content or '"seq": 100' in active_content
 
         await writer.stop()
@@ -333,28 +362,27 @@ class TestWALWriterRetention:
 class TestWALWriterPartialLineRecovery:
     @pytest.mark.asyncio
     async def test_partial_final_line_does_not_corrupt(self, writer, sink, config):
-        """A partial line at the end of the active file should not corrupt parsing."""
+        """A partial record left by a crash tail should not corrupt parsing."""
         await writer.start()
         sink.try_put(CaptureEvent(data={"seq": 1}))
         await asyncio.sleep(0.1)
+        await writer.stop()  # clean stop -> member 1 finished with trailer
 
-        # Simulate a crash by writing a partial line
+        # Simulate a crash mid-write: a truncated gzip member whose last
+        # record is incomplete JSON is appended (no trailer was ever
+        # written — the crashed writer is gone, so nothing finishes it).
         root = Path(config.capture_root)
-        active = root / "guardian_capture_current.jsonl"
-        if active.exists():
-            with open(active, "a") as f:
-                f.write('{"incomplete')  # Partial JSON
+        active = root / "guardian_capture_current.jsonl.gz"
+        _append_truncated_member(active, '{"seq": 2, "event_type": "crashed"}\n{"incomplete')
 
-        await writer.stop()
-
-        # Reading should recover by discarding the partial line
-        content = active.read_text()
-        lines = content.strip().split("\n")
-        # The last line should be incomplete and can be discarded by reader
-        # Our writer doesn't truncate it, but Keanu should handle it
-        for line in lines[:-1] if lines else []:
-            if line.strip():
-                json.loads(line)  # All but last should be valid
+        # The reader recovers the complete records; the partial tail is
+        # dropped.  Both the pre-crash record (seq 1) and the crashed
+        # complete record (seq 2) must be present and valid.
+        content = _read_active_text(active)
+        lines = [json.loads(l) for l in content.strip().split("\n") if l.strip()]
+        seqs = [l["seq"] for l in lines]
+        assert 1 in seqs
+        assert 2 in seqs
 
 
 class TestWALWriterLifecycle:
@@ -375,8 +403,8 @@ class TestWALWriterLifecycle:
         await writer.stop()
 
         root = Path(config.capture_root)
-        active = root / "guardian_capture_current.jsonl"
-        content = active.read_text()
+        active = root / "guardian_capture_current.jsonl.gz"
+        content = _read_active_text(active)
         lines = [json.loads(l) for l in content.strip().split("\n") if l]
         assert len(lines) == 3
         for i, line in enumerate(lines):
@@ -412,8 +440,8 @@ class TestWALRecordAuth:
         await writer.stop()
 
         root = Path(config.capture_root)
-        active = root / "guardian_capture_current.jsonl"
-        content = active.read_text()
+        active = root / "guardian_capture_current.jsonl.gz"
+        content = _read_active_text(active)
         line = json.loads(content.strip())
         assert "record_auth" in line
         assert line["record_auth"]["alg"] == "hmac-sha256"
@@ -429,8 +457,8 @@ class TestWALRecordAuth:
         await writer.stop()
 
         root = Path(config.capture_root)
-        active = root / "guardian_capture_current.jsonl"
-        content = active.read_text()
+        active = root / "guardian_capture_current.jsonl.gz"
+        content = _read_active_text(active)
         line = json.loads(content.strip())
         assert "record_auth" not in line
 
@@ -445,8 +473,8 @@ class TestWALRecordAuth:
         await writer.stop()
 
         root = Path(config.capture_root)
-        active = root / "guardian_capture_current.jsonl"
-        content = active.read_text()
+        active = root / "guardian_capture_current.jsonl.gz"
+        content = _read_active_text(active)
         line_dict = json.loads(content.strip())
 
         # Strip record_auth, re-serialize, recompute MAC
@@ -469,8 +497,8 @@ class TestWALRecordAuth:
         await writer.stop()
 
         root = Path(config.capture_root)
-        active = root / "guardian_capture_current.jsonl"
-        lines = [json.loads(l) for l in active.read_text().strip().split("\n")]
+        active = root / "guardian_capture_current.jsonl.gz"
+        lines = [json.loads(l) for l in _read_active_text(active).strip().split("\n")]
         assert len(lines) == 2
         key_ids = {line["record_auth"]["key_id"] for line in lines}
         assert len(key_ids) == 1
@@ -501,8 +529,8 @@ class TestWALWriterCrashRecovery:
         sink2.try_put(CaptureEvent(data={"seq": 3, "event_type": "request_received"}))
         await writer2.stop()
 
-        active = tmp_capture_root / "guardian_capture_current.jsonl"
-        lines = [json.loads(l) for l in active.read_text().strip().split("\n") if l.strip()]
+        active = tmp_capture_root / "guardian_capture_current.jsonl.gz"
+        lines = [json.loads(l) for l in _read_active_text(active).strip().split("\n") if l.strip()]
         seqs = [e["seq"] for e in lines]
         assert seqs == [1, 2, 3]
 
@@ -515,12 +543,10 @@ class TestWALWriterCrashRecovery:
         sink.try_put(CaptureEvent(data={"seq": 1, "event_type": "request_received"}))
         await writer.stop()
 
-        # Simulate crash: write a partial JSON line (with newline — the
-        # writer always appends complete lines ending in \n, so a crashed
-        # partial line would have a \n at the end if the buffer was flushed).
-        active = tmp_capture_root / "guardian_capture_current.jsonl"
-        with open(active, "a") as f:
-            f.write('{"partial": true, "cu\n')  # incomplete JSON + newline
+        # Simulate crash: append a truncated gzip member (complete record +
+        # incomplete partial record, no trailer).
+        active = tmp_capture_root / "guardian_capture_current.jsonl.gz"
+        _append_truncated_member(active, '{"seq": 99, "event_type": "crashed"}\n{"partial": true, "cu')
 
         # Restart writer with fresh sink
         sink2 = CaptureSink(max_pending_events=config.max_pending_events)
@@ -529,14 +555,19 @@ class TestWALWriterCrashRecovery:
         sink2.try_put(CaptureEvent(data={"seq": 2, "event_type": "request_completed"}))
         await writer2.stop()
 
-        lines = active.read_text().strip().split("\n")
-        # First line: complete event
-        json.loads(lines[0])
-        assert json.loads(lines[0])["seq"] == 1
-        # Second line: partial (reader must discard)
-        # Third line: new complete event
-        json.loads(lines[2])
-        assert json.loads(lines[2])["seq"] == 2
+        # Reader recovers the pre-crash complete record AND the post-restart
+        # record; the partial crash tail is dropped.
+        seqs = []
+        for l in _read_active_text(active).strip().split("\n"):
+            if not l.strip():
+                continue
+            try:
+                seqs.append(json.loads(l)["seq"])
+            except (json.JSONDecodeError, KeyError):
+                continue  # partial record — reader may surface or drop it
+        assert 1 in seqs
+        assert 99 in seqs
+        assert 2 in seqs
 
     @pytest.mark.asyncio
     async def test_state_persisted_across_restart(self, writer, sink, config, tmp_capture_root):
@@ -596,7 +627,7 @@ class TestWALWriterCrashRecovery:
         await writer.stop()
 
         # Simulate crash: delete the active file
-        active = tmp_capture_root / "guardian_capture_current.jsonl"
+        active = tmp_capture_root / "guardian_capture_current.jsonl.gz"
         active.unlink()
         assert not active.exists()
 
@@ -608,7 +639,7 @@ class TestWALWriterCrashRecovery:
         await writer2.stop()
 
         assert active.exists()
-        lines = [json.loads(l) for l in active.read_text().strip().split("\n") if l.strip()]
+        lines = [json.loads(l) for l in _read_active_text(active).strip().split("\n") if l.strip()]
         assert len(lines) == 1
         assert lines[0]["seq"] == 2
 
@@ -619,11 +650,11 @@ class TestWALWriterCrashRecovery:
         sink.try_put(CaptureEvent(data={"seq": 1}))
         await writer.stop()
 
-        active = tmp_capture_root / "guardian_capture_current.jsonl"
-        # Write multiple partial lines (with newlines — see partial_line test)
-        with open(active, "a") as f:
-            f.write('{"broken1":\n')
-            f.write('{"broken2": tru\n')
+        active = tmp_capture_root / "guardian_capture_current.jsonl.gz"
+        # Multiple consecutive crash members with broken records — the reader
+        # must tolerate them all and still recover seq 1 and seq 2.
+        _append_truncated_member(active, '{"broken1": true}\n')
+        _append_truncated_member(active, '{"broken2": tru')
 
         sink2 = CaptureSink(max_pending_events=config.max_pending_events)
         writer2 = CaptureWALWriter(sink2, config)
@@ -631,14 +662,16 @@ class TestWALWriterCrashRecovery:
         sink2.try_put(CaptureEvent(data={"seq": 2}))
         await writer2.stop()
 
-        lines = active.read_text().strip().split("\n")
-        # Line 0: valid (seq 1)
-        # Lines 1-2: partial (reader discards)
-        # Line 3: valid (seq 2)
-        json.loads(lines[0])
-        assert json.loads(lines[0])["seq"] == 1
-        json.loads(lines[3])
-        assert json.loads(lines[3])["seq"] == 2
+        seqs = []
+        for l in _read_active_text(active).strip().split("\n"):
+            if not l.strip():
+                continue
+            try:
+                seqs.append(json.loads(l)["seq"])
+            except (json.JSONDecodeError, KeyError):
+                continue
+        assert 1 in seqs
+        assert 2 in seqs
 
     @pytest.mark.asyncio
     async def test_empty_file_after_crash_is_safe(self, writer, sink, config, tmp_capture_root):
@@ -646,10 +679,10 @@ class TestWALWriterCrashRecovery:
         await writer.start()
         await writer.stop()
 
-        active = tmp_capture_root / "guardian_capture_current.jsonl"
+        active = tmp_capture_root / "guardian_capture_current.jsonl.gz"
         # File may or may not exist — if it does, it's empty
         if active.exists():
-            assert active.read_text() == ""
+            assert _read_active_text(active) == ""
 
         # Restart and write
         sink2 = CaptureSink(max_pending_events=config.max_pending_events)
@@ -658,7 +691,7 @@ class TestWALWriterCrashRecovery:
         sink2.try_put(CaptureEvent(data={"seq": 1}))
         await writer2.stop()
 
-        lines = [l for l in active.read_text().strip().split("\n") if l.strip()]
+        lines = [l for l in _read_active_text(active).strip().split("\n") if l.strip()]
         assert len(lines) == 1
         assert json.loads(lines[0])["seq"] == 1
 
@@ -685,8 +718,8 @@ class TestWALWriterCrashRecovery:
         await asyncio.sleep(0.1)
         await writer.stop()
 
-        active = tmp_capture_root / "guardian_capture_current.jsonl"
-        lines = [json.loads(l) for l in active.read_text().strip().split("\n") if l.strip()]
+        active = tmp_capture_root / "guardian_capture_current.jsonl.gz"
+        lines = [json.loads(l) for l in _read_active_text(active).strip().split("\n") if l.strip()]
         seqs = [e["seq"] for e in lines]
         # seq 1 was written before failure; seq 2 was lost; seq 3 recovered
         assert 1 in seqs
@@ -708,8 +741,8 @@ class TestWALWriterCrashRecovery:
         sink2.try_put(CaptureEvent(data={"seq": 2, "event_type": "request_completed"}))
         await writer2.stop()
 
-        active = tmp_capture_root / "guardian_capture_current.jsonl"
-        lines = [json.loads(l) for l in active.read_text().strip().split("\n") if l.strip()]
+        active = tmp_capture_root / "guardian_capture_current.jsonl.gz"
+        lines = [json.loads(l) for l in _read_active_text(active).strip().split("\n") if l.strip()]
         assert len(lines) == 2
         for line in lines:
             assert "record_auth" in line

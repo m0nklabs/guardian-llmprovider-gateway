@@ -9,23 +9,28 @@ Subcommands:
   enable     Enable capture (modifies settings.yaml, requires server restart)
   disable    Disable capture (modifies settings.yaml, requires server restart)
   test-event Emit a synthetic test event to verify the pipeline end-to-end
+  export     Replay raw WAL events (Keanu handoff) with integrity checks
 
 Usage:
   ./venv/bin/python scripts/guardianctl.py status
   ./venv/bin/python scripts/guardianctl.py files --json
   GUARDIAN_API_KEY=flip... ./venv/bin/python scripts/guardianctl.py rotate
+  ./venv/bin/python scripts/guardianctl.py export --verify --out dataset.jsonl
 
 Note: `status` and `rotate` talk to the running Guardian API.
       `config`, `enable`, `disable` read/modify settings.yaml directly.
-      `files` inspects the filesystem.
+      `files`, `export` inspect the filesystem.
+      `export` replays the RAW WAL (Guardian stores raw since 2026-08-26;
+      redaction is Keanu's job via scripts/keanu_redact.py).
 """
 
 import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
-from _paths import CONFIG_DIR, DATA_DIR, REPO_ROOT
+from _paths import DATA_DIR, REPO_ROOT
 
 # Capture config lives in the global settings file (config-schema, 2026-08-21).
 # Resolve through app.paths.global_settings_file() so an installation still on
@@ -169,7 +174,12 @@ def cmd_files(args: argparse.Namespace) -> None:
     print("─" * 72)
     for f in files:
         size = f.stat().st_size
-        ftype = "gzip" if f.suffix == ".gz" else "active" if ".active" in f.name else "complete"
+        if f.name.startswith("guardian_capture_current"):
+            ftype = "active (gzip)"
+        elif f.suffix == ".sha256":
+            ftype = "checksum"
+        else:
+            ftype = "gzip"
         print(f"{str(f.relative_to(REPO_ROOT)):<50s} {size:>12,}  {ftype}")
     print("─" * 72)
     print(f"{'Total:':<50s} {total_bytes:>12,}")
@@ -266,6 +276,127 @@ def cmd_test_event(args: argparse.Namespace) -> None:
     print(f"   Request ID: {event.get('request_id', '?')}")
 
 
+def _load_env_secret(name: str) -> str:
+    """Load a secret from the environment, falling back to the repo .env."""
+    import os
+
+    val = os.environ.get(name, "")
+    if val:
+        return val
+    env_path = REPO_ROOT / ".env"
+    if env_path.exists():
+        for raw in env_path.read_text().splitlines():
+            raw = raw.strip()
+            if raw.startswith("#") or "=" not in raw:
+                continue
+            key, _, value = raw.partition("=")
+            if key.strip() == name:
+                return value.strip().strip('"').strip("'")
+    return ""
+
+
+def _iter_wal_events(
+    root: Path,
+    *,
+    verify_auth: bool,
+    verify_checksums: bool,
+    secret: str,
+) -> Any:
+    """Yield (path, event_dict) for every WAL record, oldest file first.
+
+    Order: completed files by name (timestamp_seq), then the active file.
+    Completed files are checked against their ``.sha256`` sidecar when
+    ``verify_checksums``.  Records are read with the crash-tolerant gzip
+    reader (a restart after a crash appends a new gzip member to the active
+    file).  With ``verify_auth`` (and a secret), every record's ``record_auth``
+    HMAC is validated.
+    """
+    import hashlib
+    import hmac
+
+    from app.capture.gzip_reader import iter_records
+
+    files = sorted(root.glob("guardian_capture_*.jsonl.gz"))
+    active = root / "guardian_capture_current.jsonl.gz"
+    if active.exists() and active not in files:
+        files.append(active)
+
+    for path in files:
+        if verify_checksums and path != active:
+            sidecar = path.with_suffix(".sha256")
+            if sidecar.exists():
+                expected = sidecar.read_text().split()[0]
+                actual = hashlib.sha256(path.read_bytes()).hexdigest()
+                if actual != expected:
+                    print(f"⚠️  CHECKSUM MISMATCH: {path.name}", file=sys.stderr)
+        for record in iter_records(path):
+            if not record.strip():
+                continue
+            try:
+                event = json.loads(record.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                print(f"⚠️  Unparseable record in {path.name} (skipped)", file=sys.stderr)
+                continue
+            if verify_auth and secret:
+                auth = event.pop("record_auth", None)
+                canon = json.dumps(event, separators=(",", ":"), sort_keys=False, default=str)
+                mac = hmac.new(secret.encode("utf-8"), canon.encode("utf-8"), hashlib.sha256).hexdigest()
+                if auth is None or auth.get("mac") != mac:
+                    print(
+                        f"⚠️  RECORD_AUTH MISMATCH in {path.name}: "
+                        f"event_id={event.get('event_id', '?')}",
+                        file=sys.stderr,
+                    )
+                if auth is not None:
+                    event["record_auth"] = auth
+            yield path, event
+
+
+def cmd_export(args: argparse.Namespace) -> None:
+    """Replay raw WAL events with integrity checks (Keanu handoff)."""
+    if not CAPTURE_ROOT.exists():
+        print(f"Capture root does not exist: {CAPTURE_ROOT}")
+        raise SystemExit(1)
+
+    secret = _load_env_secret("GUARDIAN_CAPTURE_RECORD_AUTH_SECRET")
+    if args.no_verify:
+        verify_auth = verify_checksums = False
+    else:
+        verify_auth = args.verify_auth or bool(secret)
+        verify_checksums = args.verify_checksums
+
+    out_fh = sys.stdout
+    close_out = False
+    if args.out and not args.verify_only:
+        out_fh = open(args.out, "w", encoding="utf-8")
+        close_out = True
+
+    count = 0
+    try:
+        for path, event in _iter_wal_events(
+            CAPTURE_ROOT,
+            verify_auth=verify_auth,
+            verify_checksums=verify_checksums,
+            secret=secret,
+        ):
+            if not args.verify_only:
+                out_fh.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
+            count += 1
+    except OSError as exc:
+        print(f"⚠️  Export aborted on unreadable stream: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+    finally:
+        if close_out:
+            out_fh.close()
+
+    if args.verify_only:
+        print(f"✅ Verified {count} raw events — no data written", file=sys.stderr)
+    else:
+        print(f"✅ Exported {count} raw events", file=sys.stderr)
+    if not verify_auth and not args.no_verify:
+        print("   (record_auth verification skipped — no signing secret found)", file=sys.stderr)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -310,6 +441,19 @@ def main() -> None:
     # test-event
     p_test = sub.add_parser("test-event", help="Emit synthetic test event to verify pipeline")
     p_test.set_defaults(func=cmd_test_event)
+
+    # export
+    p_export = sub.add_parser("export", help="Replay raw WAL events with integrity checks")
+    p_export.add_argument("--out", metavar="FILE", help="Write events to FILE (default: stdout)")
+    p_export.add_argument("--verify", dest="verify_auth", action="store_true",
+                          help="Verify per-record HMAC (default: on when secret is present)")
+    p_export.add_argument("--verify-checksums", action="store_true",
+                          help="Verify rotated files against their .sha256 sidecars")
+    p_export.add_argument("--verify-only", action="store_true",
+                          help="Only verify integrity; do not emit events")
+    p_export.add_argument("--no-verify", action="store_true",
+                          help="Skip all integrity verification")
+    p_export.set_defaults(func=cmd_export)
 
     args = parser.parse_args()
     args.func(args)

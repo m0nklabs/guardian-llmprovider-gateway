@@ -11,9 +11,10 @@ Usage:
     GUARDIAN_CAPTURE_RECORD_AUTH_SECRET="secret" ./venv/bin/python \\
         scripts/generate_contract_wal.py --out /tmp/contract_wal --request-id req-001
 
-The active WAL file is ``<out>/guardian_capture_current.jsonl``; Keanu
-ingestion should use ``--include-active`` (or copy/rename the file so it
-is treated as a completed WAL).
+The active WAL file is ``<out>/guardian_capture_current.jsonl.gz`` (stream
+gzip; a completed member, written cleanly on stop). Keanu ingestion should
+use ``--include-active`` (or copy/rename the file so it is treated as a
+completed WAL).
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 from app.capture.config import CaptureConfig  # noqa: E402
+from app.capture.gzip_reader import iter_records  # noqa: E402
 from app.capture.schema import (  # noqa: E402
     BuildContext,
     build_request_completed_event,
@@ -99,15 +101,16 @@ async def _main(out_dir: Path, request_id: str, instance_id: str) -> None:
     await asyncio.sleep(0.6)
     await writer.stop()
 
-    wals = list(out_dir.glob("*.jsonl"))
+    wals = sorted(out_dir.glob("*.jsonl.gz"))
     if not wals:
         raise SystemExit("ERROR: no WAL file produced")
     print(f"WAL: {wals[0]}")
     for w in wals:
-        lines = w.read_text().strip().splitlines()
+        import json
+
+        lines = list(iter_records(w))
         print(f"  lines={len(lines)}")
         for ln in lines:
-            import json
             ev = json.loads(ln)
             auth = "record_auth=yes" if ev.get("record_auth") else "record_auth=NO"
             print(f"    {ev['event_type']} {auth}")
