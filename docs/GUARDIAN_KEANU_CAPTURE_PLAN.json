@@ -7,7 +7,7 @@
   "created_at": "2026-08-01",
   "language": "en",
   "owners": [
-   "llama_cpp_guardian",
+   "guardian-llmprovider-gateway",
    "keanu-factory"
   ],
   "implementation_status": "phases_0_5_complete_phase_6_soak_pending",
@@ -16,7 +16,7 @@
  },
  "repositories": {
   "guardian": {
-   "path": "/home/flip/llama_cpp_guardian",
+   "path": "/home/flip/guardian-llmprovider-gateway",
    "role": "Capture producer and inference gateway"
   },
   "keanu_factory": {

@@ -29,7 +29,7 @@ onafhankelijk en worden per credential uit `cloud_keys.json` gebouwd.
    ```
 2. Backup:
    ```bash
-   cd /home/flip/llama_cpp_guardian
+   cd /home/flip/guardian-llmprovider-gateway
    cp config/cloud_keys.json config/cloud_keys.json.bak.$(date +%s)
    ```
 3. Voeg onder `"links"` een entry toe (credential-ID's staan in dezelfde file

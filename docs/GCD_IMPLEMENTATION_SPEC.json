@@ -2,7 +2,7 @@
   "spec_id": "guardian-gcd-grammar-constrained-decoding",
   "title": "Grammar-Constrained Decoding (GCD) — first-class Guardian option",
   "purpose": "Add Grammar-Constrained Decoding (GBNF / JSON-schema / response_format) as a documented, first-class option in Guardian. Primary consumer: the Keanu Factory distill pipeline, which needs strict structured JSON output from LLMs. Today the local OpenAI path passes a `grammar` field through to llama-server unmodified (body is forwarded 1:1), but this is undocumented, breaks on cloud routes, is missing on the Ollama bridge, and has no per-model toggle. Make it correct, documented, and configurable.",
-  "repo": "llama_cpp_guardian",
+  "repo": "guardian-llmprovider-gateway",
   "consumer_context": {
     "who": "Keanu Factory (Route 2 distill pipeline, /home/flip/keanu-factory)",
     "why": "Distill needs guaranteed-JSON output from local models. Without GCD, distill yields invalid JSON ~5-15% of the time and depends on brittle regex parsing.",

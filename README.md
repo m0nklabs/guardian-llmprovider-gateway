@@ -83,7 +83,7 @@ Guardian is currently configured for a shared dual-GPU host with:
 ### 1. Python environment
 
 ```bash
-cd /home/flip/llama_cpp_guardian
+cd /home/flip/guardian-llmprovider-gateway
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -152,7 +152,7 @@ active local backend's `/props` `n_ctx`, and finally reports a conservative
 ### 4. Start Guardian
 
 ```bash
-cd /home/flip/llama_cpp_guardian
+cd /home/flip/guardian-llmprovider-gateway
 source venv/bin/activate
 python -m app.main
 ```

@@ -1,9 +1,9 @@
-# Guardian opsplitsing — `guardian-llmprovider-gateway` + `guardian-llama-cpp-manager`
+# Guardian opsplitsing — `guardian-llmprovider-gateway` + `caretaker-llama-cpp`
 
 > Status: **architectuur-richting (operator-besluit 2026-08-26), NIET gebouwd.**
 > Operator: "ik zit te denken om de boel op te splitsen" → twee componenten:
 > **`guardian-llmprovider-gateway`** (de gateway/kieslaag) en
-> **`guardian-llama-cpp-manager`** (de wrapper die llama-server beheert).
+> **`caretaker-llama-cpp`** (de wrapper die llama-server beheert).
 
 ## Waarom
 
@@ -47,7 +47,7 @@ Hard geteld (functie-lichamen): `engine/manager.py` ≈ 1637 regels,
    een daemon is de enige manier om een GPU-host ZONDER Guardian (Windows)
    beheerd te krijgen. Dáár is geen verwevenheid — gewoon "draai model X".
 
-## Wat verhuist naar `guardian-llama-cpp-manager` (alleen de lifecycle-kern)
+## Wat verhuist naar `caretaker-llama-cpp` (alleen de lifecycle-kern)
 
 | Bron (nu in Gateway-repo) | Functie |
 |---|---|
@@ -118,7 +118,7 @@ providers:
   `local`); restart van de gateway raakt het geladen model niet meer (en
   vice versa); één consistent verhaal per model-server.
 - **Nadelen/kosten:** nieuw proces = nieuwe systemd-unit (bv.
-  `llama-cpp-manager.service`) + eigen logging/monitoring. De manager-kern
+  `caretaker-llama-cpp.service`) + eigen logging/monitoring. De manager-kern
   is klein (~1050 regels) en verkeersgebonden — voor de lokale host alleen
   is een aparte daemon NIET nodig (een module volstaat); de daemon wordt pas
   zinvol zodra er GPU-hosts zonder Guardian (Windows) zijn. Contract +
@@ -134,10 +134,10 @@ beide managers via `management_url`.
 ```
 ai-kvm-2 (Linux, GPU #1)                homelab (Windows, GPU #2)
 ┌──────────────────────────────┐        ┌──────────────────────────────┐
-│ guardian-llmprovider-gateway │        │ guardian-llama-cpp-manager   │
+│ guardian-llmprovider-gateway │        │ caretaker-llama-cpp   │
 │  (proxy/routing/capture)     │        │  (eigen proces)              │
 │        │                     │        │        │                     │
-│  guardian-llama-cpp-manager  │  HTTP  │  llama-server.exe (CUDA)     │
+│  caretaker-llama-cpp  │  HTTP  │  llama-server.exe (CUDA)     │
 │  (eigen proces)              │ ◄────► │  :11440  (per model evt.     │
 │        │                     │        │           :11441, …)         │
 │  llama-server :11440         │        │                              │
@@ -179,7 +179,7 @@ ai-kvm-2 (Linux, GPU #1)                homelab (Windows, GPU #2)
   keuze in de gateway (aanbevolen: gateway houdt de keuze, manager voert uit)?
 - Waar gaat `scheduler/manager.py` (maintenance/services-stopper) naartoe?
 - Naming: project-prefix `guardian-` en component-prefix
-  `llmprovider-gateway` / `llama-cpp-manager` bevestigd (operator 2026-08-26).
+  `llmprovider-gateway` / `caretaker-llama-cpp` bevestigd (operator 2026-08-26).
 
 ## Cross-references
 
