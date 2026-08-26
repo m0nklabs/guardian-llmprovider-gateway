@@ -118,6 +118,14 @@ When touching these areas, read the referenced detail docs:
 
 ## Active Handoff
 
+### DSH session `20260826_muse_catalog` (nieuw OpenRouter-model zichtbaar maken, last updated 2026-08-26)
+
+- Working directory: `/home/flip/llama_cpp_guardian`
+- **Vraag operator:** "muse net aangezet op openrouter, maar ik zie hem nog niet bij /v1/models". Antwoord + fix: **een op OpenRouter nieuw ingeschakeld model verschijnt NIET automatisch in Guardian's `/v1/models` — er moet een catalog-refresh lopen** (`POST /api/cloud/catalog/refresh`, elke geldige key). De openrouter-catalogus wordt in memory + disk (`data/cloud_catalog_cache.json`, `source = base_url|catalog_url`) gecached met 1-uurs TTL; de cache stond op 24-aug en miste het model.
+- **Uitgevoerd (live):** refresh → openrouter 22 modellen (was 21), `/v1/models` toont nu `openrouter/meta/muse-spark-1.2-contributor` (dit is het model dat de operator aanzette; de andere muse-varianten `muse-glimmer-30b`/`muse-spark-1.2`/`muse-spark-1.1` staan wél in OpenRouter's volledige catalogus maar NIET in `/models/user` van deze key). Entry heeft reasoning-metadata: `supported_efforts [xhigh,high,medium,low,minimal]`, default `medium`, `mandatory: true`. `nvidia/meta/muse-glimmer-30b` stond al in de NVIDIA-allowlist en is nu ook zichtbaar.
+- **Tweede cache-laag (NIEUW inzicht, reverse-engineered):** naast de catalog-cache heeft `ProviderRegistry` een APARTE in-memory context-catalogus (`_context_catalogs`, `CONTEXT_CATALOG_TTL_SECONDS = 3600`, eigen fetch van `base_url + catalog_url` die alleen `context_length`/`max_input_tokens` extraheert). Een nieuw model kan dus wél in `/v1/models` staan maar nog de `131072`-fallback tonen (muse adverteert upstream 1.048.576) — de context-catalogus pakt dat pas op bij zijn eigen TTL-expiry of een restart. Er is GEEN admin-endpoint om de context-catalogus apart te forceren. Geen bug, geen restart nodig.
+- **Terzijde (observatie, geen actie):** NVIDIA's live `/v1/models` is geslonken van 102 naar 83 modellen; 15 van de 40 `catalog_allowlist`-ids worden niet meer geadverteerd (o.a. `meta/llama-3.1-70b-instruct`, `meta/llama-3.1-8b-instruct`, `meta/llama-3.2-1b/3b-instruct`, `meta/llama-3.3-70b-instruct`, `nvidia/llama-3.1-nemotron-nano-8b-v1`, `nvidia/nemotron-mini-4b-instruct`, `nvidia/nv-embed-v1`, `thinkingmachines/inkling`). De allowlist kan met `scripts/sync_nvidia_free_models.js` worden opgeschoond zodra de operator dat wil.
+
 ### DSH session `20260826_raw_capture` (RAW capture + Keanu replay, last updated 2026-08-26)
 
 - Working directory: `/home/flip/llama_cpp_guardian`
