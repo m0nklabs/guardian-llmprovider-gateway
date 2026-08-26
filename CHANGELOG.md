@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Fixed
+- Prevented cloud streaming requests from returning HTTP 500 when capture is
+  enabled. The cloud response assembler is now wired correctly:
+  `StreamResponseAssembler()` (no kwargs) + `add_sse_line(raw_line)` on both
+  the pass-through and Anthropic-translation paths, with every assembler call
+  fail-open so capture can never break a client stream. Assembled cloud
+  response content and tool calls are captured again (they were temporarily
+  omitted after the initial 500 hotfix). Also fixed stream finalization's
+  closure state handling (`nonlocal _cloud_stream_cancelled`). Regression
+  coverage is in `tests/unit/test_cloud_forwarding.py`.
+- Pre-restart gate gained a cross-module call-site signature check (3b) that
+  resolves imported callees across all `app/**/*.py` and flags unexpected
+  kwargs, missing required params, and calls to nonexistent methods — it
+  catches the `StreamResponseAssembler(protocol=...)`/`.feed()` drift that
+  caused the 500 before it can ship again.
+
 ### Added
 - Qwen3.6 speed benchmark suite `scripts/bench_qwen36_variants.py` +
   `data/bench-qwen36/results.json`: turbo4 KV cache is +11% gen speed

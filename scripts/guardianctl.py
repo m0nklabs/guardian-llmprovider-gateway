@@ -175,7 +175,10 @@ def cmd_files(args: argparse.Namespace) -> None:
     for f in files:
         size = f.stat().st_size
         if f.name.startswith("guardian_capture_current"):
-            ftype = "active (gzip)"
+            # The active WAL is stream-gzip since 2026-08-26; a non-gz
+            # "current" file is a legacy plain JSONL leftover (no longer
+            # written or read by the pipeline — export ignores it).
+            ftype = "active (gzip)" if f.suffix == ".gz" else "legacy (plain)"
         elif f.suffix == ".sha256":
             ftype = "checksum"
         else:

@@ -21,7 +21,6 @@ from fastapi import HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
 from app.proxy.providers import CloudProvider, ProviderRegistry
-from app.capture.config import PROTOCOL_ANTHROPIC, PROTOCOL_OPENAI
 from app.capture.schema import BuildContext
 from app.capture.policy import PolicyResult
 from app.capture.stream_assembler import StreamResponseAssembler
@@ -624,11 +623,14 @@ async def forward_to_cloud_provider(
     usage_totals = {"prompt_tokens": 0, "completion_tokens": 0}
 
     # ── Capture: streaming assembler for cloud route ──
+    # Assembled via StreamResponseAssembler().add_sse_line() (raw SSE lines),
+    # matching the local paths in gateway/routing.py and local_inference/ollama.py.
+    # Every assembler call is fail-open: capture must never break the stream
+    # (this path returned HTTP 500 on 2026-08-26 when the assembler was called
+    # with a wrong API — pinned by scripts/pre_restart_check.py call-site check).
     _cloud_assembler: Optional[StreamResponseAssembler] = None
     if capture_ctx is not None:
-        _cloud_assembler = StreamResponseAssembler(
-            protocol=PROTOCOL_ANTHROPIC if needs_translation else PROTOCOL_OPENAI,
-        )
+        _cloud_assembler = StreamResponseAssembler()
 
     async def _read_sse_lines():
         """Yield raw SSE lines from the upstream response with watchdog."""
@@ -647,6 +649,7 @@ async def forward_to_cloud_provider(
     _cloud_stream_cancelled = False
 
     async def cloud_stream():
+        nonlocal _cloud_stream_cancelled
         try:
             if needs_translation:
                 # ── Anthropic streaming translation ───────────────
@@ -668,11 +671,16 @@ async def forward_to_cloud_provider(
                                             usage_totals["completion_tokens"],
                                             data.get("usage", {}).get("output_tokens", 0),
                                         )
-                                    # ── Capture: feed translated Anthropic event to assembler ──
-                                    if _cloud_assembler is not None:
-                                        _cloud_assembler.feed(data)
                         except (json.JSONDecodeError, TypeError):
                             pass
+                    # ── Capture: feed every translated data: line to assembler ──
+                    if _cloud_assembler is not None:
+                        for part in event_line.split("\n"):
+                            if part.startswith("data: "):
+                                try:
+                                    _cloud_assembler.add_sse_line(part)
+                                except Exception:
+                                    pass
                     encoded_line = event_line.encode("utf-8")
                     _update_live_request_usage(
                         request,
@@ -697,9 +705,6 @@ async def forward_to_cloud_provider(
                                         usage.get("completion_tokens", usage.get("output_tokens", 0))
                                     ),
                                 )
-                            # ── Capture: feed chunk to assembler ──
-                            if _cloud_assembler is not None:
-                                _cloud_assembler.feed(data)
                         except (TypeError, ValueError, json.JSONDecodeError):
                             pass
                     encoded_line = (line + "\n").encode("utf-8")
@@ -707,6 +712,12 @@ async def forward_to_cloud_provider(
                         request,
                         response_bytes_delta=len(encoded_line),
                     )
+                    # ── Capture: feed raw SSE line to assembler (fail-open) ──
+                    if _cloud_assembler is not None:
+                        try:
+                            _cloud_assembler.add_sse_line(line)
+                        except Exception:
+                            pass
                     yield encoded_line
         except (asyncio.CancelledError, _GuardianRequestCancelled, httpx.StreamClosed, httpx.ReadError, httpx.RemoteProtocolError):
             _cloud_stream_cancelled = True
@@ -739,9 +750,15 @@ async def forward_to_cloud_provider(
                     _cloud_stream_content = None
                     _cloud_stream_tool_calls = None
                     if _cloud_assembler is not None:
-                        _cloud_assembled = _cloud_assembler.assemble()
-                        _cloud_stream_content = _cloud_assembled.get("content")
-                        _cloud_stream_tool_calls = _cloud_assembled.get("tool_calls")
+                        try:
+                            _cloud_assembled = _cloud_assembler.assemble()
+                            _cloud_stream_content = _cloud_assembled.get("content")
+                            _cloud_stream_tool_calls = _cloud_assembled.get("tool_calls")
+                        except Exception:
+                            # Fail-open: a broken assembler must never turn a
+                            # successful upstream response into a 500.
+                            _cloud_stream_content = None
+                            _cloud_stream_tool_calls = None
                     _dispatch_capture_request_completed(
                         capture_ctx,
                         policy_result=capture_policy_result,
