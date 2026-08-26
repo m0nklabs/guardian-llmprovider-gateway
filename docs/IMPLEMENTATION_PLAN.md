@@ -26,7 +26,7 @@
 - **Goal state (operator 2026-08-26):**
   1. **Everything that serves models is a provider.** Local becomes one
      (managed) provider entry; the Windows PC (14700K) and cloud providers are
-     external entries. A per-GPU-host `caretaker-llama-cpp` daemon owns the
+     external entries. A per-GPU-host `caretaker-llamacpp` daemon owns the
      local llama-server lifecycle behind a thin control API.
   2. **One config file per provider** (`config/providers/<name>.settings.yaml`),
      local/cloud distinction visible in the name (`ai-kvm2-local`,
@@ -68,7 +68,7 @@ F3 Local as managed provider entry (LAN_GPU_BACKENDS step 1)
    │
 F4 Untangle registry/choice/discovery from manager.py (GATEWAY_MANAGER_SPLIT step 0)
    │
-F5 caretaker-llama-cpp daemon + local passive via contract (GATEWAY_MANAGER_SPLIT steps 1–2)
+F5 caretaker-llamacpp daemon + local passive via contract (GATEWAY_MANAGER_SPLIT steps 1–2)
    │
 F6 Windows/14700K provider + caretaker on Windows (LAN_GPU_BACKENDS step 2 + split step 3)
    │
@@ -87,7 +87,7 @@ longer reference the legacy identity; the repo is public.
   with this issue).
 - `m0nklabs/llama-cpp-guardian` = legacy/archive (description already marked;
   production still runs from `/home/flip/llama_cpp_guardian` until F7).
-- `m0nklabs/caretaker-llama-cpp` = empty repo for the manager (filled in F5/F6).
+- `m0nklabs/caretaker-llamacpp` = empty repo for the manager (filled in F5/F6).
 
 ### F0.2 Rename sweep (internal identity)
 Replace the legacy identity everywhere in this repo (code, config, deploy,
@@ -274,11 +274,11 @@ before push. Update `docs/FILE_REGISTER.md`.
 
 ---
 
-## F5 — caretaker-llama-cpp daemon; local becomes passive
+## F5 — caretaker-llamacpp daemon; local becomes passive
 (`GATEWAY_MANAGER_SPLIT` steps 1–2)
 
 **Goal:** the local llama-server lifecycle runs in a separate process
-(`caretaker-llama-cpp`) next to llama-server, behind a thin control API. The
+(`caretaker-llamacpp`) next to llama-server, behind a thin control API. The
 gateway no longer owns the local lifecycle; it talks to the manager via
 `management_url` + `POST /ensure`.
 
@@ -297,8 +297,8 @@ POST /unload            → unload (idle-unload with traffic input from gateway)
 
 ### In-repo first (monorepo daemon)
 - Per the plan: keep it in this repo as a second process + systemd unit
-  (`caretaker-llama-cpp.service`) first; splitting into the separate
-  `m0nklabs/caretaker-llama-cpp` repo is the **last** step, only once stable.
+  (`caretaker-llamacpp.service`) first; splitting into the separate
+  `m0nklabs/caretaker-llamacpp` repo is the **last** step, only once stable.
 - `local` becomes a passive provider entry:
   ```yaml
   providers:
@@ -317,7 +317,7 @@ when the gateway says the queue is empty; gateway restart does NOT drop the
 loaded model; manager restart → gateway recovers via `/ensure`; full suite +
 gate green.
 **Deployment impact:** new systemd unit + code change → **operator-run
-restart** of gateway; new `caretaker-llama-cpp.service` started by operator.
+restart** of gateway; new `caretaker-llamacpp.service` started by operator.
 
 ---
 
@@ -331,7 +331,7 @@ across the LAN (the operator's stated goal — not one split model).
 ### Windows side (operator)
 1. llama.cpp CUDA release on the Windows PC; per model a process
    (`llama-server.exe -m <model>.gguf --host 0.0.0.0 --port 11440/11441/... -ngl 99 --api-key <lan-key>`).
-2. caretaker-llama-cpp on Windows as a Windows service (NSSM/scheduled task),
+2. caretaker-llamacpp on Windows as a Windows service (NSSM/scheduled task),
    reading its **own** `models.local.settings.yaml` (14700K GGUF paths) — no
    copy of the Linux list.
 3. Firewall: open inbound ports; GGUF local on Windows (or SMB share).
@@ -371,7 +371,7 @@ on Windows = Windows-side ops.
 2. Stage new systemd unit `guardian-llmprovider-gateway.service`
    (`WorkingDirectory=/home/flip/guardian-llmprovider-gateway`,
    `ExecStart=<new-dir>/venv/bin/python3.14 -m app.main`, `Alias=llama-guardian.service`)
-   + `caretaker-llama-cpp.service` (from F5) + llama-server unit (unchanged).
+   + `caretaker-llamacpp.service` (from F5) + llama-server unit (unchanged).
 3. Stage renamed nginx confs (`deploy/nginx/guardian-*`) + TLS drop-in; keep
    the same public endpoints (`:11434` TLS-mux, `:11437` dashboard) so clients
    are unaffected.
@@ -403,7 +403,7 @@ bug (same rule as a stale handoff in AGENTS.md).
 ## Open questions to resolve before/during F5–F6
 
 1. Monorepo-with-two-daemons vs. split into the separate
-   `caretaker-llama-cpp` repo immediately (plan recommends in-repo first).
+   `caretaker-llamacpp` repo immediately (plan recommends in-repo first).
 2. Does the manager itself do `POST /pick` (move choice into manager) or does
    the gateway keep the choice and the manager only executes?
    (Recommended: gateway keeps the choice.)
