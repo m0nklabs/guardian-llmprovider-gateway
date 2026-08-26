@@ -8,7 +8,13 @@ def _expand_path(value: str) -> Path:
 
 
 APP_DIR = Path(__file__).resolve().parent
-REPO_ROOT = _expand_path(os.getenv("GUARDIAN_LLMPROVIDER_GATEWAY_ROOT", str(APP_DIR.parent)))
+# Backward-compat: accept the legacy LLAMA_CPP_GUARDIAN_* env vars until the
+# F7 cut-over (deployments/scripts may still set them).
+REPO_ROOT = _expand_path(
+    os.getenv("GUARDIAN_LLMPROVIDER_GATEWAY_ROOT")
+    or os.getenv("LLAMA_CPP_GUARDIAN_ROOT")
+    or str(APP_DIR.parent)
+)
 CONFIG_DIR = REPO_ROOT / "config"
 DATA_DIR = REPO_ROOT / "data"
 DOCS_DIR = REPO_ROOT / "docs"
@@ -110,7 +116,9 @@ GUARDIAN_APIKEYS_FILE = guardian_apikeys_file()
 CLOUD_MODELS_OVERRIDES_FILE = models_cloud_overrides_file()
 
 LLAMA_SLOTS_DIR = _expand_path(
-    os.getenv("GUARDIAN_LLMPROVIDER_GATEWAY_SLOTS_DIR", str(Path.home() / "llama_slots"))
+    os.getenv("GUARDIAN_LLMPROVIDER_GATEWAY_SLOTS_DIR")
+    or os.getenv("LLAMA_CPP_GUARDIAN_SLOTS_DIR")
+    or str(Path.home() / "llama_slots")
 )
 LLAMA_CPP_OFFICIAL_ROOT = _expand_path(
     os.getenv("LLAMA_CPP_OFFICIAL_ROOT", str(REPO_ROOT.parent / "llama_cpp_official"))
