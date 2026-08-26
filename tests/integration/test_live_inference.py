@@ -2,7 +2,7 @@
 Integration tests for Guardian — hits the LIVE proxy on localhost:11434.
 
 These tests require:
-  1. Guardian running (systemctl --user status llama-guardian)
+  1. Guardian running (systemctl --user status guardian-llmprovider-gateway)
   2. A valid API key in config/api_keys.json
   3. At least one model configured in config/models.yaml
 

@@ -6,7 +6,6 @@ forwarding headers/URLs, and handles edge cases like disabled providers,
 missing API keys, and environment-variable expansion.
 """
 
-import os
 import textwrap
 from pathlib import Path
 from unittest.mock import patch

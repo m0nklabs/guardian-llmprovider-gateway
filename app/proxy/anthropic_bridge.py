@@ -68,7 +68,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 import uuid
 import logging
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
@@ -191,7 +190,7 @@ def _convert_content_blocks_to_openai(
     text_parts: List[str] = []
     image_parts: List[Dict[str, Any]] = []
     tool_calls: List[Dict[str, Any]] = []
-    tool_results: List[Dict[str, Any]] = []
+    _tool_results: List[Dict[str, Any]] = []  # intentionally unused: tool results are built inline below
     result_messages: List[Dict[str, Any]] = []
 
     for block in blocks:

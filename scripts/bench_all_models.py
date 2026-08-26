@@ -34,7 +34,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -237,7 +236,7 @@ def write_doc(results: dict[str, Any], entries: list[dict[str, Any]]) -> None:
     lines.append(f"- **Date:** {results.get('finished_at', datetime.now(timezone.utc).isoformat())}")
     lines.append(f"- **Endpoint:** `{DEFAULT_BASE_URL}`")
     n_predict = next(iter(results['completed'].values())).get('n_predict') if results['completed'] else DEFAULT_N_PREDICT
-    lines.append(f"- **Prompt tokens (approx):** varies per model tokenizer")
+    lines.append("- **Prompt tokens (approx):** varies per model tokenizer")
     lines.append(f"- **Max tokens per run:** {n_predict}")
     lines.append(f"- **Runs per model:** {DEFAULT_RUNS} (median reported)")
     lines.append(f"- **Prompt:** `{PROMPT[:80]}...`")
@@ -394,7 +393,7 @@ def main() -> int:
     try:
         r = httpx.get(f"{args.base_url}/models", headers=headers, timeout=30.0)
         if r.status_code == 401:
-            print(f"ERROR: auth failed (401) — key invalid", file=sys.stderr)
+            print("ERROR: auth failed (401) — key invalid", file=sys.stderr)
             return 2
         r.raise_for_status()
     except Exception as exc:

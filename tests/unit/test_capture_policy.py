@@ -14,7 +14,8 @@ def _make_client_ref() -> str:
     """Compute client_ref — must be called after env var is set."""
     import os
     secret = os.environ.get("GUARDIAN_CAPTURE_CLIENT_REF_SECRET", "")
-    import hmac, hashlib
+    import hmac
+    import hashlib
     return hmac.new(
         secret.encode("utf-8"),
         TEST_FINGERPRINT.encode("utf-8"),

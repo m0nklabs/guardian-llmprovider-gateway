@@ -10,8 +10,6 @@ enter raw capture data."
 
 import gzip
 import json
-import os
-from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
@@ -24,14 +22,7 @@ from app.capture.redactor import (
     redact_reasoning_content,
     redact_tool_results,
     redact_tool_calls,
-    redact_image_blocks,
     scan_for_secrets,
-)
-from app.capture.schema import (
-    SCHEMA_NAME,
-    SCHEMA_VERSION,
-    compute_event_id,
-    compute_client_ref,
 )
 
 

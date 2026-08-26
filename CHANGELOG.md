@@ -30,6 +30,15 @@
   0.34,0.66 (see Changed below).
 
 ### Changed
+- Service/identity rename (F0 of the Guardian 2.0 plan, issue #1): the legacy
+  identity `llama-guardian` / `llama_cpp_guardian` is renamed to
+  `guardian-llmprovider-gateway` across deploy configs, scripts, docs, and the
+  `LLAMA_CPP_GUARDIAN_*` env vars (now `GUARDIAN_LLMPROVIDER_GATEWAY_*`).
+  Deploy files renamed: nginx confs, systemd drop-in directory, VS Code
+  workspace file. The TLS cert `deploy/tls/guardian-192.168.1.35.crt` keeps
+  its filename (cert identity, not service name). Production still runs from
+  the legacy dir until the F7 cut-over; the live systemd unit name
+  `llama-guardian.service` is intentionally unchanged for now.
 - `Qwen3.6-35B-A3B-HauhauCS-Aggressive-Turbo4` text context extended to
   393216 (1.5x native 262144) via YaRN (`--rope-scaling yarn --rope-scale 1.5
   --yarn-orig-ctx 262144`) + `--batch-size 1024 --ubatch-size 256` (the 1.6 GB

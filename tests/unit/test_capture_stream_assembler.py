@@ -1,7 +1,6 @@
 """Unit tests for the stream response assembler."""
 
 import json
-import pytest
 from app.capture.stream_assembler import StreamResponseAssembler
 
 

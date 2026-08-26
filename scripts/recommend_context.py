@@ -1,6 +1,5 @@
 import json
 import os
-import yaml
 
 import _paths  # noqa: F401  (adds repo root to sys.path)
 from _paths import DOCS_DIR

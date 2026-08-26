@@ -16,7 +16,7 @@ import logging
 import time
 from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 import httpx
 

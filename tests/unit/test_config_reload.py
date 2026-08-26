@@ -7,9 +7,8 @@ Covers:
 - admin_api.reload_config(): end-to-end orchestration via injected deps
 """
 
-import json
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 

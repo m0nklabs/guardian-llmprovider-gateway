@@ -9,10 +9,8 @@ import gzip
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 
-import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VENV_PY = REPO_ROOT / "venv" / "bin" / "python"
@@ -77,7 +75,7 @@ def _run(cmd: list, env: dict, root_override: Path | None = None) -> subprocess.
     full_env = dict(os.environ)
     full_env.update(env)
     if root_override is not None:
-        full_env["LLAMA_CPP_GUARDIAN_ROOT"] = str(root_override)
+        full_env["GUARDIAN_LLMPROVIDER_GATEWAY_ROOT"] = str(root_override)
     return subprocess.run(
         [str(VENV_PY), *cmd],
         capture_output=True,
@@ -105,7 +103,7 @@ class TestGuardianctlExport:
         assert "CHECKSUM MISMATCH" not in proc.stderr
         lines = out.read_text().strip().splitlines()
         assert len(lines) == 2
-        parsed = [json.loads(l) for l in lines]
+        parsed = [json.loads(line) for line in lines]
         assert [p["event_id"] for p in parsed] == ["ev-1", "ev-2"]
         # record_auth preserved in the replay (Keanu can re-verify)
         assert all("record_auth" in p for p in parsed)
@@ -152,7 +150,7 @@ class TestKeanuRedact:
         assert proc.returncode == 0, proc.stderr
         lines = out.read_text().strip().splitlines()
         assert len(lines) == 2
-        events = [json.loads(l) for l in lines]
+        events = [json.loads(line) for line in lines]
         received = events[0]
         completed = events[1]
 

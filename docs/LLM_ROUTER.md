@@ -251,7 +251,7 @@ routes.
 For a failover group containing both text-only and image-capable candidates,
 Guardian forwards image requests only to image-capable candidates. It does not
 start a local vision runtime merely because an image is present. Restart
-`llama-guardian.service` after changing this capability configuration.
+`guardian-llmprovider-gateway.service` after changing this capability configuration.
 
 ## Configuration
 
@@ -345,7 +345,7 @@ The provider registry loads its provider/model configuration from
 `model_prefixes`, restart Guardian — the registry is not re-read per request:
 
 ```bash
-sudo systemctl restart llama-guardian
+sudo systemctl restart guardian-llmprovider-gateway
 ```
 
 ## Usage

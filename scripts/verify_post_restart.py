@@ -66,12 +66,12 @@ def main() -> int:
     # 1. Service active
     try:
         out = subprocess.run(
-            ["systemctl", "is-active", "llama-guardian"],
+            ["systemctl", "is-active", "guardian-llmprovider-gateway"],
             capture_output=True, text=True, timeout=10,
         ).stdout.strip()
-        results.append(check("llama-guardian service active", out == "active", out))
+        results.append(check("guardian-llmprovider-gateway service active", out == "active", out))
     except Exception as e:  # noqa: BLE001
-        results.append(check("llama-guardian service active", False, str(e)))
+        results.append(check("guardian-llmprovider-gateway service active", False, str(e)))
 
     # 2. Auth store reads new guardian.keys.yaml
     try:
