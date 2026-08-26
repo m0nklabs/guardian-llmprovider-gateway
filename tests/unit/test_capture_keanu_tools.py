@@ -103,7 +103,7 @@ class TestGuardianctlExport:
         assert "CHECKSUM MISMATCH" not in proc.stderr
         lines = out.read_text().strip().splitlines()
         assert len(lines) == 2
-        parsed = [json.loads(l) for l in lines]
+        parsed = [json.loads(line) for line in lines]
         assert [p["event_id"] for p in parsed] == ["ev-1", "ev-2"]
         # record_auth preserved in the replay (Keanu can re-verify)
         assert all("record_auth" in p for p in parsed)
@@ -150,7 +150,7 @@ class TestKeanuRedact:
         assert proc.returncode == 0, proc.stderr
         lines = out.read_text().strip().splitlines()
         assert len(lines) == 2
-        events = [json.loads(l) for l in lines]
+        events = [json.loads(line) for line in lines]
         received = events[0]
         completed = events[1]
 

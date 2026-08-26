@@ -18,16 +18,16 @@ if _ENV_FILE.exists():
     _ENV_FILE.chmod(0o600)
 load_dotenv(_ENV_FILE)
 
-from app.proxy.server import (
+from app.proxy.server import (  # noqa: E402  (intentional late import: requires .env loaded first)
     app as proxy_app,
     state as proxy_state,
     get_gpu_metrics,
     get_model_size,
     inference_queue,
 )
-from app.proxy.auth import load_api_keys, generate_api_key, _token_fingerprint, verify_api_key
-from app.proxy.server import provider_registry, cloud_catalog, cloud_rate_limiter
-from app.scheduler.manager import SchedulerManager
+from app.proxy.auth import load_api_keys, generate_api_key, _token_fingerprint, verify_api_key  # noqa: E402
+from app.proxy.server import provider_registry, cloud_catalog, cloud_rate_limiter  # noqa: E402
+from app.scheduler.manager import SchedulerManager  # noqa: E402
 
 # Configure logging
 _LOG_FILE = pathlib.Path("guardian.log")
@@ -362,8 +362,10 @@ class GuardianService:
 
     def stop(self):
         logger.info("Stopping Guardian...")
-        if self.proxy_task: self.proxy_task.cancel()
-        if self.scheduler_task: self.scheduler_task.cancel()
+        if self.proxy_task:
+            self.proxy_task.cancel()
+        if self.scheduler_task:
+            self.scheduler_task.cancel()
 
 if __name__ == "__main__":
     service = GuardianService()

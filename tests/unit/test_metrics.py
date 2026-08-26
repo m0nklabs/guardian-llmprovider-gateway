@@ -23,7 +23,7 @@ from app.proxy.metrics import (
 
 class TestTrackRequest:
     def test_increments_request_count(self):
-        before = REQUEST_COUNT._metrics.copy()
+        _before = REQUEST_COUNT._metrics.copy()
         with track_request("/api/chat", "test-model"):
             pass
         body, _ = get_metrics_output()
@@ -46,7 +46,7 @@ class TestTrackRequest:
 
     def test_error_sets_status(self):
         try:
-            with track_request("/api/chat", "test-model") as tracker:
+            with track_request("/api/chat", "test-model") as _tracker:
                 raise ValueError("test error")
         except ValueError:
             pass

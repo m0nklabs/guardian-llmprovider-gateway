@@ -1068,7 +1068,7 @@ def test_cloud_attempts_for_images_skip_text_only_failover_candidates():
 
 def test_cloud_attempts_normalize_openrouter_model_alias():
     request = _routing_auth_request()
-    provider = CloudProvider(
+    _provider = CloudProvider(
         name="openrouter",
         base_url="https://openrouter.ai/api/v1",
         api_key="sk-or-test",
@@ -1638,13 +1638,13 @@ async def test_admin_load_passes_kv_type_runtime_override():
 
 # ── Cloud LLM router tests ─────────────────────────────────────────────
 
-from app.proxy.providers import CloudProvider
+from app.proxy.providers import CloudProvider  # noqa: E402  (deferred import: cloud-router tests only)
 
 
 @pytest.mark.asyncio
 async def test_resolve_or_reject_accepts_cloud_model():
     """Cloud-provider models should pass model resolution without 404."""
-    fake_provider = CloudProvider(
+    _fake_provider = CloudProvider(
         name="openrouter",
         base_url="https://openrouter.ai/api/v1",
         api_key="sk-or-test",

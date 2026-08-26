@@ -18,8 +18,8 @@ async def send_request(i, start_time):
                 "stream": False, # We want the full response time for this test
                 "options": {"num_ctx": 2048}
             }) as resp:
-                # Wait for body
-                body = await resp.aread()
+                # Wait for body (read the streamed response fully)
+                _body = await resp.aread()
                 dur = time.time() - req_start
                 
                 if resp.status_code == 200:
