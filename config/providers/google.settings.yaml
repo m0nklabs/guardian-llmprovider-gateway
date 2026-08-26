@@ -1,0 +1,7 @@
+# Google cloud provider (OpenAI-compatible endpoint).
+enabled: true
+base_url: https://generativelanguage.googleapis.com/v1beta/openai
+api_key: ${GOOGLE_API_KEY}
+timeout_seconds: 1200
+model_prefixes:
+- google/

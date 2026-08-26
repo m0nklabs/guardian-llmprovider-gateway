@@ -1,0 +1,7 @@
+# Poolside cloud provider.
+enabled: true
+base_url: https://inference.poolside.ai/v1
+api_key: ${POOLSIDE_API_KEY}
+timeout_seconds: 1200
+model_prefixes:
+- poolside/
