@@ -62,7 +62,7 @@ def _save_yaml_capture(capture_section: dict) -> None:
     data["capture"] = capture_section
     SETTINGS_YAML.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True))
     print(f"✅ Updated {SETTINGS_YAML.relative_to(REPO_ROOT)}")
-    print("⚠️  Requires server restart: sudo systemctl restart llama-guardian")
+    print("⚠️  Requires server restart: sudo systemctl restart guardian-llmprovider-gateway")
 
 
 def _api_request(method: str, endpoint: str, *, base_url: str = "http://127.0.0.1:11434", json_body: dict | None = None) -> dict:
@@ -81,7 +81,7 @@ def _api_request(method: str, endpoint: str, *, base_url: str = "http://127.0.0.
             return resp.json()
     except httpx.ConnectError:
         print(f"❌ Cannot connect to Guardian at {base_url}", file=sys.stderr)
-        print("   Is the server running? Check: sudo systemctl status llama-guardian", file=sys.stderr)
+        print("   Is the server running? Check: sudo systemctl status guardian-llmprovider-gateway", file=sys.stderr)
         raise SystemExit(1)
 
 

@@ -174,7 +174,7 @@ def main():
     # Check Guardian is running
     if not check_guardian_health():
         print("❌ Guardian proxy not running on port 11434!")
-        print("   Start with: sudo systemctl start llama-guardian llama-server")
+        print("   Start with: sudo systemctl start guardian-llmprovider-gateway llama-server")
         sys.exit(1)
 
     # Load model configs to verify they exist

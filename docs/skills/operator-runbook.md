@@ -7,20 +7,20 @@
 
 ```bash
 # Start / stop / restart the Guardian proxy (port :11434)
-sudo systemctl start llama-guardian
-sudo systemctl stop llama-guardian
-sudo systemctl restart llama-guardian
-sudo systemctl status llama-guardian
+sudo systemctl start guardian-llmprovider-gateway
+sudo systemctl stop guardian-llmprovider-gateway
+sudo systemctl restart guardian-llmprovider-gateway
+sudo systemctl status guardian-llmprovider-gateway
 
 # Verify it's listening
 curl -s http://127.0.0.1:11434/healthz
 
 # View recent logs (ignore healthz noise)
-journalctl -u llama-guardian.service --since "5 min ago" --no-pager | grep -v 'GET /healthz'
+journalctl -u guardian-llmprovider-gateway.service --since "5 min ago" --no-pager | grep -v 'GET /healthz'
 ```
 
 > **Hot reload (since 2026-08-19).** Code changes (`app/*.py`) still
-> require `sudo systemctl restart llama-guardian` — there is NO hot code
+> require `sudo systemctl restart guardian-llmprovider-gateway` — there is NO hot code
 > reload. But `settings.yaml` + `cloud_keys.json` changes (providers,
 > failover groups, credential links, capture cloud_capture/prefixes,
 > failover_health, cloud_retry) now apply WITHOUT restart via:
@@ -116,6 +116,6 @@ grep -E 'OPENROUTER_API_KEY|NVIDIA_API_KEY|POOLSIDE_API_KEY' .env
    All four gates must PASS before restarting — a startup-breaking error is
    not self-healable because the agent's own model traffic routes through
    Guardian (see AGENTS.md Critical rules).
-3. `sudo systemctl restart llama-guardian` — deploy
+3. `sudo systemctl restart guardian-llmprovider-gateway` — deploy
 4. `curl -s http://127.0.0.1:11434/healthz` — verify it's back up
-5. Watch logs: `journalctl -u llama-guardian.service -f | grep -v healthz`
+5. Watch logs: `journalctl -u guardian-llmprovider-gateway.service -f | grep -v healthz`
