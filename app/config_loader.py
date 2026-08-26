@@ -3,10 +3,11 @@
 Config-schema migration (2026-08-21, docs/CONFIG_SCHEMA.md): the monolith
 ``config/settings.yaml`` is split into domain files.  This module is the
 central read switch: it deep-merges the full ``global.settings.yaml`` document
-into the shared top-level config dict, then overlays the merged provider config
-(``providers.settings.yaml`` + ``providers.overrides.yaml``, overrides win) as
-the canonical ``providers`` section.  It loads once and exposes typed accessors
-for the individual settings that used to re-read YAML on every use.
+into the shared top-level config dict, then overlays the per-provider config
+(F2, docs/CONFIG_PROVIDER_FILES.md) — a directory scan of
+``config/providers/*.settings.yaml`` — as the canonical ``providers`` section.
+It loads once and exposes typed accessors for the individual settings that used
+to re-read YAML on every use.
 """
 
 from __future__ import annotations
@@ -19,8 +20,8 @@ import yaml
 
 from app.paths import (
     global_settings_file,
-    providers_defaults_file,
-    providers_overrides_file,
+    provider_names,
+    provider_settings_file,
 )
 from app.proxy.ratelimit import RateLimitConfig
 
@@ -57,25 +58,34 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
     return out
 
 
+def provider_settings_documents() -> Dict[str, Any]:
+    """Read every ``config/providers/*.settings.yaml`` into ``{name: doc}``.
+
+    F2 directory-scan (docs/CONFIG_PROVIDER_FILES.md): one document per
+    provider, replacing the old defaults/overrides merge.  Each document
+    carries the provider's own keys (enabled/base_url/api_key/… + a ``models:``
+    block).  A missing/unparseable file yields ``{}`` for that provider rather
+    than failing the whole scan.
+    """
+    documents: Dict[str, Any] = {}
+    for name in provider_names():
+        documents[name] = _load_yaml_map(provider_settings_file(name))
+    return documents
+
+
 def _merge_providers() -> Dict[str, Any]:
-    """Merge providers defaults + overrides (overrides win per provider)."""
-    defaults = _load_yaml_map(providers_defaults_file()).get("providers", {}) or {}
-    overrides = _load_yaml_map(providers_overrides_file()).get("providers", {}) or {}
-    if not isinstance(defaults, dict):
-        defaults = {}
-    if not isinstance(overrides, dict):
-        overrides = {}
-    return _deep_merge(defaults, overrides)
+    """Scan the ``providers/`` directory into ``{provider_name: document}``."""
+    return provider_settings_documents()
 
 
 def load_config() -> dict:
     """Load configuration from the config-schema files with sensible defaults.
 
     Merges, in order: built-in defaults → the full ``global.settings.yaml``
-    document → merged providers (from ``providers.settings.yaml`` +
-    ``providers.overrides.yaml``, overrides win).  This keeps shared
-    ``CONFIG.get("key")`` consumers like the inference queue on the configured
-    values while direct readers/writers of the domain files continue to work.
+    document → the per-provider directory scan (``providers/*.settings.yaml``,
+    one document per provider).  This keeps shared ``CONFIG.get("key")``
+    consumers like the inference queue on the configured values while direct
+    readers/writers of the domain files continue to work.
     """
     default_config: Dict[str, Any] = {
         "proxy": {
@@ -104,9 +114,9 @@ def load_config() -> dict:
     global_cfg = _load_yaml_map(CONFIG_PATH)
     default_config = _deep_merge(default_config, global_cfg)
 
-    # Provider section merged from settings + overrides is the canonical config
-    # (providers.py still reads its own files directly for cold reads; this
-    # keeps the shared CONFIG dict carrying the merged providers as well).
+    # Provider section from the per-provider directory scan is the canonical
+    # config (providers.py still reads its own files directly for cold reads;
+    # this keeps the shared CONFIG dict carrying the providers as well).
     default_config["providers"] = _merge_providers()
 
     return default_config
