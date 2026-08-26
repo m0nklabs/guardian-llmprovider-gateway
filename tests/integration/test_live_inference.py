@@ -168,7 +168,10 @@ def _guardian_reachable() -> bool:
             timeout=5.0,
         )
         return resp.status_code == 200
-    except (httpx.ConnectError, httpx.TimeoutException):
+    except (httpx.ConnectError, httpx.TimeoutException, SystemExit):
+        # SystemExit: no API key available (CI checkout has no
+        # config/guardian.keys.yaml, it is gitignored) — the tests cannot run
+        # without a key, so treat as unreachable and skip.
         return False
 
 
