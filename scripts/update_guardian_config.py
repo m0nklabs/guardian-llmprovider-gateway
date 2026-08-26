@@ -1,5 +1,4 @@
 import json
-import re
 import os
 
 import _paths  # noqa: F401  (adds repo root to sys.path)

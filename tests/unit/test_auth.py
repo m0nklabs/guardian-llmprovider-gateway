@@ -1,16 +1,14 @@
 """Tests for app.proxy.auth — Bearer token authentication."""
 
-import json
 import logging
 from pathlib import Path
 from stat import S_IMODE
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 from types import SimpleNamespace
 
 import pytest
 import yaml
 
-from tests.conftest import SAMPLE_API_KEYS
 
 
 # ── Helpers ────────────────────────────────────────────────────────────

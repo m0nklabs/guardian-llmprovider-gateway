@@ -17,16 +17,13 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
 import logging
 import os
-import time
-import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
-from app.capture.config import CaptureConfig, PROTOCOL_OPENAI, ROUTE_LOCAL, ROUTE_CLOUD
+from app.capture.config import CaptureConfig
 
 logger = logging.getLogger("Guardian.Capture.Schema")
 

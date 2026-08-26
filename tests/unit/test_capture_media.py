@@ -2,8 +2,6 @@
 
 import base64
 import hashlib
-import json
-from pathlib import Path
 
 from app.capture.media import extract_media_from_messages, is_media_reference
 

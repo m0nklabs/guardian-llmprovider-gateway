@@ -9,10 +9,8 @@ import gzip
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 
-import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 VENV_PY = REPO_ROOT / "venv" / "bin" / "python"

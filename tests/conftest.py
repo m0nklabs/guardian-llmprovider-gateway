@@ -1,7 +1,6 @@
 """Shared fixtures for Guardian tests."""
 
 import json
-import asyncio
 import pytest
 from pathlib import Path
 from typing import Dict

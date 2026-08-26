@@ -1,7 +1,6 @@
 import asyncio
 import httpx
 import time
-import sys
 
 # We will use 3 models that should fit together in 28GB VRAM
 # 1. qwen2.5:0.5b (~600MB)

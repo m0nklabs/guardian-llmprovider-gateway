@@ -13,11 +13,11 @@ import asyncio
 import json
 import time
 from contextlib import suppress
-from typing import Any, Dict, Optional
+from typing import Optional
 
 import httpx
 from fastapi import HTTPException, Request, Response
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 
 from app.engine.manager import ModelLoadError
 from app.capture.config import PROTOCOL_ANTHROPIC, PROTOCOL_OPENAI, ROUTE_LOCAL

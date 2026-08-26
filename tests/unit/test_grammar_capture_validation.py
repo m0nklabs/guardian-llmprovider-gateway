@@ -6,7 +6,6 @@ FEAT-6: capture events expose ``grammar_present``/``response_format_present``
 boolean flags and never leak raw grammar/schema content.
 """
 
-import pytest
 
 from app.capture import schema as capture_schema
 from app.capture import redactor as redactor_mod

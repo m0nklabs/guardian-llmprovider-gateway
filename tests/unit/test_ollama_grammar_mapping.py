@@ -6,7 +6,6 @@
 - the global ``grammar.enabled`` kill-switch disables the mapping.
 """
 
-import pytest
 
 from app.local_inference import ollama as _ollama
 

@@ -33,7 +33,7 @@ import hashlib
 import logging
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 from app.capture.redactor import _try_extract_image_dimensions
 

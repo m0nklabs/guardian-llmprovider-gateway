@@ -77,7 +77,7 @@ def generate_key(name, metadata=None, prefix=None):
     }
     
     save_keys(keys)
-    print(f"\n✅ Generated successfully!")
+    print("\n✅ Generated successfully!")
     print(f"Name: {name}")
     print(f"Prefix: {prefix}")
     print(f"Key:  {api_key}")

@@ -15,7 +15,6 @@ from app.proxy.usage import ApiUsageTracker
 from app.proxy.failover import FailoverCandidate, FailoverGroup, FailoverRegistry
 from app.proxy import server
 from app.gateway import streaming as _streaming
-from app.cloud_inference import routing as _cloud_routing
 from app.gateway import queue_helpers as _queue_helpers
 
 

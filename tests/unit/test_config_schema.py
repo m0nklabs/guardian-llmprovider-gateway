@@ -16,7 +16,6 @@ must preserve:
 import yaml
 from pathlib import Path
 
-import pytest
 
 from app import config_loader
 from app.proxy.providers import ProviderRegistry
