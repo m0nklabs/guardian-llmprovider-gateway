@@ -8,13 +8,23 @@ def _expand_path(value: str) -> Path:
 
 
 APP_DIR = Path(__file__).resolve().parent
-# Backward-compat: accept the legacy LLAMA_CPP_GUARDIAN_* env vars until the
-# F7 cut-over (deployments/scripts may still set them).
-REPO_ROOT = _expand_path(
-    os.getenv("GUARDIAN_LLMPROVIDER_GATEWAY_ROOT")
-    or os.getenv("LLAMA_CPP_GUARDIAN_ROOT")
-    or str(APP_DIR.parent)
-)
+# Legacy env vars are GONE (F0 rename, issue #1) — no fallback. If anything
+# still sets them, fail loudly so stale deployments surface the rename
+# instead of silently resolving wrong paths.
+_LEGACY_ENV_RENAMES = {
+    "LLAMA_CPP_GUARDIAN_ROOT": "GUARDIAN_LLMPROVIDER_GATEWAY_ROOT",
+    "LLAMA_CPP_GUARDIAN_SLOTS_DIR": "GUARDIAN_LLMPROVIDER_GATEWAY_SLOTS_DIR",
+}
+_legacy_set = [v for v in _LEGACY_ENV_RENAMES if os.getenv(v)]
+if _legacy_set:
+    _detail = "; ".join(
+        f"{old} -> use {_LEGACY_ENV_RENAMES[old]}" for old in _legacy_set
+    )
+    raise RuntimeError(
+        "Legacy LLAMA_CPP_GUARDIAN_* env vars are no longer supported "
+        f"(F0 rename, issue #1): {_detail}"
+    )
+REPO_ROOT = _expand_path(os.getenv("GUARDIAN_LLMPROVIDER_GATEWAY_ROOT", str(APP_DIR.parent)))
 CONFIG_DIR = REPO_ROOT / "config"
 DATA_DIR = REPO_ROOT / "data"
 DOCS_DIR = REPO_ROOT / "docs"
@@ -116,9 +126,7 @@ GUARDIAN_APIKEYS_FILE = guardian_apikeys_file()
 CLOUD_MODELS_OVERRIDES_FILE = models_cloud_overrides_file()
 
 LLAMA_SLOTS_DIR = _expand_path(
-    os.getenv("GUARDIAN_LLMPROVIDER_GATEWAY_SLOTS_DIR")
-    or os.getenv("LLAMA_CPP_GUARDIAN_SLOTS_DIR")
-    or str(Path.home() / "llama_slots")
+    os.getenv("GUARDIAN_LLMPROVIDER_GATEWAY_SLOTS_DIR", str(Path.home() / "llama_slots"))
 )
 LLAMA_CPP_OFFICIAL_ROOT = _expand_path(
     os.getenv("LLAMA_CPP_OFFICIAL_ROOT", str(REPO_ROOT.parent / "llama_cpp_official"))
