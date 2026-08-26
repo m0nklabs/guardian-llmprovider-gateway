@@ -240,6 +240,31 @@ def prepare_cloud_candidate_request(
 # ── Response content extraction ─────────────────────────────────────
 
 
+def extract_cloud_reasoning_content(
+    payload: Optional[Dict[str, Any]],
+) -> Optional[str]:
+    """Extract reasoning text from a non-streaming cloud response message.
+
+    OpenAI sends ``message.reasoning_content``; some OpenRouter-proxied
+    providers send ``message.reasoning`` instead. Returns None when absent.
+    """
+    if not isinstance(payload, dict):
+        return None
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    choice = choices[0]
+    msg = choice.get("message") if isinstance(choice, dict) else {}
+    if not isinstance(msg, dict):
+        return None
+    reasoning = msg.get("reasoning_content")
+    if not isinstance(reasoning, str) or not reasoning:
+        reasoning = msg.get("reasoning")
+    if isinstance(reasoning, str) and reasoning:
+        return reasoning
+    return None
+
+
 def extract_cloud_response_content(
     payload: Optional[Dict[str, Any]],
 ) -> Tuple[Optional[str], Optional[list]]:

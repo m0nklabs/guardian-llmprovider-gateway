@@ -1002,6 +1002,7 @@ _cloud_forwarding.init(
     resolve_cloud_attempts=_cloud_routing.resolve_cloud_attempts,
     prepare_cloud_candidate_request=_cloud_routing.prepare_cloud_candidate_request,
     extract_cloud_response_content=_cloud_routing.extract_cloud_response_content,
+    extract_cloud_reasoning_content=_cloud_routing.extract_cloud_reasoning_content,
     guardian_debug_headers=_cloud_inf.guardian_debug_headers,
     is_retryable_cloud_error=_cloud_inf.is_retryable_cloud_error,
     sanitize_proxied_response_headers=_cloud_inf.sanitize_proxied_response_headers,

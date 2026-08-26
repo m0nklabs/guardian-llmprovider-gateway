@@ -2376,6 +2376,23 @@ class TestExtractCloudResponseContent:
         content, tool_calls = server._extract_cloud_response_content(payload)
         assert content == "Thinking..."
 
+    def test_extracts_reasoning_content_separately(self):
+        payload = {"choices": [{"message": {"content": "Answer", "reasoning_content": "Let me think"}}]}
+        reasoning = server._cloud_routing.extract_cloud_reasoning_content(payload)
+        assert reasoning == "Let me think"
+
+    def test_extracts_openrouter_reasoning_field(self):
+        payload = {"choices": [{"message": {"content": "Answer", "reasoning": "1. think"}}]}
+        reasoning = server._cloud_routing.extract_cloud_reasoning_content(payload)
+        assert reasoning == "1. think"
+
+    def test_reasoning_extraction_returns_none_when_absent(self):
+        assert server._cloud_routing.extract_cloud_reasoning_content(None) is None
+        assert server._cloud_routing.extract_cloud_reasoning_content({}) is None
+        assert server._cloud_routing.extract_cloud_reasoning_content(
+            {"choices": [{"message": {"content": "Hi"}}]}
+        ) is None
+
     def test_extracts_openai_content_block_list(self):
         payload = {"choices": [{"message": {"content": [{"type": "text", "text": "Part 1"}, {"type": "text", "text": "Part 2"}]}}]}
         content, tool_calls = server._extract_cloud_response_content(payload)

@@ -32,6 +32,7 @@ logger = logging.getLogger("Guardian")
 _resolve_cloud_attempts = None
 _prepare_cloud_candidate_request = None
 _extract_cloud_response_content = None
+_extract_cloud_reasoning_content = None
 _guardian_debug_headers = None
 _is_retryable_cloud_error = None
 _sanitize_proxied_response_headers = None
@@ -67,6 +68,7 @@ def init(
     resolve_cloud_attempts,
     prepare_cloud_candidate_request,
     extract_cloud_response_content,
+    extract_cloud_reasoning_content,
     guardian_debug_headers,
     is_retryable_cloud_error,
     sanitize_proxied_response_headers,
@@ -112,9 +114,11 @@ def init(
     global cloud_rate_limiter, failover_health, _GuardianRequestCancelled
     global STREAM_HEARTBEAT_INTERVAL_S
     global _grammar_cloud_auto_convert_json, _grammar_cloud_strict_mode, _grammar_enabled
+    global _extract_cloud_reasoning_content
     _resolve_cloud_attempts = resolve_cloud_attempts
     _prepare_cloud_candidate_request = prepare_cloud_candidate_request
     _extract_cloud_response_content = extract_cloud_response_content
+    _extract_cloud_reasoning_content = extract_cloud_reasoning_content
     _guardian_debug_headers = guardian_debug_headers
     _is_retryable_cloud_error = is_retryable_cloud_error
     _sanitize_proxied_response_headers = sanitize_proxied_response_headers
@@ -560,11 +564,17 @@ async def forward_to_cloud_provider(
                 ) if capture_ctx is not None else None
             else:
                 _cloud_content, _cloud_tool_calls = _extract_cloud_response_content(payload)
+                # Reasoning apart doorgeven (raw capture), maar alleen als de
+                # fallback hem niet al in content heeft gestopt (geen content).
+                _cloud_reasoning = None
+                if _cloud_content:
+                    _cloud_reasoning = _extract_cloud_reasoning_content(payload)
                 _dispatch_capture_request_completed(
                     capture_ctx,
                     policy_result=capture_policy_result,
                     response_content=_cloud_content,
                     tool_calls=_cloud_tool_calls,
+                    reasoning_content=_cloud_reasoning,
                     prompt_tokens=payload.get("usage", {}).get("prompt_tokens", payload.get("usage", {}).get("input_tokens", 0)) if isinstance(payload, dict) else None,
                     completion_tokens=payload.get("usage", {}).get("completion_tokens", payload.get("usage", {}).get("output_tokens", 0)) if isinstance(payload, dict) else None,
                     http_status=resp.status_code,
@@ -754,16 +764,19 @@ async def forward_to_cloud_provider(
                             _cloud_assembled = _cloud_assembler.assemble()
                             _cloud_stream_content = _cloud_assembled.get("content")
                             _cloud_stream_tool_calls = _cloud_assembled.get("tool_calls")
+                            _cloud_stream_reasoning = _cloud_assembled.get("reasoning_content")
                         except Exception:
                             # Fail-open: a broken assembler must never turn a
                             # successful upstream response into a 500.
                             _cloud_stream_content = None
                             _cloud_stream_tool_calls = None
+                            _cloud_stream_reasoning = None
                     _dispatch_capture_request_completed(
                         capture_ctx,
                         policy_result=capture_policy_result,
                         response_content=_cloud_stream_content,
                         tool_calls=_cloud_stream_tool_calls,
+                        reasoning_content=_cloud_stream_reasoning,
                         prompt_tokens=usage_totals["prompt_tokens"],
                         completion_tokens=usage_totals["completion_tokens"],
                         http_status=resp.status_code,
