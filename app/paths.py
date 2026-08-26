@@ -45,7 +45,12 @@ CURRENT_MODEL_SIG_FILE = CONFIG_DIR / "current_model.sig"
 GLOBAL_SETTINGS_FILE = CONFIG_DIR / "global.settings.yaml"
 LEGACY_SETTINGS_FILE = CONFIG_DIR / "settings.yaml"
 
-# Cloud gateways: provider defaults + per-provider overrides.
+# Cloud gateways + local provider: one settings file per provider (F2,
+# docs/CONFIG_PROVIDER_FILES.md).  The old providers.settings.yaml +
+# providers.overrides.yaml + models.local.settings.yaml +
+# models.cloud.overrides.yaml split is replaced by a `providers/` directory
+# scan; these legacy constants are retained for backward-compat readers/tests
+# that still reference the old filenames.
 PROVIDERS_SETTINGS_FILE = CONFIG_DIR / "providers.settings.yaml"
 PROVIDERS_OVERRIDES_FILE = CONFIG_DIR / "providers.overrides.yaml"
 
@@ -53,6 +58,13 @@ PROVIDERS_OVERRIDES_FILE = CONFIG_DIR / "providers.overrides.yaml"
 # other model files are reserved — no runtime consumer yet, see CONFIG_SCHEMA).)
 MODELS_LOCAL_SETTINGS_FILE = CONFIG_DIR / "models.local.settings.yaml"
 MODELS_CLOUD_OVERRIDES_FILE = CONFIG_DIR / "models.cloud.overrides.yaml"
+
+# Per-provider config files (F2).  Each `config/providers/<name>.settings.yaml`
+# holds that provider's whole document: enabled/base_url/api_key/timeout/
+# model_prefixes (+ catalog_url/catalog_allowlist/local) and a `models:` block
+# with per-model overrides (and, for the local provider, the local registry +
+# aliases + guardian policy).
+PROVIDERS_DIR = CONFIG_DIR / "providers"
 
 # Guardian API keys (entity file).
 GUARDIAN_KEYS_FILE = CONFIG_DIR / "guardian.keys.yaml"
@@ -103,14 +115,65 @@ def providers_overrides_file() -> "Path":
     return resolve_config_file("providers.overrides.yaml")
 
 
+def provider_settings_file(name: str) -> "Path":
+    """Resolve ``config/providers/<name>.settings.yaml``."""
+    return PROVIDERS_DIR / f"{name}.settings.yaml"
+
+
+def provider_names() -> "list[str]":
+    """Return the sorted provider names from ``config/providers/*.settings.yaml``.
+
+    The provider name is the file basename without the ``.settings.yaml``
+    suffix.  The local provider carries a ``-local`` suffix in its name (and an
+    explicit ``local: true`` marker in its document); cloud providers do not.
+    """
+    if not PROVIDERS_DIR.is_dir():
+        return []
+    suffix = ".settings.yaml"
+    names = sorted(
+        p.name[: -len(suffix)]
+        for p in PROVIDERS_DIR.glob(f"*{suffix}")
+        if p.is_file()
+    )
+    return names
+
+
+def is_local_provider_name(name: str) -> bool:
+    """Return True when a provider name marks a local (managed) provider.
+
+    Local providers are identified by the ``-local`` name suffix (F2, docs/
+    CONFIG_PROVIDER_FILES.md) — e.g. ``ai-kvm2-local``, ``14700k-local``.  The
+    ``local: true`` marker in the document is read separately by the directory
+    scan; this helper is a cheap name-based fallback.
+    """
+    return name.endswith("-local")
+
+
 def models_cloud_overrides_file() -> "Path":
-    """Resolve the cloud-model overrides path (new name first, legacy alias)."""
+    """Resolve the cloud-model overrides path (new name first, legacy alias).
+
+    Deprecated since F2 (per-provider config): overrides now live in each
+    provider's ``models:`` block.  Retained only for backward-compat readers.
+    """
     return resolve_config_file("models.cloud.overrides.yaml", "cloud_models.yaml")
 
 
 def local_models_file() -> "Path":
-    """Resolve the local model registry path (new name first, legacy alias)."""
-    return resolve_config_file("models.local.settings.yaml", "local_models.yaml", "models.yaml")
+    """Resolve the local model registry path.
+
+    Since F2 (docs/CONFIG_PROVIDER_FILES.md) the local registry lives in the
+    local provider's file ``config/providers/ai-kvm2-local.settings.yaml``
+    (with its ``models:``/``aliases:``/``guardian:`` blocks).  This helper
+    keeps resolving there so ``app/engine/manager.py``, scripts and tests that
+    import it keep working unchanged.  Legacy single-file names are kept as a
+    final fallback for older installations still on the pre-F2 layout.
+    """
+    return resolve_config_file(
+        "providers/ai-kvm2-local.settings.yaml",
+        "models.local.settings.yaml",
+        "local_models.yaml",
+        "models.yaml",
+    )
 
 
 def guardian_apikeys_file() -> "Path":

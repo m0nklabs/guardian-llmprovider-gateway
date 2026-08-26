@@ -2,28 +2,22 @@
 
 Guardian traditionally proxies every inference request to a single local
 ``llama-server`` backend.  This module adds support for *cloud* providers —
-currently OpenRouter, NVIDIA, and Poolside — so Guardian can act as a unified
-LLM router.
+currently OpenRouter, NVIDIA, Poolside, Google, OpenAI and Groq — so Guardian
+can act as a unified LLM router.
 
-A provider is configured in ``config/settings.yaml`` under the top-level
-``providers`` key::
+Since F2 (docs/CONFIG_PROVIDER_FILES.md) each provider has one config file
+``config/providers/<name>.settings.yaml``::
 
-    providers:
-      openrouter:
-        enabled: true
-        base_url: https://openrouter.ai/api/v1
-        api_key: ${OPENROUTER_API_KEY}
-        timeout_seconds: 600
-        models:
-          - anthropic/claude-3.5-sonnet
-          - openai/gpt-4o
-      nvidia:
-        enabled: true
-        base_url: https://integrate.api.nvidia.com/v1
-        api_key: ${NVIDIA_API_KEY}
-        timeout_seconds: 600
-        models:
-          - nvidia/llama-3.1-nemotron-70b-instruct
+    # config/providers/openrouter.settings.yaml
+    enabled: true
+    base_url: https://openrouter.ai/api/v1
+    api_key: ${OPENROUTER_API_KEY}
+    timeout_seconds: 600
+    model_prefixes: [anthropic/, openai/, ...]
+    models:                      # per-model overrides (context_window, defaults)
+      gpt-4o:
+        max_tokens: 4096
+        temperature: 0.7
 
 When a requested model matches a cloud provider entry, Guardian forwards the
 request directly to that provider instead of routing through the local
@@ -47,10 +41,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 import yaml
 
+from app.config_loader import provider_settings_documents
 from app.paths import (
-    MODELS_CLOUD_OVERRIDES_FILE,
-    PROVIDERS_OVERRIDES_FILE,
     PROVIDERS_SETTINGS_FILE,
+    is_local_provider_name,
 )
 
 logger = logging.getLogger("Guardian.Providers")
@@ -77,27 +71,6 @@ def _expand_env(value: str) -> str:
         return os.environ.get(match.group("name"), "")
 
     return _ENV_VAR_PATTERN.sub(_replace, value)
-
-
-def _deep_merge_providers(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
-    """Merge per-provider overrides over defaults (overrides win, recursively).
-
-    Recurses into mapping values so a partial override (e.g. one
-    ``extra_headers`` entry) preserves the other defaults for that provider,
-    matching the same semantics ``config_loader._deep_merge`` applies.
-    """
-    if not isinstance(base, dict):
-        base = {}
-    if not isinstance(override, dict):
-        override = {}
-    merged = {k: (dict(v) if isinstance(v, dict) else v) for k, v in base.items()}
-    for provider_name, cfg in override.items():
-        current = merged.get(provider_name)
-        if isinstance(current, dict) and isinstance(cfg, dict):
-            merged[provider_name] = _deep_merge_providers(current, cfg)
-        else:
-            merged[provider_name] = (dict(cfg) if isinstance(cfg, dict) else cfg)
-    return merged
 
 
 @dataclass
@@ -138,9 +111,9 @@ class ProviderRegistry:
 
     def __init__(self, settings_path: Optional[Path] = None) -> None:
         # When no explicit settings_path is given (production default), read the
-        # config-schema files (providers.settings.yaml + providers.overrides.yaml
-        # + models.cloud.overrides.yaml).  An explicit path (tests/legacy) reads
-        # that single file, keeping its providers + context_overrides keys.
+        # per-provider files in config/providers/ (F2 directory scan, excluding
+        # the local provider).  An explicit path (tests/legacy) reads that single
+        # file, keeping its providers + context_overrides keys.
         self._explicit_settings = settings_path is not None
         if settings_path is None:
             settings_path = PROVIDERS_SETTINGS_FILE
@@ -160,7 +133,7 @@ class ProviderRegistry:
     # ── Loading ──────────────────────────────────────────────────────
 
     def reload(self) -> None:
-        """Re-read provider configuration from the config-schema files."""
+        """Re-read provider configuration from the providers/ directory."""
         self._providers.clear()
         self._model_to_provider.clear()
         self._prefix_to_provider.clear()
@@ -182,7 +155,14 @@ class ProviderRegistry:
             enabled = bool(cfg.get("enabled", True))
             base_url = str(cfg.get("base_url", "")).rstrip("/")
             api_key = _expand_env(str(cfg.get("api_key", "")))
-            models = [str(m) for m in (cfg.get("models") or []) if m]
+            # `models` may be a LIST of model names (legacy single-file / older
+            # cloud config) or a DICT of per-model overrides (F2 per-provider
+            # files).  Only a list registers explicit model→provider mappings;
+            # a dict is the provider's per-model override block (its
+            # context_window overrides are already surfaced via
+            # ``_context_overrides``) and does not list served models.
+            raw_models = cfg.get("models") or []
+            models = [str(m) for m in raw_models if m] if isinstance(raw_models, list) else []
             # Namespace prefixes (e.g. ``nvidia/``) let Guardian recognise a
             # cloud model by its raw upstream name without an explicit listing.
             # A trailing ``/`` is enforced so prefixes match whole namespace
@@ -268,10 +248,13 @@ class ProviderRegistry:
         """Read the complete config document.
 
         With an explicit ``settings_path`` (tests/legacy single file) this reads
-        that file directly.  Otherwise (production default) it merges
-        ``providers.settings.yaml`` + ``providers.overrides.yaml`` (overrides
-        win) for ``providers``, and derives ``context_overrides`` from
-        ``models.cloud.overrides.yaml`` (the ``context_window`` entries).
+        that file directly, keeping its ``providers`` + ``context_overrides``
+        keys.  Otherwise (production default) it scans the ``providers/``
+        directory (F2, docs/CONFIG_PROVIDER_FILES.md): one document per
+        provider; local providers (``*-local`` name / ``local: true``) are
+        excluded from the *cloud* registry; ``context_overrides`` is derived
+        from the ``context_window`` entries in the cloud providers' ``models:``
+        blocks (formerly ``models.cloud.overrides.yaml``).
         """
         if self._explicit_settings:
             try:
@@ -286,37 +269,33 @@ class ProviderRegistry:
                 )
                 return {}
 
-        # Production default: merged provider config.
+        # Production default: per-provider directory scan.
         try:
-            default_providers: Dict[str, Any] = {}
-            if PROVIDERS_SETTINGS_FILE.exists():
-                with open(PROVIDERS_SETTINGS_FILE, "r", encoding="utf-8") as f:
-                    raw = yaml.safe_load(f) or {}
-                default_providers = raw.get("providers", {}) if isinstance(raw, dict) else {}
-
-            override_providers: Dict[str, Any] = {}
-            if PROVIDERS_OVERRIDES_FILE.exists():
-                with open(PROVIDERS_OVERRIDES_FILE, "r", encoding="utf-8") as f:
-                    raw = yaml.safe_load(f) or {}
-                override_providers = raw.get("providers", {}) if isinstance(raw, dict) else {}
-
-            merged = _deep_merge_providers(default_providers, override_providers)
-
-            # context_overrides: context_window entries from models.cloud.overrides.yaml
+            documents = provider_settings_documents()
+            providers: Dict[str, Any] = {}
             context_overrides: Dict[str, int] = {}
-            if MODELS_CLOUD_OVERRIDES_FILE.exists():
-                with open(MODELS_CLOUD_OVERRIDES_FILE, "r", encoding="utf-8") as f:
-                    raw = yaml.safe_load(f) or {}
-                if isinstance(raw, dict):
-                    for model, entry in raw.items():
+            for name, doc in documents.items():
+                if not isinstance(doc, dict):
+                    continue
+                # The local provider is managed by engine/manager.py, not this
+                # cloud registry; it carries `local: true` and/or a `-local`
+                # name suffix and must not be treated as a cloud gateway.
+                if is_local_provider_name(name) or bool(doc.get("local")):
+                    continue
+                providers[name] = doc
+                # context_window overrides from the provider's models: block
+                # (formerly models.cloud.overrides.yaml).
+                model_overrides = doc.get("models")
+                if isinstance(model_overrides, dict):
+                    for model, entry in model_overrides.items():
                         if isinstance(entry, dict):
                             cw = entry.get("context_window")
                             if isinstance(cw, int) and not isinstance(cw, bool) and cw > 0:
                                 context_overrides[model] = cw
 
-            return {"providers": merged, "context_overrides": context_overrides}
+            return {"providers": providers, "context_overrides": context_overrides}
         except Exception as e:
-            logger.warning("Failed to load merged providers config: %s", e)
+            logger.warning("Failed to load per-provider config from providers/: %s", e)
             return {}
 
     @staticmethod

@@ -352,7 +352,7 @@ async def reload_config(client_id: str) -> Any:
         errors.append(f"settings.yaml: {exc}")
         not_reloaded.append("settings.yaml")
 
-    # 2. Provider registry (reads providers.settings.yaml + overrides itself)
+    # 2. Provider registry (re-reads the config/providers/ directory itself)
     try:
         _provider_registry.reload()
         reloaded.append("providers")
