@@ -104,6 +104,7 @@ When touching these areas, read the referenced detail docs:
 - **Client setup** → `@docs/CLIENT_INTEGRATION.md`
 - **GPU/hardware tuning** → `@docs/HARDWARE_TUNING.md`
 - **Deployment & operations** → `@docs/skills/operator-runbook.md`
+- **LAN GPU backends (PLAN 2026-08-26, niet gebouwd)** → `@docs/LAN_GPU_BACKENDS.md` — Windows-PC-GPU als extra model-server via een provider-entry (`base_url` LAN + `catalog_url: /models`); optie B = llama.cpp `--rpc` (haalbaar op 1 Gbit voor chat, ~5–15% overhead). Operator: "alleen plan vastleggen".
 
 ## References
 
