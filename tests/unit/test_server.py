@@ -1397,6 +1397,31 @@ async def test_ollama_show_reports_context_for_cloud_model():
 
 
 @pytest.mark.asyncio
+async def test_show_model_failover_address_stays_cloud_branch():
+    """A failover address must resolve through the cloud branch and never fall
+    into the local (else) branch. Regression pin: PR-Piet flagged that an
+    `if`-instead-of-`elif` made failover requests also hit the local resolver."""
+    failover_model = "failover/kimi-k3"
+
+    class Request:
+        async def json(self):
+            return {"model": failover_model}
+
+    with (
+        patch.object(server.failover_registry, "_groups", {"kimi-k3": FailoverGroup(name="kimi-k3")}),
+        patch.object(server._model_discovery, "resolve_cloud_attempts", return_value=([], "kimi-k3")) as resolve_mock,
+        patch.object(server.model_manager, "resolve_model", side_effect=AssertionError("local else-branch hit")) as resolve_local_mock,
+        patch.object(server._ctx_meta, "resolve_context_window", new=AsyncMock(return_value=1048576)),
+    ):
+        payload = await server.show_model_ollama(Request(), client_id="test-user")
+
+    resolve_mock.assert_called_once()
+    resolve_local_mock.assert_not_called()
+    assert payload["model"] == failover_model
+    assert payload["model_info"]["general.context_length"] == 1048576
+
+
+@pytest.mark.asyncio
 async def test_model_metadata_returns_cloud_entry_even_when_resolution_denied():
     """Cloud metadata is returned even when attempt resolution is denied
     (cloud_gateway_access=false): the discovery layer stays informative and
@@ -1829,6 +1854,41 @@ async def test_list_models_includes_cloud_models():
     assert "local-model" in ids
     assert "openrouter/openai/gpt-4o" in ids
     assert "openrouter/anthropic/claude-3.5-sonnet" in ids
+
+
+@pytest.mark.asyncio
+async def test_list_models_excludes_managed_provider_cloud_entries():
+    """A managed (local) provider must NOT surface as cloud entries in /v1/models.
+
+    F3 made managed providers is_configured=True; without an explicit guard they
+    would leak local models as `{local}/{model}` cloud entries here. Pin that the
+    cloud-entry loop skips managed providers."""
+    managed = CloudProvider(
+        name="ai-kvm2-local",
+        base_url="http://127.0.0.1:11440/v1",
+        api_key="",
+        models=["llama3.2-3b", "qwen3.8-27b"],
+        managed=True,
+    )
+    with (
+        patch.object(
+            server.provider_registry,
+            "get_enabled_providers",
+            return_value=[managed],
+        ),
+        patch.object(server.model_manager, "get_public_model_map", return_value={"local-model": "local-model"}),
+        patch.object(server._ctx_meta, "build_model_metadata_entry", return_value={"id": "local-model", "object": "model"}),
+    ):
+        result = await server.list_models(
+            request=SimpleNamespace(headers={}, state=SimpleNamespace(), url=SimpleNamespace(path="/v1/models"), method="GET"),
+            client_id="test-user",
+        )
+
+    ids = [m["id"] for m in result["data"]]
+    # The managed provider's local models must not appear as cloud entries.
+    assert "ai-kvm2-local/llama3.2-3b" not in ids
+    assert "ai-kvm2-local/qwen3.8-27b" not in ids
+    assert "local-model" in ids
 
 
 @pytest.mark.asyncio

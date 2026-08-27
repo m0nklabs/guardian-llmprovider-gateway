@@ -169,10 +169,13 @@ async def list_models(request: Request, client_id: str) -> Dict[str, Any]:
 
     # Append provider-global cloud models from the dynamic catalog
     # ({provider}/{brand}/{model}). Per-key gated on cloud_gateway_access.
+    # Managed (local) providers are excluded: they are served by Guardian's own
+    # lifecycle and must not surface as cloud entries here.
     if _key_can_access_cloud(request, client_id):
         try:
             for provider_name in [
-                p.name for p in _provider_registry.get_enabled_providers() if p.is_configured
+                p.name for p in _provider_registry.get_enabled_providers()
+                if p.is_configured and not p.managed
             ]:
                 for full_id in _cloud_entries_for_provider(provider_name):
                     models_list.append(await _build_cloud_entry(full_id, provider_name))
@@ -237,9 +240,9 @@ async def model_metadata(model_id: str, request: Request, client_id: str) -> Dic
         raise HTTPException(status_code=404, detail=f"Failover group '{group_name}' not found")
 
     # Cloud-provider models first (they may contain slashes like "openai/gpt-4o").
-    if (
-        _provider_registry.is_cloud_model(model_id)
-        or _provider_registry._provider_from_address(model_id) is not None
+    _addr = _provider_registry._provider_from_address(model_id)
+    if _provider_registry.is_cloud_model(model_id) or (
+        _addr is not None and not _addr.managed
     ):
         entry = _provider_registry.build_model_metadata_entry(model_id)
         if entry is not None:
@@ -286,7 +289,10 @@ async def show_model(request: Request, client_id: str) -> Dict[str, Any]:
         cloud_attempts, _ = resolve_cloud_attempts(model_name, request, client_id)
     elif (
         _provider_registry.is_cloud_model(model_name)
-        or _provider_registry._provider_from_address(model_name) is not None
+        or (
+            (_addr := _provider_registry._provider_from_address(model_name)) is not None
+            and not _addr.managed
+        )
     ):
         cloud_attempts, _ = resolve_cloud_attempts(model_name, request, client_id)
     else:
