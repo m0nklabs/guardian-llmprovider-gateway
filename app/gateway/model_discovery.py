@@ -284,10 +284,12 @@ async def show_model(request: Request, client_id: str) -> Dict[str, Any]:
         if _failover_registry.get_group(group_name) is None:
             raise HTTPException(status_code=404, detail=f"Failover group '{group_name}' not found")
         cloud_attempts, _ = resolve_cloud_attempts(model_name, request, client_id)
-    _addr = _provider_registry._provider_from_address(model_name)
-    if (
+    elif (
         _provider_registry.is_cloud_model(model_name)
-        or (_addr is not None and not _addr.managed)
+        or (
+            (_addr := _provider_registry._provider_from_address(model_name)) is not None
+            and not _addr.managed
+        )
     ):
         cloud_attempts, _ = resolve_cloud_attempts(model_name, request, client_id)
     else:

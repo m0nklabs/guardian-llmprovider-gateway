@@ -1397,6 +1397,31 @@ async def test_ollama_show_reports_context_for_cloud_model():
 
 
 @pytest.mark.asyncio
+async def test_show_model_failover_address_stays_cloud_branch():
+    """A failover address must resolve through the cloud branch and never fall
+    into the local (else) branch. Regression pin: PR-Piet flagged that an
+    `if`-instead-of-`elif` made failover requests also hit the local resolver."""
+    failover_model = "failover/kimi-k3"
+
+    class Request:
+        async def json(self):
+            return {"model": failover_model}
+
+    with (
+        patch.object(server.failover_registry, "_groups", {"kimi-k3": FailoverGroup(name="kimi-k3")}),
+        patch.object(server._model_discovery, "resolve_cloud_attempts", return_value=([], "kimi-k3")) as resolve_mock,
+        patch.object(server.model_manager, "resolve_model", side_effect=AssertionError("local else-branch hit")) as resolve_local_mock,
+        patch.object(server._ctx_meta, "resolve_context_window", new=AsyncMock(return_value=1048576)),
+    ):
+        payload = await server.show_model_ollama(Request(), client_id="test-user")
+
+    resolve_mock.assert_called_once()
+    resolve_local_mock.assert_not_called()
+    assert payload["model"] == failover_model
+    assert payload["model_info"]["general.context_length"] == 1048576
+
+
+@pytest.mark.asyncio
 async def test_model_metadata_returns_cloud_entry_even_when_resolution_denied():
     """Cloud metadata is returned even when attempt resolution is denied
     (cloud_gateway_access=false): the discovery layer stays informative and
