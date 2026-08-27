@@ -123,10 +123,16 @@ def is_cloud_or_guardian_route(model_name: str) -> bool:
     configured provider (e.g. ``openrouter/deepseek/...``,
     ``google/google/gemini-...``) or it matches a configured cloud model by
     name/prefix.
+
+    Managed (local) providers resolve as ``{local-provider}/{model}`` addresses
+    too, but they are NOT cloud-routed — they stay on the local path.
     """
     if _provider_registry.is_cloud_model(model_name):
         return True
-    return _provider_registry._provider_from_address(model_name) is not None
+    provider = _provider_registry._provider_from_address(model_name)
+    if provider is None or provider.managed:
+        return False
+    return True
 
 
 def cloud_provider_unavailable_error(provider: CloudProvider) -> HTTPException:

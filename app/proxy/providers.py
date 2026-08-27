@@ -94,10 +94,23 @@ class CloudProvider:
     # every model regardless of what the free token can actually reach. When
     # non-empty, only these ids are surfaced in discovery and routed.
     catalog_allowlist: Optional[List[str]] = None
+    # Managed providers are served by Guardian's own lifecycle (engine/manager):
+    # the local llama-server is the only ``managed: true`` entry (F3, docs/
+    # LAN_GPU_BACKENDS.md §Unificatie). Everything else (Windows, cloud) is a
+    # passive endpoint Guardian only sends traffic to. A managed provider is
+    # recognised as *local*, never cloud-routed, and is keyless (no upstream
+    # api_key; its catalog comes from llama-server /v1/models).
+    managed: bool = False
 
     @property
     def is_configured(self) -> bool:
-        """True when the provider has a non-empty API key."""
+        """True when the provider has a non-empty API key.
+
+        Managed (local) providers are keyless by design and are always
+        considered configured so their catalog is fetched.
+        """
+        if self.managed:
+            return True
         return bool(self.api_key and self.api_key.strip())
 
 
@@ -188,6 +201,15 @@ class ProviderRegistry:
             else:
                 allowlist = None
 
+            # Managed: Guardian owns the lifecycle. A local provider is
+            # recognised by `local: true` and/or the `-local` name suffix
+            # (F2), and/or an explicit `managed: true` (F3 generalisation).
+            managed = bool(
+                cfg.get("managed")
+                or cfg.get("local")
+                or is_local_provider_name(provider_name)
+            )
+
             provider = CloudProvider(
                 name=provider_name,
                 base_url=base_url,
@@ -198,6 +220,7 @@ class ProviderRegistry:
                 extra_headers=extra_headers,
                 catalog_url=catalog_url,
                 catalog_allowlist=allowlist,
+                managed=managed,
             )
             self._providers[provider_name] = provider
 
@@ -277,11 +300,11 @@ class ProviderRegistry:
             for name, doc in documents.items():
                 if not isinstance(doc, dict):
                     continue
-                # The local provider is managed by engine/manager.py, not this
-                # cloud registry; it carries `local: true` and/or a `-local`
-                # name suffix and must not be treated as a cloud gateway.
-                if is_local_provider_name(name) or bool(doc.get("local")):
-                    continue
+                # The local provider (F3) is a *managed* entry: it stays in the
+                # registry so `{local-provider}/...` addresses resolve here, but
+                # it is flagged managed (``local: true`` / ``-local`` suffix) and
+                # is never cloud-routed. Its context overrides are read from its
+                # models: block like any other provider.
                 providers[name] = doc
                 # context_window overrides from the provider's models: block
                 # (formerly models.cloud.overrides.yaml).
@@ -357,8 +380,14 @@ class ProviderRegistry:
         recognition is purely name-based and independent of the requesting
         client's API key — Guardian classifies cloud vs. local before any
         per-key credential lookup happens.
+
+        Managed (local) providers are never cloud models — they are served by
+        Guardian's own lifecycle and stay on the local path.
         """
-        return self.get_provider_for_model(model_name) is not None
+        provider = self.get_provider_for_model(model_name)
+        if provider is None or provider.managed:
+            return False
+        return True
 
     def get_provider_for_model(self, model_name: str) -> Optional[CloudProvider]:
         """Return the :class:`CloudProvider` that serves *model_name*.
@@ -413,11 +442,16 @@ class ProviderRegistry:
         return None
 
     def get_all_cloud_models(self) -> List[str]:
-        """Return global cloud models backed by configured provider keys."""
+        """Return global cloud models backed by configured provider keys.
+
+        Managed (local) providers are excluded: they are keyless yet
+        ``is_configured`` (catalog from llama-server), so without this guard
+        their local model names would be misreported as cloud here.
+        """
         return [
             model_name
             for model_name, provider in self._model_to_provider.items()
-            if provider.is_configured
+            if provider.is_configured and not provider.managed
         ]
 
     def get_enabled_providers(self) -> List[CloudProvider]:
@@ -561,6 +595,12 @@ class ProviderRegistry:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {provider.api_key}",
         }
+        if getattr(provider, "managed", False):
+            # Managed (local) providers are keyless: llama-server serves
+            # /v1/models without an upstream api_key, so no Authorization
+            # header is sent. A mock lacking `.managed` (SimpleNamespace) is
+            # treated as non-managed for backward compatibility.
+            headers.pop("Authorization", None)
         # OpenRouter benefits from attribution headers for ranking/leaderboards.
         if provider.name == "openrouter":
             # Per-app attribution: show the actual app name (e.g. "goose")
