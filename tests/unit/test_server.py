@@ -1090,7 +1090,14 @@ def test_cloud_attempts_normalize_openrouter_model_alias():
 def test_cloud_attempts_resolve_google_full_address():
     request = _routing_auth_request()
 
-    with patch.object(server._cloud_routing, "_provider_registry", _routing_configured_registry()):
+    with (
+        patch.object(server._cloud_routing, "_provider_registry", _routing_configured_registry()),
+        # Hermetic cold-start: the module-level catalog instance may carry a
+        # warm google entry loaded from the local disk cache
+        # (data/cloud_catalog_cache.json). The test pins the cold-start
+        # fallback, so force an empty in-memory catalog.
+        patch.object(server.cloud_catalog, "_catalogs", {}),
+    ):
         attempts, failover_group = server._resolve_cloud_attempts(
             "google/google/gemini-2.5-flash",
             request,
@@ -1587,10 +1594,12 @@ async def test_stop_stale_guardian_listener_terminates_orphan():
 
     with (
         patch.object(server, "_wait_for_proxy_listener_release", return_value=True),
-        patch.object(server.os, "kill") as kill_mock,
+        # Phase 5 extraction moved the kill logic to app/proxy/process.py; the
+        # os/signal modules live there, not on the server shell.
+        patch.object(server._process.os, "kill") as kill_mock,
     ):
         assert await server._stop_stale_guardian_listener(listener) is True
-        kill_mock.assert_called_once_with(4242, server.signal.SIGTERM)
+        kill_mock.assert_called_once_with(4242, server._process.signal.SIGTERM)
 
 
 @pytest.mark.asyncio

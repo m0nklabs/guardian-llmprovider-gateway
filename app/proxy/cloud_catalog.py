@@ -21,9 +21,11 @@ For every *enabled and configured* provider this module:
   reviewer #2) and keeps the last successful list on a failed refresh (like
   today's google fallback).
 
-``config/cloud_models.yaml`` supplies per-model **overrides** (context window,
-thinking capability, tool support, …) layered *above* the default template —
-it is not a hand-maintained catalog, only exceptions from defaults.
+The per-provider ``models:`` blocks in ``config/providers/*.settings.yaml``
+supply per-model **overrides** (context window, thinking capability, tool
+support, model sampling defaults, …) layered *above* the default template —
+they are not a hand-maintained catalog, only exceptions from defaults.  (Before
+F2 these lived in ``config/cloud_models.yaml`` / ``models.cloud.overrides.yaml``.)
 
 This module is cheap to reconstruct and hot-reload aware: call
 :meth:`CloudModelCatalog.reload` after a ``settings.yaml`` edit to pick up
@@ -41,7 +43,8 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 import yaml
 
-from app.paths import CLOUD_CATALOG_CACHE_FILE, CLOUD_MODELS_OVERRIDES_FILE
+from app.config_loader import provider_settings_documents
+from app.paths import CLOUD_CATALOG_CACHE_FILE, is_local_provider_name
 from app.proxy.providers import CloudProvider, ProviderRegistry
 
 logger = logging.getLogger("Guardian.CloudCatalog")
@@ -70,7 +73,11 @@ class CloudModelCatalog:
         self._registry = provider_registry
         self._ttl_seconds = float(ttl_seconds)
         self._cache_file = cache_file or CLOUD_CATALOG_CACHE_FILE
-        self._overrides_file = overrides_file or CLOUD_MODELS_OVERRIDES_FILE
+        # An explicit ``overrides_file`` (tests/legacy single-file) loads that
+        # flat map directly.  In production (None) the overrides come from the
+        # per-provider ``models:`` blocks in config/providers/ (F2).
+        self._explicit_overrides_file = overrides_file is not None
+        self._overrides_file = overrides_file
 
         # provider name -> {"fetched_at": float, "models": {normalized_id: upstream_id}}
         self._catalogs: Dict[str, Dict[str, Any]] = {}
@@ -83,6 +90,35 @@ class CloudModelCatalog:
     # ── Overrides / disk cache ────────────────────────────────────────
 
     def _load_overrides(self) -> None:
+        """Load per-model overrides into ``self._overrides``.
+
+        Production (no explicit ``overrides_file``): merge the ``models:``
+        blocks of every *cloud* provider file in ``config/providers/`` into a
+        flat ``{model_id: overrides}`` map (F2).  Local providers (``*-local``
+        name / ``local: true``) are skipped — their ``models:`` block is the
+        local GGUF registry, not cloud overrides.
+
+        Tests/legacy (explicit ``overrides_file``): load that single flat file
+        (the old ``models.cloud.overrides.yaml`` shape).
+        """
+        if not self._explicit_overrides_file:
+            merged: Dict[str, Any] = {}
+            try:
+                for name, doc in provider_settings_documents().items():
+                    if not isinstance(doc, dict):
+                        continue
+                    if is_local_provider_name(name) or bool(doc.get("local")):
+                        continue
+                    model_overrides = doc.get("models")
+                    if isinstance(model_overrides, dict):
+                        for model, entry in model_overrides.items():
+                            if isinstance(entry, dict):
+                                merged[str(model)] = dict(entry)
+                self._overrides = merged
+            except Exception as e:
+                logger.warning("⚠️  Failed to load per-provider overrides: %s", e)
+                self._overrides = {}
+            return
         try:
             if not self._overrides_file.exists():
                 self._overrides = {}
@@ -90,7 +126,7 @@ class CloudModelCatalog:
             raw = yaml.safe_load(self._overrides_file.read_text(encoding="utf-8")) or {}
             self._overrides = raw if isinstance(raw, dict) else {}
         except Exception as e:
-            logger.warning("⚠️  Failed to load cloud_models.yaml overrides: %s", e)
+            logger.warning("⚠️  Failed to load cloud overrides file: %s", e)
             self._overrides = {}
 
     def _load_disk_cache(self) -> None:
