@@ -141,8 +141,15 @@ def test_provider_registry_excludes_local_provider(monkeypatch, tmp_path: Path):
     monkeypatch.setattr("app.paths.PROVIDERS_DIR", tmp_path / "providers")
 
     reg = ProviderRegistry()
-    assert "ai-kvm2-local" not in reg._providers
-    assert "llama3.2-3b" not in reg._model_to_provider
+    # F3: the local provider is a managed entry in the registry — present,
+    # flagged managed, keyless-configured, and NEVER a cloud gateway.
+    assert "ai-kvm2-local" in reg._providers
+    local_provider = reg._providers["ai-kvm2-local"]
+    assert local_provider.managed is True
+    assert local_provider.is_configured is True
+    assert not reg.is_cloud_model("ai-kvm2-local/llama3.2-3b")
+    assert not reg.is_cloud_model("llama3.2-3b")
+    assert reg._provider_from_address("ai-kvm2-local/llama3.2-3b") is local_provider
 
 
 def test_path_aliases_resolve_schema_names(monkeypatch, tmp_path: Path):

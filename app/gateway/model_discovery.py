@@ -237,9 +237,9 @@ async def model_metadata(model_id: str, request: Request, client_id: str) -> Dic
         raise HTTPException(status_code=404, detail=f"Failover group '{group_name}' not found")
 
     # Cloud-provider models first (they may contain slashes like "openai/gpt-4o").
-    if (
-        _provider_registry.is_cloud_model(model_id)
-        or _provider_registry._provider_from_address(model_id) is not None
+    _addr = _provider_registry._provider_from_address(model_id)
+    if _provider_registry.is_cloud_model(model_id) or (
+        _addr is not None and not _addr.managed
     ):
         entry = _provider_registry.build_model_metadata_entry(model_id)
         if entry is not None:
@@ -284,9 +284,10 @@ async def show_model(request: Request, client_id: str) -> Dict[str, Any]:
         if _failover_registry.get_group(group_name) is None:
             raise HTTPException(status_code=404, detail=f"Failover group '{group_name}' not found")
         cloud_attempts, _ = resolve_cloud_attempts(model_name, request, client_id)
-    elif (
+    _addr = _provider_registry._provider_from_address(model_name)
+    if (
         _provider_registry.is_cloud_model(model_name)
-        or _provider_registry._provider_from_address(model_name) is not None
+        or (_addr is not None and not _addr.managed)
     ):
         cloud_attempts, _ = resolve_cloud_attempts(model_name, request, client_id)
     else:
