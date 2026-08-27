@@ -1857,6 +1857,41 @@ async def test_list_models_includes_cloud_models():
 
 
 @pytest.mark.asyncio
+async def test_list_models_excludes_managed_provider_cloud_entries():
+    """A managed (local) provider must NOT surface as cloud entries in /v1/models.
+
+    F3 made managed providers is_configured=True; without an explicit guard they
+    would leak local models as `{local}/{model}` cloud entries here. Pin that the
+    cloud-entry loop skips managed providers."""
+    managed = CloudProvider(
+        name="ai-kvm2-local",
+        base_url="http://127.0.0.1:11440/v1",
+        api_key="",
+        models=["llama3.2-3b", "qwen3.8-27b"],
+        managed=True,
+    )
+    with (
+        patch.object(
+            server.provider_registry,
+            "get_enabled_providers",
+            return_value=[managed],
+        ),
+        patch.object(server.model_manager, "get_public_model_map", return_value={"local-model": "local-model"}),
+        patch.object(server._ctx_meta, "build_model_metadata_entry", return_value={"id": "local-model", "object": "model"}),
+    ):
+        result = await server.list_models(
+            request=SimpleNamespace(headers={}, state=SimpleNamespace(), url=SimpleNamespace(path="/v1/models"), method="GET"),
+            client_id="test-user",
+        )
+
+    ids = [m["id"] for m in result["data"]]
+    # The managed provider's local models must not appear as cloud entries.
+    assert "ai-kvm2-local/llama3.2-3b" not in ids
+    assert "ai-kvm2-local/qwen3.8-27b" not in ids
+    assert "local-model" in ids
+
+
+@pytest.mark.asyncio
 async def test_list_models_annotates_reasoning_effort_metadata():
     """Cloud /v1/models entries carry reasoning effort metadata when the catalog advertises it."""
     fake_provider = CloudProvider(

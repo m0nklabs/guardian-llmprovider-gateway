@@ -169,10 +169,13 @@ async def list_models(request: Request, client_id: str) -> Dict[str, Any]:
 
     # Append provider-global cloud models from the dynamic catalog
     # ({provider}/{brand}/{model}). Per-key gated on cloud_gateway_access.
+    # Managed (local) providers are excluded: they are served by Guardian's own
+    # lifecycle and must not surface as cloud entries here.
     if _key_can_access_cloud(request, client_id):
         try:
             for provider_name in [
-                p.name for p in _provider_registry.get_enabled_providers() if p.is_configured
+                p.name for p in _provider_registry.get_enabled_providers()
+                if p.is_configured and not p.managed
             ]:
                 for full_id in _cloud_entries_for_provider(provider_name):
                     models_list.append(await _build_cloud_entry(full_id, provider_name))
