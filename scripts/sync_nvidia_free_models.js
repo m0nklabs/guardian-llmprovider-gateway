@@ -256,17 +256,28 @@ async function main() {
     let nvidiaRaw = '';
     try { nvidiaRaw = fs.readFileSync(NVIDIA_FILE, 'utf8'); } catch {}
     const allowlistLines = [];
-    allowlistLines.push('    # AWS WAF-gated NVIDIA free catalog (build.nvidia.com filtered by');
-    allowlistLines.push('    # nimType:nim_type_preview). Auto-refreshed by scripts/sync_nvidia_free_models.js.');
-    allowlistLines.push('    catalog_allowlist:');
-    for (const m of merged) allowlistLines.push(`      - ${m}`);
+    // Follow the indentation already used in the nvidia file instead of
+    // hard-coding 4 spaces: since F2, `catalog_allowlist:` is a top-level key
+    // at column 0 in config/providers/nvidia.settings.yaml (the legacy nested
+    // providers.overrides.yaml form was indented). Writing a fixed indent would
+    // nest the block under the previous top-level key and corrupt the YAML.
+    const keyMatch = nvidiaRaw.match(/^([ \t]*)catalog_allowlist:[^\n]*$/m);
+    const indent = keyMatch ? keyMatch[1] : '';
+    allowlistLines.push(`${indent}# AWS WAF-gated NVIDIA free catalog (build.nvidia.com filtered by`);
+    allowlistLines.push(`${indent}# nimType:nim_type_preview). Auto-refreshed by scripts/sync_nvidia_free_models.js.`);
+    allowlistLines.push(`${indent}catalog_allowlist:`);
+    for (const m of merged) allowlistLines.push(`${indent}- ${m}`);
 
-    if (/\bcatalog_allowlist:\s*(?:\n\s*-[^\n]*)*/.test(nvidiaRaw)) {
-      // Replace the existing allowlist block (keeps its indentation context).
-      nvidiaRaw = nvidiaRaw.replace(
-        /\bcatalog_allowlist:\s*(?:\n\s*-[^\n]*)*/,
-        allowlistLines.join('\n'),
-      );
+    // Replace the whole existing allowlist block (key line + its `- item`
+    // lines). The `\s*`-after-colon form fails on column-0 items because it
+    // consumes the trailing newline, so the block regex must anchor the key
+    // line to its own end-of-line explicitly.
+    const blockRe = new RegExp(
+      `^[ \\t]*catalog_allowlist:[^\\n]*(?:\\n?[ \\t]*-[^\\n]*)*`,
+      'm',
+    );
+    if (blockRe.test(nvidiaRaw)) {
+      nvidiaRaw = nvidiaRaw.replace(blockRe, allowlistLines.join('\n'));
     } else {
       // No allowlist yet: append it at the end of the nvidia provider file.
       nvidiaRaw = nvidiaRaw.replace(/\s*$/, '\n') + '\n' + allowlistLines.join('\n') + '\n';
