@@ -20,7 +20,7 @@ from unittest.mock import patch
 import pytest
 
 from app.proxy.cloud_catalog import CloudModelCatalog
-from app.proxy.providers import ProviderRegistry, CloudProvider
+from app.proxy.providers import CloudProvider, ProviderRegistry
 
 
 @pytest.fixture
@@ -106,7 +106,6 @@ async def test_catalog_refresh_managed_provider_keyless(monkeypatch, reg: Provid
             def raise_for_status(self):
                 if self.status_code != 200:
                     raise RuntimeError("boom")
-                return None
 
             def json(self):
                 return self._payload
@@ -127,10 +126,11 @@ async def test_catalog_refresh_managed_provider_keyless(monkeypatch, reg: Provid
 
 
 def test_managed_address_not_cloud_metadata(reg: ProviderRegistry):
-    """model_discovery treats a managed address as local, not cloud-metadata."""
-    # An address resolving to a managed provider must NOT be treated as a cloud
-    # model entry (mirrors the model_discovery cloud-branch guard).
+    """A managed address is treated as local, not cloud-metadata.
 
+    Mirrors the model_discovery cloud-branch guard
+    ``is_cloud_model(x) or (addr is not None and not addr.managed)``.
+    """
     test_model = "ai-kvm2-local/llama3.2-3b"
     addr = reg._provider_from_address(test_model)
     assert addr is not None
@@ -138,6 +138,6 @@ def test_managed_address_not_cloud_metadata(reg: ProviderRegistry):
     # The cloud-model discovery branch requires a non-managed provider; a
     # managed address resolves but is not a cloud model.
     assert not reg.is_cloud_model(test_model)
-    # And a plain cloud address still resolves to a cloud provider.
+    # A plain cloud address still resolves to a (non-managed) cloud provider.
     cloud_addr = reg._provider_from_address("nvidia/meta/llama-3.3-70b-instruct")
     assert cloud_addr is not None and cloud_addr.managed is False
