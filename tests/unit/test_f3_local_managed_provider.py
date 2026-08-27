@@ -18,9 +18,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-import yaml
 
-from app.cloud_inference import is_cloud_or_guardian_route
 from app.proxy.cloud_catalog import CloudModelCatalog
 from app.proxy.providers import ProviderRegistry, CloudProvider
 
@@ -132,7 +130,6 @@ def test_managed_address_not_cloud_metadata(reg: ProviderRegistry):
     """model_discovery treats a managed address as local, not cloud-metadata."""
     # An address resolving to a managed provider must NOT be treated as a cloud
     # model entry (mirrors the model_discovery cloud-branch guard).
-    from app.gateway import model_discovery
 
     test_model = "ai-kvm2-local/llama3.2-3b"
     addr = reg._provider_from_address(test_model)
