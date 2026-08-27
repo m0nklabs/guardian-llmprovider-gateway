@@ -9,11 +9,13 @@ import gzip
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-VENV_PY = REPO_ROOT / "venv" / "bin" / "python"
+# CI has no venv/ (setup-python); reuse the interpreter running pytest.
+VENV_PY = sys.executable
 RECORD_AUTH_SECRET = "test-export-secret"
 
 

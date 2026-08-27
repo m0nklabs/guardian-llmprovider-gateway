@@ -622,6 +622,50 @@ class TestOverrides:
             "context_window": 1048576
         }
 
+    def test_production_overrides_from_provider_directory(self, tmp_path: Path, monkeypatch):
+        """No explicit overrides_file -> overrides come from providers/*.settings.yaml."""
+        providers_dir = tmp_path / "providers"
+        providers_dir.mkdir()
+        (providers_dir / "openrouter.settings.yaml").write_text(textwrap.dedent("""\
+            enabled: true
+            base_url: https://openrouter.ai/api/v1
+            api_key: sk-or-test
+            models:
+              gpt-4o:
+                max_tokens: 4096
+                temperature: 0.7
+        """))
+        (providers_dir / "nvidia.settings.yaml").write_text(textwrap.dedent("""\
+            enabled: true
+            base_url: https://integrate.api.nvidia.com/v1
+            api_key: nv-test
+            models:
+              moonshotai/kimi-k3:
+                context_window: 1048576
+        """))
+        # Local provider models are NOT cloud overrides.
+        (providers_dir / "ai-kvm2-local.settings.yaml").write_text(textwrap.dedent("""\
+            enabled: true
+            base_url: http://127.0.0.1:11440/v1
+            local: true
+            models:
+              llama3.2-3b:
+                path: /home/flip/models/llama3.2-3b.gguf
+        """))
+
+        registry = ProviderRegistry(settings_path=_write_settings(tmp_path))
+        monkeypatch.setattr("app.paths.PROVIDERS_DIR", providers_dir)
+        catalog = CloudModelCatalog(
+            provider_registry=registry,
+            cache_file=tmp_path / "cache.json",
+            # no overrides_file -> production directory-scan path
+        )
+
+        assert catalog.get_override("gpt-4o") == {"max_tokens": 4096, "temperature": 0.7}
+        assert catalog.get_override("moonshotai/kimi-k3") == {"context_window": 1048576}
+        assert catalog.get_override("llama3.2-3b") is None
+        assert catalog.get_override("missing") is None
+
 
 # ── cloud_gateway_access gating (routing) ────────────────────────────
 

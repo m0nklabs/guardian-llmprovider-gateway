@@ -206,9 +206,10 @@ def prepare_cloud_candidate_request(
         candidate_json_body = translate_anthropic_request_to_openai(candidate_json_body)
         effective_path = "chat/completions"
 
-    # Model defaults from models.cloud.overrides.yaml may mix real OpenAI
-    # request parameters (max_tokens, temperature, …) with Guardian metadata
-    # (context_window, …) that is only meant for the /v1/models advertisement.
+    # Model defaults from the provider's `models:` block (F2; formerly
+    # models.cloud.overrides.yaml) may mix real OpenAI request parameters
+    # (max_tokens, temperature, …) with Guardian metadata (context_window, …)
+    # that is only meant for the /v1/models advertisement.
     # Never forward the metadata keys to the upstream provider — cloud APIs
     # reject unknown parameters (e.g. NVIDIA returns 400 on `context_window`).
     metadata_keys = {

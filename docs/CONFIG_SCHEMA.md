@@ -32,11 +32,18 @@ config/
 ├─ .env                            # SECRETS + machine-paden (${VAR}-expansie)
 ├─ global.settings.yaml            # GLOBAL: proxy/queue/timeouts/scaler/capture/grammar/cloud_retry/failover/benchmark/services
 ├─ guardian.keys.yaml              # Guardian API keys (36, cloud_gateway_access)
-├─ models.cloud.overrides.yaml     # CLOUD MODEL AFWIJKINGEN (exceptions, incl. context_window + sampling)
-├─ models.local.settings.yaml      # LOKALE MODEL DEFAULTS (registry: models/aliases/guardian)
-├─ providers.settings.yaml         # PROVIDER DEFAULTS (5: base_url/api_key/timeout/model_prefixes)
-└─ providers.overrides.yaml        # PROVIDER AFWIJKINGEN (bv. openrouter catalog_url=/models/user)
+└─ providers/                      # EÉN bestand per provider (F2, docs/CONFIG_PROVIDER_FILES.md)
+   ├─ ai-kvm2-local.settings.yaml  # lokale provider: base_url + models/aliases/guardian registry
+   ├─ openrouter.settings.yaml     # base_url/api_key/timeout/prefixes + catalog_url + models:-overrides
+   ├─ nvidia.settings.yaml         # idem + catalog_allowlist + models:-overrides
+   ├─ google.settings.yaml
+   ├─ openai.settings.yaml         # + models:-overrides (gpt-4o etc.)
+   ├─ poolside.settings.yaml
+   └─ groq.settings.yaml
 
+# F2 (2026-08-26) vervangt: providers.settings.yaml + providers.overrides.yaml +
+#   models.local.settings.yaml + models.cloud.overrides.yaml door de providers/
+#   directory (één document per provider, incl. per-model overrides in `models:`).
 # Gereserveerd (nog NIET meegeleverd — nog geen runtime-consumer):
 #   models.cloud.settings.yaml  (cloud model defaults)
 #   models.local.overrides.yaml (lokale model afwijkingen)
@@ -48,21 +55,24 @@ config/
 |---|---|---|
 | `.env` | `.env` (ongewijzigd) | secrets + machine |
 | `guardian_apikeys.yaml` | `guardian.keys.yaml` | Guardian keys — compat-symlink verwijderd 2026-08-22 |
-| `local_models.yaml` (+ symlink `models.yaml`) | `models.local.settings.yaml` | lokale registry (`local_models.yaml` symlink blijft) |
-| `cloud_models.yaml` | `models.cloud.overrides.yaml` | cloud model afwijkingen + sampling/context — compat-symlink verwijderd 2026-08-22 |
+| `local_models.yaml` (+ symlink `models.yaml`) | `providers/ai-kvm2-local.settings.yaml` | lokale registry (`local_models.yaml` symlink wijst nu naar de provider-file) |
+| `cloud_models.yaml` | *(per-provider `models:`-blok, F2)* | cloud model afwijkingen + sampling/context — compat-symlink verwijderd 2026-08-22 |
+| `providers.settings.yaml` + `providers.overrides.yaml` | `providers/<naam>.settings.yaml` | één bestand per provider (F2, 2026-08-26) |
+| `models.local.settings.yaml` | `providers/ai-kvm2-local.settings.yaml` | lokale registry (models/aliases/guardian in de lokale provider-file) |
+| `models.cloud.overrides.yaml` | `providers/<naam>.settings.yaml` → `models:`-blok | per-model overrides bij de juiste provider (F2) |
 | *(nieuw, gereserveerd)* | `models.cloud.settings.yaml` | cloud model defaults — **nog geen consumer, nog niet geleverd** |
 | *(nieuw, gereserveerd)* | `models.local.overrides.yaml` | lokale model afwijkingen — **nog geen consumer, nog niet geleverd** |
-| `providers.*` in settings.yaml | `providers.settings.yaml` + `providers.overrides.yaml` | provider config |
+| `providers.*` in settings.yaml | `providers/<naam>.settings.yaml` | provider config |
 | `settings.yaml` | `global.settings.yaml` | global infra + subsystem |
-| `api_keys.json`, `cloud_keys.json`, `models.yaml`, `benchmark_models.json` | *(verwijderd 2026-08-22)* | legacy — vervangen door `guardian.keys.yaml` resp. `models.local.settings.yaml`; zie `.scratch/cleanup/legacy-config/` |
+| `api_keys.json`, `cloud_keys.json`, `models.yaml`, `benchmark_models.json` | *(verwijderd 2026-08-22)* | legacy — vervangen door `guardian.keys.yaml` resp. `providers/ai-kvm2-local.settings.yaml`; zie `.scratch/cleanup/legacy-config/` |
 | `current_model.args/.sig`, `data/cloud_catalog_cache.json` | ongew. | runtime, niet hand-editeerbaar |
 
 ## 3. Mapping: waar elke settings.yaml-key heen gaat
 
 | Huidige key | Nieuwe plek |
 |---|---|
-| `providers` | `providers.settings.yaml` (defaults) + `providers.overrides.yaml` (afwijking) |
-| `context_overrides` | `models.cloud.overrides.yaml` (het is model-override) |
+| `providers` | `providers/<naam>.settings.yaml` — één document per provider (F2) |
+| `context_overrides` | per-provider `models:`-blok (context_window) — was `models.cloud.overrides.yaml` |
 | `proxy`, `services`, `services_to_stop`, `queue`, `timeouts`, `scaler`, `benchmark` | `global.settings.yaml` |
 | `capture`, `grammar`, `cloud_retry`, `failover_health` | `global.settings.yaml` |
 | `failover_groups` (failover.py) | `global.settings.yaml` |
