@@ -442,11 +442,16 @@ class ProviderRegistry:
         return None
 
     def get_all_cloud_models(self) -> List[str]:
-        """Return global cloud models backed by configured provider keys."""
+        """Return global cloud models backed by configured provider keys.
+
+        Managed (local) providers are excluded: they are keyless yet
+        ``is_configured`` (catalog from llama-server), so without this guard
+        their local model names would be misreported as cloud here.
+        """
         return [
             model_name
             for model_name, provider in self._model_to_provider.items()
-            if provider.is_configured
+            if provider.is_configured and not provider.managed
         ]
 
     def get_enabled_providers(self) -> List[CloudProvider]:

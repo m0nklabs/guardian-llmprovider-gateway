@@ -141,3 +141,16 @@ def test_managed_address_not_cloud_metadata(reg: ProviderRegistry):
     # A plain cloud address still resolves to a (non-managed) cloud provider.
     cloud_addr = reg._provider_from_address("nvidia/meta/llama-3.3-70b-instruct")
     assert cloud_addr is not None and cloud_addr.managed is False
+
+
+def test_get_all_cloud_models_excludes_managed_provider(reg: ProviderRegistry):
+    """get_all_cloud_models() must not report managed (local) model names.
+
+    F3 makes managed providers is_configured=True; if the public API did not
+    exclude them, bare local model names would be advertised as cloud models.
+    """
+    # The local managed provider's model is in the registry but must not surface.
+    assert "llama3.2-3b" not in reg.get_all_cloud_models()
+    for name in reg.get_all_cloud_models():
+        provider = reg.get_provider_for_model(name)
+        assert provider is not None and provider.managed is False
