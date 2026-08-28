@@ -151,15 +151,15 @@ class ModelRegistry:
         if name in aliases:
             target = aliases[name]
             if target in self.models:
-                logger.info(f"🏷️  Resolved alias '{name}' → '{target}'")
+                logger.info(f"🏷️  Resolved alias {name!r} → {target!r}")
                 return target
-            logger.warning(f"⚠️ Alias '{name}' points to '{target}' which is not in models config")
+            logger.warning(f"⚠️ Alias {name!r} points to {target!r} which is not in models config")
 
         # 3. Case-insensitive fallback
         name_lower = name.lower()
         for model_name in self.models:
             if model_name.lower() == name_lower:
-                logger.info(f"🏷️  Resolved case-insensitive '{name}' → '{model_name}'")
+                logger.info(f"🏷️  Resolved case-insensitive {name!r} → {model_name!r}")
                 return model_name
 
         raise ValueError(f"Model '{name}' not found in configuration (no alias match)")
