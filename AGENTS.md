@@ -320,71 +320,82 @@ jobs:
 
 ## GitHub / Git / PR / Reviewers
 
-> Deze sectie maakt de identity van de PR-reviewer en de review-werkstroom
-> expliciet. De kernafspraken over `/review` en het merge-criterium staan in
-> Critical rules (zie de bullet "PR-afhandeling op guardian — `/review`-commando");
-> hieronder staat het geconsolideerde beeld plus hoe je review-output als
-> voorgestelde code-changes aprobeert.
+> **Doel van deze sectie.** Expliciet maken wie de PR-reviewer is, hoe de
+> review-werkstroom op guardian draait, en hoe je review-output slim afhandelt.
+> De kernafspraken (`/review`-commando, merge-criterium, human-merge) staan in
+> Critical rules — deze sectie is de geconsolideerde bedieningshandleiding.
 
-### Wie is de PR-reviewer (de "PR-Piet"-persona)?
+### Identity van de PR-reviewer (de "PR-Piet"-persona)
 
-Er is **geen afzonderlijke menselijke reviewer**; de review wordt automatisch
-uitgevoerd door **PR-Piet** — een door de org samengestelde review-persona die in
-werkelijkheid:
+Er is **geen afzonderlijke menselijke reviewer**; review gebeurt automatisch door
+één en hetzelfde mechanisme, dat drie namen draagt:
 
-1. **de pr-agent fork** `m0nklabs/pr-piet` is (een gepinde fork van
-   [`the-pr-agent/pr-agent`](https://github.com/the-pr-agent/pr-agent)),
-2. gerund wordt als **de GitHub Action workflow** `.github/workflows/pr-piet.yml`
-   die triggert op `pull_request` + `issue_comment` en de **org-reusable**
-   workflow `m0nklabs/pr-piet/.github/workflows/reusable-pr-piet.yml@main`
-   aanroept, en
-3. dus **de PR reviewer** is op alle `m0nklabs`-repos (Copilot-stijl review,
+1. **pr-agent fork** — `m0nklabs/pr-piet` (gepinde org-fork van
+   [`the-pr-agent/pr-agent`](https://github.com/the-pr-agent/pr-agent));
+2. **GitHub Action workflow** — `.github/workflows/pr-piet.yml`, die triggert op
+   `pull_request` + `issue_comment` en de org-reusable
+   `m0nklabs/pr-piet/.github/workflows/reusable-pr-piet.yml@main` aanroept;
+3. **PR reviewer** — op alle `m0nklabs`-repos (Copilot-stijl review,
    tier-1 `openai/deepseek/deepseek-v4-flash-0731` + optionele tier-2).
 
-Dus: **pr-agent fork = PR-Piet = de GitHub Action workflow = de PR reviewer** —
-één en hetzelfde mechanisme. Slash-commando's (`/review`, `/describe`, `/improve`)
-werken via dezelfde `issue_comment`-trigger.
+Kortom: **pr-agent fork = PR-Piet = de GitHub Action workflow = de PR reviewer.**
+Slash-commando's (`/review`, `/describe`, `/improve`) werken via dezelfde
+`issue_comment`-trigger.
 
-### Een review aanvragen met `/review`
+### Hoe je een review aanvraagt (`/review`)
 
-- Post het commando op de PR (van een **mens-account**, niet bot — bot-senders
-  worden overgeslagen): `gh pr comment <n> --body "/review"`.
-- Post het na **elke laatste commit** (vóór merge) zodat er een verse review op de
-  nieuwe head komt; de geposte review draagt de footer `head=<sha>`.
-- De review bekijkt de head die op dat moment actueel is; na nieuwe pushes een
-  nieuwe `/review` posten.
+- Post het commando van een **mens-account** (`gh pr comment <n> --body "/review"`);
+  bot-senders (`sender.type != 'Bot'`) worden overgeslagen.
+- Post het na **elke laatste commit vóór merge** zodat er een verse review op de
+  nieuwe head komt; de geposte review draagt de footer `head=<sha>` en bekijkt de
+  head die op dat moment actueel is — na nieuwe pushes dus opnieuw `/review`.
 - **Merge-criterium (operator):** een PR mag pas gemerged worden als er GEEN
   openstaande bevindingen/threads uit de review zijn; bevindingen die met bewijs
-  zijn weerlegd **en beantwoord** tellen niet als openstaand.
+  zijn weerlegd **én beantwoord** tellen niet als openstaand.
 - **Geen auto-approve/auto-merge — altijd human merge** (zie Critical rules).
 
-### Review-output approven (suggested code changes besparen tijd)
+### Review-output afhandelen (approven bespaart rondes)
 
-PR-Piet kan de code-review als **GitHub suggested code changes** presenteren.
-Als een voorgestelde wijziging juist is, kun je ze rechtstreeks **approven /
-toepassen** (in plaats van elke suggestie handmatig heen-en-weer te redigeren):
-- In de GitHub-UI → tab "Files changed" → bij een suggestion "Commit suggestion"
-  of "Apply suggestion batch".
-- Via de API/CLI: een review-comment met een `suggested change` diff is te
-  committen via de GitHub REST API (pull request review comments → "Apply" endpoint)
-  of door de diff rechtstreeks op de branch toe te passen en te pushen.
-- **Belangrijk:** meerdere suggesties in één batch committen om het aantal
-  pushes/`/review`-rondes te minimaliseren — elke push naar de feature-branch
-  telt mee voor het merge-criterium.
+PR-Piet presenteert bevindingen soms als **GitHub suggested code changes**. Een
+suggestie die klopt kun je rechtstreeks toepassen in plaats van handmatig heen-en-weer
+te redigeren:
 
-### Opmerkelijke operationele details (zie Critical rules voor de volledige set)
+- **UI:** GitHub → tab "Files changed" → "Commit suggestion" of "Apply suggestion batch".
+- **API/CLI:** review-comments met een suggested-change diff zijn te committen via de
+  GitHub REST API (pull request review comments → Apply) of door de diff rechtstreeks
+  op de branch toe te passen en te pushen.
+- **Batchen:** zoveel mogelijk suggesties in één keer committen — elke push naar de
+  feature-branch telt mee voor het merge-criterium en de `/review`-cyclus.
 
-- **Concurrency-cancel = gerade fail-check.** Het `/review`-commando (op main)
-  cancelt via de concurrency-groep de gelijktijdig lopende auto-`pull_request`-run
-  (op de feature-branch) → die gecancelde run telt als "fail"-check en maakt
-  `merge-state: UNSTABLE`. Oplossing: `gh run rerun <run-id> --failed` → merge-state
-  wordt CLEAN.
-- **Deep-review op grote diffs:** de diepe `/review`-variant (issue_comment) heeft
-  een 30-min job-timeout in de pr-piet reusable; op grotere PR-diffs kan die timen
+### Verificatie-discipline (altijd méér dan één bewijs)
+
+PR-Piet-bevindingen zijn **speculatief** — ze kunnen terecht óf onterecht zijn (zie
+Cases 1–4 in Critical rules). Handel ze daarom als een senior die niet op één bewijs
+steunt: **verifieer vóór je volgt of weerlegt, en doe dat met ten minste twee
+onafhankelijke bewijzen.** Concrete combinaties:
+
+- **Gedragstest** (live `curl`/pytest die de verkeerde-tak-executie pinnt) **+**
+  **code-lezing** van de betreffende control-flow (if/elif-chain, guards).
+- **Statische check** (`py_compile`, ruff F-selectie, imports) **+**
+  **geautomatiseerde suite** (unit-tests) op de refactor én op originele code
+  (apples-to-apples via `git stash`).
+- **API-feit** (bv. code-scanning alerts via de GitHub API) **+** **PR-thread**/
+  diff-bevestiging dat de gemelde regel anders is geworden.
+- **Call-site-analyse** (wie roept een functie aan) **+** **test die het openbare
+  contract pint**.
+
+Pas de gepaste fix toe óf weerleg met bewijs + antwoord op de thread — en laat
+een bevinding nooit ongeadresseerd "open" hangen.
+
+### Operationele details (de bekende haken)
+
+- **Concurrency-cancel = gerade fail-check.** Het `/review`-commando draait op main;
+  de `pull_request`-trigger op de feature-branch. Het commando cancelt via de
+  concurrency-groep de gelijktijdig lopende auto-`pull_request`-run → die gecancelde
+  run telt als "fail"-check en maakt `merge-state: UNSTABLE`.
+  **Oplossing:** `gh run rerun <run-id> --failed` → merge-state wordt CLEAN.
+- **Deep-review op grote diffs.** De diepe `/review`-variant (issue_comment) heeft een
+  30-min job-timeout in de pr-piet reusable; op grotere diffs kan die timen
   ("The operation was canceled", geen review gepost). De `pull_request`-auto-review
-  draait snel (~1 min) en post dezelfde template — herrun die als de diepe review
+  draait snel (~1 min) en post dezelfde template — **herrun die** als de diepe review
   getimed is.
-- **Review-bevindingen zijn speculatief:** verifieer (óf fix óf weerleg met
-  bewijs + beantwoord) vóór je ze als openstaand laat tellen. Zie de
-  Cases 1–4 in Critical rules voor voorbeelden van terechte én onterechte
-  bevindingen.
