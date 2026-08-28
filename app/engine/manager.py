@@ -121,14 +121,16 @@ class ModelManager:
         self._vision_capabilities = self.registry._vision_capabilities
 
     def resolve_model(self, name: str) -> str:
-        result = self.registry.resolve_model(name)
-        self._sync_registry_mirror()
-        return result
+        try:
+            return self.registry.resolve_model(name)
+        finally:
+            self._sync_registry_mirror()
 
     def resolve_reload_target(self, requested_model: Optional[str] = None) -> str:
-        result = self.registry.resolve_reload_target(requested_model)
-        self._sync_registry_mirror()
-        return result
+        try:
+            return self.registry.resolve_reload_target(requested_model)
+        finally:
+            self._sync_registry_mirror()
 
     def get_preferred_tool_model(self, model_name: Optional[str] = None) -> Optional[str]:
         return self.registry.get_preferred_tool_model(model_name)
@@ -146,9 +148,10 @@ class ModelManager:
         return self.registry.get_benchmark_context_limit(model_name)
 
     def get_public_model_map(self) -> Dict[str, str]:
-        result = self.registry.get_public_model_map()
-        self._sync_registry_mirror()
-        return result
+        try:
+            return self.registry.get_public_model_map()
+        finally:
+            self._sync_registry_mirror()
 
     def get_vision_capability(self, model_name: str) -> Dict[str, Any]:
         return self.registry.get_vision_capability(model_name)
