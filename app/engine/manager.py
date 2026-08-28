@@ -70,6 +70,9 @@ class ModelManager:
         self.registry.bind_runtime_state(self)
         # Mirror the registry's registry data so existing call-sites/tests that
         # read ModelManager.models / ModelManager._vision_capabilities keep working.
+        # The delegators that drive a registry-level refresh (resolve_model /
+        # resolve_reload_target / get_public_model_map) re-sync these mirrors via
+        # _sync_registry_mirror() so a hot config edit never leaves them stale.
         self.models = self.registry.models
         self._vision_capabilities: Dict[str, VisionCapability] = self.registry._vision_capabilities
         self.server_process: Optional[int] = None # Systemd manages main process, but we might control it via systemctl
@@ -108,11 +111,24 @@ class ModelManager:
 
     # --- Registry delegators: same public names/signatures so gateway modules
     # and tests that call _model_manager.<method> keep working unchanged.
+    def _sync_registry_mirror(self) -> None:
+        """Re-point the manager's registry-data mirrors at the registry's
+        current dicts. Called after any delegator that drives a registry-level
+        refresh (resolve_model / resolve_reload_target / get_public_model_map),
+        so a hot config edit never leaves ModelManager.models /
+        _vision_capabilities stale (used by direct readers in gateway modules)."""
+        self.models = self.registry.models
+        self._vision_capabilities = self.registry._vision_capabilities
+
     def resolve_model(self, name: str) -> str:
-        return self.registry.resolve_model(name)
+        result = self.registry.resolve_model(name)
+        self._sync_registry_mirror()
+        return result
 
     def resolve_reload_target(self, requested_model: Optional[str] = None) -> str:
-        return self.registry.resolve_reload_target(requested_model)
+        result = self.registry.resolve_reload_target(requested_model)
+        self._sync_registry_mirror()
+        return result
 
     def get_preferred_tool_model(self, model_name: Optional[str] = None) -> Optional[str]:
         return self.registry.get_preferred_tool_model(model_name)
@@ -130,7 +146,9 @@ class ModelManager:
         return self.registry.get_benchmark_context_limit(model_name)
 
     def get_public_model_map(self) -> Dict[str, str]:
-        return self.registry.get_public_model_map()
+        result = self.registry.get_public_model_map()
+        self._sync_registry_mirror()
+        return result
 
     def get_vision_capability(self, model_name: str) -> Dict[str, Any]:
         return self.registry.get_vision_capability(model_name)
