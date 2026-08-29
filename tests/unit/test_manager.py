@@ -786,6 +786,37 @@ class TestUnload:
         assert mgr._last_verification_at == "2026-08-29T00:00:00Z"
         assert mgr._last_backend_model == "glm-4.7"
 
+    def test_guarded_rollback_skips_when_state_was_reloaded(self, tmp_path: Path):
+        """PR #11 review (race): rollback_unload_if_unchanged must refuse to
+        clobber a fresh state when a concurrent reload mutated the fields that
+        the optimistic mark had set."""
+        mgr = _make_manager(tmp_path)
+        mgr._model_verified = True
+        mgr._last_verification_at = "2026-08-29T00:00:00Z"
+        mgr._last_backend_model = "glm-4.7"
+        prev = mgr.snapshot_unload_state()
+        mgr.mark_unloaded_by_caretaker()
+
+        # Concurrent reload finished mid-round-trip: state no longer optimistic.
+        mgr.is_unloaded = False
+        mgr._model_verified = True
+        mgr._last_verification_at = "2026-08-29T00:10:00Z"
+        mgr._last_backend_model = "glm-4.7-other"
+
+        rolled_back = mgr.rollback_unload_if_unchanged(prev)
+        assert rolled_back is False
+        # Fresh state preserved.
+        assert mgr.is_unloaded is False
+        assert mgr._model_verified is True
+        assert mgr._last_backend_model == "glm-4.7-other"
+
+        # And it DOES roll back when nothing else touched the state.
+        mgr2 = _make_manager(tmp_path)
+        mgr2._model_verified = True
+        prev2 = mgr2.snapshot_unload_state()
+        mgr2.mark_unloaded_by_caretaker()
+        assert mgr2.rollback_unload_if_unchanged(prev2) is True
+
 
 # ── _get_comfyui_url ──────────────────────────────────────────────────
 

@@ -629,6 +629,26 @@ class ModelManager:
         self._last_verification_at = last_verification_at
         self._last_backend_model = last_backend_model
 
+    def rollback_unload_if_unchanged(self, prev_state: dict) -> bool:
+        """F5: guarded rollback after a caretaker refusal.
+
+        Only restore the pre-mark snapshot when the state still looks exactly
+        like the optimistic mark set it (is_unloaded True, verification
+        cleared).  A request that arrived during the round-trip may have
+        started a reload which flips is_unloaded False / _model_verified True —
+        in that case the snapshot is stale and must NOT clobber the fresh
+        state.  Returns True when the rollback happened.
+        """
+        if (
+            self.is_unloaded is True
+            and self._model_verified is False
+            and self._last_verification_at is None
+            and self._last_backend_model is None
+        ):
+            self.rollback_unload_state(**prev_state)
+            return True
+        return False
+
     async def _free_gpu_memory(self) -> None:
         """Ask coexisting GPU services to release VRAM before loading a model.
 

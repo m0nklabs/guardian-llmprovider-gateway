@@ -264,15 +264,20 @@ async def idle_unload_watcher():
                 await _caretaker_client.unload()
             except CaretakerError as e:
                 # Expected: remote refusal — the caretaker never stopped the
-                # backend, so roll back the FULL optimistic state (flag AND the
-                # verification metadata mark_unloaded_by_caretaker cleared),
-                # otherwise the manager thinks the still-running model is
-                # unloaded/unknown and a follow-up request or health check
-                # triggers an avoidable reload or mismatch.
-                _model_manager.rollback_unload_state(**_prev_state)
+                # backend.  Roll back the FULL optimistic state (flag AND the
+                # verification metadata mark_unloaded_by_caretaker cleared) —
+                # but only if nothing mutated it meanwhile, otherwise a stale
+                # snapshot would clobber a concurrent reload (review: possible
+                # race).  Guarded: returns False when a newer state superseded it.
+                _model_manager.rollback_unload_if_unchanged(_prev_state)
                 logger.error(f"❌ Auto-unload via caretaker failed: {e}")
             except Exception as e:
-                # Unexpected (coding error, transport bug): surface the traceback
-                # so the root cause is visible instead of mislabeled as caretaker.
+                # Unexpected (coding error, transport bug): the unload was NOT
+                # confirmed (CaretakerError covers the confirmed refusals), so
+                # the backend is still up — roll the optimistic mark back the
+                # same guarded way, else is_unloaded stays True over a running
+                # backend and every later unload attempt is skipped (review:
+                # possible bug).  Surface the traceback so the root cause shows.
+                _model_manager.rollback_unload_if_unchanged(_prev_state)
                 logger.exception("❌ Auto-unload via caretaker failed unexpectedly")
                 logger.error(f"  {e}")

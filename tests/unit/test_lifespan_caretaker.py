@@ -97,6 +97,18 @@ class _FakeModelManager:
         self._last_verification_at = last_verification_at
         self._last_backend_model = last_backend_model
 
+    def rollback_unload_if_unchanged(self, prev_state: dict) -> bool:
+        still_optimistic = (
+            self.is_unloaded is True
+            and self._model_verified is False
+            and self._last_verification_at is None
+            and self._last_backend_model is None
+        )
+        if still_optimistic:
+            self.rollback_unload_state(**prev_state)
+            return True
+        return False
+
     async def unload(self) -> None:
         """Local fallback unload (no caretaker configured)."""
         self.is_unloaded = True
@@ -242,6 +254,67 @@ async def test_watcher_syncs_is_unloaded_after_successful_unload(
     mgr = lifespan_mod._model_manager
     assert mgr.is_unloaded is True
     assert mgr.mark_unloaded_calls == 1
+
+
+async def test_watcher_rolls_back_on_unexpected_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review fix (possible bug): a non-CaretakerError failure (transport /
+    coding) means the unload was NOT confirmed — the optimistic mark must be
+    rolled back too, or is_unloaded stays True over a running backend and
+    every later unload attempt is skipped."""
+    class _TransportFailingClient:
+        async def unload(self) -> dict:
+            raise RuntimeError("connection reset mid-call")
+
+    _install_globals(
+        monkeypatch,
+        last_request_time=time.time() - 600,
+        caretaker_client=_TransportFailingClient,
+    )
+    with pytest.raises(_StopWatcher):
+        await lifespan_mod.idle_unload_watcher()
+    mgr = lifespan_mod._model_manager
+    assert mgr.is_unloaded is False  # rolled back (unconfirmed)
+    assert mgr._model_verified is True   # verification restored
+    assert mgr.mark_unloaded_calls == 1
+
+
+async def test_watcher_never_rolls_back_a_concurrent_reload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review fix (possible race): if a request starts a reload during the
+    round-trip, the state is no longer the optimistic mark — the stale snapshot
+    must not clobber the fresh (loaded) state."""
+    class _MutatingFailingClient:
+        def __init__(self) -> None:
+            self.unload_calls = 0
+
+        async def unload(self) -> dict:
+            self.unload_calls += 1
+            # Simulate a concurrent hotpath reload completing mid-call.
+            mgr = lifespan_mod._model_manager
+            mgr.is_unloaded = False
+            mgr._model_verified = True
+            mgr._last_verification_at = "2026-08-29T00:10:00Z"
+            mgr._last_backend_model = "glm-4.7-other"
+            from app.gateway.caretaker_client import CaretakerUnavailable
+
+            raise CaretakerUnavailable("http://127.0.0.1:11441")
+
+    _install_globals(
+        monkeypatch,
+        last_request_time=time.time() - 600,
+        caretaker_client=_MutatingFailingClient,
+    )
+    with pytest.raises(_StopWatcher):
+        await lifespan_mod.idle_unload_watcher()
+    mgr = lifespan_mod._model_manager
+    # Fresh reload state preserved — NOT overwritten by the stale snapshot.
+    assert mgr.is_unloaded is False
+    assert mgr._model_verified is True
+    assert mgr._last_verification_at == "2026-08-29T00:10:00Z"
+    assert mgr._last_backend_model == "glm-4.7-other"
 
 
 async def test_watcher_rolls_back_is_unloaded_on_caretaker_refusal(
