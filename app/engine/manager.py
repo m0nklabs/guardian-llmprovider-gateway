@@ -584,6 +584,71 @@ class ModelManager:
         self.is_unloaded = True
         logger.info("✅ llama-server stopped — VRAM is free")
 
+    def mark_unloaded_by_caretaker(self) -> None:
+        """F5: the caretaker daemon confirmed an unload it performed itself.
+
+        The gateway's own ``unload()`` used to be the only way the flag flipped;
+        with the remote lifecycle split the caretaker can unload on its own (its
+        own idle-unload, a direct operator call).  This method brings the
+        gateway-local manager into the same end-state ``unload()`` would have
+        produced — the model is no longer served (``is_unloaded``), its backend
+        is no longer verified (``_model_verified``), so the hotpath auto-reload
+        fires on the next request and a stale health/verification run does not
+        treat the caretaker-killed process as a crash and respawn it.
+        """
+        self.is_unloaded = True
+        self._model_verified = False
+        self._last_verification_at = None
+        self._last_backend_model = None
+
+    def snapshot_unload_state(self) -> dict:
+        """Capture the pre-unload state so an optimistic
+        mark_unloaded_by_caretaker() can be fully rolled back."""
+        return {
+            "is_unloaded": self.is_unloaded,
+            "model_verified": self._model_verified,
+            "last_verification_at": self._last_verification_at,
+            "last_backend_model": self._last_backend_model,
+        }
+
+    def rollback_unload_state(
+        self,
+        *,
+        is_unloaded: bool,
+        model_verified: bool,
+        last_verification_at: str | None,
+        last_backend_model: str | None,
+    ) -> None:
+        """F5: undo an optimistic mark_unloaded_by_caretaker() after the
+        caretaker refused the unload (the backend was never stopped).  Restore
+        the exact pre-mark state so nothing looks unloaded/unknown when nothing
+        actually changed — otherwise a follow-up request or health check would
+        trigger an avoidable reload or mismatch on a still-running model."""
+        self.is_unloaded = is_unloaded
+        self._model_verified = model_verified
+        self._last_verification_at = last_verification_at
+        self._last_backend_model = last_backend_model
+
+    def rollback_unload_if_unchanged(self, prev_state: dict) -> bool:
+        """F5: guarded rollback after a caretaker refusal.
+
+        Only restore the pre-mark snapshot when the state still looks exactly
+        like the optimistic mark set it (is_unloaded True, verification
+        cleared).  A request that arrived during the round-trip may have
+        started a reload which flips is_unloaded False / _model_verified True —
+        in that case the snapshot is stale and must NOT clobber the fresh
+        state.  Returns True when the rollback happened.
+        """
+        if (
+            self.is_unloaded is True
+            and self._model_verified is False
+            and self._last_verification_at is None
+            and self._last_backend_model is None
+        ):
+            self.rollback_unload_state(**prev_state)
+            return True
+        return False
+
     async def _free_gpu_memory(self) -> None:
         """Ask coexisting GPU services to release VRAM before loading a model.
 

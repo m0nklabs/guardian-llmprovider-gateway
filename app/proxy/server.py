@@ -94,6 +94,8 @@ from app.gateway import queue_helpers as _queue_helpers
 # ── Configuration loading (Phase 5 extraction) ───────────────────────
 from app import config_loader as _config_loader
 
+from app.gateway.caretaker_client import CaretakerError, CaretakerUnavailable, build_caretaker_client
+
 # ── Proxy state container (Phase 5 extraction) ───────────────────────
 from app.proxy.state import State as _State
 
@@ -963,6 +965,18 @@ inference_queue = InferenceQueue(
     history_ttl=_queue_cfg.get("history_ttl", 300),
 )
 
+# Build the remote caretaker control-API client (F5 GATEWAY_MANAGER_SPLIT).
+# management_url comes from the local provider config; CARETAKER_KEY comes from
+# the gateway env (loaded early by app/main.py's load_dotenv).  Built eagerly so
+# the lifespan idle-unload watcher and /admin/unload share one client.  On build
+# failure the service stays bootable and the lifecycle-execution call sites log
+# an error at call time instead of at import.
+try:
+    caretaker_client = build_caretaker_client(CONFIG)
+except ValueError as _caretaker_build_err:
+    logger.error("Caretaker client could not be built: %s", _caretaker_build_err)
+    caretaker_client = None
+
 _lifespan.init(
     proxy_port=PROXY_PORT,
     pid_file=PID_FILE,
@@ -981,6 +995,7 @@ _lifespan.init(
     model_manager=model_manager,
     capture_controller=capture_controller,
     inference_queue=inference_queue,
+    caretaker_client=caretaker_client,
 )
 
 # Initialize session slots with the llama-server URL + slots dir
@@ -1141,10 +1156,95 @@ async def show_model_ollama(request: Request, client_id: str = Depends(verify_ap
 
 @app.post("/admin/unload")
 async def admin_unload(client_id: str = Depends(verify_api_key)):
-    """Stop llama-server immediately to free all VRAM (e.g. before running ComfyUI)."""
-    if model_manager.is_unloaded:
+    """Stop llama-server immediately to free all VRAM (e.g. before running ComfyUI).
+
+    Lifecycle *execution* is delegated to the caretaker control-API (F5
+    GATEWAY_MANAGER_SPLIT).  The gateway keeps the invocation decision and maps
+    the caretaker response back into the existing admin response shape.
+    """
+    # The caretaker is the INDEPENDENT lifecycle owner (F5 split): the
+    # gateway-local flag can be stale relative to it — e.g. a direct operator
+    # call to the caretaker's POST /ensure loads a model while the flag still
+    # says unloaded.  A subsequent /admin/unload must then still free VRAM, not
+    # report "already_unloaded" (review: focus-area, stale local flag).
+    if model_manager.is_unloaded and caretaker_client is not None:
+        try:
+            status = await caretaker_client.status()
+            caretaker_idle = bool(status.get("is_unloaded", False))
+        except CaretakerUnavailable:
+            # Unknown state (daemon down / transport blip / non-JSON 200): fail
+            # safe — fall through and attempt the idempotent unload, rather
+            # than reporting already_unloaded while an externally restarted
+            # backend may still be holding VRAM (review: possible issue).
+            caretaker_idle = False
+        if caretaker_idle:
+            return {"status": "already_unloaded", "message": "llama-server is already stopped"}
+        # The caretaker only counts as idle when it confirms so explicitly;
+        # otherwise fall through and unload (idempotent).
+    elif model_manager.is_unloaded:
         return {"status": "already_unloaded", "message": "llama-server is already stopped"}
-    await model_manager.unload()
+    if caretaker_client is None:
+        # No remote caretaker configured (management_url/CARETAKER_KEY/daemon
+        # absent): fall back to the local unload so VRAM freeing keeps working
+        # during the F5 transition (review: deployment-dependency regression if
+        # merged without a fallback).  The remote path takes over automatically
+        # once build_caretaker_client succeeds.
+        logger.warning("/admin/unload: caretaker client not configured; falling back to local unload")
+        await model_manager.unload()
+        return {"status": "unloaded", "message": f"Model '{model_manager.current_model}' unloaded — VRAM is free"}
+    # Optimistic mark BEFORE the round-trip (same pattern as the idle-unload
+    # watcher): a request arriving while the caretaker stops the backend sees
+    # is_unloaded=True and the hotpath reloads instead of routing at a stopping
+    # backend.  A concurrent reload completing during the round-trip flips the
+    # state back to loaded; the guarded rollback below refuses to clobber it
+    # (review: possible race — marking after the fact would undo that reload).
+    prev_state = model_manager.snapshot_unload_state()
+    model_manager.mark_unloaded_by_caretaker()
+    try:
+        await caretaker_client.unload()
+    except CaretakerUnavailable as e:
+        # Transport failure (daemon down / not deployed yet during F5 / network
+        # down): we cannot know whether the unload happened; the local
+        # systemctl stop is idempotent either way, so fall back to it instead
+        # of a 503 — the operator must always be able to free VRAM (review:
+        # possible regression).  Only when the optimistic state is still ours
+        # (no concurrent reload) do we fall back; otherwise another path
+        # manages the backend.
+        if model_manager.rollback_unload_if_unchanged(prev_state):
+            if prev_state["is_unloaded"]:
+                # The local flag was stale-True and the caretaker reported a
+                # loaded backend (or is unreachable); a local unload() would
+                # no-op on the stale flag, so we cannot confirm VRAM was freed —
+                # fail with 503 instead of claiming success (review: possible
+                # bug).
+                logger.error(
+                    "/admin/unload caretaker unavailable and local state says unloaded; cannot confirm VRAM freed: %s", e
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"caretaker unreachable and local state says unloaded: {e}",
+                ) from e
+            logger.warning("/admin/unload caretaker unavailable; falling back to local unload: %s", e)
+            try:
+                await model_manager.unload()
+            except Exception as exc:
+                # Wrap the fallback: a failing local unload must surface as a
+                # clear 503 (with cause), not escape the handler as a raw 500.
+                logger.exception("/admin/unload local fallback unload failed")
+                raise HTTPException(status_code=503, detail=f"local fallback unload failed: {exc}") from exc
+        else:
+            logger.error(f"/admin/unload caretaker call failed: {e}")
+            raise HTTPException(status_code=503, detail=str(e)) from e
+    except CaretakerError as e:
+        # Expected: remote refusal — the caretaker never stopped the backend.
+        # Roll back the optimistic mark; a concurrent reload is left untouched
+        # because rollback_unload_if_unchanged refuses to clobber fresh state.
+        model_manager.rollback_unload_if_unchanged(prev_state)
+        logger.error(f"/admin/unload caretaker call failed: {e}")
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    # 200 is always a success; the optimistic mark already reconciled the
+    # manager.  A repeat /admin/unload reports already_unloaded via the guard
+    # above; the hotpath auto-reload fires on the next request.
     return {"status": "unloaded", "message": f"Model '{model_manager.current_model}' unloaded — VRAM is free"}
 
 
