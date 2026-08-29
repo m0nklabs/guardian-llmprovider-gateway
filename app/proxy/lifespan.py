@@ -267,6 +267,21 @@ async def idle_unload_watcher():
                 _prev_state = _model_manager.snapshot_unload_state()
                 _model_manager.mark_unloaded_by_caretaker()
                 await _caretaker_client.unload()
+                # A concurrent hotpath reload may have started during the
+                # round-trip (the state is no longer the optimistic mark the
+                # caretaker's stop raced against).  The caretaker's stop and
+                # the reload's start race; log so the operator knows the
+                # backend state is uncertain (review: possible race).
+                if not (
+                    _model_manager.is_unloaded is True
+                    and _model_manager._model_verified is False
+                    and _model_manager._last_verification_at is None
+                    and _model_manager._last_backend_model is None
+                ):
+                    logger.warning(
+                        "Caretaker unload completed but a concurrent reload changed "
+                        "the manager state during the round-trip; backend state uncertain"
+                    )
             except CaretakerUnavailable as e:
                 # Transport failure: the daemon may be down (not deployed yet
                 # during F5, crashed, network down).  We cannot know whether the

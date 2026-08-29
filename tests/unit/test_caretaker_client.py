@@ -184,6 +184,19 @@ async def test_unload_403_is_availability_not_refusal() -> None:
         await client.unload()
 
 
+async def test_unload_404_is_availability_not_refusal() -> None:
+    """Review fix (possible bug): a 404 (endpoint missing — older daemon /
+    wrong management_url path, more likely a deploy/config mismatch than a
+    genuine refusal) must classify as availability so callers fall back to the
+    idempotent local unload — otherwise VRAM freeing silently stops during a
+    partial F5 deployment."""
+    import httpx
+
+    client = _make_client(lambda req: httpx.Response(404, json={"detail": "Not Found"}))
+    with pytest.raises(CaretakerUnavailable):
+        await client.unload()
+
+
 async def test_status_success() -> None:
     def handler(req: httpx.Request) -> httpx.Response:
         return _ok(

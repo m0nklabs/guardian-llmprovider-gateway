@@ -145,6 +145,41 @@ class _StopWatcher(Exception):
     """Internal: stops the watcher loop after one iteration."""
 
 
+async def test_watcher_concurrent_reload_during_roundtrip_logs_not_rolls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review fix (possible race): a hotpath reload completing DURING the
+    caretaker unload round-trip flips the manager state back to loaded.  The
+    watcher must NOT clobber it (no rollback, no local unload) and must NOT
+    crash — it logs the uncertain backend state and keeps running."""
+    class _ReloadDuringCallClient:
+        def __init__(self) -> None:
+            self.unload_calls = 0
+
+        async def unload(self) -> dict:
+            self.unload_calls += 1
+            # Concurrent reload completes mid-round-trip: loaded again.
+            mgr = lifespan_mod._model_manager
+            mgr.is_unloaded = False
+            mgr._model_verified = True
+            mgr._last_verification_at = "2026-08-29T01:00:00Z"
+            mgr._last_backend_model = "glm-4.7"
+            return {"ok": True, "is_unloaded": True}
+
+    _install_globals(
+        monkeypatch,
+        last_request_time=time.time() - 600,
+        caretaker_client=_ReloadDuringCallClient,
+    )
+    mgr = lifespan_mod._model_manager
+    with pytest.raises(_StopWatcher):
+        await lifespan_mod.idle_unload_watcher()
+    # The concurrent reload state was preserved, not rolled back or replaced.
+    assert mgr.is_unloaded is False
+    assert mgr._model_verified is True
+    assert mgr.local_unload_calls == 0
+
+
 async def test_watcher_calls_caretaker_unload_when_idle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
