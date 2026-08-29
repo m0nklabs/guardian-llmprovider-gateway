@@ -1,0 +1,296 @@
+"""Caretaker control-API client.
+
+F5 (GATEWAY_MANAGER_SPLIT): the local llama-server lifecycle *execution*
+(load/switch/unload) moves to the caretaker daemon exposed at
+``{management_url}`` (http://127.0.0.1:11441), authenticated with a Bearer
+``CARETAKER_KEY``.  The gateway keeps the *decisions* (idle-unload, switch
+permission, connect-error retry-once) and only talks to the caretaker over
+HTTP.
+
+This module is a thin, dependency-light HTTP client for the three caretaker
+endpoints (m0nklabs/caretaker-llamacpp contract):
+
+- ``POST {management_url}/ensure``  body ``{model, enable_vision?, context_hint?}``
+- ``POST {management_url}/unload``
+- ``GET  {management_url}/status``
+
+All three require ``Authorization: Bearer <CARETAKER_KEY>`` when a key is set;
+``api_key=None`` clients send no header and log a warning on construction.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import re
+from typing import Any, Self
+
+import httpx
+
+logger = logging.getLogger("Guardian")
+
+# Matches ``${ENV_VAR}`` in config strings (mirrors app/proxy/providers._expand_env
+# so this module stays free of proxy-service imports and thus of import cycles).
+_ENV_VAR_PATTERN = re.compile(r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)\}")
+
+CONTEXT_HINT_FALLBACK_CTX = 131072
+
+
+class CaretakerError(Exception):
+    """Base class for all caretaker control-API failures."""
+
+
+class CaretakerUnavailable(CaretakerError):
+    """Transport/timeout failure reaching the caretaker daemon."""
+
+    def __init__(self, management_url: str) -> None:
+        super().__init__(f"Caretaker unreachable at {management_url}")
+        self.management_url = management_url
+
+
+class CaretakerModelNotFound(CaretakerError):
+    """Caretaker returned 404 model_not_found for the requested model."""
+
+    def __init__(self, model: str) -> None:
+        super().__init__(f"Caretaker does not know model '{model}'")
+        self.model = model
+
+
+class CaretakerModelLoadFailed(CaretakerError):
+    """Caretaker returned 503 model_load_failed (optionally with crash details)."""
+
+    def __init__(self, model: str, crash_details: Any | None = None) -> None:
+        detail = "" if crash_details is None else f" — crash_details={crash_details}"
+        super().__init__(f"Caretaker failed to load model '{model}'{detail}")
+        self.model = model
+        self.crash_details = crash_details
+
+
+class CaretakerVramExceeded(CaretakerError):
+    """Caretaker returned 503 vram_limit_exceeded for the requested model."""
+
+    def __init__(self, model: str) -> None:
+        super().__init__(f"Caretaker refused model '{model}': VRAM limit exceeded")
+        self.model = model
+
+
+class CaretakerInvalidRequest(CaretakerError):
+    """Caretaker returned 422 invalid_request for a malformed ensure payload."""
+
+
+class CaretakerUnloadFailed(CaretakerError):
+    """Caretaker returned 500 unload_failed during an unload."""
+
+
+def _expand_env(value: str) -> str:
+    """Expand ``${VAR}`` references in a string using process environment.
+
+    Unknown variables are replaced with an empty string so misconfiguration
+    fails loudly at request time rather than leaking the literal placeholder
+    (mirrors ``app/proxy/providers._expand_env`` semantics).
+    """
+
+    def _replace(match: re.Match) -> str:
+        return os.environ.get(match.group("name"), "")
+
+    return _ENV_VAR_PATTERN.sub(_replace, value)
+
+
+class CaretakerClient:
+    """Async HTTP client for the caretaker control-API (management_url).
+
+    None of the methods are request-hotpath (the blueprint keeps those for the
+    real manager in tranche 2); this client is used for background idle-unload
+    and the admin routes.
+    """
+
+    def __init__(
+        self,
+        management_url: str,
+        api_key: str | None = None,
+        timeout: float = 5.0,
+        logger: logging.Logger | None = None,
+        _transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._management_url = management_url.rstrip("/")
+        self._api_key = api_key or None
+        self._timeout = timeout
+        self._log = logger or logging.getLogger("Guardian.CaretakerClient")
+        # _transport is an internal override used only by tests (MockTransport);
+        # it is not part of the public constructor contract.
+        self._client = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout),
+            transport=_transport,
+        )
+        if self._api_key is None:
+            self._log.warning(
+                "Caretaker api_key is not set; requests to %s will be sent without "
+                "an Authorization header (set CARETAKER_KEY in the gateway env/config).",
+                self._management_url,
+            )
+
+    @property
+    def management_url(self) -> str:
+        return self._management_url
+
+    def _headers(self) -> dict:
+        headers: dict = {}
+        if self._api_key:
+            headers["Authorization"] = f"Bearer {self._api_key}"
+        return headers
+
+    async def ensure(
+        self,
+        model: str,
+        *,
+        enable_vision: bool | None = None,
+        context_hint: int | None = None,
+    ) -> dict:
+        """POST /ensure — idempotently load (or switch to) ``model``.
+
+        Success returns the caretaker response dict (``{ok, loaded_model, ...}``).
+        HTTP error bodies are parsed into the specific :class:`CaretakerError`
+        subclasses; transport/timeout failures become :class:`CaretakerUnavailable`.
+        """
+        payload: dict[str, Any] = {"model": model}
+        if enable_vision is not None:
+            payload["enable_vision"] = bool(enable_vision)
+        if context_hint is not None:
+            payload["context_hint"] = int(context_hint)
+        try:
+            resp = await self._client.post(
+                f"{self._management_url}/ensure",
+                json=payload,
+                headers=self._headers(),
+            )
+        except httpx.HTTPError as exc:
+            logger.error("Caretaker /ensure transport error: %s", exc)
+            raise CaretakerUnavailable(self._management_url) from exc
+
+        if resp.status_code == 200:
+            return resp.json()
+
+        body = _safe_json(resp)
+        if resp.status_code == 404:
+            raise CaretakerModelNotFound(model)
+        if resp.status_code == 503:
+            # The caretaker error body is top-level:
+            #   {"error": "model_load_failed"|"vram_limit_exceeded",
+            #    "message": ..., "crash_details": ...}
+            error_code = body.get("error")
+            if error_code == "vram_limit_exceeded":
+                raise CaretakerVramExceeded(model)
+            crash_details = body.get("crash_details") if isinstance(body, dict) else None
+            raise CaretakerModelLoadFailed(model, crash_details)
+        if resp.status_code == 422:
+            raise CaretakerInvalidRequest()
+        # Unexpected status → treat as unavailable so the gateway never claims
+        # success from an unknown caretaker response.
+        logger.error(
+            "Caretaker /ensure unexpected status %s: %s", resp.status_code, _safe_body_text(resp)
+        )
+        raise CaretakerUnavailable(self._management_url)
+
+    async def unload(self) -> dict:
+        """POST /unload — idempotent-safe unload.
+
+        ``200`` is always ok (including the caretaker-side "already unloaded"
+        no-op second call).  ``500 unload_failed`` raises :class:`CaretakerUnloadFailed`.
+        """
+        try:
+            resp = await self._client.post(
+                f"{self._management_url}/unload",
+                headers=self._headers(),
+            )
+        except httpx.HTTPError as exc:
+            logger.error("Caretaker /unload transport error: %s", exc)
+            raise CaretakerUnavailable(self._management_url) from exc
+
+        if resp.status_code == 200:
+            return resp.json()
+        logger.error("Caretaker /unload failed (status %s): %s", resp.status_code, _safe_body_text(resp))
+        raise CaretakerUnloadFailed()
+
+    async def status(self) -> dict:
+        """GET /status — return the caretaker runtime status dict."""
+        try:
+            resp = await self._client.get(
+                f"{self._management_url}/status",
+                headers=self._headers(),
+            )
+        except httpx.HTTPError as exc:
+            logger.error("Caretaker /status transport error: %s", exc)
+            raise CaretakerUnavailable(self._management_url) from exc
+        if resp.status_code != 200:
+            logger.error("Caretaker /status failed (status %s): %s", resp.status_code, _safe_body_text(resp))
+            raise CaretakerUnavailable(self._management_url)
+        return resp.json()
+
+    async def close(self) -> None:
+        """Close the underlying httpx client."""
+        await self._client.aclose()
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *_exc) -> None:
+        await self.close()
+
+
+def _safe_json(resp: httpx.Response) -> dict:
+    try:
+        value = resp.json()
+        return value if isinstance(value, dict) else {}
+    except ValueError:
+        return {}
+
+
+def _safe_body_text(resp: httpx.Response) -> str:
+    try:
+        return (resp.text or "")[:300]
+    except Exception:  # noqa: BLE001 - defensive: never fail on body reading
+        return ""
+
+
+def build_caretaker_client(config: dict) -> CaretakerClient:
+    """Build a :class:`CaretakerClient` from the gateway provider config.
+
+    Resolution order:
+    - ``management_url``: from the local provider document
+      (``config/providers/ai-kvm2-local.settings.yaml``; ``CONFIG["providers"][...]``),
+      ``${VAR}``-expanded.  Mandatory — a missing value raises ``ValueError``.
+    - ``api_key``: ``CARETAKER_KEY`` env-first, then a ``management_key``-style
+      config fallback.  ``None`` when neither is present (the client therefore
+      sends no Authorization header and logs a warning).
+
+    The key must come from the gateway's own secret source (``.env`` loaded
+    early by ``app.main.load_dotenv``); it is never committed to YAML.
+    """
+    providers = config.get("providers") or {}
+    local_doc = None
+    for name, doc in providers.items():
+        doc = doc or {}
+        if name.endswith("-local") or doc.get("local"):
+            local_doc = doc
+            break
+    if local_doc is None:
+        # Fallback: any local:true doc, else empty.
+        for doc in providers.values():
+            if isinstance(doc, dict) and doc.get("local"):
+                local_doc = doc
+                break
+
+    management_url = _expand_env((local_doc or {}).get("management_url", "")) if local_doc else ""
+    if not management_url:
+        raise ValueError(
+            "management_url is missing for the local provider; add it to "
+            "config/providers/*-local.settings.yaml so the gateway can reach the caretaker."
+        )
+
+    # Secret resolution: env-first (CARETAKER_KEY), then config.
+    api_key = _expand_env(os.environ.get("CARETAKER_KEY", "")).strip() or None
+    if api_key is None:
+        cfg_key = _expand_env(str((local_doc or {}).get("caretaker_key", ""))).strip()
+        api_key = cfg_key or None
+
+    return CaretakerClient(management_url=management_url, api_key=api_key)

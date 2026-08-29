@@ -15,6 +15,8 @@ import time
 from contextlib import asynccontextmanager, suppress
 from typing import Optional
 
+from app.gateway.caretaker_client import CaretakerError
+
 logger = logging.getLogger("Guardian")
 
 
@@ -36,6 +38,9 @@ _cancel_startup_check_task = None
 _model_manager = None
 _capture_controller = None
 _inference_queue = None
+# Injected via init() — the remote caretaker control-API client used for the
+# lifecycle *execution* of idle-unload.  None until injected by server.py.
+_caretaker_client = None
 
 
 def init(
@@ -57,6 +62,7 @@ def init(
     model_manager,
     capture_controller,
     inference_queue,
+    caretaker_client=None,
 ) -> None:
     """Inject all dependencies. Called once at startup."""
     globals()["_cancel_startup_check_task"] = cancel_startup_check_task
@@ -76,6 +82,7 @@ def init(
     globals()["_model_manager"] = model_manager
     globals()["_capture_controller"] = capture_controller
     globals()["_inference_queue"] = inference_queue
+    globals()["_caretaker_client"] = caretaker_client
 
 
 @asynccontextmanager
@@ -236,6 +243,13 @@ async def idle_unload_watcher():
         if idle_secs >= idle_minutes * 60:
             logger.info(f"💤 Idle for {idle_secs/60:.1f}m (limit {idle_minutes}m) — auto-unloading to free VRAM")
             try:
-                await _model_manager.unload()
+                if _caretaker_client is None:
+                    logger.error("Caretaker client not injected; cannot auto-unload via caretaker")
+                    continue
+                await _caretaker_client.unload()
+            except CaretakerError as e:
+                # Log and leave is_unloaded alone — the gateway does not claim
+                # unload state it did not observe; status follows the caretaker.
+                logger.error(f"❌ Auto-unload via caretaker failed: {e}")
             except Exception as e:
-                logger.error(f"❌ Auto-unload failed: {e}")
+                logger.error(f"❌ Auto-unload via caretaker failed: {e}")

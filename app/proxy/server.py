@@ -94,6 +94,8 @@ from app.gateway import queue_helpers as _queue_helpers
 # ── Configuration loading (Phase 5 extraction) ───────────────────────
 from app import config_loader as _config_loader
 
+from app.gateway.caretaker_client import CaretakerError, build_caretaker_client
+
 # ── Proxy state container (Phase 5 extraction) ───────────────────────
 from app.proxy.state import State as _State
 
@@ -963,6 +965,18 @@ inference_queue = InferenceQueue(
     history_ttl=_queue_cfg.get("history_ttl", 300),
 )
 
+# Build the remote caretaker control-API client (F5 GATEWAY_MANAGER_SPLIT).
+# management_url comes from the local provider config; CARETAKER_KEY comes from
+# the gateway env (loaded early by app/main.py's load_dotenv).  Built eagerly so
+# the lifespan idle-unload watcher and /admin/unload share one client.  On build
+# failure the service stays bootable and the lifecycle-execution call sites log
+# an error at call time instead of at import.
+try:
+    caretaker_client = build_caretaker_client(CONFIG)
+except ValueError as _caretaker_build_err:
+    logger.error("Caretaker client could not be built: %s", _caretaker_build_err)
+    caretaker_client = None
+
 _lifespan.init(
     proxy_port=PROXY_PORT,
     pid_file=PID_FILE,
@@ -981,6 +995,7 @@ _lifespan.init(
     model_manager=model_manager,
     capture_controller=capture_controller,
     inference_queue=inference_queue,
+    caretaker_client=caretaker_client,
 )
 
 # Initialize session slots with the llama-server URL + slots dir
@@ -1141,10 +1156,29 @@ async def show_model_ollama(request: Request, client_id: str = Depends(verify_ap
 
 @app.post("/admin/unload")
 async def admin_unload(client_id: str = Depends(verify_api_key)):
-    """Stop llama-server immediately to free all VRAM (e.g. before running ComfyUI)."""
+    """Stop llama-server immediately to free all VRAM (e.g. before running ComfyUI).
+
+    Lifecycle *execution* is delegated to the caretaker control-API (F5
+    GATEWAY_MANAGER_SPLIT).  The gateway keeps the invocation decision and maps
+    the caretaker response back into the existing admin response shape.
+    """
     if model_manager.is_unloaded:
         return {"status": "already_unloaded", "message": "llama-server is already stopped"}
-    await model_manager.unload()
+    if caretaker_client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Caretaker client is not configured; cannot unload via caretaker",
+        )
+    try:
+        result = await caretaker_client.unload()
+    except CaretakerError as e:
+        logger.error(f"/admin/unload caretaker call failed: {e}")
+        raise HTTPException(status_code=503, detail=str(e)) from e
+    # Caretaker /unload is idempotent: a 200 is always a success.  Its response
+    # is ``{ok, is_unloaded}``; report "already_unloaded" when the caretaker
+    # signals the model was already free rather than freshly unloaded.
+    if result and not result.get("ok") and result.get("is_unloaded"):
+        return {"status": "already_unloaded", "message": "llama-server is already stopped"}
     return {"status": "unloaded", "message": f"Model '{model_manager.current_model}' unloaded — VRAM is free"}
 
 
