@@ -1170,12 +1170,17 @@ async def admin_unload(client_id: str = Depends(verify_api_key)):
     if model_manager.is_unloaded and caretaker_client is not None:
         try:
             status = await caretaker_client.status()
+            caretaker_idle = bool(status.get("is_unloaded", False))
         except CaretakerUnavailable:
-            status = None
-        caretaker_idle = status is None or bool(status.get("is_unloaded", True))
+            # Unknown state (daemon down / transport blip / non-JSON 200): fail
+            # safe — fall through and attempt the idempotent unload, rather
+            # than reporting already_unloaded while an externally restarted
+            # backend may still be holding VRAM (review: possible issue).
+            caretaker_idle = False
         if caretaker_idle:
             return {"status": "already_unloaded", "message": "llama-server is already stopped"}
-        # The caretaker actually has a model loaded — fall through and unload.
+        # The caretaker only counts as idle when it confirms so explicitly;
+        # otherwise fall through and unload (idempotent).
     elif model_manager.is_unloaded:
         return {"status": "already_unloaded", "message": "llama-server is already stopped"}
     if caretaker_client is None:

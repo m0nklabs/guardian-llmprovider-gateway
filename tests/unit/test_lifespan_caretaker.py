@@ -704,6 +704,50 @@ def test_admin_unload_keeps_already_unloaded_when_caretaker_confirms(
     assert client_stub.unload_calls == 0
 
 
+def test_admin_unload_unknown_status_unloads_instead_of_already_unloaded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review fix (possible issue): when the local flag is stale-True and the
+    caretaker /status is unavailable (daemon down / transport), the route must
+    fail safe — attempt the idempotent unload instead of claiming
+    already_unloaded while the backend may still hold VRAM."""
+    from fastapi.testclient import TestClient
+
+    from app.proxy import server as server_mod
+
+    app = _make_unauthed_app(monkeypatch)
+
+    class _StatusDownClient:
+        def __init__(self) -> None:
+            self.unload_calls = 0
+
+        async def status(self) -> dict:
+            from app.gateway.caretaker_client import CaretakerUnavailable
+
+            raise CaretakerUnavailable("http://127.0.0.1:11441")
+
+        async def unload(self) -> dict:
+            self.unload_calls += 1
+            return {"ok": True, "is_unloaded": True}
+
+    client_stub = _StatusDownClient()
+    monkeypatch.setattr(server_mod, "caretaker_client", client_stub)
+    fake_mgr = _FakeModelManager(
+        idle_unload_minutes=None,
+        is_unloaded=True,  # stale
+        active_requests=0,
+        last_request_time=time.time(),
+    )
+    fake_mgr.current_model = "minimal"
+    monkeypatch.setattr(server_mod, "model_manager", fake_mgr)
+
+    client = TestClient(app)
+    r = client.post("/admin/unload", headers={"Authorization": "Bearer test-key"})
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "unloaded"  # NOT already_unloaded
+    assert client_stub.unload_calls == 1
+
+
 def test_admin_unload_503_when_unavailable_and_local_fallback_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
