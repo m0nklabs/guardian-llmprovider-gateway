@@ -356,4 +356,15 @@ def build_caretaker_client(config: dict) -> CaretakerClient:
     # cleartext).
     api_key = _expand_env(os.environ.get("CARETAKER_KEY", "")).strip() or None
 
+    # Fail closed (review: sensitive key): never send the Bearer secret over
+    # cleartext HTTP to a foreign host (F5 multi-host LAN addresses like
+    # http://192.168.1.x:11441).  THIS host's caretaker — loopback or the own
+    # hostname/LAN-IP (per _is_this_host) — stays allowed; anything else with a
+    # key configured raises instead of leaking the key on the wire.
+    if api_key and management_url.lower().startswith("http://") and not _is_this_host(management_url):
+        raise ValueError(
+            "Refusing to send CARETAKER_KEY over cleartext http to non-loopback "
+            f"management_url {management_url}; use https:// or a loopback address."
+        )
+
     return CaretakerClient(management_url=management_url, api_key=api_key)

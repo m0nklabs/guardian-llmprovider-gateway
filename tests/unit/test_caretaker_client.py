@@ -303,6 +303,50 @@ def test_build_prefers_own_host_lan_ip_local(monkeypatch: pytest.MonkeyPatch) ->
     asyncio.run(client.close())
 
 
+def test_build_fails_closed_sending_key_to_foreign_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review fix (sensitive key): CARETAKER_KEY must never go over cleartext
+    HTTP to a FOREIGN host's management_url — build fails closed with ValueError."""
+    monkeypatch.setenv("CARETAKER_KEY", "supersecret")
+    monkeypatch.setattr("socket.gethostname", lambda: "ai-kvm2")
+    monkeypatch.setattr(
+        "socket.gethostbyname_ex",
+        lambda *a: ("ai-kvm2", ["ai-kvm2"], ["127.0.0.1"]),
+    )
+    config = {
+        "providers": {
+            "14700k-local": {"local": True, "management_url": "http://192.168.1.99:11441"},
+        }
+    }
+    with pytest.raises(ValueError, match="cleartext http"):
+        build_caretaker_client(config)
+
+
+def test_build_allows_key_to_own_host_lan_ip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review fix (sensitive key): the own host's caretaker via LAN-IP is
+    THIS host (not foreign) — CARETAKER_KEY is allowed and used."""
+    monkeypatch.setenv("CARETAKER_KEY", "supersecret")
+    monkeypatch.setattr("socket.gethostname", lambda: "ai-kvm2")
+    monkeypatch.setattr(
+        "socket.gethostbyname_ex",
+        lambda *a: ("ai-kvm2", ["ai-kvm2"], ["192.168.1.35", "127.0.0.1"]),
+    )
+    config = {
+        "providers": {
+            "ai-kvm2-local": {"local": True, "management_url": "http://192.168.1.35:11441"},
+        }
+    }
+    client = build_caretaker_client(config)
+    assert client.management_url == "http://192.168.1.35:11441"
+    assert client._api_key == "supersecret"
+    import asyncio
+
+    asyncio.run(client.close())
+
+
 def test_build_ignores_caretaker_key_in_yaml(monkeypatch: pytest.MonkeyPatch) -> None:
     """Review fix (sensitive key over cleartext): the Bearer secret must never
     be read from a tracked provider YAML — CARETAKER_KEY is env-only."""
