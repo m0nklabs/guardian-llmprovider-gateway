@@ -63,6 +63,7 @@ async def ensure_backend(
     context_hint: int | None = None,
     local_fallback: Callable[[], Awaitable[None]],
     pre_switch_save: bool = False,
+    client_id: str | None = None,
 ) -> str:
     """Ensure ``model`` is loaded/active on the local backend.
 
@@ -71,10 +72,24 @@ async def ensure_backend(
     backend was already healthy after a caretaker outage).  Raises the same
     error types the hotpath callers already handle (``ModelLoadError`` /
     ``ValueError``).
+
+    ``client_id`` is optional defense-in-depth: the request-hotpath switch
+    sites already gate on ``is_switch_allowed(client_id)`` before calling
+    this (routing.py / ollama.py), but the switch sites also pass their
+    client id through so a future un-gated call site cannot trigger a remote
+    switch for an allowlist-excluded client.  Reload sites (same-model
+    reload) deliberately omit it — they are not switches.
     """
     if _caretaker_client is None:
         await local_fallback()
         return "local"
+
+    if (
+        client_id is not None
+        and _model_manager is not None
+        and not _model_manager.is_switch_allowed(client_id)
+    ):
+        raise ValueError(f"Client '{client_id}' is not allowed to switch models")
 
     if pre_switch_save and _model_manager is not None:
         await _model_manager.save_current_context()

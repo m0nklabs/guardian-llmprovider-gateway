@@ -687,6 +687,12 @@ class ModelManager:
         vision-validation cache reset.
         """
         self._refresh_model_registry()
+        # Accept client-facing aliases the way the hotpath resolves them
+        # (resolve_model canonicalizes aliases / case-insensitive names and
+        # raises for unknown names). The caretaker has already switched the
+        # backend by the time we mirror the state, so a ValueError here would
+        # leave a stale current_model while the backend runs another model.
+        model_name = self.resolve_model(model_name)
         if model_name not in self.models:
             raise ValueError(f"Model '{model_name}' not found in configuration")
         # Same semantics as load()/switch_model(): resolve the vision flag with

@@ -339,6 +339,7 @@ async def chat_ollama(request: Request, client_id: str):
                                 operation=lambda: _caretaker_runtime.ensure_backend(
                                     model=model,
                                     pre_switch_save=True,
+                                    client_id=client_id,
                                     local_fallback=lambda: _model_manager.switch_model(model, client_id=client_id),
                                 ),
                                 generation=generation,
@@ -722,6 +723,7 @@ async def generate_ollama(request: Request, client_id: str):
                                 operation=lambda: _caretaker_runtime.ensure_backend(
                                     model=model,
                                     pre_switch_save=True,
+                                    client_id=client_id,
                                     local_fallback=lambda: _model_manager.switch_model(model, client_id=client_id),
                                 ),
                                 generation=generation,
