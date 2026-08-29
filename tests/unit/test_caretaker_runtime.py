@@ -187,10 +187,11 @@ async def test_unavailable_refused_then_timeout_fails_closed():
     mgr.mark_loaded_by_caretaker.assert_not_called()
 
 
-async def test_switch_without_fresh_load_support_uses_local_lifecycle():
-    """While the daemon does not ship fresh_load, a remote switch would lose
-    switch_model's save/restore parity (save runs, nothing restores).  Keep
-    the local lifecycle for switches until the capability is confirmed."""
+async def test_switch_without_fresh_load_support_goes_remote_without_save():
+    """While the daemon does not ship fresh_load, a remote switch cannot
+    restore context (save would be wasted, nothing restores).  The SWITCH stays
+    remote-first — the local lifecycle while the daemon is alive would race a
+    second controller — but the pre-save is skipped and a warning logged."""
     client = _StubClient()  # supports_fresh_load False
     mgr = _manager()
     crt.init(model_manager=mgr, caretaker_client=client)
@@ -198,9 +199,9 @@ async def test_switch_without_fresh_load_support_uses_local_lifecycle():
     result = await crt.ensure_backend(
         model="m", pre_switch_save=True, local_fallback=fallback
     )
-    assert result == "local"
-    fallback.assert_awaited_once()
-    client.ensure.assert_not_awaited()
+    assert result == "remote"
+    client.ensure.assert_awaited_once()
+    fallback.assert_not_awaited()
     mgr.save_current_context.assert_not_awaited()
     mgr.restore_current_context.assert_not_awaited()
 
@@ -317,10 +318,11 @@ async def test_unavailable_auth_status_fails_closed():
     mgr.mark_loaded_by_caretaker.assert_not_called()
 
 
-async def test_unavailable_drifted_config_runs_local_fallback():
+async def test_unavailable_drifted_config_fails_closed():
     """Backend serves the model + healthy, but the requested launch config
-    (vision/context_hint) drifts from the persisted one -> must NOT adopt; the
-    drift-checked local fallback must reload instead."""
+    (vision/context_hint) drifts from the persisted one -> must NOT adopt.  The
+    backend is ALIVE, so the local lifecycle must NOT run either (second
+    controller race on a live llama-server) -> fail closed."""
     client = _StubClient()
     client.ensure.side_effect = CaretakerUnavailable("http://x:11441")
     mgr = _manager()
@@ -329,19 +331,20 @@ async def test_unavailable_drifted_config_runs_local_fallback():
     mgr._config_drifted = Mock(return_value=True)
     crt.init(model_manager=mgr, caretaker_client=client)
     fallback = AsyncMock()
-    result = await crt.ensure_backend(
-        model="m",
-        enable_vision=True,
-        context_hint=4096,
-        local_fallback=fallback,
-    )
-    assert result == "local"
-    fallback.assert_awaited_once()
+    with pytest.raises(ModelLoadError):
+        await crt.ensure_backend(
+            model="m",
+            enable_vision=True,
+            context_hint=4096,
+            local_fallback=fallback,
+        )
+    fallback.assert_not_awaited()
     mgr.mark_loaded_by_caretaker.assert_not_called()
 
 
 async def test_unavailable_hung_backend_runs_local_fallback():
-    """Backend serves the model but is NOT healthy (hung) -> must NOT adopt."""
+    """Backend serves the model but is NOT healthy (hung) -> must NOT adopt;
+    the backend is DOWN, so the local lifecycle is the sole controller."""
     client = _StubClient()
     client.ensure.side_effect = CaretakerUnavailable("http://x:11441")
     mgr = _manager()
@@ -355,17 +358,21 @@ async def test_unavailable_hung_backend_runs_local_fallback():
     mgr.mark_loaded_by_caretaker.assert_not_called()
 
 
-async def test_unavailable_healthy_backend_wrong_model_runs_fallback():
-    """Backend up but serving a different model must NOT adopt loaded state."""
+async def test_unavailable_healthy_backend_wrong_model_fails_closed():
+    """Backend up + healthy but serving a different model -> must NOT adopt.
+    The backend is ALIVE (a live daemon may surface as unreachable via
+    firewall DROP/backlog while still owning llama-server): spawning locally
+    would race a second controller -> fail closed."""
     client = _StubClient()
     client.ensure.side_effect = CaretakerUnavailable("http://x:11441")
     mgr = _manager()
     mgr.backend_serves_model = AsyncMock(return_value=False)
+    mgr.backend_health_ok = AsyncMock(return_value=True)
     crt.init(model_manager=mgr, caretaker_client=client)
     fallback = AsyncMock()
-    result = await crt.ensure_backend(model="m", local_fallback=fallback)
-    assert result == "local"
-    fallback.assert_awaited_once()
+    with pytest.raises(ModelLoadError):
+        await crt.ensure_backend(model="m", local_fallback=fallback)
+    fallback.assert_not_awaited()
     mgr.mark_loaded_by_caretaker.assert_not_called()
 
 
