@@ -278,6 +278,31 @@ def test_build_prefers_loopback_local_over_other_local(monkeypatch: pytest.Monke
     asyncio.run(client.close())
 
 
+def test_build_prefers_own_host_lan_ip_local(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review fix (possible issue): F5 reaches this host's caretaker via its
+    LAN IP (192.168.1.35), which is NOT loopback.  With a second local provider
+    present, the factory must still pick THIS host's caretaker via hostname/IP
+    resolution — not dict order."""
+    monkeypatch.delenv("CARETAKER_KEY", raising=False)
+    monkeypatch.setattr("socket.gethostname", lambda: "ai-kvm2")
+    monkeypatch.setattr(
+        "socket.gethostbyname_ex",
+        lambda *a: ("ai-kvm2", ["ai-kvm2"], ["192.168.1.35", "127.0.0.1"]),
+    )
+    config = {
+        "providers": {
+            # Intentionally ordered so the non-this-host one comes first.
+            "14700k-local": {"local": True, "management_url": "http://192.168.1.99:11441"},
+            "ai-kvm2-local": {"local": True, "management_url": "http://192.168.1.35:11441"},
+        }
+    }
+    client = build_caretaker_client(config)
+    assert client.management_url == "http://192.168.1.35:11441"
+    import asyncio
+
+    asyncio.run(client.close())
+
+
 def test_build_ignores_caretaker_key_in_yaml(monkeypatch: pytest.MonkeyPatch) -> None:
     """Review fix (sensitive key over cleartext): the Bearer secret must never
     be read from a tracked provider YAML — CARETAKER_KEY is env-only."""

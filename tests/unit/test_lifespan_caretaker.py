@@ -50,21 +50,6 @@ class _FakeModelManager:
         self.last_request_time = last_request_time
         self.mark_unloaded_calls = 0
         self.local_unload_calls = 0
-
-    def __init__(
-        self,
-        *,
-        idle_unload_minutes: float | None,
-        is_unloaded: bool,
-        active_requests: int,
-        last_request_time: float,
-    ) -> None:
-        self.idle_unload_minutes = idle_unload_minutes
-        self.is_unloaded = is_unloaded
-        self.active_requests = active_requests
-        self.last_request_time = last_request_time
-        self.mark_unloaded_calls = 0
-        self.local_unload_calls = 0
         self._model_verified = True
         self._last_verification_at = "2026-08-29T00:00:00Z"
         self._last_backend_model = "glm-4.7"
@@ -254,6 +239,41 @@ async def test_watcher_syncs_is_unloaded_after_successful_unload(
     mgr = lifespan_mod._model_manager
     assert mgr.is_unloaded is True
     assert mgr.mark_unloaded_calls == 1
+
+
+async def test_watcher_fallback_unload_error_is_logged_not_unbound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review fix (possible bug): when the local fallback unload() raises and
+    NO snapshot was taken, the except-handler must not reference _prev_state
+    (UnboundLocalError, which would kill the watcher) — it just logs."""
+    class _FailingLocalManager(_FakeModelManager):
+        async def unload(self) -> None:
+            self.local_unload_calls += 1
+            raise RuntimeError("systemctl stop failed")
+
+    # Build the usual manager then swap in the failing local-unload one.
+    original_install = _install_globals(
+        monkeypatch,
+        last_request_time=time.time() - 600,
+        caretaker_client=lambda: None,
+    )
+    del original_install
+    failing = _FailingLocalManager(
+        idle_unload_minutes=5,
+        is_unloaded=False,
+        active_requests=0,
+        last_request_time=time.time() - 600,
+    )
+    monkeypatch.setattr(lifespan_mod, "_model_manager", failing)
+
+    with pytest.raises(_StopWatcher):
+        await lifespan_mod.idle_unload_watcher()
+    # Watcher survived; local unload attempted, nothing rolled back (no mark).
+    mgr = lifespan_mod._model_manager
+    assert mgr.local_unload_calls == 1
+    assert mgr.is_unloaded is False
+    assert mgr.mark_unloaded_calls == 0
 
 
 async def test_watcher_rolls_back_on_unexpected_exception(

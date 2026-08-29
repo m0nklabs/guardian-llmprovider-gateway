@@ -242,6 +242,11 @@ async def idle_unload_watcher():
         idle_secs = time.time() - _model_manager.last_request_time
         if idle_secs >= idle_minutes * 60:
             logger.info(f"💤 Idle for {idle_secs/60:.1f}m (limit {idle_minutes}m) — auto-unloading to free VRAM")
+            # Snapshot is only taken on the caretaker branch; None here means
+            # no optimistic mark was made, so the except-handlers must skip the
+            # rollback (avoids UnboundLocalError when the local fallback unload
+            # raises — review: possible bug).
+            _prev_state = None
             try:
                 if _caretaker_client is None:
                     # No remote caretaker configured (management_url/CARETAKER_KEY
@@ -269,7 +274,8 @@ async def idle_unload_watcher():
                 # but only if nothing mutated it meanwhile, otherwise a stale
                 # snapshot would clobber a concurrent reload (review: possible
                 # race).  Guarded: returns False when a newer state superseded it.
-                _model_manager.rollback_unload_if_unchanged(_prev_state)
+                if _prev_state is not None:
+                    _model_manager.rollback_unload_if_unchanged(_prev_state)
                 logger.error(f"❌ Auto-unload via caretaker failed: {e}")
             except Exception as e:
                 # Unexpected (coding error, transport bug): the unload was NOT
@@ -278,6 +284,7 @@ async def idle_unload_watcher():
                 # same guarded way, else is_unloaded stays True over a running
                 # backend and every later unload attempt is skipped (review:
                 # possible bug).  Surface the traceback so the root cause shows.
-                _model_manager.rollback_unload_if_unchanged(_prev_state)
+                if _prev_state is not None:
+                    _model_manager.rollback_unload_if_unchanged(_prev_state)
                 logger.exception("❌ Auto-unload via caretaker failed unexpectedly")
                 logger.error(f"  {e}")

@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import socket
 from typing import Any, Self
 
 import httpx
@@ -296,17 +297,36 @@ def build_caretaker_client(config: dict) -> CaretakerClient:
     def _is_local(name: str, doc: dict) -> bool:
         return name.endswith("-local") or bool(doc.get("local"))
 
-    # Pass 1: prefer a local provider whose management_url binds loopback —
-    # this is THIS host's caretaker (the gateway on ai-kvm-2 talks to its own
-    # daemon, never to a Windows/remote GPU host, for lifecycle execution).
-    # Dict ordering must not decide which caretaker the gateway unloads (F5
-    # multi-host: ai-kvm2-local vs a future 14700k-local).
+    def _is_this_host(mgmt: str) -> bool:
+        """True when the management_url binds THIS host: loopback, or the
+        host's own hostname / resolved LAN IP (F5 deploys reach the local
+        caretaker via e.g. http://192.168.1.35:11441, which is NOT loopback).
+        This prevents dict order from sending lifecycle commands (/unload) to
+        a different GPU host's caretaker once a second local provider exists."""
+        if mgmt.startswith(("http://127.0.0.1", "http://localhost")):
+            return True
+        host = mgmt.split("://", 1)[-1].split(":", 1)[0].split("/", 1)[0].lower()
+        if not host:
+            return False
+        try:
+            hostname, aliases, ips = socket.gethostbyname_ex(socket.gethostname())
+        except OSError:
+            return False
+        own = {hostname.lower(), *(a.lower() for a in aliases), *(ip.lower() for ip in ips)}
+        return host in own
+
+    # Pass 1: prefer a local provider whose management_url binds THIS host —
+    # this is the gateway's own caretaker (ai-kvm-2 talks to its own daemon,
+    # never to a Windows/remote GPU host, for lifecycle execution).  Loopback
+    # OR this host's hostname/LAN-IP.  Dict ordering must not decide which
+    # caretaker the gateway unloads (F5 multi-host: ai-kvm2-local vs a future
+    # 14700k-local).
     for name, doc in providers.items():
         doc = doc or {}
         if not _is_local(name, doc):
             continue
         mgmt = _expand_env(str(doc.get("management_url", "")))
-        if mgmt.startswith(("http://127.0.0.1", "http://localhost")):
+        if _is_this_host(mgmt):
             local_doc, local_name = doc, name
             break
     # Pass 2 (single-provider / non-loopback fallback): first local doc.
