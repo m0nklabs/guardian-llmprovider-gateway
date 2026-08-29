@@ -40,6 +40,7 @@ def _manager(**attrs) -> MagicMock:
     mgr.save_current_context = AsyncMock()
     mgr.restore_current_context = AsyncMock()
     mgr._config_drifted = Mock(return_value=False)
+    mgr.is_switch_allowed = Mock(return_value=True)
     for k, v in attrs.items():
         setattr(mgr, k, v)
     return mgr
@@ -201,3 +202,29 @@ async def test_pre_switch_save_false_skips_context_save():
     crt.init(model_manager=mgr, caretaker_client=client)
     await crt.ensure_backend(model="m", local_fallback=AsyncMock())
     mgr.save_current_context.assert_not_awaited()
+
+
+async def test_switch_guard_blocks_allowlist_excluded_client():
+    """Defense-in-depth: a switch call site passing client_id is gated even if
+    a future call site forgets the hotpath is_switch_allowed check."""
+    client = _StubClient()
+    mgr = _manager()
+    mgr.is_switch_allowed = Mock(return_value=False)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    with pytest.raises(ValueError, match="not allowed to switch models"):
+        await crt.ensure_backend(
+            model="m", client_id="blocked-client", local_fallback=AsyncMock()
+        )
+    client.ensure.assert_not_awaited()
+    mgr.save_current_context.assert_not_awaited()
+
+
+async def test_reload_without_client_id_not_gated():
+    """Reload sites (same-model reload, no switch) omit client_id -> no gate."""
+    client = _StubClient()
+    mgr = _manager()
+    mgr.is_switch_allowed = Mock(return_value=False)  # would block if gated
+    crt.init(model_manager=mgr, caretaker_client=client)
+    result = await crt.ensure_backend(model="m", local_fallback=AsyncMock())
+    assert result == "remote"
+    client.ensure.assert_awaited_once()

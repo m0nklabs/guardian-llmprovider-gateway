@@ -1620,6 +1620,16 @@ class TestCaretakerLoadedMirror:
         assert sig["vision"] is False
         assert "args_sha256" in sig and "env_sha256" in sig
 
+    def test_mark_loaded_canonicalizes_alias(self, tmp_path: Path):
+        """mark_loaded_by_caretaker accepts aliases the way the hotpath does —
+        an unknown name still raises before the mirror desyncs current_model."""
+        mgr = _make_manager(tmp_path)
+        mgr.mark_loaded_by_caretaker("glm-4.7-flash", enable_vision=False)
+        assert mgr.current_model == "GLM-4.7-Flash"
+        assert mgr.is_unloaded is False
+        with pytest.raises(ValueError, match="not found in configuration"):
+            mgr.mark_loaded_by_caretaker("totally-unknown-model")
+
     def test_save_current_context_skips_when_unloaded(self, tmp_path: Path, monkeypatch):
         mgr = _make_manager(tmp_path)
         mgr.is_unloaded = True

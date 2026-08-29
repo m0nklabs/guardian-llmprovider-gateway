@@ -580,6 +580,7 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                                             enable_vision=desired_vision,
                                             context_hint=ctx_hint_int,
                                             pre_switch_save=True,
+                                            client_id=client_id,
                                             local_fallback=lambda: _model_manager.switch_model(
                                                 desired_model,
                                                 client_id=client_id,
