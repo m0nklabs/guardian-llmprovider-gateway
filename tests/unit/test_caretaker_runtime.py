@@ -8,6 +8,7 @@ their existing crash/503 handling.
 
 from unittest.mock import AsyncMock, MagicMock, Mock
 
+import httpx
 import pytest
 
 from app.engine.manager import ModelLoadError
@@ -24,6 +25,14 @@ from app.gateway.caretaker_client import (
 class _StubClient:
     def __init__(self) -> None:
         self.ensure = AsyncMock(return_value={"ok": True, "loaded_model": "m"})
+
+
+def _timeout_unavailable() -> CaretakerUnavailable:
+    """A transport CaretakerUnavailable whose cause is a timeout — the daemon
+    accepted the connection, so it is alive but busy."""
+    err = CaretakerUnavailable("http://x:11441")
+    err.__cause__ = httpx.ReadTimeout("timed out")
+    return err
 
 
 @pytest.fixture(autouse=True)
@@ -79,12 +88,12 @@ async def test_remote_success_calls_ensure_and_marks_loaded():
 
 
 async def test_unavailable_timeout_rereprobe_succeeds_remote():
-    """A transport timeout is NOT a dead daemon: a live daemon mid-switch
-    would race a local spawn (two controllers).  Re-probing once must recover
-    a merely-slow daemon -> remote, no local fallback."""
+    """A transport TIMEOUT is NOT a dead daemon: the daemon accepted the
+    connection, so it is alive (mid-switch).  Re-probing once must recover a
+    merely-slow daemon -> remote, no local fallback."""
     client = _StubClient()
     client.ensure.side_effect = [
-        CaretakerUnavailable("http://x:11441"),
+        _timeout_unavailable(),
         {"ok": True, "loaded_model": "m"},
     ]
     mgr = _manager()
@@ -99,9 +108,27 @@ async def test_unavailable_timeout_rereprobe_succeeds_remote():
     )
 
 
+async def test_unavailable_timeout_twice_fails_closed():
+    """Two consecutive timeouts mean the daemon accepted the connection but is
+    unresponsive (still mid-switch — a load can outlast the client timeout
+    more than once).  Spawning locally would create a second controller on a
+    live daemon's backend -> fail closed with ModelLoadError."""
+    client = _StubClient()
+    client.ensure.side_effect = [_timeout_unavailable(), _timeout_unavailable()]
+    mgr = _manager()
+    crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
+    with pytest.raises(ModelLoadError):
+        await crt.ensure_backend(model="m", local_fallback=fallback)
+    assert client.ensure.await_count == 2
+    fallback.assert_not_awaited()
+    mgr.mark_loaded_by_caretaker.assert_not_called()
+
+
 async def test_unavailable_rereprobe_also_fails_then_local():
-    """Two CaretakerUnavailable in a row confirm the daemon is really gone;
-    only then may the local lifecycle run (it is the sole controller)."""
+    """Two non-timeout CaretakerUnavailable in a row (connection refused =
+    daemon really gone) let the local lifecycle run — it is then the sole
+    controller."""
     client = _StubClient()
     client.ensure.side_effect = [
         CaretakerUnavailable("http://x:11441"),
@@ -137,6 +164,41 @@ async def test_remote_idempotent_ensure_does_not_restore():
     client = _StubClient()
     mgr = _manager()
     mgr.backend_serves_model = AsyncMock(return_value=True)  # fresh_load False
+    crt.init(model_manager=mgr, caretaker_client=client)
+    result = await crt.ensure_backend(
+        model="m", pre_switch_save=True, local_fallback=AsyncMock()
+    )
+    assert result == "remote"
+    mgr.restore_current_context.assert_not_awaited()
+
+
+async def test_remote_ensure_fresh_load_field_overrides_probe():
+    """The daemon's fresh_load field overrides the probe: backend_serves_model
+    misdetects an already-serving backend (probe says NOT fresh) but /ensure
+    reports the model was freshly loaded -> restore (empty slot)."""
+    client = _StubClient()
+    client.ensure = AsyncMock(
+        return_value={"ok": True, "loaded_model": "m", "fresh_load": True}
+    )
+    mgr = _manager()
+    mgr.backend_serves_model = AsyncMock(return_value=True)  # probe: not fresh
+    crt.init(model_manager=mgr, caretaker_client=client)
+    result = await crt.ensure_backend(
+        model="m", pre_switch_save=True, local_fallback=AsyncMock()
+    )
+    assert result == "remote"
+    mgr.restore_current_context.assert_awaited_once()
+
+
+async def test_remote_ensure_fresh_load_false_skips_restore():
+    """The daemon contradicts the probe: /ensure says the load was idempotent
+    (fresh_load False) even though the probe thought it was fresh -> no
+    restore (live session authoritative)."""
+    client = _StubClient()
+    client.ensure = AsyncMock(
+        return_value={"ok": True, "loaded_model": "m", "fresh_load": False}
+    )
+    mgr = _manager()  # backend_serves_model False -> probe says fresh
     crt.init(model_manager=mgr, caretaker_client=client)
     result = await crt.ensure_backend(
         model="m", pre_switch_save=True, local_fallback=AsyncMock()
