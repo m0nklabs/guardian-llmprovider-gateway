@@ -131,6 +131,14 @@ async def ensure_backend(
                 enable_vision=enable_vision,
                 context_hint=context_hint,
             )
+            # Mirror the remote/switch restore here too: when this is a switch
+            # (pre_switch_save=True) and the backend was freshly (re)started
+            # serving the target model, restore its auto-saved session context
+            # so history survives (same clobbering consideration as the remote
+            # path, which also restores right after an idempotent /ensure on
+            # an already-loaded model).
+            if pre_switch_save and _model_manager is not None:
+                await _model_manager.restore_current_context()
             return "local-healthy"
         logger.warning(
             "F5: caretaker unavailable — local load fallback for '%s'", model
@@ -174,7 +182,21 @@ async def ensure_backend(
             "Caretaker /ensure succeeded but did not report the loaded model"
         )
     loaded = result["loaded_model"]
-    if loaded != model:
+    # Canonicalize BOTH sides through the gateway's resolver before comparing:
+    # the caretaker may report the canonical name for an alias we sent (or
+    # vice versa), and a raw string compare would turn a legitimate
+    # alias-load into a false ModelLoadError/503 on every such request.
+    # Unknown names on either side fall back to the raw string (the equality
+    # then fails closed, which is correct).
+    try:
+        resolved_loaded = _model_manager.resolve_model(loaded) if _model_manager else loaded
+    except ValueError:
+        resolved_loaded = loaded
+    try:
+        resolved_requested = _model_manager.resolve_model(model) if _model_manager else model
+    except ValueError:
+        resolved_requested = model
+    if resolved_loaded != resolved_requested:
         logger.warning(
             "F5: caretaker loaded '%s' instead of requested '%s' — "
             "failing closed to avoid a second controller on the backend",

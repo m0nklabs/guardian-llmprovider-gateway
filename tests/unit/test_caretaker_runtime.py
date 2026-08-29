@@ -41,6 +41,9 @@ def _manager(**attrs) -> MagicMock:
     mgr.restore_current_context = AsyncMock()
     mgr._config_drifted = Mock(return_value=False)
     mgr.is_switch_allowed = Mock(return_value=True)
+    # Identity resolver by default — tests override it when they need alias
+    # canonicalization semantics.
+    mgr.resolve_model = Mock(side_effect=lambda name: name)
     for k, v in attrs.items():
         setattr(mgr, k, v)
     return mgr
@@ -106,6 +109,25 @@ async def test_unavailable_with_healthy_backend_adopts_state():
         "m", enable_vision=None, context_hint=None
     )
     fallback.assert_not_awaited()
+    # Reload adopt (no pre_switch_save) must not restore.
+    mgr.restore_current_context.assert_not_awaited()
+
+
+async def test_unavailable_adopt_switch_restores_context():
+    """Adopt path with a switch (pre_switch_save=True) mirrors the remote
+    restore: a freshly (re)started backend serving the target model must
+    recover its auto-saved session context."""
+    client = _StubClient()
+    client.ensure.side_effect = CaretakerUnavailable("http://x:11441")
+    mgr = _manager()
+    mgr.backend_serves_model = AsyncMock(return_value=True)
+    mgr.backend_health_ok = AsyncMock(return_value=True)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    result = await crt.ensure_backend(
+        model="m", pre_switch_save=True, local_fallback=AsyncMock()
+    )
+    assert result == "local-healthy"
+    mgr.restore_current_context.assert_awaited_once()
 
 
 async def test_unavailable_drifted_config_runs_local_fallback():
@@ -255,6 +277,25 @@ async def test_remote_loaded_model_mismatch_fails_closed():
         await crt.ensure_backend(model="m", local_fallback=fallback)
     fallback.assert_not_awaited()
     mgr.mark_loaded_by_caretaker.assert_not_called()
+
+
+async def test_remote_loaded_model_alias_does_not_mismatch():
+    """The mismatch comparison canonicalizes both sides: the caretaker
+    reporting the canonical name for an alias we sent is NOT a mismatch (a
+    raw string compare would have turned a legitimate load into a 503)."""
+    client = _StubClient()
+    client.ensure = AsyncMock(return_value={"ok": True, "loaded_model": "M"})
+    mgr = _manager()
+    # Case-insensitive resolver: "M" canonicalizes to "m".
+    mgr.resolve_model = Mock(
+        side_effect=lambda name: "m" if name.lower() == "m" else name
+    )
+    crt.init(model_manager=mgr, caretaker_client=client)
+    result = await crt.ensure_backend(model="m", local_fallback=AsyncMock())
+    assert result == "remote"
+    mgr.mark_loaded_by_caretaker.assert_called_once_with(
+        "m", enable_vision=None, context_hint=None
+    )
 
 
 async def test_remote_success_without_loaded_model_fails_closed():
