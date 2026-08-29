@@ -74,15 +74,32 @@ async def test_unavailable_with_healthy_backend_adopts_state():
     client.ensure.side_effect = CaretakerUnavailable("http://x:11441")
     mgr = _manager()
     mgr.backend_serves_model = AsyncMock(return_value=True)
+    mgr.backend_health_ok = AsyncMock(return_value=True)
     crt.init(model_manager=mgr, caretaker_client=client)
     fallback = AsyncMock()
     result = await crt.ensure_backend(model="m", local_fallback=fallback)
     assert result == "local-healthy"
     mgr.backend_serves_model.assert_awaited_once_with("m")
+    mgr.backend_health_ok.assert_awaited_once_with()
     mgr.mark_loaded_by_caretaker.assert_called_once_with(
         "m", enable_vision=None, context_hint=None
     )
     fallback.assert_not_awaited()
+
+
+async def test_unavailable_hung_backend_runs_local_fallback():
+    """Backend serves the model but is NOT healthy (hung) -> must NOT adopt."""
+    client = _StubClient()
+    client.ensure.side_effect = CaretakerUnavailable("http://x:11441")
+    mgr = _manager()
+    mgr.backend_serves_model = AsyncMock(return_value=True)
+    mgr.backend_health_ok = AsyncMock(return_value=False)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
+    result = await crt.ensure_backend(model="m", local_fallback=fallback)
+    assert result == "local"
+    fallback.assert_awaited_once()
+    mgr.mark_loaded_by_caretaker.assert_not_called()
 
 
 async def test_unavailable_healthy_backend_wrong_model_runs_fallback():
