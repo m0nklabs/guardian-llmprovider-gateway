@@ -689,14 +689,19 @@ class ModelManager:
         self._refresh_model_registry()
         if model_name not in self.models:
             raise ValueError(f"Model '{model_name}' not found in configuration")
-        desired_vision = (
-            self._resolve_runtime_vision_flag(model_name, enable_vision)
-            if enable_vision is not None
-            else self.current_vision_enabled
-        )
+        # Same semantics as load()/switch_model(): resolve the vision flag with
+        # the OLD active model still in place — enable_vision=None keeps the
+        # current flag only when the target IS the already-active model, and
+        # otherwise falls back to the target model's own default (False when it
+        # has no mmproj). Copying current_vision_enabled blindly would stamp a
+        # stale flag + launch signature onto a different model (e.g. the
+        # connect-error recovery path switching to another model).
+        desired_vision = self._resolve_runtime_vision_flag(model_name, enable_vision)
         self.current_model = model_name
-        if enable_vision is not None:
-            self.current_vision_enabled = desired_vision
+        # Always set the vision flag: resolve already kept the previous flag
+        # for the same model and fell back to the model default otherwise
+        # (mirrors load()/switch_model()).
+        self.current_vision_enabled = desired_vision
         self.is_unloaded = False
         self._model_verified = True
         self._last_backend_model = model_name
