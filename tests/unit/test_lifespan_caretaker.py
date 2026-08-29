@@ -51,9 +51,51 @@ class _FakeModelManager:
         self.mark_unloaded_calls = 0
         self.local_unload_calls = 0
 
+    def __init__(
+        self,
+        *,
+        idle_unload_minutes: float | None,
+        is_unloaded: bool,
+        active_requests: int,
+        last_request_time: float,
+    ) -> None:
+        self.idle_unload_minutes = idle_unload_minutes
+        self.is_unloaded = is_unloaded
+        self.active_requests = active_requests
+        self.last_request_time = last_request_time
+        self.mark_unloaded_calls = 0
+        self.local_unload_calls = 0
+        self._model_verified = True
+        self._last_verification_at = "2026-08-29T00:00:00Z"
+        self._last_backend_model = "glm-4.7"
+
     def mark_unloaded_by_caretaker(self) -> None:
         self.is_unloaded = True
+        self._model_verified = False
+        self._last_verification_at = None
+        self._last_backend_model = None
         self.mark_unloaded_calls += 1
+
+    def snapshot_unload_state(self) -> dict:
+        return {
+            "is_unloaded": self.is_unloaded,
+            "model_verified": self._model_verified,
+            "last_verification_at": self._last_verification_at,
+            "last_backend_model": self._last_backend_model,
+        }
+
+    def rollback_unload_state(
+        self,
+        *,
+        is_unloaded: bool,
+        model_verified: bool,
+        last_verification_at: str | None,
+        last_backend_model: str | None,
+    ) -> None:
+        self.is_unloaded = is_unloaded
+        self._model_verified = model_verified
+        self._last_verification_at = last_verification_at
+        self._last_backend_model = last_backend_model
 
     async def unload(self) -> None:
         """Local fallback unload (no caretaker configured)."""
@@ -221,7 +263,12 @@ async def test_watcher_rolls_back_is_unloaded_on_caretaker_refusal(
     with pytest.raises(_StopWatcher):
         await lifespan_mod.idle_unload_watcher()
     mgr = lifespan_mod._model_manager
-    assert mgr.is_unloaded is False  # rolled back to the pre-call value
+    # Full rollback: the flag AND the verification metadata cleared by the
+    # optimistic mark are restored — the still-running backend stays verified.
+    assert mgr.is_unloaded is False
+    assert mgr._model_verified is True
+    assert mgr._last_verification_at == "2026-08-29T00:00:00Z"
+    assert mgr._last_backend_model == "glm-4.7"
     assert mgr.mark_unloaded_calls == 1  # the optimistic mark did fire
 
 

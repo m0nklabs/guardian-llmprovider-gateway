@@ -765,6 +765,27 @@ class TestUnload:
         assert mgr._last_verification_at is None
         assert mgr._last_backend_model is None
 
+    def test_rollback_unload_state_restores_full_state(self, tmp_path: Path):
+        """PR #11 review: after a caretaker refusal the full optimistic state
+        cleared by mark_unloaded_by_caretaker() must be restored on the real
+        manager — flag AND verification metadata, else the still-running model
+        looks unloaded/unknown and triggers an avoidable reload."""
+        mgr = _make_manager(tmp_path)
+        mgr._model_verified = True
+        mgr._last_verification_at = "2026-08-29T00:00:00Z"
+        mgr._last_backend_model = "glm-4.7"
+
+        prev = mgr.snapshot_unload_state()
+        mgr.mark_unloaded_by_caretaker()
+        assert mgr.is_unloaded is True
+        assert mgr._model_verified is False
+
+        mgr.rollback_unload_state(**prev)
+        assert mgr.is_unloaded is prev["is_unloaded"]  # False
+        assert mgr._model_verified is True
+        assert mgr._last_verification_at == "2026-08-29T00:00:00Z"
+        assert mgr._last_backend_model == "glm-4.7"
+
 
 # ── _get_comfyui_url ──────────────────────────────────────────────────
 

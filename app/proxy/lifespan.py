@@ -259,14 +259,17 @@ async def idle_unload_watcher():
                 # instead of routing it at a backend that is about to stop.
                 # Same end-state as unload() (minus the process stop the
                 # caretaker does): is_unloaded + verification-state reset.
-                _prev_unloaded = _model_manager.is_unloaded
+                _prev_state = _model_manager.snapshot_unload_state()
                 _model_manager.mark_unloaded_by_caretaker()
                 await _caretaker_client.unload()
             except CaretakerError as e:
                 # Expected: remote refusal — the caretaker never stopped the
-                # backend, so roll the optimistic flag back; the watcher guard
-                # (is_unloaded) must not treat the model as gone.
-                _model_manager.is_unloaded = _prev_unloaded
+                # backend, so roll back the FULL optimistic state (flag AND the
+                # verification metadata mark_unloaded_by_caretaker cleared),
+                # otherwise the manager thinks the still-running model is
+                # unloaded/unknown and a follow-up request or health check
+                # triggers an avoidable reload or mismatch.
+                _model_manager.rollback_unload_state(**_prev_state)
                 logger.error(f"❌ Auto-unload via caretaker failed: {e}")
             except Exception as e:
                 # Unexpected (coding error, transport bug): surface the traceback

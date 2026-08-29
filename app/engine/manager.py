@@ -601,6 +601,34 @@ class ModelManager:
         self._last_verification_at = None
         self._last_backend_model = None
 
+    def snapshot_unload_state(self) -> dict:
+        """Capture the pre-unload state so an optimistic
+        mark_unloaded_by_caretaker() can be fully rolled back."""
+        return {
+            "is_unloaded": self.is_unloaded,
+            "model_verified": self._model_verified,
+            "last_verification_at": self._last_verification_at,
+            "last_backend_model": self._last_backend_model,
+        }
+
+    def rollback_unload_state(
+        self,
+        *,
+        is_unloaded: bool,
+        model_verified: bool,
+        last_verification_at: str | None,
+        last_backend_model: str | None,
+    ) -> None:
+        """F5: undo an optimistic mark_unloaded_by_caretaker() after the
+        caretaker refused the unload (the backend was never stopped).  Restore
+        the exact pre-mark state so nothing looks unloaded/unknown when nothing
+        actually changed — otherwise a follow-up request or health check would
+        trigger an avoidable reload or mismatch on a still-running model."""
+        self.is_unloaded = is_unloaded
+        self._model_verified = model_verified
+        self._last_verification_at = last_verification_at
+        self._last_backend_model = last_backend_model
+
     async def _free_gpu_memory(self) -> None:
         """Ask coexisting GPU services to release VRAM before loading a model.
 
