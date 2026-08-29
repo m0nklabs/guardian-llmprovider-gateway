@@ -348,13 +348,24 @@ def build_caretaker_client(config: dict) -> CaretakerClient:
         if _is_this_host(mgmt):
             local_doc, local_name = doc, name
             break
-    # Pass 2 (single-provider / non-loopback fallback): first local doc.
+    # Pass 2 (single-provider fallback): when none of the local providers binds
+    # THIS host (e.g. /etc/hosts maps the hostname to 127.0.1.1 instead of the
+    # LAN IP), a single local provider is unambiguous.  But with MULTIPLE local
+    # providers none binding this host, dict order must never decide which GPU
+    # host's caretaker receives lifecycle commands (and possibly CARETAKER_KEY)
+    # — fail closed instead (review: possible issue).
     if local_doc is None:
-        for name, doc in providers.items():
-            doc = doc or {}
-            if _is_local(name, doc):
-                local_doc, local_name = doc, name
-                break
+        local_candidates = [
+            (name, doc or {}) for name, doc in providers.items() if _is_local(name, doc or {})
+        ]
+        if len(local_candidates) == 1:
+            local_name, local_doc = local_candidates[0]
+        elif len(local_candidates) > 1:
+            raise ValueError(
+                "Multiple local providers configured and none binds this host; "
+                "refusing to pick one by dict order (check management_url and "
+                "host/IP resolution)."
+            )
     if local_name is not None:
         logger.info(
             "Caretaker client uses local provider %s (%s)",

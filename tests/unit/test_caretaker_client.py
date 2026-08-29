@@ -398,6 +398,28 @@ def test_build_ignores_caretaker_key_in_yaml(monkeypatch: pytest.MonkeyPatch) ->
     asyncio.run(client.close())
 
 
+def test_build_fails_closed_on_multiple_locals_no_this_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review fix (possible issue): with TWO local providers and none binding
+    THIS host, dict order must never decide which GPU host's caretaker receives
+    lifecycle commands — fail closed with ValueError."""
+    monkeypatch.delenv("CARETAKER_KEY", raising=False)
+    monkeypatch.setattr("socket.gethostname", lambda: "ai-kvm2")
+    monkeypatch.setattr(
+        "socket.gethostbyname_ex",
+        lambda *a: ("ai-kvm2", ["ai-kvm2"], ["127.0.0.1"]),  # no LAN IP
+    )
+    config = {
+        "providers": {
+            "14700k-local": {"local": True, "management_url": "http://192.168.1.99:11441"},
+            "ai-kvm2-local": {"local": True, "management_url": "http://192.168.1.35:11441"},
+        }
+    }
+    with pytest.raises(ValueError, match="Multiple local providers"):
+        build_caretaker_client(config)
+
+
 def test_build_falls_back_to_first_local(monkeypatch: pytest.MonkeyPatch) -> None:
     """Without a loopback entry the first local provider still wins."""
     monkeypatch.delenv("CARETAKER_KEY", raising=False)

@@ -572,6 +572,51 @@ def test_admin_unload_falls_back_to_local_unload_on_caretaker_unavailable(
     assert fake_mgr.is_unloaded is True
 
 
+def test_admin_unload_preserves_concurrent_reload_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review fix (possible race): if a concurrent reload completes during the
+    /admin/unload round-trip, marking after the fact would clobber the fresh
+    loaded state — the optimistic mark + guarded rollback must leave it alone."""
+    from fastapi.testclient import TestClient
+
+    from app.proxy import server as server_mod
+
+    app = _make_unauthed_app(monkeypatch)
+
+    class _ReloadDuringCallClient:
+        def __init__(self) -> None:
+            self.unload_calls = 0
+
+        async def unload(self) -> dict:
+            self.unload_calls += 1
+            # Simulate a concurrent hotpath reload completing mid-round-trip.
+            mgr = server_mod.model_manager
+            mgr.is_unloaded = False
+            mgr._model_verified = True
+            mgr._last_verification_at = "2026-08-29T00:10:00Z"
+            mgr._last_backend_model = "glm-4.7-other"
+            return {"ok": True, "is_unloaded": True}
+
+    monkeypatch.setattr(server_mod, "caretaker_client", _ReloadDuringCallClient())
+    fake_mgr = _FakeModelManager(
+        idle_unload_minutes=None,
+        is_unloaded=False,
+        active_requests=0,
+        last_request_time=time.time(),
+    )
+    fake_mgr.current_model = "minimal"
+    monkeypatch.setattr(server_mod, "model_manager", fake_mgr)
+
+    client = TestClient(app)
+    r = client.post("/admin/unload", headers={"Authorization": "Bearer test-key"})
+    assert r.status_code == 200, r.text
+    # Fresh reload state preserved — NOT clobbered by the post-fact mark.
+    assert fake_mgr.is_unloaded is False
+    assert fake_mgr._model_verified is True
+    assert fake_mgr._last_backend_model == "glm-4.7-other"
+
+
 def test_admin_unload_503_when_unavailable_and_local_fallback_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
