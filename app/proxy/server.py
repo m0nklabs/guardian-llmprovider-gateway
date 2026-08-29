@@ -1184,7 +1184,13 @@ async def admin_unload(client_id: str = Depends(verify_api_key)):
         # (someone else manages the backend) do we surface the error.
         if model_manager.is_unloaded is False:
             logger.warning("/admin/unload caretaker unavailable; falling back to local unload: %s", e)
-            await model_manager.unload()
+            try:
+                await model_manager.unload()
+            except Exception as exc:
+                # Wrap the fallback: a failing local unload must surface as a
+                # clear 503 (with cause), not escape the handler as a raw 500.
+                logger.exception("/admin/unload local fallback unload failed")
+                raise HTTPException(status_code=503, detail=f"local fallback unload failed: {exc}") from exc
         else:
             logger.error(f"/admin/unload caretaker call failed: {e}")
             raise HTTPException(status_code=503, detail=str(e)) from e

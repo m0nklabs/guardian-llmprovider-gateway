@@ -277,7 +277,14 @@ async def idle_unload_watcher():
                 # otherwise never be freed until the daemon returns).
                 if _prev_state is not None and _model_manager.rollback_unload_if_unchanged(_prev_state):
                     logger.warning("Auto-unload via caretaker unavailable; falling back to local unload: %s", e)
-                    await _model_manager.unload()
+                    try:
+                        await _model_manager.unload()
+                    except Exception:
+                        # An exception raised inside an except-handler is NOT
+                        # caught by the later sibling 'except Exception' — wrap
+                        # the fallback so a failing local unload logs instead of
+                        # killing the watcher task (review: possible bug).
+                        logger.exception("Local fallback unload failed after caretaker unavailable")
                 else:
                     logger.error(f"❌ Auto-unload via caretaker failed: {e}")
             except CaretakerError as e:

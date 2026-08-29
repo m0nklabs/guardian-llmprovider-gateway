@@ -241,6 +241,46 @@ async def test_watcher_syncs_is_unloaded_after_successful_unload(
     assert mgr.mark_unloaded_calls == 1
 
 
+async def test_watcher_unavailable_then_local_fallback_failure_survives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review fix (possible bug): with a caretaker unavailable AND the local
+    fallback unload raising, the watcher task must NOT die — the fallback is
+    wrapped in its own try/except (an exception inside an except-handler is not
+    caught by the sibling except Exception)."""
+    class _UnavailableClient:
+        async def unload(self) -> dict:
+            from app.gateway.caretaker_client import CaretakerUnavailable
+
+            raise CaretakerUnavailable("http://127.0.0.1:11441")
+
+    class _FailingLocalManager(_FakeModelManager):
+        async def unload(self) -> None:
+            self.local_unload_calls += 1
+            raise RuntimeError("systemctl stop failed")
+
+    _install_globals(
+        monkeypatch,
+        last_request_time=time.time() - 600,
+        caretaker_client=_UnavailableClient,
+    )
+    failing = _FailingLocalManager(
+        idle_unload_minutes=5,
+        is_unloaded=False,
+        active_requests=0,
+        last_request_time=time.time() - 600,
+    )
+    monkeypatch.setattr(lifespan_mod, "_model_manager", failing)
+
+    # The watcher runs a full iteration and STOPS via our sleep-sentinel
+    # (_StopWatcher): it did not die on the fallback failure.
+    with pytest.raises(_StopWatcher):
+        await lifespan_mod.idle_unload_watcher()
+    assert failing.local_unload_calls == 1
+    # The fallback failed so is_unloaded stayed False (rollback kept it too).
+    assert failing.is_unloaded is False
+
+
 async def test_watcher_fallback_unload_error_is_logged_not_unbound(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -530,6 +570,47 @@ def test_admin_unload_falls_back_to_local_unload_on_caretaker_unavailable(
     assert r.json()["status"] == "unloaded"
     assert fake_mgr.local_unload_calls == 1
     assert fake_mgr.is_unloaded is True
+
+
+def test_admin_unload_503_when_unavailable_and_local_fallback_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review fix (possible bug): caretaker unavailable AND the local fallback
+    unload failing surfaces as a clear 503 (with cause), not a raw escaping
+    500 / empty detail."""
+    from fastapi.testclient import TestClient
+
+    from app.proxy import server as server_mod
+
+    app = _make_unauthed_app(monkeypatch)
+
+    class _UnavailableClient:
+        async def unload(self) -> dict:
+            from app.gateway.caretaker_client import CaretakerUnavailable
+
+            raise CaretakerUnavailable("http://127.0.0.1:11441")
+
+    monkeypatch.setattr(server_mod, "caretaker_client", _UnavailableClient())
+
+    class _FailingLocalManager(_FakeModelManager):
+        async def unload(self) -> None:
+            self.local_unload_calls += 1
+            raise RuntimeError("systemctl stop failed")
+
+    failing = _FailingLocalManager(
+        idle_unload_minutes=None,
+        is_unloaded=False,
+        active_requests=0,
+        last_request_time=time.time(),
+    )
+    failing.current_model = "minimal"
+    monkeypatch.setattr(server_mod, "model_manager", failing)
+
+    client = TestClient(app)
+    r = client.post("/admin/unload", headers={"Authorization": "Bearer test-key"})
+    assert r.status_code == 503, r.text
+    assert "local fallback unload failed" in r.json()["detail"]
+    assert failing.local_unload_calls == 1
 
 
 def test_admin_unload_503_on_definitive_caretaker_refusal(
