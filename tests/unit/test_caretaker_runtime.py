@@ -6,7 +6,7 @@ not configured or unreachable, and error mapping so the hotpath callers keep
 their existing crash/503 handling.
 """
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 
@@ -38,6 +38,7 @@ def _manager(**attrs) -> MagicMock:
     mgr.backend_serves_model = AsyncMock(return_value=False)
     mgr.backend_health_ok = AsyncMock(return_value=False)
     mgr.save_current_context = AsyncMock()
+    mgr._config_drifted = Mock(return_value=False)
     for k, v in attrs.items():
         setattr(mgr, k, v)
     return mgr
@@ -81,10 +82,36 @@ async def test_unavailable_with_healthy_backend_adopts_state():
     assert result == "local-healthy"
     mgr.backend_serves_model.assert_awaited_once_with("m")
     mgr.backend_health_ok.assert_awaited_once_with()
+    mgr._config_drifted.assert_called_once_with(
+        "m", enable_vision=None, context_hint=None
+    )
     mgr.mark_loaded_by_caretaker.assert_called_once_with(
         "m", enable_vision=None, context_hint=None
     )
     fallback.assert_not_awaited()
+
+
+async def test_unavailable_drifted_config_runs_local_fallback():
+    """Backend serves the model + healthy, but the requested launch config
+    (vision/context_hint) drifts from the persisted one -> must NOT adopt; the
+    drift-checked local fallback must reload instead."""
+    client = _StubClient()
+    client.ensure.side_effect = CaretakerUnavailable("http://x:11441")
+    mgr = _manager()
+    mgr.backend_serves_model = AsyncMock(return_value=True)
+    mgr.backend_health_ok = AsyncMock(return_value=True)
+    mgr._config_drifted = Mock(return_value=True)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
+    result = await crt.ensure_backend(
+        model="m",
+        enable_vision=True,
+        context_hint=4096,
+        local_fallback=fallback,
+    )
+    assert result == "local"
+    fallback.assert_awaited_once()
+    mgr.mark_loaded_by_caretaker.assert_not_called()
 
 
 async def test_unavailable_hung_backend_runs_local_fallback():

@@ -726,8 +726,12 @@ class ModelManager:
             return
         try:
             await self._save_context(f"auto_save_{self.current_model}")
-        except Exception:  # noqa: BLE001 — save must never block a model switch
-            logger.info("No auto-save found for %s, starting fresh.", self.current_model)
+        except Exception as exc:  # noqa: BLE001 — save must never block a model switch
+            logger.warning(
+                "Context auto-save failed for %s (switch continues): %s",
+                self.current_model,
+                exc,
+            )
 
     async def _free_gpu_memory(self) -> None:
         """Ask coexisting GPU services to release VRAM before loading a model.
