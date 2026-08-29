@@ -164,10 +164,18 @@ async def test_watcher_skips_below_idle_limit(
 async def test_watcher_logs_when_client_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _install_globals(monkeypatch, caretaker_client=lambda: None)
+    # Idle (old last_request_time) so the idle gate passes and the
+    # _caretaker_client-is-None branch is actually reached (review: vacuous).
+    _install_globals(
+        monkeypatch,
+        last_request_time=time.time() - 600,
+        caretaker_client=lambda: None,
+    )
     with pytest.raises(_StopWatcher):
         await lifespan_mod.idle_unload_watcher()
     # No exception was raised by the missing client; the loop just continued.
+    mgr = lifespan_mod._model_manager
+    assert mgr.is_unloaded is False  # no unload claim without a client
 
 
 async def test_watcher_syncs_is_unloaded_after_successful_unload(
@@ -219,10 +227,17 @@ async def test_watcher_caretaker_error_is_caught(
 
             raise CaretakerUnavailable("http://127.0.0.1:11441")
 
-    _install_globals(monkeypatch, caretaker_client=_FailingClient)
+    _install_globals(
+        monkeypatch,
+        last_request_time=time.time() - 600,  # idle → error path reached
+        caretaker_client=_FailingClient,
+    )
     with pytest.raises(_StopWatcher):
         await lifespan_mod.idle_unload_watcher()
-    # CaretakerError was swallowed (logged), not re-raised.
+    # CaretakerError was swallowed (logged), not re-raised; no unload claim.
+    mgr = lifespan_mod._model_manager
+    assert mgr.is_unloaded is False
+    assert mgr.mark_unloaded_calls == 0
 
 
 def test_idle_unload_watcher_defined_in_lifespan() -> None:

@@ -278,12 +278,16 @@ def build_caretaker_client(config: dict) -> CaretakerClient:
     - ``management_url``: from the local provider document
       (``config/providers/ai-kvm2-local.settings.yaml``; ``CONFIG["providers"][...]``),
       ``${VAR}``-expanded.  Mandatory — a missing value raises ``ValueError``.
-    - ``api_key``: ``CARETAKER_KEY`` env-first, then a ``management_key``-style
-      config fallback.  ``None`` when neither is present (the client therefore
-      sends no Authorization header and logs a warning).
+    - ``api_key``: ``CARETAKER_KEY`` env-only (never from YAML).  ``None`` when
+      absent (the client then sends no Authorization header and logs a warning).
 
     The key must come from the gateway's own secret source (``.env`` loaded
-    early by ``app.main.load_dotenv``); it is never committed to YAML.
+    early by ``app.main.load_dotenv``); it is never committed to
+    ``config/providers/*.settings.yaml`` — those are tracked and a Bearer key
+    read from them would leak over the LAN in cleartext (review: sensitive
+    key over cleartext).  A non-loopback ``management_url`` (multi-host F5)
+    therefore also requires ``CARETAKER_KEY`` to be set explicitly; without it
+    the client simply sends no Authorization header and the caretaker 401s.
     """
     providers = config.get("providers") or {}
     local_doc = None
@@ -326,10 +330,10 @@ def build_caretaker_client(config: dict) -> CaretakerClient:
             "config/providers/*-local.settings.yaml so the gateway can reach the caretaker."
         )
 
-    # Secret resolution: env-first (CARETAKER_KEY), then config.
+    # Secret resolution: env-only (CARETAKER_KEY).  No YAML fallback — a
+    # caretaker_key in a tracked provider file would leak the Bearer secret
+    # over the LAN and violate the secrets rule (review: sensitive key over
+    # cleartext).
     api_key = _expand_env(os.environ.get("CARETAKER_KEY", "")).strip() or None
-    if api_key is None:
-        cfg_key = _expand_env(str((local_doc or {}).get("caretaker_key", ""))).strip()
-        api_key = cfg_key or None
 
     return CaretakerClient(management_url=management_url, api_key=api_key)

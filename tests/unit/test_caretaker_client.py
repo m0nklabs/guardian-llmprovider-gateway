@@ -278,6 +278,28 @@ def test_build_prefers_loopback_local_over_other_local(monkeypatch: pytest.Monke
     asyncio.run(client.close())
 
 
+def test_build_ignores_caretaker_key_in_yaml(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review fix (sensitive key over cleartext): the Bearer secret must never
+    be read from a tracked provider YAML — CARETAKER_KEY is env-only."""
+    monkeypatch.delenv("CARETAKER_KEY", raising=False)
+    config = {
+        "providers": {
+            "ai-kvm2-local": {
+                "local": True,
+                "management_url": "http://127.0.0.1:11441",
+                "caretaker_key": "would-leak-over-lan",
+            }
+        }
+    }
+    client = build_caretaker_client(config)
+    # The YAML caretaker_key is deliberately IGNORED; without CARETAKER_KEY the
+    # client sends no Authorization header at all.
+    assert client._api_key is None
+    import asyncio
+
+    asyncio.run(client.close())
+
+
 def test_build_falls_back_to_first_local(monkeypatch: pytest.MonkeyPatch) -> None:
     """Without a loopback entry the first local provider still wins."""
     monkeypatch.delenv("CARETAKER_KEY", raising=False)
