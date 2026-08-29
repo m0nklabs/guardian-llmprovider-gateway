@@ -475,6 +475,11 @@ def test_admin_unload_delegates_to_caretaker(
         def __init__(self) -> None:
             self.unload_calls = 0
 
+        async def status(self) -> dict:
+            # The caretaker has nothing loaded — the already_unloaded shortcut
+            # on the second call may trust it.
+            return {"is_unloaded": True, "loaded_model": None}
+
         async def unload(self) -> dict:
             self.unload_calls += 1
             return {"ok": True, "is_unloaded": True}
@@ -615,6 +620,88 @@ def test_admin_unload_preserves_concurrent_reload_state(
     assert fake_mgr.is_unloaded is False
     assert fake_mgr._model_verified is True
     assert fake_mgr._last_backend_model == "glm-4.7-other"
+
+
+def test_admin_unload_stale_flag_still_unloads_when_caretaker_has_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review fix (focus-area, stale local flag): with the F5 split the
+    gateway-local is_unloaded can be stale — the caretaker (independent owner)
+    may have a model loaded via a direct /ensure call.  A subsequent
+    /admin/unload must then still free VRAM, not report already_unloaded."""
+    from fastapi.testclient import TestClient
+
+    from app.proxy import server as server_mod
+
+    app = _make_unauthed_app(monkeypatch)
+
+    class _Client:
+        def __init__(self) -> None:
+            self.unload_calls = 0
+
+        async def status(self) -> dict:
+            return {"is_unloaded": False, "loaded_model": "minimal"}
+
+        async def unload(self) -> dict:
+            self.unload_calls += 1
+            return {"ok": True, "is_unloaded": True}
+
+    client_stub = _Client()
+    monkeypatch.setattr(server_mod, "caretaker_client", client_stub)
+    fake_mgr = _FakeModelManager(
+        idle_unload_minutes=None,
+        is_unloaded=True,  # stale: gateway thinks unloaded, caretaker disagrees
+        active_requests=0,
+        last_request_time=time.time(),
+    )
+    fake_mgr.current_model = "minimal"
+    monkeypatch.setattr(server_mod, "model_manager", fake_mgr)
+
+    client = TestClient(app)
+    r = client.post("/admin/unload", headers={"Authorization": "Bearer test-key"})
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "unloaded"
+    assert client_stub.unload_calls == 1  # delegated to the caretaker
+
+
+def test_admin_unload_keeps_already_unloaded_when_caretaker_confirms(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review fix: when the caretaker confirms it has nothing loaded, the
+    already_unloaded shortcut stays (no redundant remote call)."""
+    from fastapi.testclient import TestClient
+
+    from app.proxy import server as server_mod
+
+    app = _make_unauthed_app(monkeypatch)
+
+    class _Client:
+        def __init__(self) -> None:
+            self.unload_calls = 0
+
+        async def status(self) -> dict:
+            return {"is_unloaded": True, "loaded_model": None}
+
+        async def unload(self) -> dict:
+            self.unload_calls += 1
+            return {"ok": True, "is_unloaded": True}
+
+    client_stub = _Client()
+    monkeypatch.setattr(server_mod, "caretaker_client", client_stub)
+    fake_mgr = _FakeModelManager(
+        idle_unload_minutes=None,
+        is_unloaded=True,
+        active_requests=0,
+        last_request_time=time.time(),
+    )
+    fake_mgr.current_model = "minimal"
+    monkeypatch.setattr(server_mod, "model_manager", fake_mgr)
+
+    client = TestClient(app)
+    r = client.post("/admin/unload", headers={"Authorization": "Bearer test-key"})
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "already_unloaded"
+    assert client_stub.unload_calls == 0
 
 
 def test_admin_unload_503_when_unavailable_and_local_fallback_fails(

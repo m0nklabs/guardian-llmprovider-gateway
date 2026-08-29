@@ -1162,7 +1162,21 @@ async def admin_unload(client_id: str = Depends(verify_api_key)):
     GATEWAY_MANAGER_SPLIT).  The gateway keeps the invocation decision and maps
     the caretaker response back into the existing admin response shape.
     """
-    if model_manager.is_unloaded:
+    # The caretaker is the INDEPENDENT lifecycle owner (F5 split): the
+    # gateway-local flag can be stale relative to it — e.g. a direct operator
+    # call to the caretaker's POST /ensure loads a model while the flag still
+    # says unloaded.  A subsequent /admin/unload must then still free VRAM, not
+    # report "already_unloaded" (review: focus-area, stale local flag).
+    if model_manager.is_unloaded and caretaker_client is not None:
+        try:
+            status = await caretaker_client.status()
+        except CaretakerUnavailable:
+            status = None
+        caretaker_idle = status is None or bool(status.get("is_unloaded", True))
+        if caretaker_idle:
+            return {"status": "already_unloaded", "message": "llama-server is already stopped"}
+        # The caretaker actually has a model loaded — fall through and unload.
+    elif model_manager.is_unloaded:
         return {"status": "already_unloaded", "message": "llama-server is already stopped"}
     if caretaker_client is None:
         # No remote caretaker configured (management_url/CARETAKER_KEY/daemon
