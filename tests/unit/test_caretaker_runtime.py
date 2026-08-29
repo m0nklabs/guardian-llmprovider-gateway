@@ -25,6 +25,8 @@ from app.gateway.caretaker_client import (
 class _StubClient:
     def __init__(self) -> None:
         self.ensure = AsyncMock(return_value={"ok": True, "loaded_model": "m"})
+        # Default: daemon does not ship fresh_load yet (capability not detected).
+        self.supports_fresh_load = False
 
 
 def _timeout_unavailable() -> CaretakerUnavailable:
@@ -185,31 +187,21 @@ async def test_unavailable_refused_then_timeout_fails_closed():
     mgr.mark_loaded_by_caretaker.assert_not_called()
 
 
-async def test_remote_switch_without_fresh_load_does_not_restore():
-    """Restore is gated on the daemon's explicit fresh_load confirmation.  While
-    the /ensure contract does not ship the field, a switch (pre_switch_save)
-    must NOT restore on a gateway-side probe result alone."""
-    client = _StubClient()  # response has no fresh_load field
+async def test_switch_without_fresh_load_support_uses_local_lifecycle():
+    """While the daemon does not ship fresh_load, a remote switch would lose
+    switch_model's save/restore parity (save runs, nothing restores).  Keep
+    the local lifecycle for switches until the capability is confirmed."""
+    client = _StubClient()  # supports_fresh_load False
     mgr = _manager()
     crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
     result = await crt.ensure_backend(
-        model="m", pre_switch_save=True, local_fallback=AsyncMock()
+        model="m", pre_switch_save=True, local_fallback=fallback
     )
-    assert result == "remote"
-    mgr.restore_current_context.assert_not_awaited()
-
-
-async def test_remote_idempotent_ensure_does_not_restore():
-    """An /ensure without a fresh_load confirmation must NOT restore — the slot
-    may hold a live session and restoring the stale auto-save would clobber
-    it."""
-    client = _StubClient()
-    mgr = _manager()
-    crt.init(model_manager=mgr, caretaker_client=client)
-    result = await crt.ensure_backend(
-        model="m", pre_switch_save=True, local_fallback=AsyncMock()
-    )
-    assert result == "remote"
+    assert result == "local"
+    fallback.assert_awaited_once()
+    client.ensure.assert_not_awaited()
+    mgr.save_current_context.assert_not_awaited()
     mgr.restore_current_context.assert_not_awaited()
 
 
@@ -217,6 +209,7 @@ async def test_remote_ensure_fresh_load_true_restores():
     """The daemon's explicit fresh_load: true is the ONLY restore signal — a
     freshly loaded model (empty slot) mirrors switch_model's restore."""
     client = _StubClient()
+    client.supports_fresh_load = True
     client.ensure = AsyncMock(
         return_value={"ok": True, "loaded_model": "m", "fresh_load": True}
     )
@@ -233,6 +226,7 @@ async def test_remote_ensure_fresh_load_false_skips_restore():
     """The daemon says the load was idempotent (fresh_load False) -> no restore
     (live session authoritative)."""
     client = _StubClient()
+    client.supports_fresh_load = True
     client.ensure = AsyncMock(
         return_value={"ok": True, "loaded_model": "m", "fresh_load": False}
     )
@@ -275,6 +269,7 @@ async def test_unavailable_adopt_never_restores():
     """Adoption never restores — the daemon is unreachable, so no fresh_load
     confirmation is available; the live session in slot 0 is authoritative."""
     client = _StubClient()
+    client.supports_fresh_load = True  # gate passes; adopt path is reached
     client.ensure.side_effect = CaretakerUnavailable("http://x:11441")
     mgr = _manager()
     mgr.backend_serves_model = AsyncMock(return_value=True)
@@ -292,6 +287,7 @@ async def test_unavailable_adopt_never_restores_even_after_timed_out_switch():
     unreachable, so no fresh_load confirmation exists.  Adopt never restores
     on a probe result alone (it could clobber a live session)."""
     client = _StubClient()
+    client.supports_fresh_load = True
     client.ensure.side_effect = CaretakerUnavailable("http://x:11441")
     mgr = _manager()
     mgr.backend_serves_model = AsyncMock(return_value=True)
@@ -401,6 +397,43 @@ async def test_caretaker_errors_map_to_model_load_error(exc):
         await crt.ensure_backend(model="m", local_fallback=AsyncMock())
 
 
+async def test_model_load_failed_preserves_crash_telemetry():
+    """The daemon's crash_details (its CrashRecord.to_dict()) must reach the
+    raised ModelLoadError.crash_record so the hotpath crash recording keeps
+    working unchanged on the remote primary path."""
+    client = _StubClient()
+    client.ensure.side_effect = CaretakerModelLoadFailed(
+        "m",
+        crash_details={
+            "timestamp": "2026-08-29T00:00:00+00:00",
+            "model": "m",
+            "error_message": "llama-server crashed",
+            "exit_code": -11,
+            "config_snapshot": {"ngl": 99},
+        },
+    )
+    crt.init(model_manager=_manager(), caretaker_client=client)
+    with pytest.raises(ModelLoadError) as err:
+        await crt.ensure_backend(model="m", local_fallback=AsyncMock())
+    crash = err.value.crash_record
+    assert crash is not None
+    assert crash.model == "m"
+    assert crash.error_message == "llama-server crashed"
+    assert crash.exit_code == -11
+    assert crash.config_snapshot == {"ngl": 99}
+
+
+async def test_model_load_failed_without_details_keeps_no_crash():
+    """A 503 without a crash_details dict must not crash the mapping — the
+    ModelLoadError simply carries no crash_record."""
+    client = _StubClient()
+    client.ensure.side_effect = CaretakerModelLoadFailed("m")
+    crt.init(model_manager=_manager(), caretaker_client=client)
+    with pytest.raises(ModelLoadError) as err:
+        await crt.ensure_backend(model="m", local_fallback=AsyncMock())
+    assert err.value.crash_record is None
+
+
 async def test_invalid_request_maps_to_value_error():
     client = _StubClient()
     client.ensure.side_effect = CaretakerInvalidRequest("bad payload")
@@ -411,6 +444,7 @@ async def test_invalid_request_maps_to_value_error():
 
 async def test_pre_switch_save_saves_context_before_ensure():
     client = _StubClient()
+    client.supports_fresh_load = True
     mgr = _manager()
     crt.init(model_manager=mgr, caretaker_client=client)
     await crt.ensure_backend(

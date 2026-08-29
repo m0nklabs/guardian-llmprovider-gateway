@@ -14,18 +14,27 @@ Decision logic:
 - ``CaretakerClient`` built and reachable → ``POST /ensure``; on 200 the
   manager state is mirrored via ``mark_loaded_by_caretaker`` and the result is
   ``"remote"``.
+- SWITCHES (``pre_switch_save=True``) additionally require the daemon to
+  report ``fresh_load`` (observed via ``CaretakerClient.supports_fresh_load``)
+  before the remote path runs: restoring the target's session context is
+  gated on that daemon-confirmed freshness, and until the field ships the
+  local lifecycle (which has ``switch_model``'s save/restore parity) handles
+  the switch so no session continuity is silently lost.  Reload sites (no
+  ``pre_switch_save``) always go remote-first.
 - ``CaretakerUnavailable`` (transport/timeout/auth) → a single re-probe of
   ``/ensure`` happens first (a live daemon mid-switch would otherwise race a
-  local spawn — two controllers on the same backend).  Only a second
-  ``CaretakerUnavailable`` counts as "daemon really gone": the backend may
-  still be healthy (daemon died but llama-server survived) — if so, adopt the
-  loaded state without spawning.  Otherwise run the original local lifecycle
-  (``local_fallback``) — safe, because with the daemon down nothing else owns
-  the backend port.
+  local spawn — two controllers on the same backend).  A read/write timeout
+  means the daemon accepted the connection (alive): a second one fails closed.
+  Connection-refused/DNS/ConnectTimeout mean the daemon is really gone: the
+  backend may still be healthy (daemon died but llama-server survived) — if
+  so, adopt the loaded state without spawning.  Otherwise run the original
+  local lifecycle (``local_fallback``) — safe, because with the daemon down
+  nothing else owns the backend port.
 - Any other ``CaretakerError`` (model not found, VRAM limit, load failed,
   invalid request) → mapped to the same error types the hotpath callers
-  already handle (``ModelLoadError`` / ``ValueError``), so crash recording and
-  the 503 paths keep working unchanged.
+  already handle (``ModelLoadError`` / ``ValueError``), so crash recording
+  (the daemon's ``crash_details`` become the raised ``crash_record``) and the
+  503 paths keep working unchanged.
 - Client ``None`` (no caretaker configured) → ``local_fallback`` directly —
   exact pre-F5 behaviour.
 """
@@ -37,7 +46,7 @@ from collections.abc import Awaitable, Callable
 
 import httpx
 
-from app.engine.manager import ModelLoadError
+from app.engine.manager import CrashRecord, ModelLoadError
 from app.gateway.caretaker_client import (
     CaretakerError,
     CaretakerInvalidRequest,
@@ -173,7 +182,23 @@ async def ensure_backend(
     ):
         raise ValueError(f"Client '{client_id}' is not allowed to switch models")
 
+    # A switch (pre_switch_save) needs the target model's auto-saved context
+    # to be restored after the remote load.  Restore is gated on the daemon's
+    # explicit "fresh_load" confirmation (never on a gateway-side probe).  As
+    # long as the /ensure contract does not ship that field, a remote switch
+    # would silently lose switch_model's save/restore parity (save runs but
+    # nothing restores) — so keep the local lifecycle for switches until the
+    # caretaker reports fresh_load.  Reload sites (no pre_switch_save) are
+    # unaffected and still go remote-first.
     if pre_switch_save and _model_manager is not None:
+        if not getattr(_caretaker_client, "supports_fresh_load", False):
+            logger.warning(
+                "F5: /ensure cannot confirm fresh_load — using local lifecycle "
+                "for switch to '%s'",
+                model,
+            )
+            await local_fallback()
+            return "local"
         await _model_manager.save_current_context()
 
     try:
@@ -245,7 +270,24 @@ async def ensure_backend(
     except CaretakerVramExceeded as exc:
         raise ModelLoadError(str(exc)) from exc
     except CaretakerModelLoadFailed as exc:
-        raise ModelLoadError(str(exc)) from exc
+        # The daemon's crash_details (its CrashRecord.to_dict()) must reach the
+        # hotpath callers' crash recording, exactly as load()/switch_model()
+        # populated crash_record before F5 — otherwise the remote primary path
+        # would silently record nothing on backend crashes.
+        crash_record = None
+        details = exc.crash_details
+        if isinstance(details, dict):
+            try:
+                crash_record = CrashRecord(
+                    timestamp=details.get("timestamp", ""),
+                    model=details.get("model", getattr(exc, "model", "")),
+                    error_message=details.get("error_message", str(exc)),
+                    exit_code=details.get("exit_code"),
+                    config_snapshot=details.get("config_snapshot"),
+                )
+            except Exception:  # noqa: BLE001 — telemetry mapping must never break the error path
+                crash_record = None
+        raise ModelLoadError(str(exc), crash_record=crash_record) from exc
     except CaretakerInvalidRequest as exc:
         raise ValueError(str(exc)) from exc
     except CaretakerError as exc:  # safety net — never claim success from an unknown caretaker state
