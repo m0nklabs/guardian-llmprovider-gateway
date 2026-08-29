@@ -215,6 +215,19 @@ class CaretakerClient:
 
         if resp.status_code == 200:
             return await self._ok_json(resp, "/unload")
+        if resp.status_code in (401, 403):
+            # The daemon rejected our credentials (missing/mismatched
+            # CARETAKER_KEY — e.g. multi-host/non-loopback where the daemon
+            # requires Bearer auth).  The unload was NOT processed.  Classify as
+            # availability (not a definitive refusal) so callers fall back to
+            # the idempotent local unload — otherwise a key misconfiguration
+            # silently disables VRAM freeing (review: possible bug).
+            logger.error(
+                "Caretaker /unload unauthorized (status %s): %s — check CARETAKER_KEY",
+                resp.status_code,
+                _safe_body_text(resp),
+            )
+            raise CaretakerUnavailable(self._management_url)
         logger.error("Caretaker /unload failed (status %s): %s", resp.status_code, _safe_body_text(resp))
         raise CaretakerUnloadFailed()
 

@@ -163,6 +163,27 @@ async def test_unload_failure_500() -> None:
         await client.unload()
 
 
+async def test_unload_401_is_availability_not_refusal() -> None:
+    """Review fix (possible bug): a 401 (missing/mismatched CARETAKER_KEY —
+    the daemon rejected and did NOT process the unload) must classify as
+    availability so callers fall back to the idempotent local unload, instead
+    of a definitive refusal that silently disables VRAM freeing."""
+    import httpx
+
+    client = _make_client(lambda req: httpx.Response(401, json={"error": "unauthorized"}))
+    with pytest.raises(CaretakerUnavailable):
+        await client.unload()
+
+
+async def test_unload_403_is_availability_not_refusal() -> None:
+    """Same as 401: 403 forbidden also means the unload was not processed."""
+    import httpx
+
+    client = _make_client(lambda req: httpx.Response(403, json={"error": "forbidden"}))
+    with pytest.raises(CaretakerUnavailable):
+        await client.unload()
+
+
 async def test_status_success() -> None:
     def handler(req: httpx.Request) -> httpx.Response:
         return _ok(
@@ -263,8 +284,6 @@ def test_error_classes_have_default_messages() -> None:
     """Review fix (error reporting gap): CaretakerInvalidRequest and
     CaretakerUnloadFailed carry a default message so str(e) is never empty
     (the /admin/unload detail and watcher log would otherwise be blank)."""
-    from app.gateway.caretaker_client import CaretakerInvalidRequest, CaretakerUnloadFailed
-
     assert str(CaretakerInvalidRequest()) == "Caretaker rejected the request (422 invalid_request)"
     assert str(CaretakerUnloadFailed()) == "Caretaker failed to unload (500 unload_failed)"
 
