@@ -119,6 +119,29 @@ async def test_ensure_unexpected_status_unavailable() -> None:
         await client.ensure("minimal")
 
 
+async def test_unload_non_json_200_is_unavailable() -> None:
+    """Review fix 1: a 200 whose body is NOT a JSON dict (empty body or an
+    HTML error page from an intermediary) must raise CaretakerUnavailable —
+    never a raw ValueError leaking as HTTP 500."""
+    import httpx
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html>502 Bad Gateway</html>")
+
+    client = _make_client(handler)
+    with pytest.raises(CaretakerUnavailable):
+        await client.unload()
+
+
+async def test_status_empty_body_200_is_unavailable() -> None:
+    """Review fix 1: same defensive parsing on GET /status."""
+    import httpx
+
+    client = _make_client(lambda req: httpx.Response(200, content=b""))
+    with pytest.raises(CaretakerUnavailable):
+        await client.status()
+
+
 async def test_unload_success_and_idempotent() -> None:
     calls: list[httpx.Request] = []
 
@@ -234,3 +257,37 @@ def test_build_missing_management_url_raises() -> None:
     config = {"providers": {"openrouter": {"local": False, "base_url": "x"}}}
     with pytest.raises(ValueError):
         build_caretaker_client(config)
+
+
+def test_build_prefers_loopback_local_over_other_local(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review fix 2: with multi-host locals present, the factory must pick the
+    loopback (this-host) caretaker for lifecycle execution, not the first via
+    dict ordering."""
+    monkeypatch.delenv("CARETAKER_KEY", raising=False)
+    config = {
+        "providers": {
+            # Intentionally ordered so the non-loopback one comes first.
+            "14700k-local": {"local": True, "management_url": "http://192.168.1.99:11441"},
+            "ai-kvm2-local": {"local": True, "management_url": "http://127.0.0.1:11441"},
+        }
+    }
+    client = build_caretaker_client(config)
+    assert client.management_url == "http://127.0.0.1:11441"
+    import asyncio
+
+    asyncio.run(client.close())
+
+
+def test_build_falls_back_to_first_local(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without a loopback entry the first local provider still wins."""
+    monkeypatch.delenv("CARETAKER_KEY", raising=False)
+    config = {
+        "providers": {
+            "myhost-local": {"local": True, "management_url": "http://10.0.0.5:11441"},
+        }
+    }
+    client = build_caretaker_client(config)
+    assert client.management_url == "http://10.0.0.5:11441"
+    import asyncio
+
+    asyncio.run(client.close())

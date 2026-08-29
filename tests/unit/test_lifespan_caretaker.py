@@ -172,16 +172,25 @@ def test_idle_unload_watcher_defined_in_lifespan() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_unauthed_app():
-    """Return (app, stub) with verify_api_key overridden via FastAPI's
-    dependency_overrides (the route froze the Depends() reference at import, so
-    patching the module attribute does NOT affect it)."""
+def _make_unauthed_app(monkeypatch: pytest.MonkeyPatch):
+    """Return the shared app with verify_api_key overridden via FastAPI's
+    dependency_overrides.
+
+    The route froze the ``Depends()`` reference at import, so patching the
+    module attribute does NOT affect it.  We replace the whole overrides dict
+    through ``monkeypatch.setattr`` so pytest restores the original dict
+    automatically at teardown (no leaking auth override into later tests).
+    """
     from app.proxy import server as server_mod
 
     async def _noop_auth():
         return "test-key"
 
-    server_mod.app.dependency_overrides[server_mod.verify_api_key] = _noop_auth
+    monkeypatch.setattr(
+        server_mod.app,
+        "dependency_overrides",
+        {server_mod.verify_api_key: _noop_auth},
+    )
     return server_mod.app
 
 
@@ -192,7 +201,7 @@ def test_admin_unload_delegates_to_caretaker(
 
     from app.proxy import server as server_mod
 
-    app = _make_unauthed_app()
+    app = _make_unauthed_app(monkeypatch)
 
     class _StubClient:
         def __init__(self) -> None:
@@ -214,11 +223,6 @@ def test_admin_unload_delegates_to_caretaker(
     body = r.json()
     assert body["status"] == "unloaded"
     assert stub.unload_calls == 1
-    # Restore the original overrides dict (the shared app object is mutated).
-    monkeypatch.setattr(
-        server_mod.app, "dependency_overrides", dict(server_mod.app.dependency_overrides)
-    )
-    _ = server_mod  # (imported above)
 
 
 def test_admin_unload_503_when_client_missing(
@@ -228,7 +232,7 @@ def test_admin_unload_503_when_client_missing(
 
     from app.proxy import server as server_mod
 
-    app = _make_unauthed_app()
+    app = _make_unauthed_app(monkeypatch)
     monkeypatch.setattr(server_mod, "caretaker_client", None)
     fake_mgr = SimpleNamespace(current_model="minimal", is_unloaded=False)
     monkeypatch.setattr(server_mod, "model_manager", fake_mgr)

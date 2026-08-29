@@ -168,7 +168,7 @@ class CaretakerClient:
             raise CaretakerUnavailable(self._management_url) from exc
 
         if resp.status_code == 200:
-            return resp.json()
+            return await self._ok_json(resp, "/ensure")
 
         body = _safe_json(resp)
         if resp.status_code == 404:
@@ -207,7 +207,7 @@ class CaretakerClient:
             raise CaretakerUnavailable(self._management_url) from exc
 
         if resp.status_code == 200:
-            return resp.json()
+            return await self._ok_json(resp, "/unload")
         logger.error("Caretaker /unload failed (status %s): %s", resp.status_code, _safe_body_text(resp))
         raise CaretakerUnloadFailed()
 
@@ -224,7 +224,7 @@ class CaretakerClient:
         if resp.status_code != 200:
             logger.error("Caretaker /status failed (status %s): %s", resp.status_code, _safe_body_text(resp))
             raise CaretakerUnavailable(self._management_url)
-        return resp.json()
+        return await self._ok_json(resp, "/status")
 
     async def close(self) -> None:
         """Close the underlying httpx client."""
@@ -235,6 +235,25 @@ class CaretakerClient:
 
     async def __aexit__(self, *_exc) -> None:
         await self.close()
+
+    async def _ok_json(self, resp: httpx.Response, endpoint: str) -> dict:
+        """Parse a 200 response defensively.
+
+        A caretaker 200 whose body is not a JSON dict (empty body, or an
+        HTML/error page returned by an intermediary) must not surface as
+        ``ValueError`` — callers only catch :class:`CaretakerError`, so this
+        would leak as an HTTP 500 instead of the intended 503 mapping.  Any
+        non-dict body is treated as :class:`CaretakerUnavailable`.
+        """
+        try:
+            value = resp.json()
+        except ValueError:
+            logger.error("Caretaker %s returned non-JSON 200 body", endpoint)
+            raise CaretakerUnavailable(self._management_url) from None
+        if not isinstance(value, dict):
+            logger.error("Caretaker %s returned non-dict 200 body: %r", endpoint, value)
+            raise CaretakerUnavailable(self._management_url)
+        return value
 
 
 def _safe_json(resp: httpx.Response) -> dict:
@@ -268,17 +287,37 @@ def build_caretaker_client(config: dict) -> CaretakerClient:
     """
     providers = config.get("providers") or {}
     local_doc = None
+    local_name = None
+
+    def _is_local(name: str, doc: dict) -> bool:
+        return name.endswith("-local") or bool(doc.get("local"))
+
+    # Pass 1: prefer a local provider whose management_url binds loopback —
+    # this is THIS host's caretaker (the gateway on ai-kvm-2 talks to its own
+    # daemon, never to a Windows/remote GPU host, for lifecycle execution).
+    # Dict ordering must not decide which caretaker the gateway unloads (F5
+    # multi-host: ai-kvm2-local vs a future 14700k-local).
     for name, doc in providers.items():
         doc = doc or {}
-        if name.endswith("-local") or doc.get("local"):
-            local_doc = doc
+        if not _is_local(name, doc):
+            continue
+        mgmt = _expand_env(str(doc.get("management_url", "")))
+        if mgmt.startswith(("http://127.0.0.1", "http://localhost")):
+            local_doc, local_name = doc, name
             break
+    # Pass 2 (single-provider / non-loopback fallback): first local doc.
     if local_doc is None:
-        # Fallback: any local:true doc, else empty.
-        for doc in providers.values():
-            if isinstance(doc, dict) and doc.get("local"):
-                local_doc = doc
+        for name, doc in providers.items():
+            doc = doc or {}
+            if _is_local(name, doc):
+                local_doc, local_name = doc, name
                 break
+    if local_name is not None:
+        logger.info(
+            "Caretaker client uses local provider %s (%s)",
+            local_name,
+            _expand_env(str((local_doc or {}).get("management_url", ""))),
+        )
 
     management_url = _expand_env((local_doc or {}).get("management_url", "")) if local_doc else ""
     if not management_url:
