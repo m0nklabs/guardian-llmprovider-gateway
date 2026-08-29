@@ -1642,11 +1642,25 @@ class TestCaretakerLoadedMirror:
     def test_save_current_context_saves_auto_save_file(self, tmp_path: Path, monkeypatch):
         mgr = _make_manager(tmp_path)
         mgr.current_model = "GLM-4.7-Flash"
+        monkeypatch.setattr(mgr, "backend_serves_model", AsyncMock(return_value=True))
         saved = []
         monkeypatch.setattr(mgr, "_save_context", AsyncMock(side_effect=lambda n: saved.append(n)))
         import asyncio
         asyncio.run(mgr.save_current_context())
         assert saved == ["auto_save_GLM-4.7-Flash"]
+
+    def test_save_current_context_skips_when_backend_serves_other(self, tmp_path: Path, monkeypatch):
+        """Stale state: gateway thinks a model is active but the backend serves
+        something else -> saving would write the live context under the wrong
+        auto_save file, so the save must be skipped."""
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+        monkeypatch.setattr(mgr, "backend_serves_model", AsyncMock(return_value=False))
+        saved = []
+        monkeypatch.setattr(mgr, "_save_context", AsyncMock(side_effect=lambda n: saved.append(n)))
+        import asyncio
+        asyncio.run(mgr.save_current_context())
+        assert saved == []
 
     def test_restore_current_context_skips_when_unloaded(self, tmp_path: Path, monkeypatch):
         mgr = _make_manager(tmp_path)
@@ -1698,6 +1712,17 @@ class TestBackendServesModel:
         monkeypatch.setattr(mgr, "_get_backend_model_path", lambda: None)
         import asyncio
         assert asyncio.run(mgr.backend_serves_model("GLM-4.7-Flash")) is False
+
+    def test_serves_model_canonicalizes_alias(self, tmp_path: Path, monkeypatch):
+        """An alias/lowercase name must still hit the local-healthy adoption
+        (backend_serves_model canonicalizes via resolve_model)."""
+        mgr = _make_manager(tmp_path)
+        expected = mgr.models["GLM-4.7-Flash"]["path"]
+        monkeypatch.setattr(mgr, "_get_backend_model_path", lambda: expected)
+        import asyncio
+        assert asyncio.run(mgr.backend_serves_model("glm-4.7-flash")) is True
+        # Unknown names resolve to False (not an exception).
+        assert asyncio.run(mgr.backend_serves_model("totally-unknown")) is False
 
 
 class TestCaretakerLoadedMirrorVisionFlag:

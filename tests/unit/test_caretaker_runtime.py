@@ -242,30 +242,30 @@ async def test_reload_without_client_id_not_gated():
     client.ensure.assert_awaited_once()
 
 
-async def test_remote_loaded_model_mismatch_runs_local_fallback():
-    """Caretaker resolved the request to a different model -> do NOT adopt the
-    requested model's loaded state; run the local lifecycle so current_model
-    stays truthful with the running backend."""
+async def test_remote_loaded_model_mismatch_fails_closed():
+    """Caretaker resolved the request to a different model -> fail CLOSED with
+    ModelLoadError (NOT local_fallback: the daemon is alive and owns the
+    backend; the gateway must not become a second controller)."""
     client = _StubClient()
     client.ensure = AsyncMock(return_value={"ok": True, "loaded_model": "other-model"})
     mgr = _manager()
     crt.init(model_manager=mgr, caretaker_client=client)
     fallback = AsyncMock()
-    result = await crt.ensure_backend(model="m", local_fallback=fallback)
-    assert result == "local"
-    fallback.assert_awaited_once()
+    with pytest.raises(ModelLoadError):
+        await crt.ensure_backend(model="m", local_fallback=fallback)
+    fallback.assert_not_awaited()
     mgr.mark_loaded_by_caretaker.assert_not_called()
 
 
-async def test_remote_success_without_loaded_model_runs_local_fallback():
+async def test_remote_success_without_loaded_model_fails_closed():
     """A 200 without a truthful loaded_model must NOT be adopted blindly —
-    never claim success from an unknown caretaker state."""
+    never claim success from an unknown caretaker state (fail closed)."""
     client = _StubClient()
     client.ensure = AsyncMock(return_value={"ok": True})
     mgr = _manager()
     crt.init(model_manager=mgr, caretaker_client=client)
     fallback = AsyncMock()
-    result = await crt.ensure_backend(model="m", local_fallback=fallback)
-    assert result == "local"
-    fallback.assert_awaited_once()
+    with pytest.raises(ModelLoadError):
+        await crt.ensure_backend(model="m", local_fallback=fallback)
+    fallback.assert_not_awaited()
     mgr.mark_loaded_by_caretaker.assert_not_called()

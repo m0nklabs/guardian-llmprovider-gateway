@@ -441,8 +441,14 @@ class ModelManager:
         against the requested model's config path — so the gateway can
         distinguish "backend is up" from "backend is up AND serving the model
         a request needs" after a caretaker outage, without adopting a wrong
-        loaded-state.
+        loaded-state.  Canonicalizes aliases the way mark_loaded_by_caretaker
+        does, so a client-facing alias still hits the local-healthy adoption
+        instead of needlessly reloading an already-serving backend.
         """
+        try:
+            model_name = self.resolve_model(model_name)
+        except ValueError:
+            return False
         actual_gguf = await asyncio.to_thread(self._get_backend_model_path)
         if not actual_gguf:
             return False
@@ -729,6 +735,18 @@ class ModelManager:
         one. Tolerates a missing/corrupt save file (mirrors load()'s restore).
         """
         if not self.current_model or self.is_unloaded:
+            return
+        # Guard on stale state: after a caretaker-initiated switch the gateway
+        # may still believe another model is active while the backend serves
+        # something else.  Saving would write the live backend context under
+        # auto_save_<current_model> and a later switch back would restore the
+        # wrong conversation into the wrong model.  Skip when the backend does
+        # not actually serve what the gateway thinks is loaded.
+        if not await self.backend_serves_model(self.current_model):
+            logger.warning(
+                "Context auto-save skipped: backend does not serve '%s'",
+                self.current_model,
+            )
             return
         try:
             await self._save_context(f"auto_save_{self.current_model}")
