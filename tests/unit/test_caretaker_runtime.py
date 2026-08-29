@@ -70,8 +70,20 @@ async def test_remote_success_calls_ensure_and_marks_loaded():
     mgr.mark_loaded_by_caretaker.assert_called_once_with(
         "m", enable_vision=True, context_hint=4096
     )
-    # Remote switch path mirrors the local switch_model body: restore the
-    # target's auto-saved session context after the caretaker loaded it.
+    # Reload sites (no pre_switch_save) start a fresh context — restore must
+    # NOT run (mirrors load(), which does not restore).
+    mgr.restore_current_context.assert_not_awaited()
+
+
+async def test_remote_switch_restores_target_context():
+    """Switch sites (pre_switch_save=True) mirror switch_model's restore."""
+    client = _StubClient()
+    mgr = _manager()
+    crt.init(model_manager=mgr, caretaker_client=client)
+    result = await crt.ensure_backend(
+        model="m", pre_switch_save=True, local_fallback=AsyncMock()
+    )
+    assert result == "remote"
     mgr.restore_current_context.assert_awaited_once()
 
 
@@ -236,6 +248,20 @@ async def test_remote_loaded_model_mismatch_runs_local_fallback():
     stays truthful with the running backend."""
     client = _StubClient()
     client.ensure = AsyncMock(return_value={"ok": True, "loaded_model": "other-model"})
+    mgr = _manager()
+    crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
+    result = await crt.ensure_backend(model="m", local_fallback=fallback)
+    assert result == "local"
+    fallback.assert_awaited_once()
+    mgr.mark_loaded_by_caretaker.assert_not_called()
+
+
+async def test_remote_success_without_loaded_model_runs_local_fallback():
+    """A 200 without a truthful loaded_model must NOT be adopted blindly —
+    never claim success from an unknown caretaker state."""
+    client = _StubClient()
+    client.ensure = AsyncMock(return_value={"ok": True})
     mgr = _manager()
     crt.init(model_manager=mgr, caretaker_client=client)
     fallback = AsyncMock()
