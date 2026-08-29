@@ -38,6 +38,7 @@ def _manager(**attrs) -> MagicMock:
     mgr.backend_serves_model = AsyncMock(return_value=False)
     mgr.backend_health_ok = AsyncMock(return_value=False)
     mgr.save_current_context = AsyncMock()
+    mgr.restore_current_context = AsyncMock()
     mgr._config_drifted = Mock(return_value=False)
     for k, v in attrs.items():
         setattr(mgr, k, v)
@@ -68,6 +69,9 @@ async def test_remote_success_calls_ensure_and_marks_loaded():
     mgr.mark_loaded_by_caretaker.assert_called_once_with(
         "m", enable_vision=True, context_hint=4096
     )
+    # Remote switch path mirrors the local switch_model body: restore the
+    # target's auto-saved session context after the caretaker loaded it.
+    mgr.restore_current_context.assert_awaited_once()
 
 
 async def test_unavailable_with_healthy_backend_adopts_state():
