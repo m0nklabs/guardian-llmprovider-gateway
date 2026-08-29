@@ -1660,3 +1660,37 @@ class TestBackendServesModel:
         monkeypatch.setattr(mgr, "_get_backend_model_path", lambda: None)
         import asyncio
         assert asyncio.run(mgr.backend_serves_model("GLM-4.7-Flash")) is False
+
+
+class TestCaretakerLoadedMirrorVisionFlag:
+    """F5: mark_loaded_by_caretaker must resolve the model's own vision flag
+    (not blindly copy the previous model's) when enable_vision is None."""
+
+    def test_mark_loaded_none_vision_different_model_uses_model_default(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        # Previous model had vision enabled.
+        mgr.current_model = "Qwen3-30B-A3B"
+        mgr.current_vision_enabled = True
+        # Target (GLM-4.7-Flash) has no mmproj -> its own default is False.
+        mgr.mark_loaded_by_caretaker("GLM-4.7-Flash", enable_vision=None)
+        assert mgr.current_model == "GLM-4.7-Flash"
+        assert mgr.current_vision_enabled is False
+
+    def test_mark_loaded_none_vision_same_model_keeps_flag(self, tmp_path: Path):
+        # A model WITHOUT mmproj can never run vision — its resolved default is
+        # False regardless of the previous flag (correct). Use a vision-capable
+        # model to pin the "keep current flag for the same model" branch.
+        vision_yaml = SAMPLE_MODELS_YAML.rstrip() + "\n    GLM-Vision:\n        path: /models/GLM-Vision.gguf\n        vision_mmproj: /models/mmproj.gguf\n"
+        mgr = _make_manager(tmp_path, models_yaml=vision_yaml)
+        mgr.current_model = "GLM-Vision"
+        mgr.current_vision_enabled = True
+        # Same model + no explicit flag -> keep current vision flag.
+        mgr.mark_loaded_by_caretaker("GLM-Vision", enable_vision=None)
+        assert mgr.current_vision_enabled is True
+
+    def test_mark_loaded_explicit_vision_overrides_default(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "Qwen3-30B-A3B"
+        mgr.current_vision_enabled = True
+        mgr.mark_loaded_by_caretaker("GLM-4.7-Flash", enable_vision=False)
+        assert mgr.current_vision_enabled is False
