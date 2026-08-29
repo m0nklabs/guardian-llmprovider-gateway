@@ -32,6 +32,29 @@ class _StubCaretakerClient:
         return {"ok": True, "is_unloaded": True}
 
 
+class _FakeModelManager:
+    """Minimal manager double with the unload-bookkeeping method the watcher
+    now reconciles through (mark_unloaded_by_caretaker)."""
+
+    def __init__(
+        self,
+        *,
+        idle_unload_minutes: float | None,
+        is_unloaded: bool,
+        active_requests: int,
+        last_request_time: float,
+    ) -> None:
+        self.idle_unload_minutes = idle_unload_minutes
+        self.is_unloaded = is_unloaded
+        self.active_requests = active_requests
+        self.last_request_time = last_request_time
+        self.mark_unloaded_calls = 0
+
+    def mark_unloaded_by_caretaker(self) -> None:
+        self.is_unloaded = True
+        self.mark_unloaded_calls += 1
+
+
 def _install_globals(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -47,7 +70,7 @@ def _install_globals(
     run exactly one watcher iteration (first sleep returns, second raises)."""
     if last_request_time is None:
         last_request_time = time.time()
-    manager = SimpleNamespace(
+    manager = _FakeModelManager(
         idle_unload_minutes=idle_minutes,
         is_unloaded=is_unloaded,
         active_requests=active_requests,
@@ -159,7 +182,9 @@ async def test_watcher_syncs_is_unloaded_after_successful_unload(
     with pytest.raises(_StopWatcher):
         await lifespan_mod.idle_unload_watcher()
     assert client.unload_calls == 1
-    assert lifespan_mod._model_manager.is_unloaded is True
+    mgr = lifespan_mod._model_manager
+    assert mgr.is_unloaded is True
+    assert mgr.mark_unloaded_calls == 1
 
 
 async def test_watcher_does_not_sync_is_unloaded_on_error(
@@ -180,7 +205,9 @@ async def test_watcher_does_not_sync_is_unloaded_on_error(
     )
     with pytest.raises(_StopWatcher):
         await lifespan_mod.idle_unload_watcher()
-    assert lifespan_mod._model_manager.is_unloaded is False
+    mgr = lifespan_mod._model_manager
+    assert mgr.is_unloaded is False
+    assert mgr.mark_unloaded_calls == 0
 
 
 async def test_watcher_caretaker_error_is_caught(
@@ -249,8 +276,15 @@ def test_admin_unload_delegates_to_caretaker(
 
     stub = _StubClient()
     monkeypatch.setattr(server_mod, "caretaker_client", stub)
-    # model_manager is a module-level object; give it a current_model attribute.
-    fake_mgr = SimpleNamespace(current_model="minimal", is_unloaded=False)
+    # model_manager is a module-level object; reconcile through the same
+    # unload-bookkeeping method the production manager exposes.
+    fake_mgr = _FakeModelManager(
+        idle_unload_minutes=None,
+        is_unloaded=False,
+        active_requests=0,
+        last_request_time=time.time(),
+    )
+    fake_mgr.current_model = "minimal"
     monkeypatch.setattr(server_mod, "model_manager", fake_mgr)
 
     client = TestClient(app)
@@ -278,7 +312,13 @@ def test_admin_unload_503_when_client_missing(
 
     app = _make_unauthed_app(monkeypatch)
     monkeypatch.setattr(server_mod, "caretaker_client", None)
-    fake_mgr = SimpleNamespace(current_model="minimal", is_unloaded=False)
+    fake_mgr = _FakeModelManager(
+        idle_unload_minutes=None,
+        is_unloaded=False,
+        active_requests=0,
+        last_request_time=time.time(),
+    )
+    fake_mgr.current_model = "minimal"
     monkeypatch.setattr(server_mod, "model_manager", fake_mgr)
 
     client = TestClient(app)

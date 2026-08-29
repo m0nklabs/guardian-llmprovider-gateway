@@ -1174,13 +1174,15 @@ async def admin_unload(client_id: str = Depends(verify_api_key)):
     except CaretakerError as e:
         logger.error(f"/admin/unload caretaker call failed: {e}")
         raise HTTPException(status_code=503, detail=str(e)) from e
-    # Caretaker /unload is idempotent: a 200 is always a success.  Mirror the
-    # confirmed unload back into the gateway-local manager so (a) a repeat
+    # Caretaker /unload is idempotent: a 200 is always a success.  Reconcile
+    # through the manager's own unload bookkeeping (same end-state as unload(),
+    # minus the process stop the caretaker already did) so (a) a repeat
     # /admin/unload reports "already_unloaded" via the guard above instead of
-    # re-sending an idempotent caretaker call, and (b) the request hotpath's
-    # is_unloaded auto-reload triggers on the next inference (review: stale
-    # state, server.py).
-    model_manager.is_unloaded = True
+    # re-sending an idempotent caretaker call, (b) the request hotpath's
+    # is_unloaded auto-reload triggers on the next inference, and (c) a stale
+    # health/verification run does not respawn the caretaker-killed process
+    # (review: stale state, server.py).
+    model_manager.mark_unloaded_by_caretaker()
     return {"status": "unloaded", "message": f"Model '{model_manager.current_model}' unloaded — VRAM is free"}
 
 

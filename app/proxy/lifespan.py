@@ -247,16 +247,20 @@ async def idle_unload_watcher():
                     logger.error("Caretaker client not injected; cannot auto-unload via caretaker")
                     continue
                 await _caretaker_client.unload()
-                # F5: the caretaker confirmed the unload — keep the
-                # gateway-local manager state in sync so (a) the watcher guard
-                # ``is_unloaded`` stops re-issuing /unload every 60s idle cycle
-                # and (b) the request hotpath's ``is_unloaded`` auto-reload
-                # (routing.py) reloads the model on the next request instead of
-                # hitting a migrated llama-server with nothing loaded.
-                _model_manager.is_unloaded = True
+                # F5: the caretaker confirmed the unload — reconcile through the
+                # manager's own unload bookkeeping (same end-state as unload(),
+                # minus the process stop the caretaker already did).  This keeps
+                # is_unloaded + verification state consistent so (a) the watcher
+                # guard stops re-issuing /unload each idle cycle, (b) the hotpath
+                # auto-reload fires on the next request, and (c) a stale health/
+                # verification run does not respawn the caretaker-killed process.
+                _model_manager.mark_unloaded_by_caretaker()
             except CaretakerError as e:
-                # Log and leave is_unloaded alone — the gateway does not claim
-                # unload state it did not observe; status follows the caretaker.
+                # Expected: remote refusal. Log without a traceback; do NOT claim
+                # unload state the gateway did not observe.
                 logger.error(f"❌ Auto-unload via caretaker failed: {e}")
             except Exception as e:
-                logger.error(f"❌ Auto-unload via caretaker failed: {e}")
+                # Unexpected (coding error, transport bug): surface the traceback
+                # so the root cause is visible instead of mislabeled as caretaker.
+                logger.exception("❌ Auto-unload via caretaker failed unexpectedly")
+                logger.error(f"  {e}")

@@ -584,6 +584,23 @@ class ModelManager:
         self.is_unloaded = True
         logger.info("✅ llama-server stopped — VRAM is free")
 
+    def mark_unloaded_by_caretaker(self) -> None:
+        """F5: the caretaker daemon confirmed an unload it performed itself.
+
+        The gateway's own ``unload()`` used to be the only way the flag flipped;
+        with the remote lifecycle split the caretaker can unload on its own (its
+        own idle-unload, a direct operator call).  This method brings the
+        gateway-local manager into the same end-state ``unload()`` would have
+        produced — the model is no longer served (``is_unloaded``), its backend
+        is no longer verified (``_model_verified``), so the hotpath auto-reload
+        fires on the next request and a stale health/verification run does not
+        treat the caretaker-killed process as a crash and respawn it.
+        """
+        self.is_unloaded = True
+        self._model_verified = False
+        self._last_verification_at = None
+        self._last_backend_model = None
+
     async def _free_gpu_memory(self) -> None:
         """Ask coexisting GPU services to release VRAM before loading a model.
 
