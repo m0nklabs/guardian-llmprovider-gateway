@@ -1638,6 +1638,34 @@ class TestCaretakerLoadedMirror:
         asyncio.run(mgr.save_current_context())
         assert saved == ["auto_save_GLM-4.7-Flash"]
 
+    def test_restore_current_context_skips_when_unloaded(self, tmp_path: Path, monkeypatch):
+        mgr = _make_manager(tmp_path)
+        mgr.is_unloaded = True
+        loaded = []
+        monkeypatch.setattr(mgr, "_load_context", AsyncMock(side_effect=lambda n: loaded.append(n)))
+        import asyncio
+        asyncio.run(mgr.restore_current_context())
+        assert loaded == []
+
+    def test_restore_current_context_restores_auto_save_file(self, tmp_path: Path, monkeypatch):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+        loaded = []
+        monkeypatch.setattr(mgr, "_load_context", AsyncMock(side_effect=lambda n: loaded.append(n)))
+        import asyncio
+        asyncio.run(mgr.restore_current_context())
+        assert loaded == ["auto_save_GLM-4.7-Flash"]
+
+    def test_restore_current_context_tolerates_missing_save(self, tmp_path: Path, monkeypatch):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+        async def boom(_n):
+            raise RuntimeError("Restore failed")
+        monkeypatch.setattr(mgr, "_load_context", AsyncMock(side_effect=boom))
+        import asyncio
+        # Must not raise — missing/corrupt save must never block the hotpath.
+        asyncio.run(mgr.restore_current_context())
+
 
 class TestBackendServesModel:
     """F5: backend_serves_model compares the running GGUF with a requested model."""

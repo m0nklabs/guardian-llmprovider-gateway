@@ -733,6 +733,27 @@ class ModelManager:
                 exc,
             )
 
+    async def restore_current_context(self) -> None:
+        """F5: restore the just-activated model's auto-saved session context.
+
+        The remote ``/ensure`` switch path no longer runs the local
+        ``switch_model`` body (which owned the context restore); the gateway
+        calls this after a successful remote ensure so an A->B->A switch
+        recovers A's saved context exactly like the local lifecycle.
+        Tolerates a missing/corrupt save file (mirrors switch_model's
+        restore).  Restore must never block the hotpath.
+        """
+        if not self.current_model or self.is_unloaded:
+            return
+        try:
+            await self._load_context(f"auto_save_{self.current_model}")
+        except Exception as exc:  # noqa: BLE001 — restore must never block the hotpath
+            logger.warning(
+                "Context restore failed for %s (switch continues): %s",
+                self.current_model,
+                exc,
+            )
+
     async def _free_gpu_memory(self) -> None:
         """Ask coexisting GPU services to release VRAM before loading a model.
 

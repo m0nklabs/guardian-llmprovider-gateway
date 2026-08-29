@@ -140,4 +140,9 @@ async def ensure_backend(
             enable_vision=enable_vision,
             context_hint=context_hint,
         )
+        # The remote path no longer runs the local switch_model body, which
+        # owned the context restore — mirror it so A->B->A switches recover
+        # the target's auto-saved session context (missing/corrupt save is
+        # tolerated inside the manager; restore never blocks the hotpath).
+        await _model_manager.restore_current_context()
     return "remote"
