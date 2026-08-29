@@ -75,12 +75,16 @@ async def _ensure_with_retry(
 
     - status_code set → daemon alive but rejected the request (deterministic,
       no re-probe).
-    - ``__cause__`` is :class:`httpx.TimeoutException` → the daemon ACCEPTED
-      the connection, so it is alive but busy (likely mid-switch; VRAM freeing
-      + a large-model load can outlast the client timeout).  Re-probe once; a
-      second timeout must NOT run the local lifecycle — a live daemon would
-      race a local spawn (two controllers on the same backend port /
-      launch-args file).  Fail closed instead.
+    - ``__cause__`` is :class:`httpx.ReadTimeout`/:class:`httpx.WriteTimeout`
+      → a connection was ESTABLISHED, so the daemon is alive but busy (likely
+      mid-switch; VRAM freeing + a large-model load can outlast the client
+      timeout).  Re-probe once; a second such timeout must NOT run the local
+      lifecycle — a live daemon would race a local spawn (two controllers on
+      the same backend port / launch-args file).  Fail closed instead.
+      ``ConnectTimeout``/``PoolTimeout`` are deliberately excluded: no
+      connection was ever accepted there, so the daemon may as well be down
+      (restarting with a full backlog, firewall DROP, LAN host powered off)
+      and the safe local fallback still applies.
     - any other transport error (connection refused, DNS, …) → the daemon is
       really gone; re-probe once more so the caller can adopt a surviving
       backend or run the local fallback (it is then the only controller).
@@ -95,7 +99,7 @@ async def _ensure_with_retry(
         if exc.status_code is not None:
             raise  # daemon alive but rejected us — no point re-probing
         cause = exc.__cause__
-        if isinstance(cause, httpx.TimeoutException):
+        if isinstance(cause, (httpx.ReadTimeout, httpx.WriteTimeout)):
             # Alive but busy: re-probe once; a second timeout must not spawn
             # locally against a live daemon.
             try:
@@ -107,18 +111,18 @@ async def _ensure_with_retry(
             except CaretakerUnavailable as exc2:
                 if exc2.status_code is not None:
                     raise
-                if isinstance(exc2.__cause__, httpx.TimeoutException):
+                if isinstance(exc2.__cause__, (httpx.ReadTimeout, httpx.WriteTimeout)):
                     raise ModelLoadError(
                         "Caretaker alive but unresponsive; refusing local "
                         "fallback to avoid a second controller on the backend"
                     ) from exc2
                 raise
-        # Non-timeout transport errors (connection refused, DNS, ...) mean the
-        # daemon is really gone: re-probe once more so the caller can adopt a
-        # surviving backend or run the local fallback.  A TIMEOUT on that
-        # re-probe means the daemon came back but is busy (alive) — running
-        # the local lifecycle would race a live daemon, so fail closed the
-        # same way the timeout branch does.
+        # Non-timeout transport errors (connection refused, DNS, ConnectTimeout,
+        # ...) mean the daemon is really gone: re-probe once more so the caller
+        # can adopt a surviving backend or run the local fallback.  A READ/WRITE
+        # timeout on that re-probe means the daemon came back but is busy
+        # (alive) — running the local lifecycle would race a live daemon, so
+        # fail closed the same way the timeout branch does.
         try:
             return await _caretaker_client.ensure(
                 model,
@@ -126,7 +130,7 @@ async def _ensure_with_retry(
                 context_hint=context_hint,
             )
         except CaretakerUnavailable as exc2:
-            if isinstance(exc2.__cause__, httpx.TimeoutException):
+            if isinstance(exc2.__cause__, (httpx.ReadTimeout, httpx.WriteTimeout)):
                 raise ModelLoadError(
                     "Caretaker alive but unresponsive; refusing local "
                     "fallback to avoid a second controller on the backend"
@@ -171,16 +175,6 @@ async def ensure_backend(
 
     if pre_switch_save and _model_manager is not None:
         await _model_manager.save_current_context()
-
-    # Was the target already being served before the ensure?  If yes, the
-    # /ensure is idempotent — the backend slot already holds the live session
-    # for that model, and a later restore would clobber it.  If not, the
-    # caretaker freshly loaded the model (empty slot) and restoring the
-    # auto-saved history is the safe mirror of switch_model's restore.
-    fresh_load = not (
-        _model_manager is not None
-        and await _model_manager.backend_serves_model(model)
-    )
 
     try:
         result = await _ensure_with_retry(
@@ -232,15 +226,14 @@ async def ensure_backend(
                 enable_vision=enable_vision,
                 context_hint=context_hint,
             )
-            # Restore the auto-saved context only when the model was FRESHLY
-            # loaded (fresh_load=True): the timed-out /ensure may have
-            # completed the switch, so slot 0 is empty and restoring mirrors
-            # switch_model's restore.  When the backend was already serving
-            # the model before the ensure (fresh_load=False), the live session
-            # in slot 0 is authoritative — never restore, it would clobber an
-            # active conversation.
-            if pre_switch_save and fresh_load and _model_manager is not None:
-                await _model_manager.restore_current_context()
+            # NO restore on the adopt path: adoption only happens when the
+            # daemon is UNREACHABLE, so there is no /ensure response to
+            # confirm the model was freshly loaded (the timed-out ensure may
+            # or may not have completed the switch).  Restoring on a
+            # gateway-side probe alone risks clobbering a live slot-0 session
+            # (the gguf-arg probe can misdetect a caretaker-launched
+            # process) — the live session is authoritative.  A later A->B->A
+            # re-ensure restores correctly once the daemon reports fresh_load.
             return "local-healthy"
         logger.warning(
             "F5: caretaker unavailable — local load fallback for '%s'", model
@@ -319,18 +312,18 @@ async def ensure_backend(
         # owned the context restore — mirror it so a fresh remote load
         # recovers the target's auto-saved session history (missing/corrupt
         # save is tolerated inside the manager; restore never blocks the
-        # hotpath).  Freshness is best reported by the daemon itself: the
-        # pre-ensure probe (backend_serves_model) parses the running
-        # llama-server's command line and can misdetect a caretaker-launched
-        # process (different arg shape / GGUF path resolution), which would
-        # wrongly mark an already-serving backend as fresh and restore a stale
-        # auto-save over the live slot-0 session.  Prefer the daemon's own
-        # "fresh_load" field when the /ensure contract ships it (caretaker
-        # follow-up); fall back to the probe until then.  Reload sites
-        # (auto-reload, connect-error recovery) start a fresh context via
-        # load() and must not re-inject a stale auto-save — they never set
-        # pre_switch_save.
-        fresh_ensure = result.get("fresh_load", fresh_load)
-        if pre_switch_save and fresh_ensure:
+        # hotpath).  Restore ONLY on the daemon's explicit "fresh_load": true
+        # confirmation — the /ensure response is the authoritative freshness
+        # signal.  A gateway-side probe (parsing the running llama-server's
+        # command line) can misdetect a caretaker-launched process and would
+        # clobber a live slot-0 session with a stale auto-save, so never
+        # restore on a probe result alone.  While the /ensure contract does
+        # not yet ship the field (caretaker follow-up) restore stays dormant;
+        # save_current_context() still persists the pre-switch model's
+        # context, and a later A->B->A re-ensure restores it correctly once
+        # the daemon reports fresh_load.  Reload sites (auto-reload,
+        # connect-error recovery) start a fresh context via load() and must
+        # not re-inject a stale auto-save — they never set pre_switch_save.
+        if pre_switch_save and result.get("fresh_load") is True:
             await _model_manager.restore_current_context()
     return "remote"
