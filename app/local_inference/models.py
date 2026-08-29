@@ -16,6 +16,8 @@ from typing import Any, Dict, Optional
 
 from fastapi import HTTPException
 
+from app.gateway import caretaker_runtime as _caretaker_runtime
+
 logger = logging.getLogger("Guardian")
 
 
@@ -276,7 +278,10 @@ async def reload_backend_after_connect_error(path: str, error: Exception) -> Non
                 target_model=reload_model,
                 requested_model=current_model,
                 owner="backend_recovery",
-                operation=lambda: _model_manager.load(reload_model),
+                operation=lambda: _caretaker_runtime.ensure_backend(
+                    model=reload_model,
+                    local_fallback=lambda: _model_manager.load(reload_model),
+                ),
                 generation=generation,
             )
         except _ModelLoadError as e:
