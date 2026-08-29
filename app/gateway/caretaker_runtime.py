@@ -115,12 +115,23 @@ async def _ensure_with_retry(
                 raise
         # Non-timeout transport errors (connection refused, DNS, ...) mean the
         # daemon is really gone: re-probe once more so the caller can adopt a
-        # surviving backend or run the local fallback.
-        return await _caretaker_client.ensure(
-            model,
-            enable_vision=enable_vision,
-            context_hint=context_hint,
-        )
+        # surviving backend or run the local fallback.  A TIMEOUT on that
+        # re-probe means the daemon came back but is busy (alive) — running
+        # the local lifecycle would race a live daemon, so fail closed the
+        # same way the timeout branch does.
+        try:
+            return await _caretaker_client.ensure(
+                model,
+                enable_vision=enable_vision,
+                context_hint=context_hint,
+            )
+        except CaretakerUnavailable as exc2:
+            if isinstance(exc2.__cause__, httpx.TimeoutException):
+                raise ModelLoadError(
+                    "Caretaker alive but unresponsive; refusing local "
+                    "fallback to avoid a second controller on the backend"
+                ) from exc2
+            raise
 
 
 async def ensure_backend(
