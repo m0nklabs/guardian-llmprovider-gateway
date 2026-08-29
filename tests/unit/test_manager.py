@@ -1586,3 +1586,77 @@ class TestSpeculativeDecodingNoDraft:
         # Config now gains spec_type: draft-mtp → args differ → drift.
         mgr.models["SpecModel"]["spec_type"] = "draft-mtp"
         assert mgr._config_drifted("SpecModel", enable_vision=False) is True
+
+
+class TestCaretakerLoadedMirror:
+    """F5: mark_loaded_by_caretaker / save_current_context (remote-ensure mirror)."""
+
+    def test_mark_loaded_clears_unloaded_and_sets_current(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.is_unloaded = True
+        mgr.current_model = "Other"
+        mgr.current_vision_enabled = False
+
+        mgr.mark_loaded_by_caretaker("GLM-4.7-Flash", enable_vision=False)
+
+        assert mgr.is_unloaded is False
+        assert mgr.current_model == "GLM-4.7-Flash"
+        assert mgr._model_verified is True
+        assert mgr._last_backend_model == "GLM-4.7-Flash"
+
+    def test_mark_loaded_unknown_model_raises(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        with pytest.raises(ValueError, match="not found in configuration"):
+            mgr.mark_loaded_by_caretaker("Nope-Model")
+
+    def test_mark_loaded_persists_launch_signature(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.current_vision_enabled = False
+        mgr.mark_loaded_by_caretaker("GLM-4.7-Flash", enable_vision=False, context_hint=4096)
+        sig_file = tmp_path / "config" / "current_model.sig"
+        assert sig_file.exists()
+        sig = json.loads(sig_file.read_text())
+        assert sig["model"] == "GLM-4.7-Flash"
+        assert sig["vision"] is False
+        assert "args_sha256" in sig and "env_sha256" in sig
+
+    def test_save_current_context_skips_when_unloaded(self, tmp_path: Path, monkeypatch):
+        mgr = _make_manager(tmp_path)
+        mgr.is_unloaded = True
+        saved = []
+        monkeypatch.setattr(mgr, "_save_context", AsyncMock(side_effect=lambda n: saved.append(n)))
+        import asyncio
+        asyncio.run(mgr.save_current_context())
+        assert saved == []
+
+    def test_save_current_context_saves_auto_save_file(self, tmp_path: Path, monkeypatch):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+        saved = []
+        monkeypatch.setattr(mgr, "_save_context", AsyncMock(side_effect=lambda n: saved.append(n)))
+        import asyncio
+        asyncio.run(mgr.save_current_context())
+        assert saved == ["auto_save_GLM-4.7-Flash"]
+
+
+class TestBackendServesModel:
+    """F5: backend_serves_model compares the running GGUF with a requested model."""
+
+    def test_serves_model_matches_running_gguf(self, tmp_path: Path, monkeypatch):
+        mgr = _make_manager(tmp_path)
+        expected = mgr.models["GLM-4.7-Flash"]["path"]
+        monkeypatch.setattr(mgr, "_get_backend_model_path", lambda: expected)
+        import asyncio
+        assert asyncio.run(mgr.backend_serves_model("GLM-4.7-Flash")) is True
+
+    def test_serves_model_false_on_different_gguf(self, tmp_path: Path, monkeypatch):
+        mgr = _make_manager(tmp_path)
+        monkeypatch.setattr(mgr, "_get_backend_model_path", lambda: "/models/other.gguf")
+        import asyncio
+        assert asyncio.run(mgr.backend_serves_model("GLM-4.7-Flash")) is False
+
+    def test_serves_model_false_without_process(self, tmp_path: Path, monkeypatch):
+        mgr = _make_manager(tmp_path)
+        monkeypatch.setattr(mgr, "_get_backend_model_path", lambda: None)
+        import asyncio
+        assert asyncio.run(mgr.backend_serves_model("GLM-4.7-Flash")) is False

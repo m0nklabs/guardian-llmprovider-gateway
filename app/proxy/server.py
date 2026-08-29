@@ -43,6 +43,9 @@ from app.capture.stream_assembler import StreamResponseAssembler
 # ── Gateway helpers (Phase 5 extraction) ─────────────────────────────
 from app.gateway import context_metadata as _ctx_meta
 
+# ── F5 remote lifecycle execution (caretaker /ensure hotpath) ────────
+from app.gateway import caretaker_runtime as _caretaker_runtime
+
 # ── Cloud inference helpers (Phase 5 extraction) ────────────────────
 import app.cloud_inference as _cloud_inf
 
@@ -976,6 +979,14 @@ try:
 except ValueError as _caretaker_build_err:
     logger.error("Caretaker client could not be built: %s", _caretaker_build_err)
     caretaker_client = None
+
+# F5 tranche 2: the request hotpath (auto-reload/switch, connect-error
+# recovery) executes lifecycle through the caretaker /ensure first, with the
+# gateway's own ModelManager as the local fallback.
+_caretaker_runtime.init(
+    model_manager=model_manager,
+    caretaker_client=caretaker_client,
+)
 
 _lifespan.init(
     proxy_port=PROXY_PORT,

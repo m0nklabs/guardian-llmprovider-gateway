@@ -20,6 +20,7 @@ from fastapi import HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
 from app.engine.manager import ModelLoadError
+from app.gateway import caretaker_runtime as _caretaker_runtime
 from app.capture.config import PROTOCOL_ANTHROPIC, PROTOCOL_OPENAI, ROUTE_LOCAL
 from app.capture.redactor import anthropic_messages_to_openai
 from app.capture.schema import BuildContext
@@ -494,13 +495,21 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                             target_model=reload_model,
                             requested_model=requested_model or current_model,
                             owner=client_id,
-                            operation=lambda: _model_manager.load(
-                                reload_model,
+                            operation=lambda: _caretaker_runtime.ensure_backend(
+                                model=reload_model,
                                 enable_vision=_desired_runtime_vision_enabled(
                                     reload_model,
                                     has_image_inputs,
                                 ),
                                 context_hint=ctx_hint_int,
+                                local_fallback=lambda: _model_manager.load(
+                                    reload_model,
+                                    enable_vision=_desired_runtime_vision_enabled(
+                                        reload_model,
+                                        has_image_inputs,
+                                    ),
+                                    context_hint=ctx_hint_int,
+                                ),
                             ),
                             generation=generation,
                         )
@@ -561,24 +570,34 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                                     client_id,
                                 )
                                 try:
-                                    operation = (
-                                        (lambda: _model_manager.switch_model(
-                                            desired_model,
-                                            client_id=client_id,
+                                    if needs_model_switch or ctx_hint_int is not None:
+                                        # Remote-first switch: the caretaker
+                                        # /ensure is idempotent + drift-checked.
+                                        # Context auto-save stays a gateway
+                                        # responsibility (pre_switch_save).
+                                        operation = lambda: _caretaker_runtime.ensure_backend(
+                                            model=desired_model,
                                             enable_vision=desired_vision,
                                             context_hint=ctx_hint_int,
-                                        ))
-                                        # A context hint on the already-active model
-                                        # must go through switch_model: its drift check
-                                        # + signature persistence give the same-hint
-                                        # caching (no reload when the hinted sig matches).
-                                        if needs_model_switch or ctx_hint_int is not None
-                                        else (lambda: _model_manager.load(
-                                            desired_model,
+                                            pre_switch_save=True,
+                                            local_fallback=lambda: _model_manager.switch_model(
+                                                desired_model,
+                                                client_id=client_id,
+                                                enable_vision=desired_vision,
+                                                context_hint=ctx_hint_int,
+                                            ),
+                                        )
+                                    else:
+                                        operation = lambda: _caretaker_runtime.ensure_backend(
+                                            model=desired_model,
                                             enable_vision=desired_vision,
                                             context_hint=ctx_hint_int,
-                                        ))
-                                    )
+                                            local_fallback=lambda: _model_manager.load(
+                                                desired_model,
+                                                enable_vision=desired_vision,
+                                                context_hint=ctx_hint_int,
+                                            ),
+                                        )
                                     await _run_guardian_operation(
                                         source="proxy",
                                         phase=phase,

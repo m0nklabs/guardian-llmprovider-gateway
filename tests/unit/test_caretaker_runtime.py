@@ -1,0 +1,155 @@
+"""Tests for app.gateway.caretaker_runtime — F5 remote-first hotpath ensure.
+
+Pins the decision logic of the request-path lifecycle bridge:
+caretaker /ensure first, gateway ModelManager fallback when the caretaker is
+not configured or unreachable, and error mapping so the hotpath callers keep
+their existing crash/503 handling.
+"""
+
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from app.engine.manager import ModelLoadError
+from app.gateway import caretaker_runtime as crt
+from app.gateway.caretaker_client import (
+    CaretakerInvalidRequest,
+    CaretakerModelLoadFailed,
+    CaretakerModelNotFound,
+    CaretakerUnavailable,
+    CaretakerVramExceeded,
+)
+
+
+class _StubClient:
+    def __init__(self) -> None:
+        self.ensure = AsyncMock(return_value={"ok": True, "loaded_model": "m"})
+
+
+@pytest.fixture(autouse=True)
+def _reset_runtime():
+    crt.init(model_manager=None, caretaker_client=None)
+    yield
+    crt.init(model_manager=None, caretaker_client=None)
+
+
+def _manager(**attrs) -> MagicMock:
+    mgr = MagicMock()
+    mgr.backend_serves_model = AsyncMock(return_value=False)
+    mgr.backend_health_ok = AsyncMock(return_value=False)
+    mgr.save_current_context = AsyncMock()
+    for k, v in attrs.items():
+        setattr(mgr, k, v)
+    return mgr
+
+
+async def test_client_none_runs_local_fallback():
+    fallback = AsyncMock()
+    result = await crt.ensure_backend(model="m", local_fallback=fallback)
+    assert result == "local"
+    fallback.assert_awaited_once()
+
+
+async def test_remote_success_calls_ensure_and_marks_loaded():
+    client = _StubClient()
+    mgr = _manager()
+    crt.init(model_manager=mgr, caretaker_client=client)
+    result = await crt.ensure_backend(
+        model="m",
+        enable_vision=True,
+        context_hint=4096,
+        local_fallback=AsyncMock(),
+    )
+    assert result == "remote"
+    client.ensure.assert_awaited_once_with(
+        "m", enable_vision=True, context_hint=4096
+    )
+    mgr.mark_loaded_by_caretaker.assert_called_once_with(
+        "m", enable_vision=True, context_hint=4096
+    )
+
+
+async def test_unavailable_with_healthy_backend_adopts_state():
+    client = _StubClient()
+    client.ensure.side_effect = CaretakerUnavailable("http://x:11441")
+    mgr = _manager()
+    mgr.backend_serves_model = AsyncMock(return_value=True)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
+    result = await crt.ensure_backend(model="m", local_fallback=fallback)
+    assert result == "local-healthy"
+    mgr.backend_serves_model.assert_awaited_once_with("m")
+    mgr.mark_loaded_by_caretaker.assert_called_once_with(
+        "m", enable_vision=None, context_hint=None
+    )
+    fallback.assert_not_awaited()
+
+
+async def test_unavailable_healthy_backend_wrong_model_runs_fallback():
+    """Backend up but serving a different model must NOT adopt loaded state."""
+    client = _StubClient()
+    client.ensure.side_effect = CaretakerUnavailable("http://x:11441")
+    mgr = _manager()
+    mgr.backend_serves_model = AsyncMock(return_value=False)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
+    result = await crt.ensure_backend(model="m", local_fallback=fallback)
+    assert result == "local"
+    fallback.assert_awaited_once()
+    mgr.mark_loaded_by_caretaker.assert_not_called()
+
+
+async def test_unavailable_with_dead_backend_runs_local_fallback():
+    client = _StubClient()
+    client.ensure.side_effect = CaretakerUnavailable("http://x:11441")
+    mgr = _manager()  # backend_health_ok False
+    crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
+    result = await crt.ensure_backend(model="m", local_fallback=fallback)
+    assert result == "local"
+    fallback.assert_awaited_once()
+    mgr.mark_loaded_by_caretaker.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        CaretakerModelNotFound("m"),
+        CaretakerVramExceeded("m"),
+        CaretakerModelLoadFailed("m"),
+    ],
+)
+async def test_caretaker_errors_map_to_model_load_error(exc):
+    client = _StubClient()
+    client.ensure.side_effect = exc
+    crt.init(model_manager=_manager(), caretaker_client=client)
+    with pytest.raises(ModelLoadError):
+        await crt.ensure_backend(model="m", local_fallback=AsyncMock())
+
+
+async def test_invalid_request_maps_to_value_error():
+    client = _StubClient()
+    client.ensure.side_effect = CaretakerInvalidRequest("bad payload")
+    crt.init(model_manager=_manager(), caretaker_client=client)
+    with pytest.raises(ValueError):
+        await crt.ensure_backend(model="m", local_fallback=AsyncMock())
+
+
+async def test_pre_switch_save_saves_context_before_ensure():
+    client = _StubClient()
+    mgr = _manager()
+    crt.init(model_manager=mgr, caretaker_client=client)
+    await crt.ensure_backend(
+        model="m",
+        pre_switch_save=True,
+        local_fallback=AsyncMock(),
+    )
+    mgr.save_current_context.assert_awaited_once()
+
+
+async def test_pre_switch_save_false_skips_context_save():
+    client = _StubClient()
+    mgr = _manager()
+    crt.init(model_manager=mgr, caretaker_client=client)
+    await crt.ensure_backend(model="m", local_fallback=AsyncMock())
+    mgr.save_current_context.assert_not_awaited()
