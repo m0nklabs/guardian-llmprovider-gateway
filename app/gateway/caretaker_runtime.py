@@ -88,12 +88,15 @@ async def ensure_backend(
     except CaretakerUnavailable:
         # Caretaker unreachable — the backend may still be running (daemon
         # died, llama-server survived).  Only adopt the loaded state when the
-        # running backend actually serves the requested model; otherwise the
+        # running backend actually serves the requested model AND accepts
+        # requests; a hung-but-alive llama-server must not be adopted as
+        # healthy (the local fallback would have restarted it).  Otherwise the
         # original local lifecycle is the fallback (safe — with the daemon
         # down nothing else owns the backend port).
         if (
             _model_manager is not None
             and await _model_manager.backend_serves_model(model)
+            and await _model_manager.backend_health_ok()
         ):
             logger.warning(
                 "F5: caretaker unreachable but backend already serves '%s' — "
