@@ -365,6 +365,37 @@ def test_build_fails_closed_sending_key_to_foreign_host(
         build_caretaker_client(config)
 
 
+def test_build_recognizes_tls_loopback_as_this_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review fix (possible issue): https://127.0.0.1 / https://localhost are
+    THIS host too — with a TLS loopback caretaker and multiple local providers,
+    the factory must pick it (pass 1) instead of failing closed because the
+    string '127.0.0.1' is not in gethostbyname_ex's sets."""
+    monkeypatch.delenv("CARETAKER_KEY", raising=False)
+    config = {
+        "providers": {
+            "remote-local": {"local": True, "management_url": "http://192.168.1.99:11441"},
+            "own-tls": {"local": True, "management_url": "https://127.0.0.1:11441"},
+        }
+    }
+    client = build_caretaker_client(config)
+    assert client is not None
+    assert client.management_url == "https://127.0.0.1:11441"
+
+
+def test_build_rejects_null_management_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review fix (possible issue): a YAML management_url: null (or empty that
+    survives _expand_env) must raise a clear ValueError at build time, not
+    normalize to a truthy \"None\" string that only fails at transport time."""
+    monkeypatch.delenv("CARETAKER_KEY", raising=False)
+    config = {"providers": {"ai-kvm2-local": {"local": True, "management_url": None}}}
+    with pytest.raises(ValueError, match="management_url is missing"):
+        build_caretaker_client(config)
+
+
 def test_build_allows_key_to_own_host_lan_ip(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

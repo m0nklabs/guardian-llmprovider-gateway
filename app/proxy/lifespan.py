@@ -213,6 +213,11 @@ async def run_lifespan(app):
     except Exception as exc:
         logger.warning("Capture writer shutdown error: %s", exc)
 
+    # Shutdown: Release the caretaker httpx connection pool (review: resource
+    # leak — the AsyncClient was built eagerly at import; close it so the pool
+    # does not linger for the process lifetime / per re-import).
+    await _close_caretaker_client()
+
     # Shutdown: Remove PID file
     if pid_path.exists():
         try:
@@ -224,6 +229,14 @@ async def run_lifespan(app):
         except Exception as e:
             logger.warning(f"Failed to clean up PID file: {e}")
 
+
+async def _close_caretaker_client() -> None:
+    """Close the caretaker httpx connection pool if one was built."""
+    if _caretaker_client is not None:
+        try:
+            await _caretaker_client.close()
+        except Exception as exc:  # noqa: BLE001 — shutdown guard; any failure is logged, never propagated
+            logger.warning("Caretaker client shutdown error: %s", exc)
 
 
 async def idle_unload_watcher():

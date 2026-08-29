@@ -324,7 +324,9 @@ def build_caretaker_client(config: dict) -> CaretakerClient:
         caretaker via e.g. http://192.168.1.35:11441, which is NOT loopback).
         This prevents dict order from sending lifecycle commands (/unload) to
         a different GPU host's caretaker once a second local provider exists."""
-        if mgmt.startswith(("http://127.0.0.1", "http://localhost")):
+        if mgmt.startswith(
+            ("http://127.0.0.1", "http://localhost", "https://127.0.0.1", "https://localhost")
+        ):
             return True
         host = mgmt.split("://", 1)[-1].split(":", 1)[0].split("/", 1)[0].lower()
         if not host:
@@ -375,7 +377,7 @@ def build_caretaker_client(config: dict) -> CaretakerClient:
             _expand_env(str((local_doc or {}).get("management_url", ""))),
         )
 
-    management_url = _expand_env((local_doc or {}).get("management_url", "")) if local_doc else ""
+    management_url = _expand_env(str((local_doc or {}).get("management_url") or "")) if local_doc else ""
     if not management_url:
         raise ValueError(
             "management_url is missing for the local provider; add it to "

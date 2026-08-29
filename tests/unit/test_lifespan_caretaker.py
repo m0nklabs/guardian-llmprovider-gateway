@@ -145,6 +145,40 @@ class _StopWatcher(Exception):
     """Internal: stops the watcher loop after one iteration."""
 
 
+async def test_shutdown_closes_caretaker_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review fix (resource leak): the eagerly-built caretaker httpx client is
+    closed on the lifespan shutdown path so its connection pool is released."""
+    class _CloseTrackingClient:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        async def close(self) -> None:
+            self.close_calls += 1
+
+    stub = _CloseTrackingClient()
+    monkeypatch.setattr(lifespan_mod, "_caretaker_client", stub)
+
+    await lifespan_mod._close_caretaker_client()
+    assert stub.close_calls == 1
+
+
+async def test_shutdown_close_survives_client_close_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review fix: a failing close() must not break shutdown — it logs and
+    carries on (mirrors the capture-writer shutdown guard)."""
+    class _ExplodingCloseClient:
+        async def close(self) -> None:
+            raise RuntimeError("pool release failed")
+
+    monkeypatch.setattr(lifespan_mod, "_caretaker_client", _ExplodingCloseClient())
+
+    # No exception escapes shutdown.
+    await lifespan_mod._close_caretaker_client()
+
+
 async def test_watcher_concurrent_reload_during_roundtrip_logs_not_rolls_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
