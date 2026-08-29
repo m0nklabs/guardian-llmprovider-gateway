@@ -72,6 +72,33 @@ async def test_ensure_success() -> None:
     }
 
 
+async def test_ensure_fresh_load_capability_revalidates_every_response() -> None:
+    """supports_fresh_load is re-validated on EVERY successful /ensure — the
+    daemon may be rolled back/downgraded later, and a stale True would keep
+    switches on the remote path while restore stays dormant (silent
+    session-context loss).  Absence of the field disables the capability
+    again."""
+    responses = [
+        _ok({"ok": True, "loaded_model": "minimal"}),  # no field yet
+        _ok({"ok": True, "loaded_model": "minimal", "fresh_load": False}),
+        _ok({"ok": True, "loaded_model": "minimal", "fresh_load": True}),
+        _ok({"ok": True, "loaded_model": "minimal"}),  # downgraded again
+    ]
+    client = _make_client(lambda req: responses.pop(0))
+
+    await client.ensure("minimal")
+    assert client.supports_fresh_load is False
+
+    await client.ensure("minimal")
+    assert client.supports_fresh_load is True  # field present (even False)
+
+    await client.ensure("minimal")
+    assert client.supports_fresh_load is True
+
+    await client.ensure("minimal")
+    assert client.supports_fresh_load is False  # field gone -> capability off
+
+
 async def test_ensure_model_not_found() -> None:
     client = _make_client(lambda req: _err(404, "model_not_found", "unknown"))
     with pytest.raises(CaretakerModelNotFound):

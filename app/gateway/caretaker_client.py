@@ -197,12 +197,14 @@ class CaretakerClient:
 
         if resp.status_code == 200:
             value = await self._ok_json(resp, "/ensure")
-            if isinstance(value, dict) and "fresh_load" in value:
-                # The daemon ships the freshness field — the remote switch path
-                # may now restore session context with daemon-confirmed
-                # freshness (self-healing capability detection: the first
-                # reload ensure after the daemon upgrades flips this).
-                self.supports_fresh_load = True
+            if isinstance(value, dict):
+                # Capability is re-validated on EVERY successful /ensure: the
+                # daemon may be rolled back/downgraded later, and a stale True
+                # would keep switches on the remote path while restore stays
+                # dormant (save runs, nothing restores) — silent
+                # session-context loss.  Absence of the field disables the
+                # capability again.
+                self.supports_fresh_load = "fresh_load" in value
             return value
 
         body = _safe_json(resp)

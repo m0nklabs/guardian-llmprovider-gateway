@@ -14,22 +14,27 @@ Decision logic:
 - ``CaretakerClient`` built and reachable → ``POST /ensure``; on 200 the
   manager state is mirrored via ``mark_loaded_by_caretaker`` and the result is
   ``"remote"``.
-- SWITCHES (``pre_switch_save=True``) additionally require the daemon to
-  report ``fresh_load`` (observed via ``CaretakerClient.supports_fresh_load``)
-  before the remote path runs: restoring the target's session context is
-  gated on that daemon-confirmed freshness, and until the field ships the
-  local lifecycle (which has ``switch_model``'s save/restore parity) handles
-  the switch so no session continuity is silently lost.  Reload sites (no
-  ``pre_switch_save``) always go remote-first.
+- SWITCHES (``pre_switch_save=True``) restore the target's session context
+  only when the daemon reports ``fresh_load`` (observed via
+  ``CaretakerClient.supports_fresh_load``, re-validated on every /ensure
+  response).  Until the field ships, remote switches run WITHOUT context
+  restore and log a loud warning; the pre-save is gated on the same
+  capability so no wasteful slot-save/ps-scan runs.  The switch itself stays
+  remote-first: a local-lifecycle switch while the daemon is alive would
+  race a second controller on the backend (see the unreachable branch), so
+  the local lifecycle is only ever used when the daemon is confirmed
+  down/absent.  Reload sites (no ``pre_switch_save``) always go remote-first.
 - ``CaretakerUnavailable`` (transport/timeout/auth) → a single re-probe of
   ``/ensure`` happens first (a live daemon mid-switch would otherwise race a
   local spawn — two controllers on the same backend).  A read/write timeout
   means the daemon accepted the connection (alive): a second one fails closed.
-  Connection-refused/DNS/ConnectTimeout mean the daemon is really gone: the
+  Connection-refused/DNS/ConnectTimeout mean the daemon may be gone: the
   backend may still be healthy (daemon died but llama-server survived) — if
-  so, adopt the loaded state without spawning.  Otherwise run the original
-  local lifecycle (``local_fallback``) — safe, because with the daemon down
-  nothing else owns the backend port.
+  so, adopt the loaded state without spawning.  If the backend is ALIVE but
+  not serving the requested model, the local lifecycle would race a second
+  controller → fail closed.  Only when the backend is confirmed DOWN does the
+  original local lifecycle (``local_fallback``) run — safe, because with the
+  daemon down nothing else owns the backend port.
 - Any other ``CaretakerError`` (model not found, VRAM limit, load failed,
   invalid request) → mapped to the same error types the hotpath callers
   already handle (``ModelLoadError`` / ``ValueError``), so crash recording
@@ -182,24 +187,32 @@ async def ensure_backend(
     ):
         raise ValueError(f"Client '{client_id}' is not allowed to switch models")
 
-    # A switch (pre_switch_save) needs the target model's auto-saved context
-    # to be restored after the remote load.  Restore is gated on the daemon's
-    # explicit "fresh_load" confirmation (never on a gateway-side probe).  As
-    # long as the /ensure contract does not ship that field, a remote switch
-    # would silently lose switch_model's save/restore parity (save runs but
-    # nothing restores) — so keep the local lifecycle for switches until the
-    # caretaker reports fresh_load.  Reload sites (no pre_switch_save) are
-    # unaffected and still go remote-first.
+    # A switch (pre_switch_save) restores the target model's auto-saved
+    # context only when the daemon CONFIRMS the model was freshly loaded
+    # ("fresh_load"), never on a gateway-side probe.  The pre-save is the
+    # counterpart of that restore: running it while the daemon cannot confirm
+    # freshness would be a wasted slot-save POST + ps-scan with nothing ever
+    # restoring it, so the SAVE is gated on the same capability.
+    #
+    # The SWITCH itself stays remote-first.  A local-lifecycle switch
+    # (switch_model) while the caretaker daemon is alive would race a second
+    # controller on the backend (the thread-2 invariant: local lifecycle is
+    # only safe when the daemon is down/absent, which the CaretakerUnavailable
+    # branch below already routes to the fallback).  Until the daemon ships
+    # fresh_load, remote switches run WITHOUT context restore and log a loud
+    # warning; the field ships as the immediate caretaker follow-up, after
+    # which the capability is observed on the first reload/switch /ensure and
+    # restore comes back automatically (self-healing).
     if pre_switch_save and _model_manager is not None:
         if not getattr(_caretaker_client, "supports_fresh_load", False):
             logger.warning(
-                "F5: /ensure cannot confirm fresh_load — using local lifecycle "
-                "for switch to '%s'",
+                "F5: /ensure cannot confirm fresh_load — remote switch to "
+                "'%s' proceeds WITHOUT context restore until the daemon "
+                "ships the field",
                 model,
             )
-            await local_fallback()
-            return "local"
-        await _model_manager.save_current_context()
+        else:
+            await _model_manager.save_current_context()
 
     try:
         result = await _ensure_with_retry(
@@ -260,8 +273,24 @@ async def ensure_backend(
             # process) — the live session is authoritative.  A later A->B->A
             # re-ensure restores correctly once the daemon reports fresh_load.
             return "local-healthy"
+        # ConnectTimeout/connection-refused does NOT prove the daemon is gone:
+        # a firewall DROP on the management port, saturated accept backlog or
+        # a restart window all surface as transport errors while the daemon
+        # still owns llama-server.  If the backend is ALIVE (a real llama-server
+        # answers), spawning/switching locally would race a second controller
+        # on it (args-file write + systemctl stop/start) — the same hazard the
+        # timeout branch fails closed on, and the state may be a live daemon
+        # serving a different model than requested.  Only run the local
+        # lifecycle when the backend is confirmed DOWN.
+        if _model_manager is not None and await _model_manager.backend_health_ok():
+            raise ModelLoadError(
+                "Caretaker unreachable but backend is alive; refusing local "
+                "fallback to avoid a second controller on the backend"
+            ) from exc
         logger.warning(
-            "F5: caretaker unavailable — local load fallback for '%s'", model
+            "F5: caretaker unavailable and backend down — local load fallback "
+            "for '%s'",
+            model,
         )
         await local_fallback()
         return "local"
@@ -359,13 +388,13 @@ async def ensure_backend(
         # signal.  A gateway-side probe (parsing the running llama-server's
         # command line) can misdetect a caretaker-launched process and would
         # clobber a live slot-0 session with a stale auto-save, so never
-        # restore on a probe result alone.  While the /ensure contract does
-        # not yet ship the field (caretaker follow-up) restore stays dormant;
-        # save_current_context() still persists the pre-switch model's
-        # context, and a later A->B->A re-ensure restores it correctly once
-        # the daemon reports fresh_load.  Reload sites (auto-reload,
-        # connect-error recovery) start a fresh context via load() and must
-        # not re-inject a stale auto-save — they never set pre_switch_save.
+        # restore on a probe result alone.  The pre-save is gated on the same
+        # capability (see the switch gate above): until the daemon ships the
+        # field, no save runs, nothing is lost, and once the field is
+        # observed the save/restore pair comes back together.  Reload sites
+        # (auto-reload, connect-error recovery) start a fresh context via
+        # load() and must not re-inject a stale auto-save — they never set
+        # pre_switch_save.
         if pre_switch_save and result.get("fresh_load") is True:
             await _model_manager.restore_current_context()
     return "remote"
