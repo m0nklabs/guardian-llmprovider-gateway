@@ -149,13 +149,23 @@ async def ensure_backend(
         logger.error("F5: caretaker ensure failed unexpectedly: %s", exc)
         raise ModelLoadError(str(exc)) from exc
 
-    # The caretaker response names the model it actually loaded.  If it
-    # resolved the request to a different model than the one the gateway
-    # asked for (caretaker-side alias/fallback), do NOT adopt the requested
-    # model's loaded state — the backend would desync from gateway state.
-    # Run the local lifecycle instead so current_model stays truthful.
-    loaded = (result or {}).get("loaded_model") if isinstance(result, dict) else None
-    if loaded and loaded != model:
+    # The caretaker response names the model it actually loaded.  Without a
+    # truthful loaded_model the gateway cannot tell whether the backend now
+    # serves the requested model — never claim success from an unknown
+    # caretaker state, run the local lifecycle instead (keeps current_model
+    # truthful).  The same holds when the caretaker resolved the request to a
+    # different model (caretaker-side alias/fallback/partial load): do NOT
+    # adopt the requested model's loaded state, the backend would desync from
+    # gateway state.
+    if not isinstance(result, dict) or "loaded_model" not in (result or {}):
+        logger.warning(
+            "F5: caretaker /ensure response did not name a loaded_model — "
+            "falling back to local lifecycle"
+        )
+        await local_fallback()
+        return "local"
+    loaded = result["loaded_model"]
+    if loaded != model:
         logger.warning(
             "F5: caretaker loaded '%s' instead of requested '%s' — "
             "falling back to local lifecycle",
@@ -175,5 +185,10 @@ async def ensure_backend(
         # owned the context restore — mirror it so A->B->A switches recover
         # the target's auto-saved session context (missing/corrupt save is
         # tolerated inside the manager; restore never blocks the hotpath).
-        await _model_manager.restore_current_context()
+        # Only switch call sites (which also set pre_switch_save) restore:
+        # reload sites (auto-reload, connect-error recovery) used to start
+        # a fresh context via load() and must not re-inject a stale
+        # auto-save from an earlier session of the same model.
+        if pre_switch_save:
+            await _model_manager.restore_current_context()
     return "remote"
