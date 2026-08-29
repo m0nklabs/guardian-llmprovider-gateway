@@ -745,6 +745,26 @@ class TestUnload:
             await mgr.unload()
         mock_stop.assert_called_once()
 
+    def test_mark_unloaded_by_caretaker_real_manager(self, tmp_path: Path):
+        """PR #11 review (attribute-error concern): mark_unloaded_by_caretaker()
+        must run against the REAL ModelManager without AttributeError and put it
+        in the same end-state as unload() minus the process stop."""
+        mgr = _make_manager(tmp_path)
+        assert mgr.is_unloaded is False
+        assert mgr._model_verified is False  # not loaded yet
+
+        # Simulate a loaded+verified state, then reconcile a caretaker unload.
+        mgr._model_verified = True
+        mgr._last_verification_at = "2026-08-29T00:00:00Z"
+        mgr._last_backend_model = "glm-4.7"
+
+        mgr.mark_unloaded_by_caretaker()
+
+        assert mgr.is_unloaded is True
+        assert mgr._model_verified is False
+        assert mgr._last_verification_at is None
+        assert mgr._last_backend_model is None
+
 
 # ── _get_comfyui_url ──────────────────────────────────────────────────
 

@@ -253,18 +253,20 @@ async def idle_unload_watcher():
                     logger.warning("Caretaker client not configured; falling back to local unload")
                     await _model_manager.unload()
                     continue
-                await _caretaker_client.unload()
-                # F5: the caretaker confirmed the unload — reconcile through the
-                # manager's own unload bookkeeping (same end-state as unload(),
-                # minus the process stop the caretaker already did).  This keeps
-                # is_unloaded + verification state consistent so (a) the watcher
-                # guard stops re-issuing /unload each idle cycle, (b) the hotpath
-                # auto-reload fires on the next request, and (c) a stale health/
-                # verification run does not respawn the caretaker-killed process.
+                # Optimistic: mark unloaded BEFORE the round-trip so a request
+                # arriving while the caretaker is stopping the backend already
+                # sees is_unloaded=True and the hotpath auto-reload fires —
+                # instead of routing it at a backend that is about to stop.
+                # Same end-state as unload() (minus the process stop the
+                # caretaker does): is_unloaded + verification-state reset.
+                _prev_unloaded = _model_manager.is_unloaded
                 _model_manager.mark_unloaded_by_caretaker()
+                await _caretaker_client.unload()
             except CaretakerError as e:
-                # Expected: remote refusal. Log without a traceback; do NOT claim
-                # unload state the gateway did not observe.
+                # Expected: remote refusal — the caretaker never stopped the
+                # backend, so roll the optimistic flag back; the watcher guard
+                # (is_unloaded) must not treat the model as gone.
+                _model_manager.is_unloaded = _prev_unloaded
                 logger.error(f"❌ Auto-unload via caretaker failed: {e}")
             except Exception as e:
                 # Unexpected (coding error, transport bug): surface the traceback

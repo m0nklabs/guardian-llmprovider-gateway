@@ -202,11 +202,11 @@ async def test_watcher_syncs_is_unloaded_after_successful_unload(
     assert mgr.mark_unloaded_calls == 1
 
 
-async def test_watcher_does_not_sync_is_unloaded_on_error(
+async def test_watcher_rolls_back_is_unloaded_on_caretaker_refusal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """On CaretakerError the gateway must NOT claim unload state it did not
-    observe — the flag stays False."""
+    """The optimistic is_unloaded mark is rolled back when the caretaker
+    refuses (never stopped the backend) — no unload claim on an error."""
     class _FailingClient:
         async def unload(self) -> dict:
             from app.gateway.caretaker_client import CaretakerUnavailable
@@ -221,8 +221,8 @@ async def test_watcher_does_not_sync_is_unloaded_on_error(
     with pytest.raises(_StopWatcher):
         await lifespan_mod.idle_unload_watcher()
     mgr = lifespan_mod._model_manager
-    assert mgr.is_unloaded is False
-    assert mgr.mark_unloaded_calls == 0
+    assert mgr.is_unloaded is False  # rolled back to the pre-call value
+    assert mgr.mark_unloaded_calls == 1  # the optimistic mark did fire
 
 
 async def test_watcher_caretaker_error_is_caught(
@@ -241,10 +241,11 @@ async def test_watcher_caretaker_error_is_caught(
     )
     with pytest.raises(_StopWatcher):
         await lifespan_mod.idle_unload_watcher()
-    # CaretakerError was swallowed (logged), not re-raised; no unload claim.
+    # CaretakerError was swallowed (logged), not re-raised; the optimistic mark
+    # was rolled back — no lingering unload claim.
     mgr = lifespan_mod._model_manager
     assert mgr.is_unloaded is False
-    assert mgr.mark_unloaded_calls == 0
+    assert mgr.mark_unloaded_calls == 1  # optimistic mark fired, then rolled back
 
 
 def test_idle_unload_watcher_defined_in_lifespan() -> None:
