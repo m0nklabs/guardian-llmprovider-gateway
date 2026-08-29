@@ -1165,10 +1165,14 @@ async def admin_unload(client_id: str = Depends(verify_api_key)):
     if model_manager.is_unloaded:
         return {"status": "already_unloaded", "message": "llama-server is already stopped"}
     if caretaker_client is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Caretaker client is not configured; cannot unload via caretaker",
-        )
+        # No remote caretaker configured (management_url/CARETAKER_KEY/daemon
+        # absent): fall back to the local unload so VRAM freeing keeps working
+        # during the F5 transition (review: deployment-dependency regression if
+        # merged without a fallback).  The remote path takes over automatically
+        # once build_caretaker_client succeeds.
+        logger.warning("/admin/unload: caretaker client not configured; falling back to local unload")
+        await model_manager.unload()
+        return {"status": "unloaded", "message": f"Model '{model_manager.current_model}' unloaded — VRAM is free"}
     try:
         await caretaker_client.unload()
     except CaretakerError as e:

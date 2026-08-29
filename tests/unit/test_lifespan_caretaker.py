@@ -49,10 +49,16 @@ class _FakeModelManager:
         self.active_requests = active_requests
         self.last_request_time = last_request_time
         self.mark_unloaded_calls = 0
+        self.local_unload_calls = 0
 
     def mark_unloaded_by_caretaker(self) -> None:
         self.is_unloaded = True
         self.mark_unloaded_calls += 1
+
+    async def unload(self) -> None:
+        """Local fallback unload (no caretaker configured)."""
+        self.is_unloaded = True
+        self.local_unload_calls += 1
 
 
 def _install_globals(
@@ -161,21 +167,22 @@ async def test_watcher_skips_below_idle_limit(
     assert client.unload_calls == 0
 
 
-async def test_watcher_logs_when_client_missing(
+async def test_watcher_falls_back_to_local_unload_when_client_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Idle (old last_request_time) so the idle gate passes and the
-    # _caretaker_client-is-None branch is actually reached (review: vacuous).
+    """Review fix (deployment dependency): without a caretaker client the
+    watcher must still free VRAM via the local unload — never silently stop."""
     _install_globals(
         monkeypatch,
-        last_request_time=time.time() - 600,
+        last_request_time=time.time() - 600,  # idle → branch reached
         caretaker_client=lambda: None,
     )
     with pytest.raises(_StopWatcher):
         await lifespan_mod.idle_unload_watcher()
-    # No exception was raised by the missing client; the loop just continued.
     mgr = lifespan_mod._model_manager
-    assert mgr.is_unloaded is False  # no unload claim without a client
+    assert mgr.is_unloaded is True
+    assert mgr.local_unload_calls == 1
+    assert mgr.mark_unloaded_calls == 0  # caretaker path not taken
 
 
 async def test_watcher_syncs_is_unloaded_after_successful_unload(
@@ -318,9 +325,11 @@ def test_admin_unload_delegates_to_caretaker(
     assert stub.unload_calls == 1  # unchanged
 
 
-def test_admin_unload_503_when_client_missing(
+def test_admin_unload_falls_back_to_local_unload_when_client_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Review fix (deployment dependency): /admin/unload must still free VRAM
+    when no caretaker client is configured — local fallback, not a 503."""
     from fastapi.testclient import TestClient
 
     from app.proxy import server as server_mod
@@ -338,5 +347,7 @@ def test_admin_unload_503_when_client_missing(
 
     client = TestClient(app)
     r = client.post("/admin/unload", headers={"Authorization": "Bearer test-key"})
-    assert r.status_code == 503
-    assert "not configured" in r.json()["detail"]
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "unloaded"
+    assert fake_mgr.local_unload_calls == 1
+    assert fake_mgr.is_unloaded is True

@@ -244,7 +244,14 @@ async def idle_unload_watcher():
             logger.info(f"💤 Idle for {idle_secs/60:.1f}m (limit {idle_minutes}m) — auto-unloading to free VRAM")
             try:
                 if _caretaker_client is None:
-                    logger.error("Caretaker client not injected; cannot auto-unload via caretaker")
+                    # No remote caretaker configured (management_url/CARETAKER_KEY
+                    # or the daemon itself absent): fall back to the local unload
+                    # so VRAM freeing keeps working during the F5 transition — the
+                    # caretaker owns the lifecycle only once it is deployed.  The
+                    # review painted this as a deployment-dependency regression if
+                    # merged without a fallback (review: possible issue).
+                    logger.warning("Caretaker client not configured; falling back to local unload")
+                    await _model_manager.unload()
                     continue
                 await _caretaker_client.unload()
                 # F5: the caretaker confirmed the unload — reconcile through the
