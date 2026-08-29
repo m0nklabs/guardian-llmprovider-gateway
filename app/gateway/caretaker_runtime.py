@@ -73,7 +73,10 @@ async def _ensure_with_retry(
     controllers on the same backend port / launch-args file.  Re-probing once
     lets a merely-slow daemon answer; only a second ``CaretakerUnavailable``
     is treated as "the daemon is really gone", where the local lifecycle is
-    the only controller on the backend.
+    the only controller on the backend.  A ``CaretakerUnavailable`` with a
+    ``status_code`` (daemon alive but rejected the request, e.g. 401/403) is
+    deterministic — re-probing would just get the same status again, so it
+    propagates immediately.
     """
     try:
         return await _caretaker_client.ensure(
@@ -81,8 +84,9 @@ async def _ensure_with_retry(
             enable_vision=enable_vision,
             context_hint=context_hint,
         )
-    except CaretakerUnavailable:
-        pass
+    except CaretakerUnavailable as exc:
+        if exc.status_code is not None:
+            raise  # daemon alive but rejected us — no point re-probing
     return await _caretaker_client.ensure(
         model,
         enable_vision=enable_vision,
@@ -144,7 +148,20 @@ async def ensure_backend(
             enable_vision=enable_vision,
             context_hint=context_hint,
         )
-    except CaretakerUnavailable:
+    except CaretakerUnavailable as exc:
+        # CaretakerUnavailable covers transport/timeout failures AND unexpected
+        # HTTP statuses.  A status_code means the daemon IS alive but rejected
+        # the gateway (e.g. 401/403 after a key rotation): running the local
+        # lifecycle would create a second controller on a backend the daemon
+        # still owns — fail closed.  Only status_code None (transport/timeout)
+        # means the daemon may be gone; then the backend may still be running
+        # (daemon died, llama-server survived).
+        if exc.status_code is not None:
+            raise ModelLoadError(
+                f"Caretaker control-API rejected the request "
+                f"(status {exc.status_code}); refusing local fallback to avoid "
+                "a second controller on the backend"
+            ) from exc
         # Caretaker unreachable — the backend may still be running (daemon
         # died, llama-server survived).  Only adopt the loaded state when the
         # running backend actually serves the requested model AND accepts
@@ -175,10 +192,15 @@ async def ensure_backend(
                 enable_vision=enable_vision,
                 context_hint=context_hint,
             )
-            # NO restore here: adoption only happens when the backend was
-            # already serving the requested model, so the live session in
-            # slot 0 is authoritative — restoring the stale auto-save would
-            # clobber an active conversation.
+            # Restore the auto-saved context only when the model was FRESHLY
+            # loaded (fresh_load=True): the timed-out /ensure may have
+            # completed the switch, so slot 0 is empty and restoring mirrors
+            # switch_model's restore.  When the backend was already serving
+            # the model before the ensure (fresh_load=False), the live session
+            # in slot 0 is authoritative — never restore, it would clobber an
+            # active conversation.
+            if pre_switch_save and fresh_load and _model_manager is not None:
+                await _model_manager.restore_current_context()
             return "local-healthy"
         logger.warning(
             "F5: caretaker unavailable — local load fallback for '%s'", model
