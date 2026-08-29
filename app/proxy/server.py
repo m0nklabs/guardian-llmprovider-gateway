@@ -94,7 +94,7 @@ from app.gateway import queue_helpers as _queue_helpers
 # ── Configuration loading (Phase 5 extraction) ───────────────────────
 from app import config_loader as _config_loader
 
-from app.gateway.caretaker_client import CaretakerError, build_caretaker_client
+from app.gateway.caretaker_client import CaretakerError, CaretakerUnavailable, build_caretaker_client
 
 # ── Proxy state container (Phase 5 extraction) ───────────────────────
 from app.proxy.state import State as _State
@@ -1175,6 +1175,19 @@ async def admin_unload(client_id: str = Depends(verify_api_key)):
         return {"status": "unloaded", "message": f"Model '{model_manager.current_model}' unloaded — VRAM is free"}
     try:
         await caretaker_client.unload()
+    except CaretakerUnavailable as e:
+        # Transport failure (daemon down / not deployed yet during F5 / network
+        # down): we cannot know whether the unload happened; the local
+        # systemctl stop is idempotent either way, so fall back to it instead
+        # of a 503 — the operator must always be able to free VRAM (review:
+        # possible regression).  Only when the optimistic state is NOT ours
+        # (someone else manages the backend) do we surface the error.
+        if model_manager.is_unloaded is False:
+            logger.warning("/admin/unload caretaker unavailable; falling back to local unload: %s", e)
+            await model_manager.unload()
+        else:
+            logger.error(f"/admin/unload caretaker call failed: {e}")
+            raise HTTPException(status_code=503, detail=str(e)) from e
     except CaretakerError as e:
         logger.error(f"/admin/unload caretaker call failed: {e}")
         raise HTTPException(status_code=503, detail=str(e)) from e

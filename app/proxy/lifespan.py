@@ -15,7 +15,7 @@ import time
 from contextlib import asynccontextmanager, suppress
 from typing import Optional
 
-from app.gateway.caretaker_client import CaretakerError
+from app.gateway.caretaker_client import CaretakerError, CaretakerUnavailable
 
 logger = logging.getLogger("Guardian")
 
@@ -267,6 +267,19 @@ async def idle_unload_watcher():
                 _prev_state = _model_manager.snapshot_unload_state()
                 _model_manager.mark_unloaded_by_caretaker()
                 await _caretaker_client.unload()
+            except CaretakerUnavailable as e:
+                # Transport failure: the daemon may be down (not deployed yet
+                # during F5, crashed, network down).  We cannot know whether the
+                # unload happened; the local systemctl stop is idempotent either
+                # way.  Only fall back when the optimistic state is STILL ours
+                # (rollback succeeded) — a concurrent reload means another path
+                # manages the backend (review: possible regression — VRAM would
+                # otherwise never be freed until the daemon returns).
+                if _prev_state is not None and _model_manager.rollback_unload_if_unchanged(_prev_state):
+                    logger.warning("Auto-unload via caretaker unavailable; falling back to local unload: %s", e)
+                    await _model_manager.unload()
+                else:
+                    logger.error(f"❌ Auto-unload via caretaker failed: {e}")
             except CaretakerError as e:
                 # Expected: remote refusal — the caretaker never stopped the
                 # backend.  Roll back the FULL optimistic state (flag AND the

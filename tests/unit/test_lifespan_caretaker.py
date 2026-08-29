@@ -337,11 +337,13 @@ async def test_watcher_never_rolls_back_a_concurrent_reload(
     assert mgr._last_backend_model == "glm-4.7-other"
 
 
-async def test_watcher_rolls_back_is_unloaded_on_caretaker_refusal(
+async def test_watcher_falls_back_to_local_unload_on_caretaker_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The optimistic is_unloaded mark is rolled back when the caretaker
-    refuses (never stopped the backend) — no unload claim on an error."""
+    """Review fix (possible regression): a transport failure
+    (CaretakerUnavailable) means we cannot know whether the unload happened —
+    the watcher restores the optimistic state and falls back to the idempotent
+    local unload so VRAM is still freed (daemon not deployed yet / crashed)."""
     class _FailingClient:
         async def unload(self) -> dict:
             from app.gateway.caretaker_client import CaretakerUnavailable
@@ -356,36 +358,36 @@ async def test_watcher_rolls_back_is_unloaded_on_caretaker_refusal(
     with pytest.raises(_StopWatcher):
         await lifespan_mod.idle_unload_watcher()
     mgr = lifespan_mod._model_manager
-    # Full rollback: the flag AND the verification metadata cleared by the
-    # optimistic mark are restored — the still-running backend stays verified.
-    assert mgr.is_unloaded is False
-    assert mgr._model_verified is True
-    assert mgr._last_verification_at == "2026-08-29T00:00:00Z"
-    assert mgr._last_backend_model == "glm-4.7"
-    assert mgr.mark_unloaded_calls == 1  # the optimistic mark did fire
+    # Optimistic mark fired, then rolled back and replaced by the local unload.
+    assert mgr.mark_unloaded_calls == 1
+    assert mgr.local_unload_calls == 1
+    assert mgr.is_unloaded is True  # local unload put it in the unloaded state
 
 
-async def test_watcher_caretaker_error_is_caught(
+async def test_watcher_rolls_back_and_logs_on_definitive_refusal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class _FailingClient:
+    """Review fix: a DEFINITIVE refusal (e.g. CaretakerUnloadFailed — the
+    caretaker is up but explicitly refused) is not a transport failure: no
+    local fallback, just roll back the optimistic mark and log."""
+    class _RefusingClient:
         async def unload(self) -> dict:
-            from app.gateway.caretaker_client import CaretakerUnavailable
+            from app.gateway.caretaker_client import CaretakerUnloadFailed
 
-            raise CaretakerUnavailable("http://127.0.0.1:11441")
+            raise CaretakerUnloadFailed()
 
     _install_globals(
         monkeypatch,
         last_request_time=time.time() - 600,  # idle → error path reached
-        caretaker_client=_FailingClient,
+        caretaker_client=_RefusingClient,
     )
     with pytest.raises(_StopWatcher):
         await lifespan_mod.idle_unload_watcher()
-    # CaretakerError was swallowed (logged), not re-raised; the optimistic mark
-    # was rolled back — no lingering unload claim.
     mgr = lifespan_mod._model_manager
-    assert mgr.is_unloaded is False
-    assert mgr.mark_unloaded_calls == 1  # optimistic mark fired, then rolled back
+    assert mgr.mark_unloaded_calls == 1  # optimistic mark fired
+    assert mgr.local_unload_calls == 0   # NO local fallback on a refusal
+    assert mgr.is_unloaded is False      # mark was rolled back
+    assert mgr._model_verified is True   # verification metadata restored
 
 
 def test_idle_unload_watcher_defined_in_lifespan() -> None:
@@ -492,3 +494,75 @@ def test_admin_unload_falls_back_to_local_unload_when_client_missing(
     assert r.json()["status"] == "unloaded"
     assert fake_mgr.local_unload_calls == 1
     assert fake_mgr.is_unloaded is True
+
+
+def test_admin_unload_falls_back_to_local_unload_on_caretaker_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review fix (possible regression): /admin/unload with a caretaker that
+    is UP but unreachable (transport) must fall back to the idempotent local
+    unload instead of a 503 — the operator can always free VRAM."""
+    from fastapi.testclient import TestClient
+
+    from app.proxy import server as server_mod
+
+    app = _make_unauthed_app(monkeypatch)
+
+    class _UnreachableClient:
+        async def unload(self) -> dict:
+            from app.gateway.caretaker_client import CaretakerUnavailable
+
+            raise CaretakerUnavailable("http://127.0.0.1:11441")
+
+    monkeypatch.setattr(server_mod, "caretaker_client", _UnreachableClient())
+    fake_mgr = _FakeModelManager(
+        idle_unload_minutes=None,
+        is_unloaded=False,
+        active_requests=0,
+        last_request_time=time.time(),
+    )
+    fake_mgr.current_model = "minimal"
+    monkeypatch.setattr(server_mod, "model_manager", fake_mgr)
+
+    client = TestClient(app)
+    r = client.post("/admin/unload", headers={"Authorization": "Bearer test-key"})
+    assert r.status_code == 200, r.text
+    assert r.json()["status"] == "unloaded"
+    assert fake_mgr.local_unload_calls == 1
+    assert fake_mgr.is_unloaded is True
+
+
+def test_admin_unload_503_on_definitive_caretaker_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review fix: a DEFINITIVE refusal (caretaker up but explicitly refused)
+    still surfaces as 503 — no local fallback for a real rejection."""
+    from fastapi.testclient import TestClient
+
+    from app.proxy import server as server_mod
+
+    app = _make_unauthed_app(monkeypatch)
+
+    class _RefusingClient:
+        async def unload(self) -> dict:
+            from app.gateway.caretaker_client import CaretakerUnloadFailed
+
+            raise CaretakerUnloadFailed()
+
+    monkeypatch.setattr(server_mod, "caretaker_client", _RefusingClient())
+    fake_mgr = _FakeModelManager(
+        idle_unload_minutes=None,
+        is_unloaded=False,
+        active_requests=0,
+        last_request_time=time.time(),
+    )
+    fake_mgr.current_model = "minimal"
+    monkeypatch.setattr(server_mod, "model_manager", fake_mgr)
+
+    client = TestClient(app)
+    r = client.post("/admin/unload", headers={"Authorization": "Bearer test-key"})
+    assert r.status_code == 503, r.text
+    # The default message is now set — detail is not empty.
+    assert "unload_failed" in r.json()["detail"]
+    assert fake_mgr.local_unload_calls == 0
+    assert fake_mgr.is_unloaded is False

@@ -259,6 +259,16 @@ def test_build_missing_management_url_raises() -> None:
         build_caretaker_client(config)
 
 
+def test_error_classes_have_default_messages() -> None:
+    """Review fix (error reporting gap): CaretakerInvalidRequest and
+    CaretakerUnloadFailed carry a default message so str(e) is never empty
+    (the /admin/unload detail and watcher log would otherwise be blank)."""
+    from app.gateway.caretaker_client import CaretakerInvalidRequest, CaretakerUnloadFailed
+
+    assert str(CaretakerInvalidRequest()) == "Caretaker rejected the request (422 invalid_request)"
+    assert str(CaretakerUnloadFailed()) == "Caretaker failed to unload (500 unload_failed)"
+
+
 def test_build_prefers_loopback_local_over_other_local(monkeypatch: pytest.MonkeyPatch) -> None:
     """Review fix 2: with multi-host locals present, the factory must pick the
     loopback (this-host) caretaker for lifecycle execution, not the first via

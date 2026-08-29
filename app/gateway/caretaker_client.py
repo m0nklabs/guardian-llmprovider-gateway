@@ -78,9 +78,15 @@ class CaretakerVramExceeded(CaretakerError):
 class CaretakerInvalidRequest(CaretakerError):
     """Caretaker returned 422 invalid_request for a malformed ensure payload."""
 
+    def __init__(self, message: str = "Caretaker rejected the request (422 invalid_request)") -> None:
+        super().__init__(message)
+
 
 class CaretakerUnloadFailed(CaretakerError):
     """Caretaker returned 500 unload_failed during an unload."""
+
+    def __init__(self, message: str = "Caretaker failed to unload (500 unload_failed)") -> None:
+        super().__init__(message)
 
 
 def _expand_env(value: str) -> str:
