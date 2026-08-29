@@ -152,28 +152,38 @@ async def ensure_backend(
     # The caretaker response names the model it actually loaded.  Without a
     # truthful loaded_model the gateway cannot tell whether the backend now
     # serves the requested model — never claim success from an unknown
-    # caretaker state, run the local lifecycle instead (keeps current_model
-    # truthful).  The same holds when the caretaker resolved the request to a
-    # different model (caretaker-side alias/fallback/partial load): do NOT
-    # adopt the requested model's loaded state, the backend would desync from
-    # gateway state.
+    # caretaker state.  The same holds when the caretaker resolved the request
+    # to a different model (caretaker-side alias/fallback/partial load): do
+    # NOT adopt the requested model's loaded state, the backend would desync
+    # from gateway state.
+    #
+    # NOTE: fail CLOSED here (ModelLoadError), not local_fallback().  The
+    # local lifecycle safety rationale ("nothing else owns the backend port")
+    # only holds when the caretaker is DOWN.  Here the daemon is alive and
+    # owns the backend — running gateway load()/switch_model() against an
+    # already-running instance would be a no-op that still flips current_model
+    # to the requested model while the backend actually serves the caretaker's
+    # different model: the exact desync we are preventing.  The hotpath maps
+    # ModelLoadError to its existing crash/503 handling.
     if not isinstance(result, dict) or "loaded_model" not in (result or {}):
         logger.warning(
             "F5: caretaker /ensure response did not name a loaded_model — "
-            "falling back to local lifecycle"
+            "failing closed to avoid a second controller on the backend"
         )
-        await local_fallback()
-        return "local"
+        raise ModelLoadError(
+            "Caretaker /ensure succeeded but did not report the loaded model"
+        )
     loaded = result["loaded_model"]
     if loaded != model:
         logger.warning(
             "F5: caretaker loaded '%s' instead of requested '%s' — "
-            "falling back to local lifecycle",
+            "failing closed to avoid a second controller on the backend",
             loaded,
             model,
         )
-        await local_fallback()
-        return "local"
+        raise ModelLoadError(
+            f"Caretaker loaded '{loaded}' instead of requested '{model}'"
+        )
 
     if _model_manager is not None:
         _model_manager.mark_loaded_by_caretaker(
