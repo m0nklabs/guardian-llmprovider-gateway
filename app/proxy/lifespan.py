@@ -247,6 +247,13 @@ async def idle_unload_watcher():
                     logger.error("Caretaker client not injected; cannot auto-unload via caretaker")
                     continue
                 await _caretaker_client.unload()
+                # F5: the caretaker confirmed the unload — keep the
+                # gateway-local manager state in sync so (a) the watcher guard
+                # ``is_unloaded`` stops re-issuing /unload every 60s idle cycle
+                # and (b) the request hotpath's ``is_unloaded`` auto-reload
+                # (routing.py) reloads the model on the next request instead of
+                # hitting a migrated llama-server with nothing loaded.
+                _model_manager.is_unloaded = True
             except CaretakerError as e:
                 # Log and leave is_unloaded alone — the gateway does not claim
                 # unload state it did not observe; status follows the caretaker.

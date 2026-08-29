@@ -147,6 +147,42 @@ async def test_watcher_logs_when_client_missing(
     # No exception was raised by the missing client; the loop just continued.
 
 
+async def test_watcher_syncs_is_unloaded_after_successful_unload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review fix 4: after the caretaker confirms the unload, the gateway-local
+    manager flag is synced so the watcher guard stops re-issuing /unload and the
+    hotpath auto-reload fires on the next request."""
+    client = _install_globals(
+        monkeypatch, last_request_time=time.time() - 600
+    )  # idle
+    with pytest.raises(_StopWatcher):
+        await lifespan_mod.idle_unload_watcher()
+    assert client.unload_calls == 1
+    assert lifespan_mod._model_manager.is_unloaded is True
+
+
+async def test_watcher_does_not_sync_is_unloaded_on_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On CaretakerError the gateway must NOT claim unload state it did not
+    observe — the flag stays False."""
+    class _FailingClient:
+        async def unload(self) -> dict:
+            from app.gateway.caretaker_client import CaretakerUnavailable
+
+            raise CaretakerUnavailable("http://127.0.0.1:11441")
+
+    _install_globals(
+        monkeypatch,
+        last_request_time=time.time() - 600,
+        caretaker_client=_FailingClient,
+    )
+    with pytest.raises(_StopWatcher):
+        await lifespan_mod.idle_unload_watcher()
+    assert lifespan_mod._model_manager.is_unloaded is False
+
+
 async def test_watcher_caretaker_error_is_caught(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
