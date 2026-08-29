@@ -172,8 +172,9 @@ async def test_unavailable_with_healthy_backend_adopts_state():
 
 
 async def test_unavailable_adopt_never_restores():
-    """Adoption never restores — even for a switch: the backend was already
-    serving the requested model, so the live context is authoritative."""
+    """Adoption with an already-serving backend (fresh_load False) never
+    restores — even for a switch: the live session in slot 0 is
+    authoritative."""
     client = _StubClient()
     client.ensure.side_effect = CaretakerUnavailable("http://x:11441")
     mgr = _manager()
@@ -185,6 +186,42 @@ async def test_unavailable_adopt_never_restores():
     )
     assert result == "local-healthy"
     mgr.restore_current_context.assert_not_awaited()
+
+
+async def test_unavailable_adopt_freshly_loaded_switch_restores():
+    """A timed-out /ensure may have COMPLETED the switch (backend only started
+    serving the model during the ensure): fresh_load True, adopt succeeds, and
+    restoring the auto-saved context mirrors switch_model (empty slot)."""
+    client = _StubClient()
+    client.ensure.side_effect = CaretakerUnavailable("http://x:11441")
+    mgr = _manager()
+    # 1st call = fresh_load probe (before ensure) -> False -> fresh_load True;
+    # 2nd call = adopt condition -> True.
+    mgr.backend_serves_model = AsyncMock(side_effect=[False, True])
+    mgr.backend_health_ok = AsyncMock(return_value=True)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    result = await crt.ensure_backend(
+        model="m", pre_switch_save=True, local_fallback=AsyncMock()
+    )
+    assert result == "local-healthy"
+    mgr.restore_current_context.assert_awaited_once()
+
+
+async def test_unavailable_auth_status_fails_closed():
+    """A CaretakerUnavailable WITH a status_code means the daemon is alive but
+    rejected the gateway (e.g. 401/403 after key rotation).  The local
+    lifecycle would become a second controller on a backend the daemon still
+    owns -> fail closed, no re-probe, no fallback."""
+    client = _StubClient()
+    client.ensure.side_effect = CaretakerUnavailable("http://x:11441", status_code=401)
+    mgr = _manager()
+    crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
+    with pytest.raises(ModelLoadError):
+        await crt.ensure_backend(model="m", local_fallback=fallback)
+    assert client.ensure.await_count == 1  # no pointless re-probe
+    fallback.assert_not_awaited()
+    mgr.mark_loaded_by_caretaker.assert_not_called()
 
 
 async def test_unavailable_drifted_config_runs_local_fallback():
