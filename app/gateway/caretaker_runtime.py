@@ -95,7 +95,7 @@ async def ensure_backend(
         await _model_manager.save_current_context()
 
     try:
-        await _caretaker_client.ensure(
+        result = await _caretaker_client.ensure(
             model,
             enable_vision=enable_vision,
             context_hint=context_hint,
@@ -148,6 +148,22 @@ async def ensure_backend(
     except CaretakerError as exc:  # safety net — never claim success from an unknown caretaker state
         logger.error("F5: caretaker ensure failed unexpectedly: %s", exc)
         raise ModelLoadError(str(exc)) from exc
+
+    # The caretaker response names the model it actually loaded.  If it
+    # resolved the request to a different model than the one the gateway
+    # asked for (caretaker-side alias/fallback), do NOT adopt the requested
+    # model's loaded state — the backend would desync from gateway state.
+    # Run the local lifecycle instead so current_model stays truthful.
+    loaded = (result or {}).get("loaded_model") if isinstance(result, dict) else None
+    if loaded and loaded != model:
+        logger.warning(
+            "F5: caretaker loaded '%s' instead of requested '%s' — "
+            "falling back to local lifecycle",
+            loaded,
+            model,
+        )
+        await local_fallback()
+        return "local"
 
     if _model_manager is not None:
         _model_manager.mark_loaded_by_caretaker(
