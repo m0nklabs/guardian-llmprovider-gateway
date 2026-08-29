@@ -15,6 +15,8 @@ import time
 from contextlib import asynccontextmanager, suppress
 from typing import Optional
 
+from app.gateway.caretaker_client import CaretakerError, CaretakerUnavailable
+
 logger = logging.getLogger("Guardian")
 
 
@@ -36,6 +38,9 @@ _cancel_startup_check_task = None
 _model_manager = None
 _capture_controller = None
 _inference_queue = None
+# Injected via init() — the remote caretaker control-API client used for the
+# lifecycle *execution* of idle-unload.  None until injected by server.py.
+_caretaker_client = None
 
 
 def init(
@@ -57,6 +62,7 @@ def init(
     model_manager,
     capture_controller,
     inference_queue,
+    caretaker_client=None,
 ) -> None:
     """Inject all dependencies. Called once at startup."""
     globals()["_cancel_startup_check_task"] = cancel_startup_check_task
@@ -76,6 +82,7 @@ def init(
     globals()["_model_manager"] = model_manager
     globals()["_capture_controller"] = capture_controller
     globals()["_inference_queue"] = inference_queue
+    globals()["_caretaker_client"] = caretaker_client
 
 
 @asynccontextmanager
@@ -206,6 +213,11 @@ async def run_lifespan(app):
     except Exception as exc:
         logger.warning("Capture writer shutdown error: %s", exc)
 
+    # Shutdown: Release the caretaker httpx connection pool (review: resource
+    # leak — the AsyncClient was built eagerly at import; close it so the pool
+    # does not linger for the process lifetime / per re-import).
+    await _close_caretaker_client()
+
     # Shutdown: Remove PID file
     if pid_path.exists():
         try:
@@ -217,6 +229,14 @@ async def run_lifespan(app):
         except Exception as e:
             logger.warning(f"Failed to clean up PID file: {e}")
 
+
+async def _close_caretaker_client() -> None:
+    """Close the caretaker httpx connection pool if one was built."""
+    if _caretaker_client is not None:
+        try:
+            await _caretaker_client.close()
+        except Exception as exc:  # noqa: BLE001 — shutdown guard; any failure is logged, never propagated
+            logger.warning("Caretaker client shutdown error: %s", exc)
 
 
 async def idle_unload_watcher():
@@ -235,7 +255,84 @@ async def idle_unload_watcher():
         idle_secs = time.time() - _model_manager.last_request_time
         if idle_secs >= idle_minutes * 60:
             logger.info(f"💤 Idle for {idle_secs/60:.1f}m (limit {idle_minutes}m) — auto-unloading to free VRAM")
+            # Snapshot is only taken on the caretaker branch; None here means
+            # no optimistic mark was made, so the except-handlers must skip the
+            # rollback (avoids UnboundLocalError when the local fallback unload
+            # raises — review: possible bug).
+            _prev_state = None
             try:
-                await _model_manager.unload()
+                if _caretaker_client is None:
+                    # No remote caretaker configured (management_url/CARETAKER_KEY
+                    # or the daemon itself absent): fall back to the local unload
+                    # so VRAM freeing keeps working during the F5 transition — the
+                    # caretaker owns the lifecycle only once it is deployed.  The
+                    # review painted this as a deployment-dependency regression if
+                    # merged without a fallback (review: possible issue).
+                    logger.warning("Caretaker client not configured; falling back to local unload")
+                    await _model_manager.unload()
+                    continue
+                # Optimistic: mark unloaded BEFORE the round-trip so a request
+                # arriving while the caretaker is stopping the backend already
+                # sees is_unloaded=True and the hotpath auto-reload fires —
+                # instead of routing it at a backend that is about to stop.
+                # Same end-state as unload() (minus the process stop the
+                # caretaker does): is_unloaded + verification-state reset.
+                _prev_state = _model_manager.snapshot_unload_state()
+                _model_manager.mark_unloaded_by_caretaker()
+                await _caretaker_client.unload()
+                # A concurrent hotpath reload may have started during the
+                # round-trip (the state is no longer the optimistic mark the
+                # caretaker's stop raced against).  The caretaker's stop and
+                # the reload's start race; log so the operator knows the
+                # backend state is uncertain (review: possible race).
+                if not (
+                    _model_manager.is_unloaded is True
+                    and _model_manager._model_verified is False
+                    and _model_manager._last_verification_at is None
+                    and _model_manager._last_backend_model is None
+                ):
+                    logger.warning(
+                        "Caretaker unload completed but a concurrent reload changed "
+                        "the manager state during the round-trip; backend state uncertain"
+                    )
+            except CaretakerUnavailable as e:
+                # Transport failure: the daemon may be down (not deployed yet
+                # during F5, crashed, network down).  We cannot know whether the
+                # unload happened; the local systemctl stop is idempotent either
+                # way.  Only fall back when the optimistic state is STILL ours
+                # (rollback succeeded) — a concurrent reload means another path
+                # manages the backend (review: possible regression — VRAM would
+                # otherwise never be freed until the daemon returns).
+                if _prev_state is not None and _model_manager.rollback_unload_if_unchanged(_prev_state):
+                    logger.warning("Auto-unload via caretaker unavailable; falling back to local unload: %s", e)
+                    try:
+                        await _model_manager.unload()
+                    except Exception:
+                        # An exception raised inside an except-handler is NOT
+                        # caught by the later sibling 'except Exception' — wrap
+                        # the fallback so a failing local unload logs instead of
+                        # killing the watcher task (review: possible bug).
+                        logger.exception("Local fallback unload failed after caretaker unavailable")
+                else:
+                    logger.error(f"❌ Auto-unload via caretaker failed: {e}")
+            except CaretakerError as e:
+                # Expected: remote refusal — the caretaker never stopped the
+                # backend.  Roll back the FULL optimistic state (flag AND the
+                # verification metadata mark_unloaded_by_caretaker cleared) —
+                # but only if nothing mutated it meanwhile, otherwise a stale
+                # snapshot would clobber a concurrent reload (review: possible
+                # race).  Guarded: returns False when a newer state superseded it.
+                if _prev_state is not None:
+                    _model_manager.rollback_unload_if_unchanged(_prev_state)
+                logger.error(f"❌ Auto-unload via caretaker failed: {e}")
             except Exception as e:
-                logger.error(f"❌ Auto-unload failed: {e}")
+                # Unexpected (coding error, transport bug): the unload was NOT
+                # confirmed (CaretakerError covers the confirmed refusals), so
+                # the backend is still up — roll the optimistic mark back the
+                # same guarded way, else is_unloaded stays True over a running
+                # backend and every later unload attempt is skipped (review:
+                # possible bug).  Surface the traceback so the root cause shows.
+                if _prev_state is not None:
+                    _model_manager.rollback_unload_if_unchanged(_prev_state)
+                logger.exception("❌ Auto-unload via caretaker failed unexpectedly")
+                logger.error(f"  {e}")
