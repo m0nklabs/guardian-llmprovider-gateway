@@ -144,6 +144,25 @@ async def test_unavailable_rereprobe_also_fails_then_local():
     fallback.assert_awaited_once()
 
 
+async def test_unavailable_refused_then_timeout_fails_closed():
+    """First probe connection-refused (daemon restarting, gone at that
+    instant), re-probe times out (daemon came back but is busy): the local
+    lifecycle must NOT run — the daemon is alive -> fail closed."""
+    client = _StubClient()
+    client.ensure.side_effect = [
+        CaretakerUnavailable("http://x:11441"),  # refused, no cause
+        _timeout_unavailable(),
+    ]
+    mgr = _manager()
+    crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
+    with pytest.raises(ModelLoadError):
+        await crt.ensure_backend(model="m", local_fallback=fallback)
+    assert client.ensure.await_count == 2
+    fallback.assert_not_awaited()
+    mgr.mark_loaded_by_caretaker.assert_not_called()
+
+
 async def test_remote_switch_restores_target_context():
     """Switch sites (pre_switch_save=True) on a FRESH load mirror switch_model's
     restore (backend did not serve the model before the ensure)."""
