@@ -137,6 +137,13 @@ class CaretakerClient:
         self._api_key = api_key or None
         self._timeout = timeout
         self._log = logger or logging.getLogger("Guardian.CaretakerClient")
+        # Capability flag: set True once a successful /ensure response carries
+        # the daemon's own "fresh_load" field.  The gateway runtime uses it to
+        # decide whether a remote switch can restore session context with
+        # daemon-confirmed freshness; until the field is observed, switches
+        # keep the local lifecycle (which has switch_model's save/restore
+        # parity).
+        self.supports_fresh_load = False
         # _transport is an internal override used only by tests (MockTransport);
         # it is not part of the public constructor contract.
         self._client = httpx.AsyncClient(
@@ -189,7 +196,14 @@ class CaretakerClient:
             raise CaretakerUnavailable(self._management_url) from exc
 
         if resp.status_code == 200:
-            return await self._ok_json(resp, "/ensure")
+            value = await self._ok_json(resp, "/ensure")
+            if isinstance(value, dict) and "fresh_load" in value:
+                # The daemon ships the freshness field — the remote switch path
+                # may now restore session context with daemon-confirmed
+                # freshness (self-healing capability detection: the first
+                # reload ensure after the daemon upgrades flips this).
+                self.supports_fresh_load = True
+            return value
 
         body = _safe_json(resp)
         if resp.status_code == 404:
