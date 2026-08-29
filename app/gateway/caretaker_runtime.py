@@ -14,9 +14,12 @@ Decision logic:
 - ``CaretakerClient`` built and reachable → ``POST /ensure``; on 200 the
   manager state is mirrored via ``mark_loaded_by_caretaker`` and the result is
   ``"remote"``.
-- ``CaretakerUnavailable`` (transport/timeout/auth) → the backend may still be
-  healthy (daemon died but llama-server survived): if so, adopt the loaded
-  state without spawning.  Otherwise run the original local lifecycle
+- ``CaretakerUnavailable`` (transport/timeout/auth) → a single re-probe of
+  ``/ensure`` happens first (a live daemon mid-switch would otherwise race a
+  local spawn — two controllers on the same backend).  Only a second
+  ``CaretakerUnavailable`` counts as "daemon really gone": the backend may
+  still be healthy (daemon died but llama-server survived) — if so, adopt the
+  loaded state without spawning.  Otherwise run the original local lifecycle
   (``local_fallback``) — safe, because with the daemon down nothing else owns
   the backend port.
 - Any other ``CaretakerError`` (model not found, VRAM limit, load failed,
@@ -54,6 +57,37 @@ def init(*, model_manager, caretaker_client) -> None:
     global _caretaker_client, _model_manager
     _caretaker_client = caretaker_client
     _model_manager = model_manager
+
+
+async def _ensure_with_retry(
+    model: str,
+    *,
+    enable_vision: bool | None = None,
+    context_hint: int | None = None,
+) -> dict:
+    """POST /ensure, re-probing once on ``CaretakerUnavailable``.
+
+    ``CaretakerUnavailable`` covers transport timeouts as well as a dead
+    daemon.  A live daemon that is mid-switch (VRAM freeing + a large-model
+    load can outlast the client timeout) would race a local spawn — two
+    controllers on the same backend port / launch-args file.  Re-probing once
+    lets a merely-slow daemon answer; only a second ``CaretakerUnavailable``
+    is treated as "the daemon is really gone", where the local lifecycle is
+    the only controller on the backend.
+    """
+    try:
+        return await _caretaker_client.ensure(
+            model,
+            enable_vision=enable_vision,
+            context_hint=context_hint,
+        )
+    except CaretakerUnavailable:
+        pass
+    return await _caretaker_client.ensure(
+        model,
+        enable_vision=enable_vision,
+        context_hint=context_hint,
+    )
 
 
 async def ensure_backend(
@@ -94,8 +128,18 @@ async def ensure_backend(
     if pre_switch_save and _model_manager is not None:
         await _model_manager.save_current_context()
 
+    # Was the target already being served before the ensure?  If yes, the
+    # /ensure is idempotent — the backend slot already holds the live session
+    # for that model, and a later restore would clobber it.  If not, the
+    # caretaker freshly loaded the model (empty slot) and restoring the
+    # auto-saved history is the safe mirror of switch_model's restore.
+    fresh_load = not (
+        _model_manager is not None
+        and await _model_manager.backend_serves_model(model)
+    )
+
     try:
-        result = await _caretaker_client.ensure(
+        result = await _ensure_with_retry(
             model,
             enable_vision=enable_vision,
             context_hint=context_hint,
@@ -131,14 +175,10 @@ async def ensure_backend(
                 enable_vision=enable_vision,
                 context_hint=context_hint,
             )
-            # Mirror the remote/switch restore here too: when this is a switch
-            # (pre_switch_save=True) and the backend was freshly (re)started
-            # serving the target model, restore its auto-saved session context
-            # so history survives (same clobbering consideration as the remote
-            # path, which also restores right after an idempotent /ensure on
-            # an already-loaded model).
-            if pre_switch_save and _model_manager is not None:
-                await _model_manager.restore_current_context()
+            # NO restore here: adoption only happens when the backend was
+            # already serving the requested model, so the live session in
+            # slot 0 is authoritative — restoring the stale auto-save would
+            # clobber an active conversation.
             return "local-healthy"
         logger.warning(
             "F5: caretaker unavailable — local load fallback for '%s'", model
@@ -214,13 +254,15 @@ async def ensure_backend(
             context_hint=context_hint,
         )
         # The remote path no longer runs the local switch_model body, which
-        # owned the context restore — mirror it so A->B->A switches recover
-        # the target's auto-saved session context (missing/corrupt save is
-        # tolerated inside the manager; restore never blocks the hotpath).
-        # Only switch call sites (which also set pre_switch_save) restore:
-        # reload sites (auto-reload, connect-error recovery) used to start
-        # a fresh context via load() and must not re-inject a stale
-        # auto-save from an earlier session of the same model.
-        if pre_switch_save:
+        # owned the context restore — mirror it so a fresh remote load
+        # recovers the target's auto-saved session history (missing/corrupt
+        # save is tolerated inside the manager; restore never blocks the
+        # hotpath).  Only restore when the ensure actually freshly loaded the
+        # model (backend was NOT serving it before, so the slot is empty) AND
+        # this is a switch site (pre_switch_save): on an idempotent /ensure
+        # the slot already holds the live session and restoring would clobber
+        # it; reload sites (auto-reload, connect-error recovery) start a
+        # fresh context via load() and must not re-inject a stale auto-save.
+        if pre_switch_save and fresh_load:
             await _model_manager.restore_current_context()
     return "remote"
