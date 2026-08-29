@@ -443,7 +443,7 @@ class ModelManager:
         a request needs" after a caretaker outage, without adopting a wrong
         loaded-state.
         """
-        actual_gguf = self._get_backend_model_path()
+        actual_gguf = await asyncio.to_thread(self._get_backend_model_path)
         if not actual_gguf:
             return False
         expected = self.models.get(model_name, {}).get("path", "")

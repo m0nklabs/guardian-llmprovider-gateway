@@ -228,3 +228,18 @@ async def test_reload_without_client_id_not_gated():
     result = await crt.ensure_backend(model="m", local_fallback=AsyncMock())
     assert result == "remote"
     client.ensure.assert_awaited_once()
+
+
+async def test_remote_loaded_model_mismatch_runs_local_fallback():
+    """Caretaker resolved the request to a different model -> do NOT adopt the
+    requested model's loaded state; run the local lifecycle so current_model
+    stays truthful with the running backend."""
+    client = _StubClient()
+    client.ensure = AsyncMock(return_value={"ok": True, "loaded_model": "other-model"})
+    mgr = _manager()
+    crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
+    result = await crt.ensure_backend(model="m", local_fallback=fallback)
+    assert result == "local"
+    fallback.assert_awaited_once()
+    mgr.mark_loaded_by_caretaker.assert_not_called()
