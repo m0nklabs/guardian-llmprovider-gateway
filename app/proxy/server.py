@@ -1211,6 +1211,19 @@ async def admin_unload(client_id: str = Depends(verify_api_key)):
         # (no concurrent reload) do we fall back; otherwise another path
         # manages the backend.
         if model_manager.rollback_unload_if_unchanged(prev_state):
+            if prev_state["is_unloaded"]:
+                # The local flag was stale-True and the caretaker reported a
+                # loaded backend (or is unreachable); a local unload() would
+                # no-op on the stale flag, so we cannot confirm VRAM was freed —
+                # fail with 503 instead of claiming success (review: possible
+                # bug).
+                logger.error(
+                    "/admin/unload caretaker unavailable and local state says unloaded; cannot confirm VRAM freed: %s", e
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"caretaker unreachable and local state says unloaded: {e}",
+                ) from e
             logger.warning("/admin/unload caretaker unavailable; falling back to local unload: %s", e)
             try:
                 await model_manager.unload()

@@ -783,6 +783,54 @@ def test_admin_unload_unknown_status_unloads_instead_of_already_unloaded(
     assert client_stub.unload_calls == 1
 
 
+def test_admin_unload_503_when_stale_true_and_caretaker_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review fix (possible bug): local flag stale-True, caretaker reports a
+    loaded backend, then the /unload round-trip raises CaretakerUnavailable.
+    The guarded rollback restores is_unloaded=True and a local unload() would
+    no-op on that flag — so the route must 503 instead of claiming 200 'VRAM is
+    free' for an unconfirmed free."""
+    from fastapi.testclient import TestClient
+
+    from app.proxy import server as server_mod
+
+    app = _make_unauthed_app(monkeypatch)
+
+    class _UnavailableAfterStatusClient:
+        def __init__(self) -> None:
+            self.unload_calls = 0
+
+        async def status(self) -> dict:
+            return {"is_unloaded": False, "loaded_model": "minimal"}
+
+        async def unload(self) -> dict:
+            from app.gateway.caretaker_client import CaretakerUnavailable
+
+            self.unload_calls += 1
+            raise CaretakerUnavailable("http://127.0.0.1:11441")
+
+    client_stub = _UnavailableAfterStatusClient()
+    monkeypatch.setattr(server_mod, "caretaker_client", client_stub)
+    # Local flag already True (stale) — a guardian-initiated unload happened
+    # earlier, but the caretaker (independent owner) loaded a model since.
+    fake_mgr = _FakeModelManager(
+        idle_unload_minutes=None,
+        is_unloaded=True,
+        active_requests=0,
+        last_request_time=time.time(),
+    )
+    fake_mgr.current_model = "minimal"
+    monkeypatch.setattr(server_mod, "model_manager", fake_mgr)
+
+    client = TestClient(app)
+    r = client.post("/admin/unload", headers={"Authorization": "Bearer test-key"})
+    assert r.status_code == 503, r.text  # NOT 200 "VRAM is free"
+    detail = r.json()["detail"]
+    assert "local state says unloaded" in detail  # unconfirmed free
+    assert client_stub.unload_calls == 1
+
+
 def test_admin_unload_503_when_unavailable_and_local_fallback_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
