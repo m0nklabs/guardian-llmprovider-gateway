@@ -259,6 +259,14 @@ def test_admin_unload_delegates_to_caretaker(
     body = r.json()
     assert body["status"] == "unloaded"
     assert stub.unload_calls == 1
+    # Review fix 5: the confirmed unload is mirrored back into the
+    # gateway-local manager, so a repeat /admin/unload reports
+    # already_unloaded via the guard — no redundant idempotent caretaker call.
+    assert fake_mgr.is_unloaded is True
+    r2 = client.post("/admin/unload", headers={"Authorization": "Bearer test-key"})
+    assert r2.status_code == 200
+    assert r2.json()["status"] == "already_unloaded"
+    assert stub.unload_calls == 1  # unchanged
 
 
 def test_admin_unload_503_when_client_missing(

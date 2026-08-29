@@ -1170,15 +1170,17 @@ async def admin_unload(client_id: str = Depends(verify_api_key)):
             detail="Caretaker client is not configured; cannot unload via caretaker",
         )
     try:
-        result = await caretaker_client.unload()
+        await caretaker_client.unload()
     except CaretakerError as e:
         logger.error(f"/admin/unload caretaker call failed: {e}")
         raise HTTPException(status_code=503, detail=str(e)) from e
-    # Caretaker /unload is idempotent: a 200 is always a success.  Its response
-    # is ``{ok, is_unloaded}``; report "already_unloaded" when the caretaker
-    # signals the model was already free rather than freshly unloaded.
-    if result and not result.get("ok") and result.get("is_unloaded"):
-        return {"status": "already_unloaded", "message": "llama-server is already stopped"}
+    # Caretaker /unload is idempotent: a 200 is always a success.  Mirror the
+    # confirmed unload back into the gateway-local manager so (a) a repeat
+    # /admin/unload reports "already_unloaded" via the guard above instead of
+    # re-sending an idempotent caretaker call, and (b) the request hotpath's
+    # is_unloaded auto-reload triggers on the next inference (review: stale
+    # state, server.py).
+    model_manager.is_unloaded = True
     return {"status": "unloaded", "message": f"Model '{model_manager.current_model}' unloaded — VRAM is free"}
 
 
