@@ -189,6 +189,20 @@ P8 = _rec(  # zero completion tokens with empty content: NOT wasted output
     response_content="",
     finish_reason="stop",
 )
+P9 = _rec(  # pure tool-call completion: usable content, never waste (review fix)
+    request_id="rq-tools",
+    timestamp_utc="2026-08-24T12:00:00.000Z",
+    requested_model="local-b",
+    resolved_model="local-b",
+    client_ref="feedface0001",
+    prompt_tokens=40,
+    completion_tokens=30,
+    response_content=None,
+    finish_reason="tool_calls",
+    tool_calls=[
+        {"id": "t1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}
+    ],
+)
 DECOY = _rec(request_id="rq-decoy")
 
 
@@ -229,6 +243,7 @@ PLAIN_LINES = "\n".join(
         json.dumps(P6),
         json.dumps(P7),
         json.dumps(P8),
+        json.dumps(P9),
     ]
 ) + "\n"
 
@@ -294,7 +309,7 @@ def test_full_scan_reads_all_records_tolerating_truncated_gz(main_root, truncate
 
     proc = run_query(main_root, "--count")
     assert proc.returncode == 0, proc.stderr
-    complete_total = 2 + 2 + 1 + 8  # gz1 + gz2 + legacy active gz + plain records
+    complete_total = 2 + 2 + 1 + 9  # gz1 + gz2 + legacy active gz + plain records (incl. P9)
     assert int(proc.stdout.strip()) == complete_total + t
 
     # First record of the truncated file always survives; second only if the
@@ -312,13 +327,13 @@ def test_verbose_reports_scan_statistics(main_root, truncated_root):
     assert proc.returncode == 0, proc.stderr
     err = proc.stderr
     assert "files_scanned=5" in err  # 3 rotated gz + legacy active gz + plain
-    assert f"records_read={13 + t}" in err
+    assert f"records_read={14 + t}" in err
     assert "skipped_json_errors=1" in err
     assert "skipped_empty_lines=2" in err
     assert "partial_files=1" in err
     assert "EOFError" in err
     # Verbose goes to stderr; stdout stays a clean count for piping.
-    assert int(proc.stdout.strip()) == 13 + t
+    assert int(proc.stdout.strip()) == 14 + t
 
 
 # ── Numeric tolerance ──────────────────────────────────────────────────
@@ -370,6 +385,9 @@ def test_empty_content_only_picks_exactly_the_waste_records(main_root):
     assert "rq-zero" not in ids
     # Real content is not "waste".
     assert "rq-ok" not in ids
+    # Pure tool-call completions are usable content, never waste
+    # (review fix: they store tool_calls with response_content omitted).
+    assert "rq-tools" not in ids
 
 
 # ── Combinable filters ─────────────────────────────────────────────────
@@ -422,11 +440,12 @@ def test_rollup_daily_math(main_root):
     assert proc.returncode == 0, proc.stderr
     rows = [json.loads(line) for line in proc.stdout.splitlines()]
 
-    def find(route, model):
-        return [r for r in rows if r["route"] == route and r["model"] == model]
+    def find(route, model, client=None):
+        return [r for r in rows if r["route"] == route and r["model"] == model
+                and (client is None or r["client_ref"] == client)]
 
     # P3..P6 share one bucket: local / local-b / c0ffee000009 on 2026-08-24.
-    buckets = find("local", "local-b")
+    buckets = find("local", "local-b", "c0ffee000009")
     assert len(buckets) == 1
     row = buckets[0]
     assert row["date"] == "2026-08-24"
@@ -441,6 +460,16 @@ def test_rollup_daily_math(main_root):
     assert row["finish_reason_counts"] == {"stop": 3, "length": 1}
     assert row["cost_sum"] == 1.25  # only P5 carries cost
     assert row["reasoning_tokens_sum"] == 12  # P5 (5) + P6 (7)
+
+    # P9: a pure tool-call completion is usable content, never waste
+    # (review fix) — its own client bucket, tokens counted, waste not.
+    tools_bucket = find("local", "local-b", "feedface0001")
+    assert len(tools_bucket) == 1
+    assert tools_bucket[0]["calls"] == 1
+    assert tools_bucket[0]["completed"] == 1
+    assert tools_bucket[0]["completion_tokens"] == 30
+    assert tools_bucket[0]["completion_with_empty_content"] == 0
+    assert tools_bucket[0]["finish_reason_counts"] == {"tool_calls": 1}
 
     # The minimal P2 record (all bucket fields missing) forms a null bucket.
     nulls = [r for r in rows if r["route"] is None and r["model"] is None]

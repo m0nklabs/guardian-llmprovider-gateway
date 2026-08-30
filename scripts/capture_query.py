@@ -280,12 +280,17 @@ def is_wasted_completion(record: dict) -> bool:
 
     The "wasted output" signal: event_type == request_completed,
     completion_tokens > 0 and response_content empty, whitespace-only or
-    absent.
+    absent.  Completions that produced tool calls are usable content and
+    never count as waste (review finding: pure tool-call completions store
+    the calls under `tool_calls` with `response_content` omitted, so they
+    would otherwise inflate the waste statistics for agent traffic).
     """
     if record.get("event_type") != "request_completed":
         return False
     completion = as_int(record.get("completion_tokens"))
     if completion is None or completion <= 0:
+        return False
+    if record.get("tool_calls"):
         return False
     content = record.get("response_content")
     if content is None:
