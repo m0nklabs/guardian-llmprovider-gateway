@@ -20,6 +20,48 @@
 > Alleen `20260826_rename` blijft actief (huidige workspace-transitie) — de écht
 > openstaande zaken staan hieronder in **Open punten**.
 
+### Sessie-overdracht 2026-08-30 avond — F5–F7 (volgende agent start HIER)
+
+> Deze sessie eindigde vóór de F7-cut-over; alles hieronder is de levende staat
+> op overdrachtsmoment. **Regel 1 voor de volgende agent: verifieer de live
+> state vóór je iets gelooft** (thread-check + CI-check per PR — een "klaar"-
+> oordeel heeft houdbaarheid; zie journal "houdbaarheid"-les).
+
+**Merge-signalen (live gecheckt 2026-08-30 ~19:45):**
+
+| PR | branch / head | status |
+|---|---|---|
+| Gateway **#14** (poll-vensters → config) | `f-caretaker-poll-windows-config` / `211016e` | **MERGE-KLAAR** — 5 threads resolved, `mergeable_state: clean` |
+| Gateway **#15** (F6 Windows LAN-provider) | `f6-windows-lan-provider` / `db9d61f` | **MERGE-KLAAR** — 8 threads resolved, `clean` |
+| Gateway **#16** (F7-staging unit + FILE_REGISTER) | `f7-cutover-staging` / `18226ad` | **MERGE-KLAAR** — 2 threads resolved, `clean` |
+| Caretaker **#8** (F6 Phase E Windows-process) | `f6-phase-e-windows-process` / `8310151` | **NOG NIET** — 2 blokkades, zie hieronder |
+
+**Caretaker #8 — 2 blokkades (beide nádat de bouw-worker klaar was):**
+1. **CI-fail** op `8310151`: `tests/test_phase_c.py::test_switch_model_swap_frees_old_slot_without_deadlock` (TimeoutError, run `33331064661`, job `99309589234`). Deze test heeft **flake-historie vóór deze PR** (journal 2026-08-30 middag: 1× rood, 3× groen daarna — machine-timing). Protocol: flake-verificatie (lokaal ≥3× + pre-PR-base `6925207` + run-historie) → daarna `gh run rerun 33331064661 --failed`. **Nooit een speculatieve fix pushen op een niet-gereproduceerde CI-fail.**
+2. **1 open review-thread** (`PRRT_kwDOUFFhks6dji7j`, `_split_args_windows` single-quote-strip, op de verse `/review` van `8310151`): premisse **weerlegbaar** — `_build_args_string` (caretaker/manager.py:578–581) bouwt een ongequote space-joined f-string; nergens `shlex.quote` in de builder → enkele quotes worden nooit geëmitteerd. Paths-met-spaties is een pre-existing beperking van het args-file-formaat (treft beide impls, out-of-scope Phase E). Thread beantwoorden met dit bewijs + resolven, **geen code-wijziging** (een push triggert een nieuwe review-cyclus).
+
+> Een verse worker was op overdrachtsmoment hiermee bezig; als je dit leest is
+> hij mogelijk al af — check de PR-state (0 open threads + CI groen + verse
+> slot-comment "klaar voor human merge") vóór je iets doet. **NB: de workers
+> zijn kinderen van de OUDE DSH-sessie — een nieuwe sessie kan ze niet
+> adopteren; de takeover loopt via het werk zélf** (GitHub-state + filesystem).
+> Begin daarom met `git status` in beide checkouts (een worker kan middenin
+> een turn gedood zijn: dirty tree / half-afgeronde actie) en verifieer
+> daarna de PR-state op GitHub.
+
+**Route na overname (in volgorde):**
+1. Caretaker #8 afmaken (de 2 blokkades hierboven) → slot-comment.
+2. Operator mergt **HUMAN**: gateway #14, #15, #16 + caretaker #8 (per PR, geen batch-auto-merge).
+3. **F7-afsluiting door de agent** (in `/home/flip/guardian-llmprovider-gateway`): AGENTS.md OPERATIONALLY-CRITICAL-flip (deploy-dir → de nieuwe dir), FILE_REGISTER-check, HANDOFF/JOURNAL-closure. **Suite-tellen ZELF verifiëren na merge** (verwachting gateway ~1144–1146, caretaker 91; PR-thread-tellings zijn branch-basis-afhankelijk — draai de volledige suite en gebruik het échte getal).
+4. **F7-cut-over = OPERATOR-RUN.** De volledige checklist staat in de PR #16-body: units stage → legacy stop/disable → nieuw enable (`guardian-llmprovider-gateway.service`, alias `llama-guardian.service`) → `nginx -t` + reload → `scripts/verify_post_restart.py` → legacy bevriezen. Rollback = legacy-unit herstarten. **De agent draait GEEN restarts** (agent-traffic loopt door Guardian).
+
+**Gedeferred / follow-ups (bewust, niet vergeten):**
+- **direct+Windows env-file merge-pariteit** (uit caretaker #8-thread-refutatie): `DirectServerProcess` merged `CURRENT_MODEL_ENV_FILE` ook niet (de reader is de systemd-wrapper `scripts/start_llama.sh`; Windows pinned env via NSSM `AppEnvironmentExtra`) — als env-file-merging voor directe spawns gewenst is: BEIDE impls in één change.
+- Stale module-docstring `app/gateway/caretaker_runtime.py` (~regel 55–62; beschrijft de mmproj-probe nog als primair) — meepakken bij de eerstvolgende code-touch.
+- Pre-existing `UP`/`I001` ruff-stijlissues (buiten de CI-selectie `E4,E7,E9,F`) — alleen in een gebatchte pass.
+- Failover-groep `local → windows` zodra de Windows-modellenlijst bekend is (de groep is per-model).
+- Open punten hierboven (NVIDIA context-overrides, pi-models.json bare-names, CI-adoptie pre-restart-gate, 72h soak-test) — onveranderd.
+
 ### DSH session `20260826_rename` (repo-split: legacy + nieuwe bouwplaats)
 
 - **DRIE repos, definitief:** `m0nklabs/llama-cpp-guardian` = LEGACY/archief; `m0nklabs/guardian-llmprovider-gateway` = NIEUW (bouwplaats, volle git-history); `m0nklabs/caretaker-llamacpp` = publieke per-GPU-host-manager-repo.
