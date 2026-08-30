@@ -14,7 +14,8 @@ import json
 import logging
 import time
 import uuid
-from typing import Any, Dict, Optional
+from contextlib import suppress
+from typing import Any, Awaitable, Dict, Optional
 
 import httpx
 from fastapi import HTTPException, Request, Response
@@ -57,6 +58,7 @@ _translate_openai_stream_to_anthropic = None
 cloud_rate_limiter = None
 failover_health = None
 _GuardianRequestCancelled = None
+_await_request_disconnect = None  # callable(request) -> await until client disconnects (G2)
 STREAM_HEARTBEAT_INTERVAL_S = 15.0
 _grammar_cloud_auto_convert_json = False
 _grammar_cloud_strict_mode = False
@@ -93,6 +95,7 @@ def init(
     rate_limiter,
     health_tracker,
     guardian_request_cancelled,
+    await_request_disconnect,
     stream_heartbeat_interval_s,
     grammar_enabled=True,
     grammar_cloud_auto_convert_json=False,
@@ -112,6 +115,7 @@ def init(
     global _translate_openai_error_to_anthropic, _translate_openai_response_to_anthropic
     global _translate_openai_stream_to_anthropic
     global cloud_rate_limiter, failover_health, _GuardianRequestCancelled
+    global _await_request_disconnect
     global STREAM_HEARTBEAT_INTERVAL_S
     global _grammar_cloud_auto_convert_json, _grammar_cloud_strict_mode, _grammar_enabled
     global _extract_cloud_reasoning_content
@@ -143,10 +147,97 @@ def init(
     cloud_rate_limiter = rate_limiter
     failover_health = health_tracker
     _GuardianRequestCancelled = guardian_request_cancelled
+    _await_request_disconnect = await_request_disconnect
     STREAM_HEARTBEAT_INTERVAL_S = stream_heartbeat_interval_s
     _grammar_enabled = grammar_enabled
     _grammar_cloud_auto_convert_json = grammar_cloud_auto_convert_json
     _grammar_cloud_strict_mode = grammar_cloud_strict_mode
+
+
+def _effective_max_call_seconds(provider: Any) -> Optional[float]:
+    """Resolve one provider's hard per-attempt duration cap.
+
+    Reads the config-driven ``max_call_seconds`` provider field (G2); absent,
+    invalid or non-positive values disable the cap (fail-open, like the other
+    optional provider knobs). This is a TOTAL-duration bound — httpx's
+    per-read ``timeout_seconds`` only bounds a single silent socket read and
+    is reset by every chunk the upstream sends.
+    """
+    raw = getattr(provider, "max_call_seconds", None)
+    if raw is None:
+        return None
+    try:
+        cap = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return cap if cap > 0 else None
+
+
+class _ClientDisconnected(Exception):
+    """Raised when the downstream client disconnects during a cloud attempt."""
+
+
+async def _upstream_with_cap(upstream_awaitable: Awaitable[Any], provider: Any) -> Any:
+    """Await one upstream attempt under the provider's configured duration cap.
+
+    ``max_call_seconds`` bounds the WHOLE attempt window (the rate-limiter's
+    bounded 429 backoff sleeps included), not just one socket read.
+    """
+    cap = _effective_max_call_seconds(provider)
+    if cap is None:
+        return await upstream_awaitable
+    return await asyncio.wait_for(upstream_awaitable, timeout=cap)
+
+
+async def _upstream_or_disconnect(
+    upstream_awaitable: Awaitable[Any],
+    disconnect_task: Optional[asyncio.Task],
+) -> Any:
+    """Await one upstream attempt, aborting as soon as the client disconnects.
+
+    The caller arms ``disconnect_task`` (an ``await_request_disconnect``
+    poller) for NON-streamed cloud requests only — the streaming branch relies
+    on Starlette's StreamingResponse disconnect handling instead. When the
+    watcher wins the race, the upstream awaitable is cancelled (which unwinds
+    the httpx client context and closes the upstream socket) and
+    :class:`_ClientDisconnected` is raised. If both futures complete in the
+    same wait batch, the upstream outcome stays authoritative.
+
+    A watcher that DIES (raises) fails open: the error is logged and the
+    upstream result stays authoritative — a broken watcher must never abort
+    or misattribute a healthy request.
+    """
+    if disconnect_task is None:
+        return await upstream_awaitable
+    upstream_task = asyncio.ensure_future(upstream_awaitable)
+    try:
+        done, _pending = await asyncio.wait(
+            {upstream_task, disconnect_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    except asyncio.CancelledError:
+        # Our own task was cancelled (e.g. by an outer scope): stop the
+        # upstream await too, then propagate.
+        upstream_task.cancel()
+        with suppress(asyncio.CancelledError, Exception):
+            await upstream_task
+        raise
+    if disconnect_task in done:
+        watcher_error = None if disconnect_task.cancelled() else disconnect_task.exception()
+        if watcher_error is not None:
+            # Watcher died (e.g. a receive-channel error): fail open — the
+            # upstream result stays authoritative, this is NOT a disconnect.
+            logger.warning(
+                "☁️  Disconnect watcher failed (%s); continuing upstream await",
+                watcher_error,
+            )
+            return await upstream_task
+        if not upstream_task.done():
+            upstream_task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await upstream_task
+            raise _ClientDisconnected()
+    return upstream_task.result()
 
 
 def _derive_response_format_from_grammar(grammar: Any, json_schema: Any) -> Optional[Dict[str, Any]]:
@@ -260,363 +351,486 @@ async def forward_to_cloud_provider(
     _start_live_request_usage(request)
     stream_http_client: Optional[httpx.AsyncClient] = None
 
+    # ── Downstream disconnect watcher (G2, non-streamed cloud only) ──────
+    # A buffered Response has no Starlette disconnect listener and uvicorn
+    # never cancels the endpoint task on client disconnect, so without this
+    # poller the upstream call would run to completion even after the client
+    # gave up. The streaming branch is intentionally NOT armed here: its
+    # StreamingResponse disconnect handling owns the request's receive
+    # channel (single consumer).
+    disconnect_task: Optional[asyncio.Task] = None
+    if not is_stream and _await_request_disconnect is not None:
+        disconnect_task = asyncio.create_task(_await_request_disconnect(request))
+
     # Track cloud capture metadata
     _cloud_capture_attempts = 0
 
-    for attempt_index, (provider, upstream_model) in enumerate(attempts):
-        is_last_attempt = attempt_index == len(attempts) - 1
-        effective_path, candidate_json_body, candidate_body, needs_translation = (
-            _prepare_cloud_candidate_request(provider, upstream_model, path, json_body, cloud_key_fingerprint)
+    def _client_disconnect_499() -> HTTPException:
+        """Client-facing 499 for a downstream disconnect (same shape as
+        ``queue_helpers.request_cancel_http_exception``)."""
+        return HTTPException(
+            status_code=499,
+            detail={
+                "error": "request_cancelled",
+                "request_id": getattr(capture_ctx, "request_id", None),
+                "message": "client_disconnected",
+            },
         )
 
-        if needs_translation:
-            logger.info(
-                "🌉 Anthropic→OpenAI bridge: translating /v1/messages for provider '%s'",
-                provider.name,
-            )
+    async def _finish_client_disconnect() -> None:
+        """Record live-usage + capture state for a downstream disconnect."""
+        nonlocal _cloud_capture_attempts
+        _cloud_capture_attempts = attempt_index + 1
+        _finish_live_request_usage(request, status_code=499, response_bytes=0)
+        _dispatch_capture_request_cancelled(
+            capture_ctx,
+            cancel_reason="client_disconnect",
+            duration_ms=(time.monotonic() - cloud_capture_start_time) * 1000 if cloud_capture_start_time else None,
+            attempts=_cloud_capture_attempts,
+            policy_result=capture_policy_result,
+        ) if capture_ctx is not None else None
 
-        forward_headers = ProviderRegistry.build_forward_headers(provider, cloud_key_fingerprint, app_name=client_id)
-        forward_url = ProviderRegistry.build_forward_url(provider, effective_path)
-        timeout = httpx.Timeout(provider.timeout_seconds, connect=15.0)
+    async def _handle_max_call_timeout() -> None:
+        """Shared ``cloud_max_duration`` handler for one attempt's cap timeout.
 
-        if failover_group is not None:
-            logger.info(
-                "🔀 Failover group '%s': attempt %d/%d via '%s'",
-                failover_group,
-                attempt_index + 1,
-                len(attempts),
-                provider.name,
-            )
-        logger.info(
-            "☁️  Cloud route: client '%s' → %s /v1/%s (model: %s, stream: %s)",
-            client_id,
+        Abandons this candidate (failover-continue) and raises HTTPException
+        504 on the last one — mirroring the adjacent generic failure path
+        (capture is dispatched on the terminal attempt only, so a request
+        produces exactly one terminal capture event).
+        """
+        nonlocal _cloud_capture_attempts
+        failover_health.record_failure(provider.name, upstream_model)
+        logger.error(
+            "☁️  Cloud provider '%s' exceeded max_call_seconds=%s (attempt %d/%d)",
             provider.name,
-            path,
-            model_name,
-            is_stream,
+            _effective_max_call_seconds(provider),
+            attempt_index + 1,
+            len(attempts),
         )
+        _cloud_capture_attempts = attempt_index + 1
+        if not is_last_attempt:
+            return
+        _finish_live_request_usage(request, status_code=504, response_bytes=0)
+        _dispatch_capture_request_failed(
+            capture_ctx,
+            error_code="cloud_max_duration",
+            http_status=504,
+            sanitized_message="Cloud provider call exceeded max_call_seconds",
+            queue_wait_ms=0,
+            duration_ms=(time.monotonic() - cloud_capture_start_time) * 1000 if cloud_capture_start_time else None,
+            attempts=_cloud_capture_attempts,
+            policy_result=capture_policy_result,
+        ) if capture_ctx is not None else None
+        raise HTTPException(status_code=504, detail="Cloud provider call exceeded max_call_seconds")
 
-        if is_stream:
-            stream_client: Optional[httpx.AsyncClient] = None
+    try:
+        for attempt_index, (provider, upstream_model) in enumerate(attempts):
+            is_last_attempt = attempt_index == len(attempts) - 1
+            effective_path, candidate_json_body, candidate_body, needs_translation = (
+                _prepare_cloud_candidate_request(provider, upstream_model, path, json_body, cloud_key_fingerprint)
+            )
 
-            async def send_stream_request() -> httpx.Response:
-                nonlocal stream_client
-                stream_client = httpx.AsyncClient(timeout=timeout)
-                req = stream_client.build_request(
-                    "POST",
-                    forward_url,
-                    content=candidate_body,
-                    headers=forward_headers,
+            if needs_translation:
+                logger.info(
+                    "🌉 Anthropic→OpenAI bridge: translating /v1/messages for provider '%s'",
+                    provider.name,
                 )
-                return await stream_client.send(req, stream=True)
 
-            async def read_stream_rate_limit(response: httpx.Response) -> str:
-                nonlocal stream_client
-                try:
-                    body_bytes = await response.aread()
-                finally:
+            forward_headers = ProviderRegistry.build_forward_headers(provider, cloud_key_fingerprint, app_name=client_id)
+            forward_url = ProviderRegistry.build_forward_url(provider, effective_path)
+            timeout = httpx.Timeout(provider.timeout_seconds, connect=15.0)
+
+            if failover_group is not None:
+                logger.info(
+                    "🔀 Failover group '%s': attempt %d/%d via '%s'",
+                    failover_group,
+                    attempt_index + 1,
+                    len(attempts),
+                    provider.name,
+                )
+            logger.info(
+                "☁️  Cloud route: client '%s' → %s /v1/%s (model: %s, stream: %s)",
+                client_id,
+                provider.name,
+                path,
+                model_name,
+                is_stream,
+            )
+
+            if is_stream:
+                stream_client: Optional[httpx.AsyncClient] = None
+
+                async def send_stream_request() -> httpx.Response:
+                    nonlocal stream_client
+                    stream_client = httpx.AsyncClient(timeout=timeout)
+                    req = stream_client.build_request(
+                        "POST",
+                        forward_url,
+                        content=candidate_body,
+                        headers=forward_headers,
+                    )
+                    return await stream_client.send(req, stream=True)
+
+                async def read_stream_rate_limit(response: httpx.Response) -> str:
+                    nonlocal stream_client
                     try:
-                        await response.aclose()
+                        body_bytes = await response.aread()
                     finally:
+                        try:
+                            await response.aclose()
+                        finally:
+                            if stream_client is not None:
+                                await stream_client.aclose()
+                                stream_client = None
+                    return body_bytes.decode("utf-8", errors="replace")
+
+                try:
+                    resp = await _upstream_with_cap(
+                        cloud_rate_limiter.execute_with_retry(
+                            cloud_key_fingerprint,
+                            provider.name,
+                            send_stream_request,
+                            on_429=read_stream_rate_limit,
+                            retry_429=failover_group is None,
+                        ),
+                        provider,
+                    )
+                except asyncio.TimeoutError:
+                    if stream_client is not None:
+                        await stream_client.aclose()
+                    await _handle_max_call_timeout()
+                    continue
+                except Exception as e:
+                    if stream_client is not None:
+                        await stream_client.aclose()
+                    failover_health.record_failure(provider.name, upstream_model)
+                    logger.error(
+                        "☁️  Cloud provider '%s' request failed (attempt %d/%d): %s",
+                        provider.name, attempt_index + 1, len(attempts), e,
+                    )
+                    if not is_last_attempt:
+                        _cloud_capture_attempts = attempt_index + 1
+                        continue
+                    _finish_live_request_usage(request, status_code=502, response_bytes=0)
+                    _dispatch_capture_request_failed(
+                        capture_ctx,
+                        error_code=_classify_capture_error(e),
+                        http_status=502,
+                        sanitized_message=_sanitize_capture_error_message(e),
+                        queue_wait_ms=0,
+                        duration_ms=(time.monotonic() - cloud_capture_start_time) * 1000 if cloud_capture_start_time else None,
+                        attempts=_cloud_capture_attempts,
+                        policy_result=capture_policy_result,
+                    ) if capture_ctx is not None else None
+                    raise HTTPException(status_code=502, detail=f"Cloud provider request failed: {e}")
+
+                # ── Failover 429 probe: wait and retry once before falling through ──
+                # When a failover candidate returns HTTP 429, the priority source
+                # (e.g. NVIDIA's free tier) gets one more chance after a 60s wait.
+                # Concurrent requests skip the rate-limited candidate and go
+                # directly to the next one (OR), keeping them responsive.
+                # Skipped when cloud_retry.enabled=false (agent harness owns 429s).
+                if (
+                    getattr(resp, "status_code", 0) == 429
+                    and failover_group is not None
+                    and not is_last_attempt
+                    and cloud_rate_limiter.config.enabled
+                ):
+                    _probe_wait = failover_health._rate_limit_cooldown_seconds
+                    logger.info(
+                        "⏳ Failover 429: '%s' rate-limited; waiting %.0fs before one retry...",
+                        provider.name, _probe_wait,
+                    )
+                    failover_health.record_rate_limited(provider.name, upstream_model)
+                    await asyncio.sleep(_probe_wait)
+                    failover_health.clear_rate_limit(provider.name, upstream_model)
+                    try:
+                        resp = await _upstream_with_cap(
+                            cloud_rate_limiter.execute_with_retry(
+                                cloud_key_fingerprint,
+                                provider.name,
+                                send_stream_request,
+                                on_429=read_stream_rate_limit,
+                                retry_429=False,
+                            ),
+                            provider,
+                        )
+                    except asyncio.TimeoutError:
                         if stream_client is not None:
                             await stream_client.aclose()
-                            stream_client = None
-                return body_bytes.decode("utf-8", errors="replace")
+                        await _handle_max_call_timeout()
+                        continue
 
-            try:
-                resp = await cloud_rate_limiter.execute_with_retry(
-                    cloud_key_fingerprint,
-                    provider.name,
-                    send_stream_request,
-                    on_429=read_stream_rate_limit,
-                    retry_429=failover_group is None,
-                )
-            except Exception as e:
-                if stream_client is not None:
-                    await stream_client.aclose()
-                failover_health.record_failure(provider.name, upstream_model)
-                logger.error(
-                    "☁️  Cloud provider '%s' request failed (attempt %d/%d): %s",
-                    provider.name, attempt_index + 1, len(attempts), e,
-                )
-                if not is_last_attempt:
-                    _cloud_capture_attempts = attempt_index + 1
+                stream_http_client = stream_client
+
+                # ── Error translation for Anthropic clients ───────────────────
+                # If the upstream provider returned an error (non-SSE body), translate
+                # it to Anthropic error format instead of trying to stream it.
+                if resp.status_code >= 400:
+                    body_bytes = await resp.aread()
+                    await resp.aclose()
+                    if stream_http_client is not None:
+                        await stream_http_client.aclose()
+                    if resp.status_code != 429:
+                        # 429 (rate limited) does not count against a provider's
+                        # health — Claude Code already retries these itself and
+                        # the provider is usually fine, just busy.
+                        failover_health.record_failure(provider.name, upstream_model)
+                    else:
+                        # Mark provider as rate-limited so concurrent requests
+                        # skip it and fall through to the next candidate directly.
+                        failover_health.record_rate_limited(provider.name, upstream_model)
+                    if _is_retryable_cloud_error(resp.status_code, body_bytes.decode("utf-8", errors="replace")) and not is_last_attempt:
+                        logger.warning(
+                            "☁️  Cloud provider '%s' returned %s after local retry budget "
+                            "(attempt %d/%d); trying next candidate",
+                            provider.name, resp.status_code, attempt_index + 1, len(attempts),
+                        )
+                        continue
+                    _finish_live_request_usage(request, status_code=resp.status_code, response_bytes=len(body_bytes))
+                    # ── Capture: request_failed (streaming HTTP error) ──
+                    _dispatch_capture_request_failed(
+                        capture_ctx,
+                        error_code=f"cloud_http_{resp.status_code}",
+                        http_status=resp.status_code,
+                        sanitized_message=f"Cloud provider returned HTTP {resp.status_code}",
+                        queue_wait_ms=0,
+                        duration_ms=(time.monotonic() - cloud_capture_start_time) * 1000 if cloud_capture_start_time else None,
+                        attempts=_cloud_capture_attempts,
+                        policy_result=capture_policy_result,
+                    ) if capture_ctx is not None else None
+                    if needs_translation:
+                        try:
+                            error_payload = json.loads(body_bytes)
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            error_payload = body_bytes.decode("utf-8", errors="replace")
+                        anthropic_error = _translate_openai_error_to_anthropic(resp.status_code, error_payload)
+                        logger.warning(
+                            "🌉 Anthropic bridge: translated %s error from %s: %s",
+                            resp.status_code,
+                            provider.name,
+                            anthropic_error["error"]["message"][:200],
+                        )
+                        return Response(
+                            content=json.dumps(anthropic_error).encode("utf-8"),
+                            status_code=resp.status_code,
+                            headers={"Content-Type": "application/json"},
+                        )
+                    return Response(
+                        content=body_bytes,
+                        status_code=resp.status_code,
+                        headers={
+                            **_sanitize_proxied_response_headers(resp.headers),
+                            **_guardian_debug_headers(provider, upstream_model, failover_group),
+                        },
+                    )
+
+                # Success — this candidate wins. Bind the winning json_body and
+                # fall through to the streaming response construction below.
+                failover_health.record_success(provider.name, upstream_model)
+                json_body = candidate_json_body
+                break
+
+            # Non-streaming
+            async with httpx.AsyncClient(timeout=timeout) as non_stream_http_client:
+                async def send_non_stream_request() -> httpx.Response:
+                    return await non_stream_http_client.post(
+                        forward_url,
+                        content=candidate_body,
+                        headers=forward_headers,
+                    )
+
+                try:
+                    resp = await _upstream_or_disconnect(
+                        _upstream_with_cap(
+                            cloud_rate_limiter.execute_with_retry(
+                                cloud_key_fingerprint,
+                                provider.name,
+                                send_non_stream_request,
+                                retry_429=failover_group is None,
+                            ),
+                            provider,
+                        ),
+                        disconnect_task,
+                    )
+                except _ClientDisconnected:
+                    await _finish_client_disconnect()
+                    raise _client_disconnect_499() from None
+                except asyncio.TimeoutError:
+                    await _handle_max_call_timeout()
                     continue
-                _finish_live_request_usage(request, status_code=502, response_bytes=0)
-                _dispatch_capture_request_failed(
-                    capture_ctx,
-                    error_code=_classify_capture_error(e),
-                    http_status=502,
-                    sanitized_message=_sanitize_capture_error_message(e),
-                    queue_wait_ms=0,
-                    duration_ms=(time.monotonic() - cloud_capture_start_time) * 1000 if cloud_capture_start_time else None,
-                    attempts=_cloud_capture_attempts,
-                    policy_result=capture_policy_result,
-                ) if capture_ctx is not None else None
-                raise HTTPException(status_code=502, detail=f"Cloud provider request failed: {e}")
-
-            # ── Failover 429 probe: wait and retry once before falling through ──
-            # When a failover candidate returns HTTP 429, the priority source
-            # (e.g. NVIDIA's free tier) gets one more chance after a 60s wait.
-            # Concurrent requests skip the rate-limited candidate and go
-            # directly to the next one (OR), keeping them responsive.
-            # Skipped when cloud_retry.enabled=false (agent harness owns 429s).
-            if (
-                getattr(resp, "status_code", 0) == 429
-                and failover_group is not None
-                and not is_last_attempt
-                and cloud_rate_limiter.config.enabled
-            ):
-                _probe_wait = failover_health._rate_limit_cooldown_seconds
-                logger.info(
-                    "⏳ Failover 429: '%s' rate-limited; waiting %.0fs before one retry...",
-                    provider.name, _probe_wait,
-                )
-                failover_health.record_rate_limited(provider.name, upstream_model)
-                await asyncio.sleep(_probe_wait)
-                failover_health.clear_rate_limit(provider.name, upstream_model)
-                resp = await cloud_rate_limiter.execute_with_retry(
-                    cloud_key_fingerprint,
-                    provider.name,
-                    send_stream_request,
-                    on_429=read_stream_rate_limit,
-                    retry_429=False,
-                )
-
-            stream_http_client = stream_client
-
-            # ── Error translation for Anthropic clients ───────────────────
-            # If the upstream provider returned an error (non-SSE body), translate
-            # it to Anthropic error format instead of trying to stream it.
-            if resp.status_code >= 400:
-                body_bytes = await resp.aread()
-                await resp.aclose()
-                if stream_http_client is not None:
-                    await stream_http_client.aclose()
-                if resp.status_code != 429:
-                    # 429 (rate limited) does not count against a provider's
-                    # health — Claude Code already retries these itself and
-                    # the provider is usually fine, just busy.
+                except Exception as e:
                     failover_health.record_failure(provider.name, upstream_model)
-                else:
-                    # Mark provider as rate-limited so concurrent requests
-                    # skip it and fall through to the next candidate directly.
+                    logger.error(
+                        "☁️  Cloud provider '%s' request failed (attempt %d/%d): %s",
+                        provider.name, attempt_index + 1, len(attempts), e,
+                    )
+                    if not is_last_attempt:
+                        _cloud_capture_attempts = attempt_index + 1
+                        continue
+                    _finish_live_request_usage(request, status_code=502, response_bytes=0)
+                    _dispatch_capture_request_failed(
+                        capture_ctx,
+                        error_code=_classify_capture_error(e),
+                        http_status=502,
+                        sanitized_message=_sanitize_capture_error_message(e),
+                        queue_wait_ms=0,
+                        duration_ms=(time.monotonic() - cloud_capture_start_time) * 1000 if cloud_capture_start_time else None,
+                        attempts=_cloud_capture_attempts,
+                        policy_result=capture_policy_result,
+                    ) if capture_ctx is not None else None
+                    raise HTTPException(status_code=502, detail=f"Cloud provider request failed: {e}")
+
+                # ── Failover 429 probe: wait and retry once before falling through ──
+                # Skipped when cloud_retry.enabled=false (agent harness owns 429s).
+                if (
+                    getattr(resp, "status_code", 0) == 429
+                    and failover_group is not None
+                    and not is_last_attempt
+                    and cloud_rate_limiter.config.enabled
+                ):
+                    _probe_wait = failover_health._rate_limit_cooldown_seconds
+                    logger.info(
+                        "⏳ Failover 429: '%s' rate-limited; waiting %.0fs before one retry...",
+                        provider.name, _probe_wait,
+                    )
                     failover_health.record_rate_limited(provider.name, upstream_model)
-                if _is_retryable_cloud_error(resp.status_code, body_bytes.decode("utf-8", errors="replace")) and not is_last_attempt:
+                    await asyncio.sleep(_probe_wait)
+                    failover_health.clear_rate_limit(provider.name, upstream_model)
+                    try:
+                        resp = await _upstream_or_disconnect(
+                            _upstream_with_cap(
+                                cloud_rate_limiter.execute_with_retry(
+                                    cloud_key_fingerprint,
+                                    provider.name,
+                                    send_non_stream_request,
+                                    retry_429=False,
+                                ),
+                                provider,
+                            ),
+                            disconnect_task,
+                        )
+                    except _ClientDisconnected:
+                        await _finish_client_disconnect()
+                        raise _client_disconnect_499() from None
+                    except asyncio.TimeoutError:
+                        await _handle_max_call_timeout()
+                        continue
+
+                if (
+                    resp.status_code >= 400
+                    and _is_retryable_cloud_error(resp.status_code, resp.text)
+                    and not is_last_attempt
+                ):
+                    if resp.status_code != 429:
+                        failover_health.record_failure(provider.name, upstream_model)
+                    else:
+                        failover_health.record_rate_limited(provider.name, upstream_model)
                     logger.warning(
                         "☁️  Cloud provider '%s' returned %s after local retry budget "
                         "(attempt %d/%d); trying next candidate",
                         provider.name, resp.status_code, attempt_index + 1, len(attempts),
                     )
                     continue
-                _finish_live_request_usage(request, status_code=resp.status_code, response_bytes=len(body_bytes))
-                # ── Capture: request_failed (streaming HTTP error) ──
-                _dispatch_capture_request_failed(
-                    capture_ctx,
-                    error_code=f"cloud_http_{resp.status_code}",
-                    http_status=resp.status_code,
-                    sanitized_message=f"Cloud provider returned HTTP {resp.status_code}",
-                    queue_wait_ms=0,
-                    duration_ms=(time.monotonic() - cloud_capture_start_time) * 1000 if cloud_capture_start_time else None,
-                    attempts=_cloud_capture_attempts,
-                    policy_result=capture_policy_result,
-                ) if capture_ctx is not None else None
-                if needs_translation:
-                    try:
-                        error_payload = json.loads(body_bytes)
-                    except (TypeError, ValueError, json.JSONDecodeError):
-                        error_payload = body_bytes.decode("utf-8", errors="replace")
-                    anthropic_error = _translate_openai_error_to_anthropic(resp.status_code, error_payload)
-                    logger.warning(
-                        "🌉 Anthropic bridge: translated %s error from %s: %s",
-                        resp.status_code,
-                        provider.name,
-                        anthropic_error["error"]["message"][:200],
-                    )
-                    return Response(
-                        content=json.dumps(anthropic_error).encode("utf-8"),
-                        status_code=resp.status_code,
-                        headers={"Content-Type": "application/json"},
-                    )
-                return Response(
-                    content=body_bytes,
-                    status_code=resp.status_code,
-                    headers={
-                        **_sanitize_proxied_response_headers(resp.headers),
-                        **_guardian_debug_headers(provider, upstream_model, failover_group),
-                    },
-                )
 
-            # Success — this candidate wins. Bind the winning json_body and
-            # fall through to the streaming response construction below.
-            failover_health.record_success(provider.name, upstream_model)
-            json_body = candidate_json_body
-            break
-
-        # Non-streaming
-        async with httpx.AsyncClient(timeout=timeout) as non_stream_http_client:
-            async def send_non_stream_request() -> httpx.Response:
-                return await non_stream_http_client.post(
-                    forward_url,
-                    content=candidate_body,
-                    headers=forward_headers,
-                )
-
-            try:
-                resp = await cloud_rate_limiter.execute_with_retry(
-                    cloud_key_fingerprint,
-                    provider.name,
-                    send_non_stream_request,
-                    retry_429=failover_group is None,
-                )
-            except Exception as e:
-                failover_health.record_failure(provider.name, upstream_model)
-                logger.error(
-                    "☁️  Cloud provider '%s' request failed (attempt %d/%d): %s",
-                    provider.name, attempt_index + 1, len(attempts), e,
-                )
-                if not is_last_attempt:
-                    _cloud_capture_attempts = attempt_index + 1
-                    continue
-                _finish_live_request_usage(request, status_code=502, response_bytes=0)
-                _dispatch_capture_request_failed(
-                    capture_ctx,
-                    error_code=_classify_capture_error(e),
-                    http_status=502,
-                    sanitized_message=_sanitize_capture_error_message(e),
-                    queue_wait_ms=0,
-                    duration_ms=(time.monotonic() - cloud_capture_start_time) * 1000 if cloud_capture_start_time else None,
-                    attempts=_cloud_capture_attempts,
-                    policy_result=capture_policy_result,
-                ) if capture_ctx is not None else None
-                raise HTTPException(status_code=502, detail=f"Cloud provider request failed: {e}")
-
-            # ── Failover 429 probe: wait and retry once before falling through ──
-            # Skipped when cloud_retry.enabled=false (agent harness owns 429s).
-            if (
-                getattr(resp, "status_code", 0) == 429
-                and failover_group is not None
-                and not is_last_attempt
-                and cloud_rate_limiter.config.enabled
-            ):
-                _probe_wait = failover_health._rate_limit_cooldown_seconds
-                logger.info(
-                    "⏳ Failover 429: '%s' rate-limited; waiting %.0fs before one retry...",
-                    provider.name, _probe_wait,
-                )
-                failover_health.record_rate_limited(provider.name, upstream_model)
-                await asyncio.sleep(_probe_wait)
-                failover_health.clear_rate_limit(provider.name, upstream_model)
-                resp = await cloud_rate_limiter.execute_with_retry(
-                    cloud_key_fingerprint,
-                    provider.name,
-                    send_non_stream_request,
-                    retry_429=False,
-                )
-
-            if (
-                resp.status_code >= 400
-                and _is_retryable_cloud_error(resp.status_code, resp.text)
-                and not is_last_attempt
-            ):
-                if resp.status_code != 429:
+                if resp.status_code < 400:
+                    failover_health.record_success(provider.name, upstream_model)
+                elif resp.status_code != 429:
+                    # 429 (rate limited) does not count against a provider's health
+                    # — Claude Code already retries these itself and the provider is
+                    # usually fine, just busy.
                     failover_health.record_failure(provider.name, upstream_model)
-                else:
-                    failover_health.record_rate_limited(provider.name, upstream_model)
-                logger.warning(
-                    "☁️  Cloud provider '%s' returned %s after local retry budget "
-                    "(attempt %d/%d); trying next candidate",
-                    provider.name, resp.status_code, attempt_index + 1, len(attempts),
+
+                # Record token usage from response payload
+                try:
+                    payload = resp.json()
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    payload = None
+                _record_usage_from_payload(client_id, f"/v1/{path}", model_name, payload, request=request)
+
+                # ── Capture: request_completed or request_failed (non-streaming) ──
+                _cloud_capture_attempts = attempt_index + 1
+                _cloud_capture_duration_ms = (
+                    (time.monotonic() - cloud_capture_start_time) * 1000
+                    if cloud_capture_start_time else None
                 )
-                continue
-
-            if resp.status_code < 400:
-                failover_health.record_success(provider.name, upstream_model)
-            elif resp.status_code != 429:
-                # 429 (rate limited) does not count against a provider's health
-                # — Claude Code already retries these itself and the provider is
-                # usually fine, just busy.
-                failover_health.record_failure(provider.name, upstream_model)
-
-            # Record token usage from response payload
-            try:
-                payload = resp.json()
-            except (TypeError, ValueError, json.JSONDecodeError):
-                payload = None
-            _record_usage_from_payload(client_id, f"/v1/{path}", model_name, payload, request=request)
-
-            # ── Capture: request_completed or request_failed (non-streaming) ──
-            _cloud_capture_attempts = attempt_index + 1
-            _cloud_capture_duration_ms = (
-                (time.monotonic() - cloud_capture_start_time) * 1000
-                if cloud_capture_start_time else None
-            )
-            if resp.status_code >= 400:
-                _dispatch_capture_request_failed(
-                    capture_ctx,
-                    error_code=f"cloud_http_{resp.status_code}",
-                    http_status=resp.status_code,
-                    sanitized_message=f"Cloud provider returned HTTP {resp.status_code}",
-                    queue_wait_ms=0,
-                    duration_ms=_cloud_capture_duration_ms,
-                    attempts=_cloud_capture_attempts,
-                    policy_result=capture_policy_result,
-                ) if capture_ctx is not None else None
-            else:
-                _cloud_content, _cloud_tool_calls = _extract_cloud_response_content(payload)
-                # Reasoning apart doorgeven (raw capture), maar alleen als de
-                # fallback hem niet al in content heeft gestopt (geen content).
-                _cloud_reasoning = None
-                if _cloud_content:
-                    _cloud_reasoning = _extract_cloud_reasoning_content(payload)
-                _dispatch_capture_request_completed(
-                    capture_ctx,
-                    policy_result=capture_policy_result,
-                    response_content=_cloud_content,
-                    tool_calls=_cloud_tool_calls,
-                    reasoning_content=_cloud_reasoning,
-                    prompt_tokens=payload.get("usage", {}).get("prompt_tokens", payload.get("usage", {}).get("input_tokens", 0)) if isinstance(payload, dict) else None,
-                    completion_tokens=payload.get("usage", {}).get("completion_tokens", payload.get("usage", {}).get("output_tokens", 0)) if isinstance(payload, dict) else None,
-                    http_status=resp.status_code,
-                    streamed=False,
-                    incomplete=False,
-                    attempts=_cloud_capture_attempts,
-                    duration_ms=_cloud_capture_duration_ms,
-                ) if capture_ctx is not None else None
-
-            debug_headers = _guardian_debug_headers(provider, upstream_model, failover_group)
-            # Suffix the client-visible model field with the winning provider on
-            # failover routes only, so an ambiguous "which provider answered?"
-            # is resolvable from the response body itself.
-            response_model_name = f"{model_name}@{provider.name}" if failover_group else model_name
-
-            # ── Anthropic response translation (non-streaming) ───────────
-            if needs_translation and payload and isinstance(payload, dict):
-                # Translate errors first
                 if resp.status_code >= 400:
-                    anthropic_error = _translate_openai_error_to_anthropic(resp.status_code, payload)
+                    _dispatch_capture_request_failed(
+                        capture_ctx,
+                        error_code=f"cloud_http_{resp.status_code}",
+                        http_status=resp.status_code,
+                        sanitized_message=f"Cloud provider returned HTTP {resp.status_code}",
+                        queue_wait_ms=0,
+                        duration_ms=_cloud_capture_duration_ms,
+                        attempts=_cloud_capture_attempts,
+                        policy_result=capture_policy_result,
+                    ) if capture_ctx is not None else None
+                else:
+                    _cloud_content, _cloud_tool_calls = _extract_cloud_response_content(payload)
+                    # Reasoning apart doorgeven (raw capture), maar alleen als de
+                    # fallback hem niet al in content heeft gestopt (geen content).
+                    _cloud_reasoning = None
+                    if _cloud_content:
+                        _cloud_reasoning = _extract_cloud_reasoning_content(payload)
+                    _dispatch_capture_request_completed(
+                        capture_ctx,
+                        policy_result=capture_policy_result,
+                        response_content=_cloud_content,
+                        tool_calls=_cloud_tool_calls,
+                        reasoning_content=_cloud_reasoning,
+                        prompt_tokens=payload.get("usage", {}).get("prompt_tokens", payload.get("usage", {}).get("input_tokens", 0)) if isinstance(payload, dict) else None,
+                        completion_tokens=payload.get("usage", {}).get("completion_tokens", payload.get("usage", {}).get("output_tokens", 0)) if isinstance(payload, dict) else None,
+                        http_status=resp.status_code,
+                        streamed=False,
+                        incomplete=False,
+                        attempts=_cloud_capture_attempts,
+                        duration_ms=_cloud_capture_duration_ms,
+                    ) if capture_ctx is not None else None
+
+                debug_headers = _guardian_debug_headers(provider, upstream_model, failover_group)
+                # Suffix the client-visible model field with the winning provider on
+                # failover routes only, so an ambiguous "which provider answered?"
+                # is resolvable from the response body itself.
+                response_model_name = f"{model_name}@{provider.name}" if failover_group else model_name
+
+                # ── Anthropic response translation (non-streaming) ───────────
+                if needs_translation and payload and isinstance(payload, dict):
+                    # Translate errors first
+                    if resp.status_code >= 400:
+                        anthropic_error = _translate_openai_error_to_anthropic(resp.status_code, payload)
+                        return Response(
+                            content=json.dumps(anthropic_error).encode("utf-8"),
+                            status_code=resp.status_code,
+                            headers={"Content-Type": "application/json", **debug_headers},
+                        )
+                    anthropic_response = _translate_openai_response_to_anthropic(
+                        payload,
+                        response_model_name,
+                        request_stop_sequences=candidate_json_body.get("stop_sequences"),
+                    )
+                    translated_content = json.dumps(anthropic_response).encode("utf-8")
                     return Response(
-                        content=json.dumps(anthropic_error).encode("utf-8"),
+                        content=translated_content,
                         status_code=resp.status_code,
                         headers={"Content-Type": "application/json", **debug_headers},
                     )
-                anthropic_response = _translate_openai_response_to_anthropic(
-                    payload,
-                    response_model_name,
-                    request_stop_sequences=candidate_json_body.get("stop_sequences"),
-                )
-                translated_content = json.dumps(anthropic_response).encode("utf-8")
+
                 return Response(
-                    content=translated_content,
+                    content=resp.content,
                     status_code=resp.status_code,
-                    headers={"Content-Type": "application/json", **debug_headers},
+                    headers={**_sanitize_proxied_response_headers(resp.headers), **debug_headers},
                 )
 
-            return Response(
-                content=resp.content,
-                status_code=resp.status_code,
-                headers={**_sanitize_proxied_response_headers(resp.headers), **debug_headers},
-            )
+    finally:
+        if disconnect_task is not None:
+            disconnect_task.cancel()
+            try:
+                await disconnect_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                # A watcher that died must not fail the request it watched.
+                logger.warning("☁️  Disconnect watcher ended with error: %s", exc)
 
     if stream_http_client is None:
         _finish_live_request_usage(request, status_code=502, response_bytes=0)

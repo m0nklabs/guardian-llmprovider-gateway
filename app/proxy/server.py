@@ -162,6 +162,14 @@ def _load_stream_close_timeout_s() -> float:
 STREAM_CLOSE_TIMEOUT_S = _load_stream_close_timeout_s()
 
 
+def _load_disconnect_poll_seconds() -> float:
+    """Return the downstream-disconnect poll interval (Phase 5: delegated)."""
+    return _config_loader.load_disconnect_poll_seconds(CONFIG)
+
+
+DISCONNECT_POLL_INTERVAL_S = _load_disconnect_poll_seconds()
+
+
 def _load_grammar_config() -> dict:
     """Return the grammar section of the configuration (Phase 5: delegated)."""
     return _config_loader.load_grammar_config(CONFIG)
@@ -1019,7 +1027,13 @@ _sessions.init(
 _streaming.init(inference_queue, _GuardianRequestCancelled, STREAM_HEARTBEAT_INTERVAL_S, STREAM_CLOSE_TIMEOUT_S)
 
 # Initialize queue helpers with queue + usage helpers
-_queue_helpers.init(inference_queue, _get_queue_owner_id, _update_live_request_usage, STREAM_CLOSE_TIMEOUT_S)
+_queue_helpers.init(
+    inference_queue,
+    _get_queue_owner_id,
+    _update_live_request_usage,
+    STREAM_CLOSE_TIMEOUT_S,
+    disconnect_poll_s=DISCONNECT_POLL_INTERVAL_S,
+)
 
 # Initialize cloud forwarding with all dependencies
 _cloud_forwarding.init(
@@ -1051,6 +1065,7 @@ _cloud_forwarding.init(
     rate_limiter=cloud_rate_limiter,
     health_tracker=failover_health,
     guardian_request_cancelled=_GuardianRequestCancelled,
+    await_request_disconnect=_queue_helpers.await_request_disconnect,
     stream_heartbeat_interval_s=STREAM_HEARTBEAT_INTERVAL_S,
     grammar_enabled=_GRAMMAR_CFG.get("enabled", True),
     grammar_cloud_auto_convert_json=_GRAMMAR_CFG.get("cloud_auto_convert_json", False),
