@@ -42,6 +42,11 @@ from app.capture.wal_writer import CaptureWALWriter
 
 logger = logging.getLogger("Guardian.Capture.Integration")
 
+#: Maximum number of tracked per-request origin records.  Entries are popped
+#: when the terminal event for a request is dispatched; the cap bounds memory
+#: for requests whose terminal event never arrives (e.g. process restart).
+MAX_TRACKED_REQUEST_ORIGINS = 4096
+
 
 class CaptureController:
     """Central facade for capture operations, wired into the Guardian request lifecycle.
@@ -57,6 +62,21 @@ class CaptureController:
         )
         self._writer: Optional[CaptureWALWriter] = None
         self._writer_started: bool = False
+        # Per-request caller-origin registry (request_id → identity fields
+        # captured from the configured inbound request headers).  Populated by
+        # :meth:`maybe_capture_request_received` and consumed by the terminal
+        # event builders so the identity is present on ALL events of a request
+        # regardless of which call site built the BuildContext.
+        self._request_origin: Dict[str, Dict[str, str]] = {}
+
+    @property
+    def _origin_registry(self) -> Dict[str, Dict[str, str]]:
+        """Lazily-created origin registry (tolerates __new__-constructed instances)."""
+        registry = getattr(self, "_request_origin", None)
+        if registry is None:
+            registry = {}
+            self._request_origin = registry
+        return registry
 
     @property
     def config(self) -> CaptureConfig:
@@ -147,6 +167,51 @@ class CaptureController:
         except Exception as exc:
             logger.warning("Capture dispatch error (fail-open): %s", exc)
 
+    def _register_request_origin(
+        self,
+        request_id: str,
+        *,
+        caller_request_id: Optional[str],
+        app_title: Optional[str],
+        app_referer: Optional[str],
+    ) -> None:
+        """Record the caller-origin identity for a captured request (bounded)."""
+        identity = {
+            key: value
+            for key, value in (
+                ("caller_request_id", caller_request_id),
+                ("app_title", app_title),
+                ("app_referer", app_referer),
+            )
+            if value
+        }
+        if not identity:
+            return
+        registry = self._origin_registry
+        if len(registry) >= MAX_TRACKED_REQUEST_ORIGINS and request_id not in registry:
+            # FIFO eviction of the oldest entry keeps the registry bounded.
+            oldest = next(iter(registry))
+            registry.pop(oldest, None)
+        registry[request_id] = identity
+
+    def _apply_request_origin(self, ctx: BuildContext, *, terminal: bool) -> None:
+        """Stamp caller-origin identity from the registry onto a BuildContext.
+
+        Called for every terminal event so the identity captured at
+        request_received time reaches events built from contexts constructed
+        at other call sites.  Terminal events pop the registry entry.
+        """
+        identity = self._origin_registry.get(ctx.request_id)
+        if identity:
+            if ctx.caller_request_id is None:
+                ctx.caller_request_id = identity.get("caller_request_id")
+            if ctx.app_title is None:
+                ctx.app_title = identity.get("app_title")
+            if ctx.app_referer is None:
+                ctx.app_referer = identity.get("app_referer")
+        if terminal:
+            self._origin_registry.pop(ctx.request_id, None)
+
     def _build_context(
         self,
         request_id: str,
@@ -159,6 +224,9 @@ class CaptureController:
         resolved_model: Optional[str] = None,
         grammar_present: bool = False,
         response_format_present: bool = False,
+        caller_request_id: Optional[str] = None,
+        app_title: Optional[str] = None,
+        app_referer: Optional[str] = None,
     ) -> BuildContext:
         """Build a BuildContext from request metadata.
 
@@ -178,6 +246,9 @@ class CaptureController:
             resolved_model=resolved_model,
             grammar_present=grammar_present,
             response_format_present=response_format_present,
+            caller_request_id=caller_request_id,
+            app_title=app_title,
+            app_referer=app_referer,
         )
 
     def maybe_capture_request_received(
@@ -195,6 +266,9 @@ class CaptureController:
         queue_wait_ms: Optional[float] = None,
         grammar_present: bool = False,
         response_format_present: bool = False,
+        caller_request_id: Optional[str] = None,
+        app_title: Optional[str] = None,
+        app_referer: Optional[str] = None,
         sequence: int = 0,
     ) -> Optional[PolicyResult]:
         """Evaluate policy and, if approved, dispatch a request_received event.
@@ -220,12 +294,27 @@ class CaptureController:
         if not policy_result.should_capture:
             return policy_result
 
+        # Track the caller-origin identity so terminal events (whose
+        # BuildContext is built at other call sites) can carry it too.
+        try:
+            self._register_request_origin(
+                request_id,
+                caller_request_id=caller_request_id,
+                app_title=app_title,
+                app_referer=app_referer,
+            )
+        except Exception as exc:
+            logger.warning("request_origin registration error (fail-open): %s", exc)
+
         ctx = self._build_context(
             request_id, endpoint, ingress_protocol, route_type,
             requested_model, client_fingerprint,
             resolved_model=resolved_model,
             grammar_present=grammar_present,
             response_format_present=response_format_present,
+            caller_request_id=caller_request_id,
+            app_title=app_title,
+            app_referer=app_referer,
         )
 
         try:
@@ -264,12 +353,20 @@ class CaptureController:
         tool_results: Optional[List[Dict[str, Any]]] = None,
         reasoning_content: Optional[str] = None,
         finish_reason: Optional[str] = None,
+        native_finish_reason: Optional[str] = None,
         prompt_tokens: Optional[int] = None,
         completion_tokens: Optional[int] = None,
+        completion_tokens_details: Optional[Dict[str, Any]] = None,
+        native_tokens_reasoning: Optional[int] = None,
+        native_tokens_cached: Optional[int] = None,
+        cost: Optional[float] = None,
+        provider_name: Optional[str] = None,
         queue_wait_ms: Optional[float] = None,
         duration_ms: Optional[float] = None,
         http_status: Optional[int] = None,
         streamed: Optional[bool] = None,
+        streamed_ingress: Optional[bool] = None,
+        streamed_upstream: Optional[bool] = None,
         incomplete: Optional[bool] = None,
         attempts: Optional[int] = None,
         sequence: int = 1,
@@ -279,6 +376,9 @@ class CaptureController:
             return
 
         try:
+            # Attach the caller-origin identity registered at request-received
+            # time (no-op when the request is unknown to the registry).
+            self._apply_request_origin(ctx, terminal=True)
             # Raw capture: response content is stored unredacted (Keanu
             # processes it downstream).  No in-pipeline redaction anymore.
             event = build_request_completed_event(
@@ -288,12 +388,20 @@ class CaptureController:
                 tool_results=tool_results,
                 reasoning_content=reasoning_content,
                 finish_reason=finish_reason,
+                native_finish_reason=native_finish_reason,
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
+                completion_tokens_details=completion_tokens_details,
+                native_tokens_reasoning=native_tokens_reasoning,
+                native_tokens_cached=native_tokens_cached,
+                cost=cost,
+                provider_name=provider_name,
                 queue_wait_ms=queue_wait_ms,
                 duration_ms=duration_ms,
                 http_status=http_status,
                 streamed=streamed,
+                streamed_ingress=streamed_ingress,
+                streamed_upstream=streamed_upstream,
                 incomplete=incomplete,
                 attempts=attempts,
                 sequence=sequence,
@@ -320,6 +428,7 @@ class CaptureController:
             return
 
         try:
+            self._apply_request_origin(ctx, terminal=True)
             # Raw capture: the sanitized error message is stored as-is
             # (it is already sanitized by the caller for client safety).
             event = build_request_failed_event(
@@ -352,6 +461,7 @@ class CaptureController:
             return
 
         try:
+            self._apply_request_origin(ctx, terminal=True)
             event = build_request_cancelled_event(
                 self._config, ctx,
                 cancel_reason=cancel_reason,

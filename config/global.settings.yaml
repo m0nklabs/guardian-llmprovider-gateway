@@ -123,8 +123,9 @@ capture:
   capture_root: data/capture
   # ── Retention: INFINITE (operator decision 2026-08-26) ───────────────────
   # -1 = keep everything; retention/cleanup is Keanu's consumption concern,
-  # not a Guardian timer.  Files are gzip-compressed at all times (active
-  # file included) so disk usage stays modest even with raw content.
+  # not a Guardian timer.  Rotated files are gzip-compressed; the active file
+  # is plain JSONL (since the 2026-08-30 capture-feedback change, so tail -f
+  # / jq work and readers never hit a truncated gzip member mid-write).
   retention_days: -1
   max_capture_bytes: -1
   max_pending_events: 10000
@@ -132,4 +133,4 @@ capture:
   max_file_age_seconds: 3600
   file_mode: '0640'
   directory_mode: '0750'
-  policy_version: 1.0.0
+  policy_version: 1.1.0

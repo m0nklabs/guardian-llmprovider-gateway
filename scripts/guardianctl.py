@@ -2,7 +2,7 @@
 """guardianctl — CLI for Guardian capture subsystem control.
 
 Subcommands:
-  status     Show capture subsystem status (config + runtime)
+  status     Show capture subsystem status (config + runtime + retention/on-disk inventory)
   config     Show effective capture configuration
   files      List capture WAL files on disk
   rotate     Force rotation of the active capture file
@@ -18,6 +18,8 @@ Usage:
   ./venv/bin/python scripts/guardianctl.py export --verify --out dataset.jsonl
 
 Note: `status` and `rotate` talk to the running Guardian API.
+      `status` also reports the configured retention and the on-disk
+      capture file inventory (active/rotated files, feedback C11).
       `config`, `enable`, `disable` read/modify settings.yaml directly.
       `files`, `export` inspect the filesystem.
       `export` replays the RAW WAL (Guardian stores raw since 2026-08-26;
@@ -26,9 +28,11 @@ Note: `status` and `rotate` talk to the running Guardian API.
 
 import argparse
 import json
+import os
 import sys
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from _paths import DATA_DIR, REPO_ROOT
 
@@ -89,11 +93,101 @@ def _api_request(method: str, endpoint: str, *, base_url: str = "http://127.0.0.
 # Subcommands
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Retention / on-disk visibility (feedback C11)
+# ---------------------------------------------------------------------------
+
+def _fmt_age(seconds: int) -> str:
+    """Human-readable age (e.g. ``42s``, ``13m``, ``5h``, ``9d``)."""
+    if seconds < 90:
+        return f"{seconds}s"
+    minutes = seconds // 60
+    if minutes < 90:
+        return f"{minutes}m"
+    hours = minutes // 60
+    if hours < 48:
+        return f"{hours}h"
+    return f"{hours // 24}d"
+
+
+def _capture_retention_summary(cfg: Optional[Any] = None) -> dict:
+    """Retention config + actual on-disk capture state (no API needed).
+
+    Retention is enforced inside the WAL writer, so it is invisible in the
+    runtime API; this summary combines the configured values (capture
+    config) with the file inventory on disk so operators can see what
+    retention is set to and what it is actually doing (feedback C11).
+
+    ``cfg`` defaults to the loaded capture config; tests inject a config
+    bound to a temporary capture root.
+    """
+    from app.capture.wal_writer import ACTIVE_FILENAME, LEGACY_ACTIVE_FILENAME
+
+    if cfg is None:
+        from app.capture.config import load_capture_config
+        cfg = load_capture_config()
+
+    root = Path(cfg.capture_root)
+    if not root.is_absolute():
+        root = REPO_ROOT / root
+
+    summary: dict = {
+        "retention_days": cfg.retention_days,
+        "max_capture_bytes": cfg.max_capture_bytes,
+        "max_file_bytes": cfg.max_file_bytes,
+        "max_file_age_seconds": cfg.max_file_age_seconds,
+        "capture_root": str(root),
+        "active_file": None,
+        "rotated_files": 0,
+        "oldest_rotated_file": None,
+        "newest_rotated_file": None,
+    }
+    if not root.is_dir():
+        return summary
+
+    now = time.time()
+
+    def _info(path: Path) -> dict:
+        stat = path.stat()
+        return {
+            "name": path.name,
+            "age_seconds": max(0, int(now - stat.st_mtime)),
+            "size_bytes": stat.st_size,
+        }
+
+    # Active file: plain (new format) or legacy gzip (migrates at next
+    # writer start).
+    for name, fmt in ((ACTIVE_FILENAME, "plain"), (LEGACY_ACTIVE_FILENAME, "legacy_gzip")):
+        candidate = root / name
+        if candidate.is_file():
+            info = _info(candidate)
+            info["format"] = fmt
+            summary["active_file"] = info
+            break
+
+    # Rotated (completed) .jsonl.gz archive, oldest first by name — the
+    # timestamp prefix makes lexicographic order chronological.
+    rotated = sorted(
+        (p for p in root.glob("guardian_capture_*.jsonl.gz")
+         if p.name not in (ACTIVE_FILENAME, LEGACY_ACTIVE_FILENAME) and p.is_file()),
+        key=lambda p: p.name,
+    )
+    summary["rotated_files"] = len(rotated)
+    if rotated:
+        summary["oldest_rotated_file"] = _info(rotated[0])
+        summary["newest_rotated_file"] = _info(rotated[-1])
+    return summary
+
+
 def cmd_status(args: argparse.Namespace) -> None:
     """Show capture subsystem status via the running Guardian API."""
     result = _api_request("GET", "/api/capture/status")
     if args.json:
-        print(json.dumps(result, indent=2))
+        try:
+            result["retention"] = _capture_retention_summary()
+        except Exception as exc:
+            result["retention"] = {"error": str(exc)}
+        print(json.dumps(result, indent=2, default=str))
         return
 
     cfg = result.get("config", {})
@@ -118,6 +212,35 @@ def cmd_status(args: argparse.Namespace) -> None:
         print("  Runtime:")
         for k, v in runtime.items():
             print(f"    {k:30s} {v}")
+    print()
+    print("  Retention & capture files (local disk):")
+    try:
+        ret = _capture_retention_summary()
+    except Exception as exc:
+        ret = None
+        print(f"    (unavailable: {exc})")
+    if ret is not None:
+        policy = "keep forever" if ret["retention_days"] < 0 else f"{ret['retention_days']} day(s)"
+        budget = ("unlimited" if ret["max_capture_bytes"] < 0
+                  else f"{ret['max_capture_bytes']:,} bytes")
+        print(f"    retention_days:      {ret['retention_days']}  ({policy})")
+        print(f"    max_capture_bytes:   {ret['max_capture_bytes']}  ({budget})")
+        print(f"    rotation thresholds: {ret['max_file_bytes']:,} bytes or {ret['max_file_age_seconds']}s per file")
+        active = ret.get("active_file")
+        if active:
+            fmt_label = ("plain (new format — mid-write readable)"
+                         if active["format"] == "plain"
+                         else "legacy gzip (renamed at next writer start)")
+            print(f"    Active file:         {active['name']}  "
+                  f"({active['size_bytes']:,} bytes, {fmt_label})")
+        else:
+            print("    Active file:         (none yet — created on first capture event)")
+        if ret.get("oldest_rotated_file"):
+            oldest = ret["oldest_rotated_file"]
+            newest = ret["newest_rotated_file"]
+            print(f"    Oldest rotated file: {oldest['name']}  (age {_fmt_age(oldest['age_seconds'])})")
+            print(f"    Newest rotated file: {newest['name']}  (age {_fmt_age(newest['age_seconds'])})")
+        print(f"    Rotated files:       {ret['rotated_files']}")
     print("━" * 60)
 
 
@@ -159,7 +282,7 @@ def cmd_files(args: argparse.Namespace) -> None:
     if args.json:
         out = [
             {
-                "path": str(f.relative_to(REPO_ROOT)),
+                "path": os.path.relpath(str(f), str(REPO_ROOT)),
                 "size_bytes": f.stat().st_size,
                 "modified": f.stat().st_mtime,
                 "suffix": f.suffix,
@@ -175,15 +298,18 @@ def cmd_files(args: argparse.Namespace) -> None:
     for f in files:
         size = f.stat().st_size
         if f.name.startswith("guardian_capture_current"):
-            # The active WAL is stream-gzip since 2026-08-26; a non-gz
-            # "current" file is a legacy plain JSONL leftover (no longer
-            # written or read by the pipeline — export ignores it).
-            ftype = "active (gzip)" if f.suffix == ".gz" else "legacy (plain)"
+            # The active WAL is plain .jsonl since 2026-08-30 (feedback C3:
+            # readable line-by-line while the writer is mid-stream); a gzip
+            # "current" file is a legacy leftover from the previous
+            # stream-gzip writer (renamed by the next writer start).
+            ftype = "active (plain)" if f.suffix == ".jsonl" else "legacy (gzip)"
         elif f.suffix == ".sha256":
             ftype = "checksum"
+        elif f.suffix == ".gz":
+            ftype = "gzip (rotated)"
         else:
-            ftype = "gzip"
-        print(f"{str(f.relative_to(REPO_ROOT)):<50s} {size:>12,}  {ftype}")
+            ftype = "plain (pending gzip at next writer start)"
+        print(f"{os.path.relpath(str(f), str(REPO_ROOT)):<50s} {size:>12,}  {ftype}")
     print("─" * 72)
     print(f"{'Total:':<50s} {total_bytes:>12,}")
     print(f"\nTotal files: {len(files)}")
@@ -307,25 +433,34 @@ def _iter_wal_events(
 ) -> Any:
     """Yield (path, event_dict) for every WAL record, oldest file first.
 
-    Order: completed files by name (timestamp_seq), then the active file.
-    Completed files are checked against their ``.sha256`` sidecar when
-    ``verify_checksums``.  Records are read with the crash-tolerant gzip
-    reader (a restart after a crash appends a new gzip member to the active
-    file).  With ``verify_auth`` (and a secret), every record's ``record_auth``
-    HMAC is validated.
+    Order: completed files by name (timestamp_seq), then the active file
+    (plain new format and/or legacy gzip).  Completed files are checked
+    against their ``.sha256`` sidecar when ``verify_checksums``.  Records
+    are read with the crash-tolerant reader (plain and gzip files through
+    the same API; a pre-2026-08-30 active file may contain multi-member
+    gzip from restarts after a crash).  With ``verify_auth`` (and a
+    secret), every record's ``record_auth`` HMAC is validated.
     """
     import hashlib
     import hmac
 
     from app.capture.gzip_reader import iter_records
+    from app.capture.wal_writer import ACTIVE_FILENAME, LEGACY_ACTIVE_FILENAME
 
-    files = sorted(root.glob("guardian_capture_*.jsonl.gz"))
-    active = root / "guardian_capture_current.jsonl.gz"
-    if active.exists() and active not in files:
-        files.append(active)
+    active_names = (ACTIVE_FILENAME, LEGACY_ACTIVE_FILENAME)
+
+    completed: set = set(root.glob("guardian_capture_*.jsonl.gz"))
+    completed.update(root.glob("guardian_capture_*.jsonl"))
+    completed = {p for p in completed if p.is_file() and p.name not in active_names}
+    files = sorted(completed, key=lambda p: p.name)
+    # Active file(s) last — they hold the newest records.
+    for name in active_names:
+        active = root / name
+        if active.is_file():
+            files.append(active)
 
     for path in files:
-        if verify_checksums and path != active:
+        if verify_checksums and path.name not in active_names:
             sidecar = path.with_suffix(".sha256")
             if sidecar.exists():
                 expected = sidecar.read_text().split()[0]

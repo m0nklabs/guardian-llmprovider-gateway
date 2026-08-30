@@ -20,12 +20,62 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import Request
 
-from app.capture.config import PROTOCOL_OPENAI, PROTOCOL_ANTHROPIC, PROTOCOL_OLLAMA
+from app.capture.config import (
+    PROTOCOL_OPENAI,
+    PROTOCOL_ANTHROPIC,
+    PROTOCOL_OLLAMA,
+    DEFAULT_CORRELATION_HEADERS,
+)
 from app.capture.integration import get_capture_controller
 from app.capture.schema import BuildContext
 from app.capture.stream_assembler import StreamResponseAssembler
 
 logger = logging.getLogger("Guardian")
+
+# ── Caller-origin extraction (C5 app origin / C6 correlation) ────────
+
+#: Maximum stored length for caller-supplied identity header values.
+CALLER_IDENTITY_MAX_LEN = 256
+
+#: OpenRouter app-attribution headers captured as ``app_title``/``app_referer``
+#: when the inbound client actually sent them (never fabricated).
+APP_TITLE_HEADER = "x-title"
+APP_REFERER_HEADER = "http-referer"
+
+
+def _capped_header_value(request: Request, header_name: str) -> Optional[str]:
+    """Return a stripped, length-capped inbound header value (or None)."""
+    try:
+        raw = request.headers.get(header_name)
+    except Exception:
+        return None
+    if not isinstance(raw, str):
+        return None
+    value = raw.strip()
+    if not value:
+        return None
+    return value[:CALLER_IDENTITY_MAX_LEN]
+
+
+def _caller_request_id(request: Request, config: Any) -> Optional[str]:
+    """First match (in config order) among the configured correlation headers.
+
+    Only headers listed in ``config.correlation_headers`` are ever read; a
+    missing/unusable config falls back to the default correlation list.
+    """
+    headers = None
+    try:
+        headers = config.correlation_headers
+    except Exception:
+        headers = None
+    if not headers:
+        headers = DEFAULT_CORRELATION_HEADERS
+    for header_name in headers:
+        value = _capped_header_value(request, str(header_name))
+        if value:
+            return value
+    return None
+
 
 # ── Injected helpers ─────────────────────────────────────────────────
 # These are set by ``init()`` at startup.
@@ -118,6 +168,12 @@ def dispatch_capture_request_received(
             or "format" in options_dict
         )
         response_format_present = bool("response_format" in params)
+        # Caller correlation + app origin (C5/C6): read ONLY the configured
+        # correlation headers plus the fixed app-attribution headers.  Values
+        # are length-capped; absent headers leave the fields absent.
+        caller_request_id = _caller_request_id(request, controller.config)
+        app_title = _capped_header_value(request, APP_TITLE_HEADER)
+        app_referer = _capped_header_value(request, APP_REFERER_HEADER)
         return controller.maybe_capture_request_received(
             request_id=request_id,
             client_fingerprint=client_fingerprint,
@@ -131,6 +187,9 @@ def dispatch_capture_request_received(
             queue_wait_ms=queue_wait_ms,
             grammar_present=grammar_present,
             response_format_present=response_format_present,
+            caller_request_id=caller_request_id,
+            app_title=app_title,
+            app_referer=app_referer,
         )
     except Exception:
         return None
@@ -145,12 +204,20 @@ def dispatch_capture_request_completed(
     tool_results: Optional[list] = None,
     reasoning_content: Optional[str] = None,
     finish_reason: Optional[str] = None,
+    native_finish_reason: Optional[str] = None,
     prompt_tokens: Optional[int] = None,
     completion_tokens: Optional[int] = None,
+    completion_tokens_details: Optional[Dict[str, Any]] = None,
+    native_tokens_reasoning: Optional[int] = None,
+    native_tokens_cached: Optional[int] = None,
+    cost: Optional[float] = None,
+    provider_name: Optional[str] = None,
     queue_wait_ms: Optional[float] = None,
     duration_ms: Optional[float] = None,
     http_status: Optional[int] = None,
     streamed: Optional[bool] = None,
+    streamed_ingress: Optional[bool] = None,
+    streamed_upstream: Optional[bool] = None,
     incomplete: Optional[bool] = None,
     attempts: Optional[int] = None,
 ) -> None:
@@ -165,12 +232,20 @@ def dispatch_capture_request_completed(
             tool_results=tool_results,
             reasoning_content=reasoning_content,
             finish_reason=finish_reason,
+            native_finish_reason=native_finish_reason,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            completion_tokens_details=completion_tokens_details,
+            native_tokens_reasoning=native_tokens_reasoning,
+            native_tokens_cached=native_tokens_cached,
+            cost=cost,
+            provider_name=provider_name,
             queue_wait_ms=queue_wait_ms,
             duration_ms=duration_ms,
             http_status=http_status,
             streamed=streamed,
+            streamed_ingress=streamed_ingress,
+            streamed_upstream=streamed_upstream,
             incomplete=incomplete,
             attempts=attempts,
         )
@@ -250,11 +325,22 @@ def dispatch_capture_stream_completed(
             policy_result=policy_result,
             response_content=assembled.get("content"),
             tool_calls=assembled.get("tool_calls"),
+            reasoning_content=assembled.get("reasoning_content"),
             finish_reason=assembled.get("finish_reason"),
+            native_finish_reason=assembled.get("native_finish_reason"),
+            completion_tokens_details=assembled.get("completion_tokens_details"),
+            native_tokens_reasoning=assembled.get("native_tokens_reasoning"),
+            native_tokens_cached=assembled.get("native_tokens_cached"),
+            cost=assembled.get("cost"),
+            provider_name=assembled.get("provider_name"),
             prompt_tokens=usage_totals.get("prompt_tokens") or None,
             completion_tokens=usage_totals.get("completion_tokens") or None,
             http_status=status_code,
             streamed=True,
+            # Local streaming: the upstream leg streamed because the client
+            # requested streaming (this wrapper only runs on stream branches).
+            streamed_ingress=True,
+            streamed_upstream=True,
             incomplete=assembled.get("incomplete"),
         )
     except Exception:
@@ -278,11 +364,41 @@ def dispatch_capture_nonstream_completed(
     try:
         response_content = None
         finish_reason = None
+        native_finish_reason = None
         prompt_tokens = None
         completion_tokens = None
         tool_calls = None
+        captured_reasoning = None
+        completion_tokens_details = None
+        native_tokens_reasoning = None
+        native_tokens_cached = None
+        cost = None
+        provider_name = None
+
+        def _accept_usage_mirror(usage: Any) -> None:
+            """Fill the rich usage mirror fields from an upstream usage dict."""
+            nonlocal completion_tokens_details, native_tokens_reasoning
+            nonlocal native_tokens_cached, cost
+            if not isinstance(usage, dict):
+                return
+            details = usage.get("completion_tokens_details")
+            if isinstance(details, dict) and details:
+                completion_tokens_details = details
+            ntr = usage.get("native_tokens_reasoning")
+            if isinstance(ntr, (int, float)) and not isinstance(ntr, bool):
+                native_tokens_reasoning = int(ntr)
+            ntc = usage.get("native_tokens_cached")
+            if isinstance(ntc, (int, float)) and not isinstance(ntc, bool):
+                native_tokens_cached = int(ntc)
+            cost_val = usage.get("cost")
+            if isinstance(cost_val, (int, float)) and not isinstance(cost_val, bool):
+                cost = float(cost_val)
 
         if isinstance(payload, dict):
+            # Provider-reported serving provider slug (OpenRouter shape).
+            reported_provider = payload.get("provider")
+            if isinstance(reported_provider, str) and reported_provider:
+                provider_name = reported_provider
             # Check if this is an Anthropic-style response (has 'content' array, not 'choices')
             if "choices" not in payload and "content" in payload:
                 # Anthropic /v1/messages response format
@@ -315,6 +431,7 @@ def dispatch_capture_nonstream_completed(
                 if isinstance(usage, dict):
                     prompt_tokens = _coerce_usage_int(usage.get("input_tokens", 0))
                     completion_tokens = _coerce_usage_int(usage.get("output_tokens", 0))
+                    _accept_usage_mirror(usage)
             else:
                 # OpenAI chat/completions response format
                 choices = payload.get("choices", [])
@@ -325,10 +442,36 @@ def dispatch_capture_nonstream_completed(
                         content = message.get("content")
                         if isinstance(content, str):
                             response_content = content
-                        finish_reason = message.get("finish_reason")
+                        # finish_reason lives on choices[0] for OpenAI
+                        # responses; fall back to message-level for tolerant
+                        # clients that put it there (non-str values ignored).
+                        choice_finish = first.get("finish_reason")
+                        if isinstance(choice_finish, str) and choice_finish:
+                            finish_reason = choice_finish
+                        else:
+                            message_finish = message.get("finish_reason")
+                            if isinstance(message_finish, str) and message_finish:
+                                finish_reason = message_finish
+                        # Provider-reported native stop reason (OpenRouter
+                        # shape: choices[0].native_finish_reason).
+                        choice_native = first.get("native_finish_reason")
+                        if isinstance(choice_native, str) and choice_native:
+                            native_finish_reason = choice_native
+                        else:
+                            message_native = message.get("native_finish_reason")
+                            if isinstance(message_native, str) and message_native:
+                                native_finish_reason = message_native
                         tc = message.get("tool_calls")
                         if isinstance(tc, list):
                             tool_calls = tc
+                        # Reasoning is captured separately from content —
+                        # some providers send reasoning_content, others
+                        # (OpenRouter-style) send reasoning.
+                        reasoning = message.get("reasoning_content")
+                        if not isinstance(reasoning, str) or not reasoning:
+                            reasoning = message.get("reasoning")
+                        if isinstance(reasoning, str) and reasoning:
+                            captured_reasoning = reasoning
                     delta = first.get("delta", {})
                     if isinstance(delta, dict):
                         content = delta.get("content")
@@ -339,18 +482,29 @@ def dispatch_capture_nonstream_completed(
                 if isinstance(usage, dict):
                     prompt_tokens = _coerce_usage_int(usage.get("prompt_tokens", usage.get("input_tokens", 0)))
                     completion_tokens = _coerce_usage_int(usage.get("completion_tokens", usage.get("output_tokens", 0)))
+                    _accept_usage_mirror(usage)
 
         dispatch_capture_request_completed(
             ctx,
             policy_result=policy_result,
             response_content=response_content,
             finish_reason=finish_reason,
+            native_finish_reason=native_finish_reason,
+            reasoning_content=captured_reasoning,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
+            completion_tokens_details=completion_tokens_details,
+            native_tokens_reasoning=native_tokens_reasoning,
+            native_tokens_cached=native_tokens_cached,
+            cost=cost,
+            provider_name=provider_name,
             tool_calls=tool_calls,
             http_status=status_code,
             streamed=False,
-            incomplete=False,
+            # Local non-streaming: neither leg streamed.
+            streamed_ingress=False,
+            streamed_upstream=False,
+            incomplete=(finish_reason is None or finish_reason == "null"),
             duration_ms=(time.monotonic() - request_start_time) * 1000,
         )
     except Exception:

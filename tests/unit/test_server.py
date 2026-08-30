@@ -2439,10 +2439,34 @@ class TestExtractCloudResponseContent:
         assert content is None
         assert tool_calls == tcs
 
-    def test_extracts_openai_reasoning_fallback(self):
+    def test_reasoning_not_stuffed_into_content(self):
+        """Reasoning is never folded into response content (2026-08-30 contract):
+        content is the model's actual content only (None here) — reasoning is
+        captured separately via extract_cloud_reasoning_content.
+        """
         payload = {"choices": [{"message": {"content": None, "reasoning_content": "Thinking..."}}]}
         content, tool_calls = server._extract_cloud_response_content(payload)
-        assert content == "Thinking..."
+        assert content is None
+        assert tool_calls is None
+
+    def test_extracts_finish_reason_from_choice(self):
+        payload = {"choices": [{"finish_reason": "length", "message": {"content": "Answer"}}]}
+        assert server._cloud_routing.extract_cloud_finish_reason(payload) == "length"
+
+    def test_finish_reason_falls_back_to_message_level(self):
+        payload = {"choices": [{"message": {"content": "Answer", "finish_reason": "stop"}}]}
+        assert server._cloud_routing.extract_cloud_finish_reason(payload) == "stop"
+
+    def test_extracts_anthropic_stop_reason(self):
+        payload = {"content": [{"type": "text", "text": "Hello"}], "stop_reason": "end_turn"}
+        assert server._cloud_routing.extract_cloud_finish_reason(payload) == "end_turn"
+
+    def test_finish_reason_returns_none_when_absent(self):
+        assert server._cloud_routing.extract_cloud_finish_reason(None) is None
+        assert server._cloud_routing.extract_cloud_finish_reason({}) is None
+        assert server._cloud_routing.extract_cloud_finish_reason(
+            {"choices": [{"message": {"content": "Hi"}}]}
+        ) is None
 
     def test_extracts_reasoning_content_separately(self):
         payload = {"choices": [{"message": {"content": "Answer", "reasoning_content": "Let me think"}}]}

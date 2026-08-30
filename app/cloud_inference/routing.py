@@ -266,10 +266,44 @@ def extract_cloud_reasoning_content(
     return None
 
 
+def extract_cloud_finish_reason(
+    payload: Optional[Dict[str, Any]],
+) -> Optional[str]:
+    """Extract the finish/stop reason from a non-streaming cloud response.
+
+    OpenAI chat completions put ``finish_reason`` on ``choices[0]`` (not on
+    the message); Anthropic responses use a top-level ``stop_reason``.
+    Returns None when absent.
+    """
+    if not isinstance(payload, dict):
+        return None
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices:
+        choice = choices[0] if isinstance(choices[0], dict) else {}
+        finish_reason = choice.get("finish_reason")
+        if isinstance(finish_reason, str) and finish_reason:
+            return finish_reason
+        msg = choice.get("message")
+        if isinstance(msg, dict):
+            fallback = msg.get("finish_reason")
+            if isinstance(fallback, str) and fallback:
+                return fallback
+        return None
+    stop_reason = payload.get("stop_reason")
+    if isinstance(stop_reason, str) and stop_reason:
+        return stop_reason
+    return None
+
+
 def extract_cloud_response_content(
     payload: Optional[Dict[str, Any]],
 ) -> Tuple[Optional[str], Optional[list]]:
-    """Extract text content and tool_calls from a non-streaming cloud response."""
+    """Extract text content and tool_calls from a non-streaming cloud response.
+
+    ``content`` is the model's actual content only (may be None). Reasoning is
+    never folded in here — it is captured separately via
+    :func:`extract_cloud_reasoning_content`.
+    """
     if not isinstance(payload, dict):
         return None, None
 
@@ -290,9 +324,6 @@ def extract_cloud_response_content(
             tc = msg.get("tool_calls")
             if isinstance(tc, list) and tc:
                 tool_calls = tc
-            reasoning = msg.get("reasoning_content")
-            if isinstance(reasoning, str) and reasoning and not content_parts:
-                content_parts.append(reasoning)
 
     if not content_parts and tool_calls is None:
         anthropic_content = payload.get("content")
