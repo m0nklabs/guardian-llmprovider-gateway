@@ -16,8 +16,9 @@ base_url: http://192.168.1.x:11440/v1
 api_key: ${WINDOWS_LAN_KEY}
 brand: windows
 # llama-server advertises /v1/models (OpenAI-compatible); bare model ids are
-# normalized to windows/<model> by the catalog (brand above).
-catalog_url: /v1/models
+# normalized to windows/<model> by the catalog (brand above).  catalog_url is
+# APPENDED to base_url (which already ends in /v1) — /models → /v1/models.
+catalog_url: /models
 # Reference for the Windows-side caretaker control API (the gateway's own
 # caretaker runtime only manages THIS host's llama-server; the Windows GPU is
 # operator-managed).  Auth is mandatory from the first LAN bind (CARETAKER_KEY
