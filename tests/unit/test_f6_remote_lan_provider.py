@@ -122,4 +122,11 @@ def test_shipped_14700k_provider_file_markers():
     # pre-restart gate would fail on every later restart.
     if "192.168.1.x" in cfg.get("base_url", ""):
         assert cfg["enabled"] is False, "placeholder config must stay disabled"
-        assert cfg["api_key"] == "${WINDOWS_LAN_KEY}"  # env-only secret, never inline
+    # Secret hygiene applies REGARDLESS of activation state: api_key stays
+    # ${VAR}-referenced, never an inline secret in the committed file.
+    api_key = cfg.get("api_key")
+    assert (
+        isinstance(api_key, str)
+        and api_key.startswith("${")
+        and api_key.endswith("}")
+    ), "api_key must stay ${VAR}-referenced, never an inline secret"
