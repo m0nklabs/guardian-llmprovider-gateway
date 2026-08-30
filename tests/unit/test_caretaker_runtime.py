@@ -55,6 +55,9 @@ def _manager(**attrs) -> MagicMock:
     # Identity resolver by default — tests override it when they need alias
     # canonicalization semantics.
     mgr.resolve_model = Mock(side_effect=lambda name: name)
+    # Live-process probe defaults: a text-only process unless a test says
+    # otherwise (drives the effective-vision mirror and the vision guards).
+    mgr.current_runtime_uses_mmproj = Mock(return_value=False)
     for k, v in attrs.items():
         setattr(mgr, k, v)
     return mgr
@@ -70,6 +73,8 @@ async def test_client_none_runs_local_fallback():
 async def test_remote_success_calls_ensure_and_marks_loaded():
     client = _StubClient()
     mgr = _manager()
+    # Vision is requested and the live process confirms mmproj -> success.
+    mgr.current_runtime_uses_mmproj = Mock(return_value=True)
     crt.init(model_manager=mgr, caretaker_client=client)
     result = await crt.ensure_backend(
         model="m",
@@ -123,6 +128,43 @@ async def test_remote_success_vision_request_with_mmproj_marks_loaded():
     )
 
 
+async def test_remote_success_vision_none_textonly_process_serves_text_request():
+    """With enable_vision=None (ollama bridge / connect-error recovery
+    reloads) the request has NO vision need — a daemon legitimately serving a
+    vision-capable model text-only (VRAM limits, daemon config without mmproj)
+    must NOT 503 the text request even though the gateway's current stamp is
+    vision-enabled.  The mark mirrors the LIVE text-only state instead."""
+    client = _StubClient()
+    mgr = _manager()
+    # The gateway's CURRENT stamp says vision (stale vs the daemon's process).
+    mgr._resolve_runtime_vision_flag = Mock(return_value=True)
+    mgr.current_runtime_uses_mmproj = Mock(return_value=False)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    result = await crt.ensure_backend(model="m", local_fallback=AsyncMock())
+    assert result == "remote"
+    # Truthful stamp: the live process is text-only -> current_vision_enabled
+    # is cleared so a later image request triggers a vision-enabled switch.
+    mgr.mark_loaded_by_caretaker.assert_called_once_with(
+        "m", enable_vision=False, context_hint=None
+    )
+
+
+async def test_remote_success_vision_none_process_with_mmproj_marks_true():
+    """With enable_vision=None and a LIVE process that uses mmproj, the mark
+    mirrors the process (vision enabled) — same as the resolved default for
+    the already-active model."""
+    client = _StubClient()
+    mgr = _manager()
+    mgr._resolve_runtime_vision_flag = Mock(return_value=True)
+    mgr.current_runtime_uses_mmproj = Mock(return_value=True)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    result = await crt.ensure_backend(model="m", local_fallback=AsyncMock())
+    assert result == "remote"
+    mgr.mark_loaded_by_caretaker.assert_called_once_with(
+        "m", enable_vision=True, context_hint=None
+    )
+
+
 async def test_unavailable_timeout_rereprobe_succeeds_remote():
     """A transport TIMEOUT is NOT a dead daemon: the daemon accepted the
     connection, so it is alive (mid-switch).  Re-probing once must recover a
@@ -140,7 +182,7 @@ async def test_unavailable_timeout_rereprobe_succeeds_remote():
     assert client.ensure.await_count == 2
     fallback.assert_not_awaited()
     mgr.mark_loaded_by_caretaker.assert_called_once_with(
-        "m", enable_vision=None, context_hint=None
+        "m", enable_vision=False, context_hint=None
     )
 
 
@@ -183,7 +225,7 @@ async def test_unavailable_timeout_twice_adopts_when_backend_now_serves(monkeypa
     # Adopt semantics: no restore (no daemon fresh_load confirmation).
     mgr.restore_current_context.assert_not_awaited()
     mgr.mark_loaded_by_caretaker.assert_called_once_with(
-        "m", enable_vision=None, context_hint=None
+        "m", enable_vision=False, context_hint=None
     )
 
 
@@ -204,7 +246,7 @@ async def test_unavailable_timeout_twice_adopts_when_load_confirms_late(monkeypa
     assert mgr.backend_serves_model.await_count == 2
     fallback.assert_not_awaited()
     mgr.mark_loaded_by_caretaker.assert_called_once_with(
-        "m", enable_vision=None, context_hint=None
+        "m", enable_vision=False, context_hint=None
     )
 
 
@@ -338,7 +380,7 @@ async def test_unavailable_connection_refused_then_daemon_rebounds_remote(monkey
     assert client.ensure.await_count == 3
     fallback.assert_not_awaited()
     mgr.mark_loaded_by_caretaker.assert_called_once_with(
-        "m", enable_vision=None, context_hint=None
+        "m", enable_vision=False, context_hint=None
     )
     mgr.restore_current_context.assert_not_awaited()
 
@@ -432,7 +474,7 @@ async def test_unavailable_connection_refused_late_rebind_remote(monkeypatch):
     assert client.ensure.await_count == 5  # 2 probes + 3 poll attempts
     fallback.assert_not_awaited()
     mgr.mark_loaded_by_caretaker.assert_called_once_with(
-        "m", enable_vision=None, context_hint=None
+        "m", enable_vision=False, context_hint=None
     )
     mgr.restore_current_context.assert_not_awaited()
 
@@ -570,7 +612,7 @@ async def test_unavailable_with_healthy_backend_adopts_state():
         "m", enable_vision=None, context_hint=None
     )
     mgr.mark_loaded_by_caretaker.assert_called_once_with(
-        "m", enable_vision=None, context_hint=None
+        "m", enable_vision=False, context_hint=None
     )
     fallback.assert_not_awaited()
     # Adopt never restores: there is no /ensure response to confirm freshness,
@@ -620,7 +662,26 @@ async def test_unavailable_vision_request_backend_without_mmproj_fails_closed():
             model="m", enable_vision=True, local_fallback=fallback
         )
     fallback.assert_not_awaited()
-    mgr.mark_loaded_by_caretaker.assert_not_called()
+
+
+async def test_unavailable_adopt_vision_none_textonly_process_adopts():
+    """enable_vision=None (reloads) has no vision need — a daemon-served
+    text-only process on a vision-capable model may be adopted and the mark
+    mirrors the LIVE text-only state (a later image request triggers a
+    vision-enabled switch) instead of failing the text request."""
+    client = _StubClient()
+    client.ensure.side_effect = CaretakerUnavailable("http://x:11441")
+    mgr = _manager()
+    mgr.backend_serves_model = AsyncMock(return_value=True)
+    mgr.backend_health_ok = AsyncMock(return_value=True)
+    mgr._resolve_runtime_vision_flag = Mock(return_value=True)
+    mgr.current_runtime_uses_mmproj = Mock(return_value=False)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    result = await crt.ensure_backend(model="m", local_fallback=AsyncMock())
+    assert result == "local-healthy"
+    mgr.mark_loaded_by_caretaker.assert_called_once_with(
+        "m", enable_vision=False, context_hint=None
+    )
 
 
 async def test_unavailable_adopt_never_restores():
@@ -883,7 +944,7 @@ async def test_remote_loaded_model_alias_does_not_mismatch():
     result = await crt.ensure_backend(model="m", local_fallback=AsyncMock())
     assert result == "remote"
     mgr.mark_loaded_by_caretaker.assert_called_once_with(
-        "m", enable_vision=None, context_hint=None
+        "m", enable_vision=False, context_hint=None
     )
 
 
