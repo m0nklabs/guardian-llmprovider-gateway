@@ -57,6 +57,7 @@ Decision logic:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 
@@ -115,6 +116,156 @@ async def _backend_now_serving(
     ):
         return None
     return {"loaded_model": model}
+
+
+def _map_caretaker_error(exc: CaretakerError) -> Exception:
+    """Map a caretaker error to the error type the hotpath callers handle.
+
+    ``CaretakerModelNotFound``/``CaretakerVramExceeded``/``CaretakerModelLoadFailed``
+    become ``ModelLoadError`` (the daemon's ``crash_details`` — its
+    ``CrashRecord.to_dict()`` — become the raised ``crash_record`` so the
+    hotpath crash recording keeps working unchanged); ``CaretakerInvalidRequest``
+    becomes ``ValueError``; anything else fails closed into ``ModelLoadError``.
+    """
+    if isinstance(exc, CaretakerModelNotFound):
+        return ModelLoadError(str(exc))
+    if isinstance(exc, CaretakerVramExceeded):
+        return ModelLoadError(str(exc))
+    if isinstance(exc, CaretakerModelLoadFailed):
+        crash_record = None
+        details = exc.crash_details
+        if isinstance(details, dict):
+            try:
+                crash_record = CrashRecord(
+                    timestamp=details.get("timestamp", ""),
+                    model=details.get("model", getattr(exc, "model", "")),
+                    error_message=details.get("error_message", str(exc)),
+                    exit_code=details.get("exit_code"),
+                    config_snapshot=details.get("config_snapshot"),
+                )
+            except Exception:  # noqa: BLE001 — telemetry mapping must never break the error path
+                crash_record = None
+        return ModelLoadError(str(exc), crash_record=crash_record)
+    if isinstance(exc, CaretakerInvalidRequest):
+        return ValueError(str(exc))
+    logger.error("F5: caretaker ensure failed unexpectedly: %s", exc)
+    return ModelLoadError(str(exc))
+
+
+async def _complete_remote(
+    model: str,
+    result: dict,
+    *,
+    enable_vision: bool | None,
+    context_hint: int | None,
+    pre_switch_save: bool,
+    capability_before: bool,
+) -> str:
+    """Finalize a SUCCESSFUL remote ensure: verify the response names the
+    requested model, guard vision integrity, mirror the loaded state and
+    return ``"remote"``.
+
+    Shared by the primary path and the bounded re-probe after a refused
+    connection (restart window), so both run identical validation.
+    """
+    # The caretaker response names the model it actually loaded.  Without a
+    # truthful loaded_model the gateway cannot tell whether the backend now
+    # serves the requested model — never claim success from an unknown
+    # caretaker state.  The same holds when the caretaker resolved the request
+    # to a different model (caretaker-side alias/fallback/partial load): do
+    # NOT adopt the requested model's loaded state, the backend would desync
+    # from gateway state.
+    #
+    # NOTE: fail CLOSED here (ModelLoadError), not local_fallback().  The
+    # local lifecycle safety rationale ("nothing else owns the backend port")
+    # only holds when the caretaker is DOWN.  Here the daemon is alive and
+    # owns the backend — running gateway load()/switch_model() against an
+    # already-running instance would be a no-op that still flips current_model
+    # to the requested model while the backend actually serves the caretaker's
+    # different model: the exact desync we are preventing.  The hotpath maps
+    # ModelLoadError to its existing crash/503 handling.
+    if not isinstance(result, dict) or "loaded_model" not in (result or {}):
+        logger.warning(
+            "F5: caretaker /ensure response did not name a loaded_model — "
+            "failing closed to avoid a second controller on the backend"
+        )
+        raise ModelLoadError(
+            "Caretaker /ensure succeeded but did not report the loaded model"
+        )
+    loaded = result["loaded_model"]
+    # Canonicalize BOTH sides through the gateway's resolver before comparing:
+    # the caretaker may report the canonical name for an alias we sent (or
+    # vice versa), and a raw string compare would turn a legitimate
+    # alias-load into a false ModelLoadError/503 on every such request.
+    # Unknown names on either side fall back to the raw string (the equality
+    # then fails closed, which is correct).
+    try:
+        resolved_loaded = _model_manager.resolve_model(loaded) if _model_manager else loaded
+    except ValueError:
+        resolved_loaded = loaded
+    try:
+        resolved_requested = _model_manager.resolve_model(model) if _model_manager else model
+    except ValueError:
+        resolved_requested = model
+    if resolved_loaded != resolved_requested:
+        logger.warning(
+            "F5: caretaker loaded '%s' instead of requested '%s' — "
+            "failing closed to avoid a second controller on the backend",
+            loaded,
+            model,
+        )
+        raise ModelLoadError(
+            f"Caretaker loaded '{loaded}' instead of requested '{model}'"
+        )
+
+    if _model_manager is not None:
+        # Mirror the adopt-path guard: the daemon may have resolved vision
+        # differently than the gateway (own config / hot config edit /
+        # daemon-side vision resolution dropping mmproj).  If the request
+        # needed vision but the LIVE process launched without mmproj,
+        # stamping current_vision_enabled=True would forward image requests
+        # to a backend that cannot serve them — fail closed instead of
+        # desyncing (the probe is reliable here: the daemon writes the args
+        # file it launches with, in the same CURRENT_MODEL_ARGS_FILE the
+        # gateway reads).
+        if (
+            _model_manager._resolve_runtime_vision_flag(model, enable_vision)
+            and not _model_manager.current_runtime_uses_mmproj(model)
+        ):
+            raise ModelLoadError(
+                f"Caretaker loaded '{loaded}' without mmproj while vision "
+                "was requested"
+            )
+        _model_manager.mark_loaded_by_caretaker(
+            model,
+            enable_vision=enable_vision,
+            context_hint=context_hint,
+        )
+        # The remote path no longer runs the local switch_model body, which
+        # owned the context restore — mirror it so a fresh remote load
+        # recovers the target's auto-saved session history (missing/corrupt
+        # save is tolerated inside the manager; restore never blocks the
+        # hotpath).  Restore ONLY on the daemon's explicit "fresh_load": true
+        # confirmation — the /ensure response is the authoritative freshness
+        # signal.  A gateway-side probe (parsing the running llama-server's
+        # command line) can misdetect a caretaker-launched process and would
+        # clobber a live slot-0 session with a stale auto-save, so never
+        # restore on a probe result alone.  The restore is gated on the SAME
+        # capability snapshot as the pre-save (see the switch gate above), so
+        # the first fresh_load-capable switch after a daemon upgrade behaves
+        # like the pre-capability path (no save, no restore) instead of
+        # restoring a stale auto-save without having saved the current
+        # session.  Reload sites (auto-reload, connect-error recovery) start
+        # a fresh context via load() and must not re-inject a stale auto-save
+        # — they never set pre_switch_save.
+        if (
+            pre_switch_save
+            and capability_before
+            and result.get("fresh_load") is True
+            and _model_manager is not None
+        ):
+            await _model_manager.restore_current_context()
+    return "remote"
 
 
 async def _ensure_with_retry(
@@ -389,6 +540,40 @@ async def ensure_backend(
                 isinstance(exc.__cause__, httpx.ConnectError)
                 and not isinstance(exc.__cause__, httpx.ConnectTimeout)
             ):
+                # A daemon that is merely RESTARTING (systemd Restart=always,
+                # deploy window) can have its management port momentarily
+                # closed (RST) while its llama-server child survives.  Give it
+                # a short bounded window to re-bind before taking over the
+                # backend as a second controller; if the re-probe succeeds the
+                # daemon is back and still owns the backend, so the remote
+                # path completes normally.
+                await asyncio.sleep(1.0)
+                try:
+                    rechecked = await _caretaker_client.ensure(
+                        model,
+                        enable_vision=enable_vision,
+                        context_hint=context_hint,
+                    )
+                except CaretakerUnavailable:
+                    rechecked = None  # still down — local lifecycle is sole controller
+                except CaretakerError as recheck_exc:
+                    # The daemon is back and answered with an error: map it the
+                    # same way the main path does (fail closed).
+                    raise _map_caretaker_error(recheck_exc) from recheck_exc
+                if rechecked is not None:
+                    logger.info(
+                        "F5: caretaker re-bound after restart window — "
+                        "completing remote ensure for '%s'",
+                        model,
+                    )
+                    return await _complete_remote(
+                        model,
+                        rechecked,
+                        enable_vision=enable_vision,
+                        context_hint=context_hint,
+                        pre_switch_save=pre_switch_save,
+                        capability_before=capability_before,
+                    )
                 logger.warning(
                     "F5: caretaker management port closed (connection refused) "
                     "— running local lifecycle fallback for '%s'",
@@ -406,130 +591,14 @@ async def ensure_backend(
         )
         await local_fallback()
         return "local"
-    except CaretakerModelNotFound as exc:
-        raise ModelLoadError(str(exc)) from exc
-    except CaretakerVramExceeded as exc:
-        raise ModelLoadError(str(exc)) from exc
-    except CaretakerModelLoadFailed as exc:
-        # The daemon's crash_details (its CrashRecord.to_dict()) must reach the
-        # hotpath callers' crash recording, exactly as load()/switch_model()
-        # populated crash_record before F5 — otherwise the remote primary path
-        # would silently record nothing on backend crashes.
-        crash_record = None
-        details = exc.crash_details
-        if isinstance(details, dict):
-            try:
-                crash_record = CrashRecord(
-                    timestamp=details.get("timestamp", ""),
-                    model=details.get("model", getattr(exc, "model", "")),
-                    error_message=details.get("error_message", str(exc)),
-                    exit_code=details.get("exit_code"),
-                    config_snapshot=details.get("config_snapshot"),
-                )
-            except Exception:  # noqa: BLE001 — telemetry mapping must never break the error path
-                crash_record = None
-        raise ModelLoadError(str(exc), crash_record=crash_record) from exc
-    except CaretakerInvalidRequest as exc:
-        raise ValueError(str(exc)) from exc
-    except CaretakerError as exc:  # safety net — never claim success from an unknown caretaker state
-        logger.error("F5: caretaker ensure failed unexpectedly: %s", exc)
-        raise ModelLoadError(str(exc)) from exc
+    except CaretakerError as exc:
+        raise _map_caretaker_error(exc) from exc
 
-    # The caretaker response names the model it actually loaded.  Without a
-    # truthful loaded_model the gateway cannot tell whether the backend now
-    # serves the requested model — never claim success from an unknown
-    # caretaker state.  The same holds when the caretaker resolved the request
-    # to a different model (caretaker-side alias/fallback/partial load): do
-    # NOT adopt the requested model's loaded state, the backend would desync
-    # from gateway state.
-    #
-    # NOTE: fail CLOSED here (ModelLoadError), not local_fallback().  The
-    # local lifecycle safety rationale ("nothing else owns the backend port")
-    # only holds when the caretaker is DOWN.  Here the daemon is alive and
-    # owns the backend — running gateway load()/switch_model() against an
-    # already-running instance would be a no-op that still flips current_model
-    # to the requested model while the backend actually serves the caretaker's
-    # different model: the exact desync we are preventing.  The hotpath maps
-    # ModelLoadError to its existing crash/503 handling.
-    if not isinstance(result, dict) or "loaded_model" not in (result or {}):
-        logger.warning(
-            "F5: caretaker /ensure response did not name a loaded_model — "
-            "failing closed to avoid a second controller on the backend"
-        )
-        raise ModelLoadError(
-            "Caretaker /ensure succeeded but did not report the loaded model"
-        )
-    loaded = result["loaded_model"]
-    # Canonicalize BOTH sides through the gateway's resolver before comparing:
-    # the caretaker may report the canonical name for an alias we sent (or
-    # vice versa), and a raw string compare would turn a legitimate
-    # alias-load into a false ModelLoadError/503 on every such request.
-    # Unknown names on either side fall back to the raw string (the equality
-    # then fails closed, which is correct).
-    try:
-        resolved_loaded = _model_manager.resolve_model(loaded) if _model_manager else loaded
-    except ValueError:
-        resolved_loaded = loaded
-    try:
-        resolved_requested = _model_manager.resolve_model(model) if _model_manager else model
-    except ValueError:
-        resolved_requested = model
-    if resolved_loaded != resolved_requested:
-        logger.warning(
-            "F5: caretaker loaded '%s' instead of requested '%s' — "
-            "failing closed to avoid a second controller on the backend",
-            loaded,
-            model,
-        )
-        raise ModelLoadError(
-            f"Caretaker loaded '{loaded}' instead of requested '{model}'"
-        )
-
-    if _model_manager is not None:
-        # Mirror the adopt-path guard: the daemon may have resolved vision
-        # differently than the gateway (own config / hot config edit /
-        # daemon-side vision resolution dropping mmproj).  If the request
-        # needed vision but the LIVE process launched without mmproj,
-        # stamping current_vision_enabled=True would forward image requests
-        # to a backend that cannot serve them — fail closed instead of
-        # desyncing (the probe is reliable here: the daemon writes the args
-        # file it launches with, in the same CURRENT_MODEL_ARGS_FILE the
-        # gateway reads).
-        if (
-            _model_manager._resolve_runtime_vision_flag(model, enable_vision)
-            and not _model_manager.current_runtime_uses_mmproj(model)
-        ):
-            raise ModelLoadError(
-                f"Caretaker loaded '{loaded}' without mmproj while vision "
-                "was requested"
-            )
-        _model_manager.mark_loaded_by_caretaker(
-            model,
-            enable_vision=enable_vision,
-            context_hint=context_hint,
-        )
-        # The remote path no longer runs the local switch_model body, which
-        # owned the context restore — mirror it so a fresh remote load
-        # recovers the target's auto-saved session history (missing/corrupt
-        # save is tolerated inside the manager; restore never blocks the
-        # hotpath).  Restore ONLY on the daemon's explicit "fresh_load": true
-        # confirmation — the /ensure response is the authoritative freshness
-        # signal.  A gateway-side probe (parsing the running llama-server's
-        # command line) can misdetect a caretaker-launched process and would
-        # clobber a live slot-0 session with a stale auto-save, so never
-        # restore on a probe result alone.  The restore is gated on the SAME
-        # capability snapshot as the pre-save (see the switch gate above), so
-        # the first fresh_load-capable switch after a daemon upgrade behaves
-        # like the pre-capability path (no save, no restore) instead of
-        # restoring a stale auto-save without having saved the current
-        # session.  Reload sites (auto-reload, connect-error recovery) start
-        # a fresh context via load() and must not re-inject a stale auto-save
-        # — they never set pre_switch_save.
-        if (
-            pre_switch_save
-            and capability_before
-            and result.get("fresh_load") is True
-            and _model_manager is not None
-        ):
-            await _model_manager.restore_current_context()
-    return "remote"
+    return await _complete_remote(
+        model,
+        result,
+        enable_vision=enable_vision,
+        context_hint=context_hint,
+        pre_switch_save=pre_switch_save,
+        capability_before=capability_before,
+    )
