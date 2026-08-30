@@ -51,17 +51,19 @@
 |------|----------|------------------------|
 | `app/engine/manager.py` | llama-server lifecycle (spawn/start/stop/reload, launch-signature drift reload, VRAM) | `scripts/start_llama.sh`, `app/proxy/process.py`, `app/scheduler/manager.py` |
 
-### app/gateway/ — Phase-5 extracted routing logic (11)
+### app/gateway/ — Phase-5 extracted routing logic (13)
 | Path | Function | Related processes/files |
 |------|----------|------------------------|
 | `app/gateway/__init__.py` | Package marker | — |
 | `app/gateway/admin_api.py` | Admin/status/credential/scaler/queue/capture/keys handlers | `app/proxy/server.py`, `app/proxy/auth.py` |
 | `app/gateway/capture_dispatch.py` | Capture event dispatch hooks (fail-open wrappers) | `app/capture/*` |
+| `app/gateway/caretaker_client.py` | F5 caretaker control-API HTTP client (/ensure, /unload, /status; error hierarchy; fail-closed build) | `m0nklabs/caretaker-llamacpp`, `app/proxy/lifespan.py`, `app/proxy/server.py` |
+| `app/gateway/caretaker_runtime.py` | F5 remote-first hotpath lifecycle execution (ensure_backend: /ensure → local fallback, error mapping) | `app/gateway/caretaker_client.py`, `app/engine/manager.py`, `app/gateway/routing.py`, `app/local_inference/ollama.py`, `app/local_inference/models.py` |
 | `app/gateway/context_metadata.py` | Context window resolution + model metadata construction | `app/cloud_inference/*`, `config/models.cloud.overrides.yaml` |
 | `app/gateway/model_discovery.py` | `/api/tags`, `/v1/models`, `/api/show` handler bodies | `app/proxy/server.py`, `app/proxy/cloud_catalog.py` |
 | `app/gateway/normalization.py` | Multimodal preflight, backend error mapping, thinking params, qwen sanitization | `app/gateway/routing.py`, `app/local_inference/ollama.py` |
 | `app/gateway/queue_helpers.py` | Request lifecycle, disconnect watch, cancel cleanup | `app/proxy/queue.py` |
-| `app/gateway/routing.py` | `/v1/{path}` dispatch node (count_tokens, cloud/local, vision fallback, queues) | `app/proxy/server.py`, all gateway/cloud/local modules |
+| `app/gateway/routing.py` | `/v1/{path}` dispatch node (count_tokens, cloud/local, vision fallback, queues; F5 remote-first auto-reload/switch) | `app/proxy/server.py`, all gateway/cloud/local modules |
 | `app/gateway/sessions.py` | Session slot save/load/list + filename sanitizer | `app/local_inference/models.py` |
 | `app/gateway/streaming.py` | SSE watchdog, keepalives, Anthropic enrichment | `app/proxy/anthropic_bridge.py` |
 | `app/gateway/usage.py` | Live usage request lifecycle + token accounting | `app/proxy/usage.py`, dashboard API |

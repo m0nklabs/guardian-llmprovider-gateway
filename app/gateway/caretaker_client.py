@@ -42,11 +42,25 @@ class CaretakerError(Exception):
 
 
 class CaretakerUnavailable(CaretakerError):
-    """Transport/timeout failure reaching the caretaker daemon."""
+    """Transport/timeout failure reaching the caretaker daemon.
 
-    def __init__(self, management_url: str) -> None:
-        super().__init__(f"Caretaker unreachable at {management_url}")
+    ``status_code`` is set when the daemon IS alive but answered with an
+    unexpected HTTP status (e.g. 401/403 auth rejection, 5xx) instead of the
+    expected control-API contract — callers can then distinguish "daemon
+    gone" (status_code None) from "daemon alive but rejects us" (status_code
+    set), which matters for the local-lifecycle fallback decision (a live
+    daemon still owns the backend).
+    """
+
+    def __init__(self, management_url: str, status_code: int | None = None) -> None:
+        if status_code is not None:
+            super().__init__(
+                f"Caretaker unreachable at {management_url} (unexpected status {status_code})"
+            )
+        else:
+            super().__init__(f"Caretaker unreachable at {management_url}")
         self.management_url = management_url
+        self.status_code = status_code
 
 
 class CaretakerModelNotFound(CaretakerError):
@@ -123,6 +137,13 @@ class CaretakerClient:
         self._api_key = api_key or None
         self._timeout = timeout
         self._log = logger or logging.getLogger("Guardian.CaretakerClient")
+        # Capability flag: set True once a successful /ensure response carries
+        # the daemon's own "fresh_load" field.  The gateway runtime uses it to
+        # decide whether a remote switch can restore session context with
+        # daemon-confirmed freshness; until the field is observed, switches
+        # keep the local lifecycle (which has switch_model's save/restore
+        # parity).
+        self.supports_fresh_load = False
         # _transport is an internal override used only by tests (MockTransport);
         # it is not part of the public constructor contract.
         self._client = httpx.AsyncClient(
@@ -175,7 +196,16 @@ class CaretakerClient:
             raise CaretakerUnavailable(self._management_url) from exc
 
         if resp.status_code == 200:
-            return await self._ok_json(resp, "/ensure")
+            value = await self._ok_json(resp, "/ensure")
+            if isinstance(value, dict):
+                # Capability is re-validated on EVERY successful /ensure: the
+                # daemon may be rolled back/downgraded later, and a stale True
+                # would keep switches on the remote path while restore stays
+                # dormant (save runs, nothing restores) — silent
+                # session-context loss.  Absence of the field disables the
+                # capability again.
+                self.supports_fresh_load = "fresh_load" in value
+            return value
 
         body = _safe_json(resp)
         if resp.status_code == 404:
@@ -192,11 +222,14 @@ class CaretakerClient:
         if resp.status_code == 422:
             raise CaretakerInvalidRequest()
         # Unexpected status → treat as unavailable so the gateway never claims
-        # success from an unknown caretaker response.
+        # success from an unknown caretaker response.  The status is carried
+        # on the exception so the runtime can tell "daemon gone" (transport)
+        # from "daemon alive but rejected the gateway" (e.g. 401/403 after a
+        # key rotation) and refuse the local-lifecycle fallback for the latter.
         logger.error(
             "Caretaker /ensure unexpected status %s: %s", resp.status_code, _safe_body_text(resp)
         )
-        raise CaretakerUnavailable(self._management_url)
+        raise CaretakerUnavailable(self._management_url, status_code=resp.status_code)
 
     async def unload(self) -> dict:
         """POST /unload — idempotent-safe unload.
@@ -229,7 +262,7 @@ class CaretakerClient:
                 resp.status_code,
                 _safe_body_text(resp),
             )
-            raise CaretakerUnavailable(self._management_url)
+            raise CaretakerUnavailable(self._management_url, status_code=resp.status_code)
         logger.error("Caretaker /unload failed (status %s): %s", resp.status_code, _safe_body_text(resp))
         raise CaretakerUnloadFailed()
 
@@ -245,7 +278,7 @@ class CaretakerClient:
             raise CaretakerUnavailable(self._management_url) from exc
         if resp.status_code != 200:
             logger.error("Caretaker /status failed (status %s): %s", resp.status_code, _safe_body_text(resp))
-            raise CaretakerUnavailable(self._management_url)
+            raise CaretakerUnavailable(self._management_url, status_code=resp.status_code)
         return await self._ok_json(resp, "/status")
 
     async def close(self) -> None:
@@ -271,10 +304,10 @@ class CaretakerClient:
             value = resp.json()
         except ValueError:
             logger.error("Caretaker %s returned non-JSON 200 body", endpoint)
-            raise CaretakerUnavailable(self._management_url) from None
+            raise CaretakerUnavailable(self._management_url, status_code=200) from None
         if not isinstance(value, dict):
             logger.error("Caretaker %s returned non-dict 200 body: %r", endpoint, value)
-            raise CaretakerUnavailable(self._management_url)
+            raise CaretakerUnavailable(self._management_url, status_code=200)
         return value
 
 

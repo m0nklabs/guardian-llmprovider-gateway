@@ -21,6 +21,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from app.engine.manager import ModelLoadError
+from app.gateway import caretaker_runtime as _caretaker_runtime
 from app.capture.config import PROTOCOL_OLLAMA, ROUTE_LOCAL
 from app.capture.schema import BuildContext
 from app.capture.stream_assembler import StreamResponseAssembler
@@ -303,7 +304,10 @@ async def chat_ollama(request: Request, client_id: str):
                         target_model=reload_model,
                         requested_model=model,
                         owner=client_id,
-                        operation=lambda: _model_manager.load(reload_model),
+                        operation=lambda: _caretaker_runtime.ensure_backend(
+                            model=reload_model,
+                            local_fallback=lambda: _model_manager.load(reload_model),
+                        ),
                         generation=generation,
                     )
 
@@ -332,7 +336,12 @@ async def chat_ollama(request: Request, client_id: str):
                                 target_model=model,
                                 requested_model=body.get("model"),
                                 owner=client_id,
-                                operation=lambda: _model_manager.switch_model(model, client_id=client_id),
+                                operation=lambda: _caretaker_runtime.ensure_backend(
+                                    model=model,
+                                    pre_switch_save=True,
+                                    client_id=client_id,
+                                    local_fallback=lambda: _model_manager.switch_model(model, client_id=client_id),
+                                ),
                                 generation=generation,
                             )
                         except ModelLoadError as e:
@@ -681,7 +690,10 @@ async def generate_ollama(request: Request, client_id: str):
                         target_model=reload_model,
                         requested_model=model,
                         owner=client_id,
-                        operation=lambda: _model_manager.load(reload_model),
+                        operation=lambda: _caretaker_runtime.ensure_backend(
+                            model=reload_model,
+                            local_fallback=lambda: _model_manager.load(reload_model),
+                        ),
                         generation=generation,
                     )
 
@@ -708,7 +720,12 @@ async def generate_ollama(request: Request, client_id: str):
                                 target_model=model,
                                 requested_model=body.get("model"),
                                 owner=client_id,
-                                operation=lambda: _model_manager.switch_model(model, client_id=client_id),
+                                operation=lambda: _caretaker_runtime.ensure_backend(
+                                    model=model,
+                                    pre_switch_save=True,
+                                    client_id=client_id,
+                                    local_fallback=lambda: _model_manager.switch_model(model, client_id=client_id),
+                                ),
                                 generation=generation,
                             )
                         except ModelLoadError as e:
