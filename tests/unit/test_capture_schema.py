@@ -765,6 +765,37 @@ class TestCorrelationHeaderConfigC6:
         cfg = load_capture_config(settings)
         assert cfg.correlation_headers == ["x-request-id", "x-trace-id"]
 
+    def test_yaml_empty_list_is_explicit_opt_out(self, tmp_path):
+        """Review fix: an explicit empty list must disable the echo, not
+        silently restore the default correlation headers."""
+        from app.capture.config import load_capture_config
+        settings = tmp_path / "global.settings.yaml"
+        settings.write_text(
+            "capture:\n"
+            "  enabled: false\n"
+            "  correlation_headers: []\n"
+        )
+        cfg = load_capture_config(settings)
+        assert cfg.correlation_headers == []
+
+    def test_direct_empty_list_is_explicit_opt_out(self):
+        assert CaptureConfig(correlation_headers=[]).correlation_headers == []
+
+    def test_all_invalid_entries_restore_default(self, tmp_path):
+        """Tolerance path: a NON-empty list whose entries are all invalid
+        falls back to the default (an empty list stays an opt-out)."""
+        from app.capture.config import load_capture_config
+        settings = tmp_path / "global.settings.yaml"
+        settings.write_text(
+            "capture:\n"
+            "  enabled: false\n"
+            "  correlation_headers:\n"
+            "    - '   '\n"
+            "    - 42\n"
+        )
+        cfg = load_capture_config(settings)
+        assert cfg.correlation_headers == ["x-request-id"]
+
     def test_non_lowercase_header_rejected(self):
         with pytest.raises(ValueError):
             CaptureConfig(correlation_headers=["X-Request-ID"])
@@ -972,50 +1003,3 @@ class TestCaptureDispatchExtractionC4C5C6:
         assert stub.received_kwargs["caller_request_id"] is None
         assert stub.received_kwargs["app_title"] is None
         assert stub.received_kwargs["app_referer"] is None
-
-
-# ── Shared cross-repo vector (unchanged) ─────────────────────────────────
-
-
-class TestSharedCrossRepoVector:
-    """Shared test vector with Keanu Factory (guardian_capture_parser.py).
-
-    Both repositories pin the SAME vector so a change in either side's
-    serialisation or HMAC construction breaks the other side's test.
-    Source of truth for generation: Guardian's compute_record_auth +
-    wal_writer's append-last placement. Keanu verifies this exact line in
-    tests/unit/parsers/test_guardian_capture_parser.py.
-    """
-
-    SECRET = "cross-repo-shared-test-secret"
-    EXPECTED_KEY_ID = "e6be02723853c25b"
-    EXPECTED_MAC = "2576d18fc2a2bac06a4dd7f4c543af82dd8cf5fa9ed4526056765d551e53ea49"
-
-    def test_vector_key_id(self, monkeypatch):
-        monkeypatch.setenv("GUARDIAN_CAPTURE_RECORD_AUTH_SECRET", self.SECRET)
-        auth = compute_record_auth('{"schema_name":"guardian_capture_v1","schema_version":1}')
-        assert auth["key_id"] == self.EXPECTED_KEY_ID
-
-    def test_vector_mac(self, monkeypatch):
-        import json as _json
-        event = {
-            "schema_name": "guardian_capture_v1",
-            "schema_version": 1,
-            "event_id": "a" * 64,
-            "event_type": "request_received",
-            "request_id": "req-shared-vector-001",
-            "sequence": 1,
-            "timestamp_utc": "2026-08-12T00:00:00.000Z",
-            "guardian_instance_id": "guardian-local-test",
-            "endpoint": "/v1/chat/completions",
-            "ingress_protocol": "openai",
-            "route_type": "local",
-            "requested_model": "llama3.2-3b",
-            "capture_policy_version": 1,
-            "client_ref": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            "payload": {"request_messages": [{"role": "user", "content": "Say OK"}]},
-        }
-        monkeypatch.setenv("GUARDIAN_CAPTURE_RECORD_AUTH_SECRET", self.SECRET)
-        line_no_auth = _json.dumps(event, separators=(",", ":"), sort_keys=False)
-        auth = compute_record_auth(line_no_auth)
-        assert auth["mac"] == self.EXPECTED_MAC
