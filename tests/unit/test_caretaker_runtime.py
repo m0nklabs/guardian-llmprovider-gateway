@@ -396,6 +396,57 @@ async def test_unavailable_timeout_twice_adopts_when_load_confirms_late(monkeypa
     )
 
 
+async def test_timeout_poll_adopts_despite_drift_when_switch_to_other_model(monkeypatch):
+    """r30 review: the drift check must NOT block adoption during a switch to
+    a DIFFERENT model.  The gateway only rewrites the persisted launch
+    signature via mark_loaded_by_caretaker (after a successful /ensure or an
+    adoption), so while a timed-out switch A->B is in flight the persisted
+    signature still describes A — _config_drifted(B) would be True for the
+    whole poll and adoption would be refused even after the daemon finishes
+    loading B, burning the full window into a spurious 503.  The live GGUF
+    identity + health already validate the running process, so drift only
+    blocks adoption when the gateway ALREADY believes the requested model is
+    current."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+    client = _StubClient()
+    client.ensure.side_effect = [_timeout_unavailable(), _timeout_unavailable()]
+    mgr = _manager()
+    mgr.backend_serves_model = AsyncMock(return_value=True)
+    mgr.backend_health_ok = AsyncMock(return_value=True)
+    mgr._config_drifted = Mock(return_value=True)  # stale sig describes old model
+    mgr.current_model = "old-model"  # gateway still believes the OLD model
+    crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
+    result = await crt.ensure_backend(model="m", local_fallback=fallback)
+    assert result == "remote"
+    fallback.assert_not_awaited()
+    mgr.mark_loaded_by_caretaker.assert_called_once_with(
+        "m", enable_vision=False, context_hint=None
+    )
+
+
+async def test_timeout_poll_fails_closed_on_drift_when_model_already_current(monkeypatch):
+    """Drift still blocks adoption when the gateway ALREADY believes the
+    requested model is current: then the persisted signature describes the
+    same model the backend serves, and a mismatch (settings edited in
+    models.yaml / a client context hint differing from the running launch)
+    means the running process does not match what this request needs."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+    client = _StubClient()
+    client.ensure.side_effect = [_timeout_unavailable(), _timeout_unavailable()]
+    mgr = _manager()
+    mgr.backend_serves_model = AsyncMock(return_value=True)
+    mgr.backend_health_ok = AsyncMock(return_value=True)
+    mgr._config_drifted = Mock(return_value=True)
+    mgr.current_model = "m"  # gateway believes the requested model IS current
+    crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
+    with pytest.raises(ModelLoadError):
+        await crt.ensure_backend(model="m", local_fallback=fallback)
+    fallback.assert_not_awaited()
+    mgr.mark_loaded_by_caretaker.assert_not_called()
+
+
 async def test_unavailable_connect_timeout_runs_local():
     """ConnectTimeout/PoolTimeout mean NO connection was ever accepted — the
     daemon may as well be down (full backlog, firewall DROP, LAN host powered

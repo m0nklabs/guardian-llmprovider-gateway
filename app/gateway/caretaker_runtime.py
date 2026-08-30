@@ -127,10 +127,13 @@ async def _backend_now_serving(
     cold large-model load can take 10-30s while the client timeout is seconds):
     adoption only mirrors state the live process already reports — no spawn,
     no args-file write, no second controller — so the daemon stays the sole
-    controller.  ``None`` when the backend does not serve the requested model,
-    is not healthy, or its launch config drifts from what this request needs
-    (same guards as the outage-adopt path).  The vision guard runs in the
-    common success path that consumes this dict.
+    controller.  ``None`` when the backend does not serve the requested model
+    or is not healthy, and when the gateway already believes the requested
+    model is current but its launch config drifts from what this request needs
+    (a genuine same-model config change worth failing on; during a switch to a
+    DIFFERENT model the persisted signature is stale by construction, so the
+    live GGUF identity + health are the validations that count).  The vision
+    guard runs in the common success path that consumes this dict.
     """
     mgr = _model_manager
     if mgr is None:
@@ -139,7 +142,26 @@ async def _backend_now_serving(
         return None
     if not await mgr.backend_health_ok():
         return None
-    if mgr._config_drifted(
+    # The persisted launch signature is stale BY CONSTRUCTION while a
+    # timed-out switch to a different model is in flight: the gateway only
+    # rewrites it via mark_loaded_by_caretaker, which runs after a successful
+    # /ensure response or an adoption.  Comparing the requested signature
+    # against the persisted one during an A->B switch would therefore always
+    # report "drift" (persisted still describes A), adoption would be refused
+    # even after the daemon finishes loading B, and the poll would burn the
+    # full _ADOPT_POLL_SECONDS window before failing closed — a spurious 503
+    # on exactly the cold switch the poll exists to rescue (pre-F5
+    # switch_model waited for backend health and succeeded).  The live GGUF
+    # identity (backend_serves_model) and backend_health_ok checks above
+    # already validate the running process.
+    #
+    # Drift only means a real config change worth failing on when the gateway
+    # ALREADY believes the requested model is current: then the persisted
+    # signature describes the same model the backend serves, and a mismatch
+    # (settings edited in models.yaml / a client context hint that differs
+    # from the running launch) means the running process does not match what
+    # this request needs.
+    if mgr.current_model == model and mgr._config_drifted(
         model, enable_vision=enable_vision, context_hint=context_hint
     ):
         return None
