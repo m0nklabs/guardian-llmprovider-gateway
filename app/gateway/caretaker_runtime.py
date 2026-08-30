@@ -703,10 +703,25 @@ async def ensure_backend(
             _model_manager is not None
             and await _model_manager.backend_serves_model(model)
             and await _model_manager.backend_health_ok()
-            and not _model_manager._config_drifted(
-                model,
-                enable_vision=enable_vision,
-                context_hint=context_hint,
+            # The persisted-signature drift check is only meaningful when the
+            # gateway believes THIS model is already loaded AND the request
+            # carries no explicit parameter need: in that narrow case the sig
+            # is the only source of truth about how the backend was launched.
+            # Cross-model or parameter-delta requests (enable_vision /
+            # context_hint set) describe a launch the sig never described —
+            # the sig then says nothing useful and must not veto adoption of
+            # a serving, healthy backend (the daemon may have legitimately
+            # reloaded with different args; the persisted signature is stale
+            # until mark_loaded_by_caretaker rewrites it AFTER adoption).
+            and not (
+                _model_manager.current_model == model
+                and enable_vision is None
+                and context_hint is None
+                and _model_manager._config_drifted(
+                    model,
+                    enable_vision=enable_vision,
+                    context_hint=context_hint,
+                )
             )
             # The drift check above only compares GATEWAY-side persisted
             # state; the daemon may have launched the backend with settings
