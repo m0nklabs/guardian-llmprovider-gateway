@@ -208,8 +208,17 @@ class ProviderRegistry:
             # name-based fallback: F6's `14700k-local` carries the -local
             # suffix from the plan naming but is a REMOTE LAN host managed
             # by its own caretaker — a passive LAN provider, never owned by
-            # this gateway's lifecycle.
+            # this gateway's lifecycle.  Quoted booleans ("false"/"true",
+            # as YAML editors/templates emit) are normalized first — a
+            # truthy string must not silently defeat the override.
             explicit_local = cfg.get("local")
+            if isinstance(explicit_local, str):
+                explicit_local = explicit_local.strip().lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                )
             if explicit_local is not None:
                 managed = bool(explicit_local) or bool(cfg.get("managed"))
             else:
