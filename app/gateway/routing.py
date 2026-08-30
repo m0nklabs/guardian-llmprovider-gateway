@@ -575,30 +575,32 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                                         # /ensure is idempotent + drift-checked.
                                         # Context auto-save stays a gateway
                                         # responsibility (pre_switch_save).
-                                        operation = lambda: _caretaker_runtime.ensure_backend(
-                                            model=desired_model,
-                                            enable_vision=desired_vision,
-                                            context_hint=ctx_hint_int,
-                                            pre_switch_save=True,
-                                            client_id=client_id,
-                                            local_fallback=lambda: _model_manager.switch_model(
-                                                desired_model,
+                                        def operation():
+                                            return _caretaker_runtime.ensure_backend(
+                                                model=desired_model,
+                                                enable_vision=desired_vision,
+                                                context_hint=ctx_hint_int,
+                                                pre_switch_save=True,
                                                 client_id=client_id,
-                                                enable_vision=desired_vision,
-                                                context_hint=ctx_hint_int,
-                                            ),
-                                        )
+                                                local_fallback=lambda: _model_manager.switch_model(
+                                                    desired_model,
+                                                    client_id=client_id,
+                                                    enable_vision=desired_vision,
+                                                    context_hint=ctx_hint_int,
+                                                ),
+                                            )
                                     else:
-                                        operation = lambda: _caretaker_runtime.ensure_backend(
-                                            model=desired_model,
-                                            enable_vision=desired_vision,
-                                            context_hint=ctx_hint_int,
-                                            local_fallback=lambda: _model_manager.load(
-                                                desired_model,
+                                        def operation():
+                                            return _caretaker_runtime.ensure_backend(
+                                                model=desired_model,
                                                 enable_vision=desired_vision,
                                                 context_hint=ctx_hint_int,
-                                            ),
-                                        )
+                                                local_fallback=lambda: _model_manager.load(
+                                                    desired_model,
+                                                    enable_vision=desired_vision,
+                                                    context_hint=ctx_hint_int,
+                                                ),
+                                            )
                                     await _run_guardian_operation(
                                         source="proxy",
                                         phase=phase,
