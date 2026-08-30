@@ -28,17 +28,26 @@ Decision logic:
   ``/ensure`` happens first (a live daemon mid-switch would otherwise race a
   local spawn — two controllers on the same backend).  A read/write timeout
   means the daemon accepted the connection (alive): a second one fails closed
-  UNLESS the backend now serves the requested model (a cold load can outlast
-  the client timeout; the in-flight /ensure is the only controller, so
-  adopting the confirmed load is safe and avoids a 503 regression vs
-  ``load()``/``switch_model()``).  Connection-refused/DNS/ConnectTimeout mean
-  the daemon may be gone: the backend may still be healthy (daemon died but
-  llama-server survived) — if so, adopt the loaded state without spawning.
-  If the backend is ALIVE but not serving the requested model (or serves it
-  without the requested vision config), the local lifecycle would race a
-  second controller → fail closed.  Only when the backend is confirmed DOWN
-  does the original local lifecycle (``local_fallback``) run — safe, because
-  with the daemon down nothing else owns the backend port.
+  UNLESS the backend now serves the requested model — the adoption probe polls
+  a bounded ~30s window (a cold load can outlast the client timeout and pre-F5
+  ``load()``/``switch_model()`` waited for backend health, so a single probe
+  right after ~2× the client timeout would 503 most cold switches; the
+  in-flight /ensure is the only controller, so adopting the confirmed load is
+  safe).  Connection-refused/DNS/ConnectTimeout mean the daemon may be gone:
+  the backend may still be healthy (daemon died but llama-server survived) —
+  if so, adopt the loaded state without spawning.  A hard connection-refused
+  with a healthy backend is the one case that preserves the pre-F5
+  auto-switch: nothing listening on the management port is the strongest
+  evidence the daemon process is gone, so after a short bounded re-probe (to
+  let a merely-restarting daemon re-bind) the local lifecycle runs — unless
+  that re-probe finds the daemon re-bound and rejecting (status_code) or
+  re-bound and busy (read/write timeout), which fail closed like every other
+  live-daemon case.  If the backend is ALIVE but not serving the requested
+  model (or serves it without the requested vision config), the local
+  lifecycle would race a second controller → fail closed.  Only when the
+  backend is confirmed DOWN does the original local lifecycle
+  (``local_fallback``) run — safe, because with the daemon down nothing else
+  owns the backend port.
 - Vision integrity: whenever state is mirrored to the gateway manager
   (``mark_loaded_by_caretaker``) — on the success path or on adoption — and
   the request needs vision, the LIVE process must confirm mmproj via
@@ -116,6 +125,35 @@ async def _backend_now_serving(
     ):
         return None
     return {"loaded_model": model}
+
+
+async def _await_backend_serving(
+    model: str,
+    *,
+    enable_vision: bool | None,
+    context_hint: int | None,
+) -> dict | None:
+    """Poll a bounded window for the backend to confirm it serves ``model``.
+
+    A cold model load can outlast the client timeout more than once; the
+    daemon's in-flight /ensure is the only controller.  Pre-F5
+    load()/switch_model() waited for backend health, so fail-closing on a
+    single probe would still 503 most cold switches — the probe runs right
+    after ~2× the client timeout (10s at the 5s default), while a 10-30s load
+    is barely started.  Poll once per second up to a bounded window (~30s,
+    covering the documented cold-load range); ``None`` if the load never
+    confirms.  Each probe is local and cheap (no daemon round-trip).
+    """
+    for _ in range(30):
+        await asyncio.sleep(1.0)
+        adopted = await _backend_now_serving(
+            model,
+            enable_vision=enable_vision,
+            context_hint=context_hint,
+        )
+        if adopted is not None:
+            return adopted
+    return None
 
 
 def _map_caretaker_error(exc: CaretakerError) -> Exception:
@@ -322,10 +360,12 @@ async def _ensure_with_retry(
                     # A cold model load can outlast the client timeout more
                     # than once; the daemon's in-flight /ensure is the only
                     # controller.  Pre-F5 load()/switch_model() waited for
-                    # backend health, so 503ing here would be a regression on
-                    # every cold switch.  Give the backend one non-blocking
-                    # chance to confirm the load before failing closed.
-                    adopted = await _backend_now_serving(
+                    # backend health, so 503ing on a single probe would be a
+                    # regression on every cold switch (the probe runs right
+                    # after ~2× the client timeout, while a 10-30s load is
+                    # barely started).  Poll a bounded window for the load to
+                    # confirm before failing closed.
+                    adopted = await _await_backend_serving(
                         model,
                         enable_vision=enable_vision,
                         context_hint=context_hint,
@@ -356,9 +396,10 @@ async def _ensure_with_retry(
             )
         except CaretakerUnavailable as exc2:
             if isinstance(exc2.__cause__, (httpx.ReadTimeout, httpx.WriteTimeout)):
-                # Same as above: the daemon came back but is busy — adopt if
-                # the backend now confirms the load, else fail closed.
-                adopted = await _backend_now_serving(
+                # Same as above: the daemon came back but is busy — poll a
+                # bounded window for the backend to confirm the load, else
+                # fail closed.
+                adopted = await _await_backend_serving(
                     model,
                     enable_vision=enable_vision,
                     context_hint=context_hint,
@@ -554,7 +595,33 @@ async def ensure_backend(
                         enable_vision=enable_vision,
                         context_hint=context_hint,
                     )
-                except CaretakerUnavailable:
+                except CaretakerUnavailable as recheck_unavail:
+                    # The re-probe result decides whether the daemon is really
+                    # gone or merely still up:
+                    # - status_code set → the daemon re-bound its port and
+                    #   rejected us (e.g. 401/403 after a key rotation): it
+                    #   owns the backend — fail closed like the outer branch.
+                    # - Read/WriteTimeout → the daemon re-bound and accepted
+                    #   the connection but is busy: alive — fail closed.
+                    # - any other transport error (refused/DNS/ConnectTimeout)
+                    #   → still nothing listening: the daemon is definitively
+                    #   gone and the local lifecycle is the sole controller.
+                    if recheck_unavail.status_code is not None:
+                        raise ModelLoadError(
+                            f"Caretaker control-API rejected the request "
+                            f"(status {recheck_unavail.status_code}); refusing "
+                            "local fallback to avoid a second controller on the "
+                            "backend"
+                        ) from recheck_unavail
+                    if isinstance(
+                        recheck_unavail.__cause__,
+                        (httpx.ReadTimeout, httpx.WriteTimeout),
+                    ):
+                        raise ModelLoadError(
+                            "Caretaker re-bound but unresponsive; refusing "
+                            "local fallback to avoid a second controller on "
+                            "the backend"
+                        ) from recheck_unavail
                     rechecked = None  # still down — local lifecycle is sole controller
                 except CaretakerError as recheck_exc:
                     # The daemon is back and answered with an error: map it the

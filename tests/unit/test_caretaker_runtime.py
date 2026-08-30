@@ -144,11 +144,13 @@ async def test_unavailable_timeout_rereprobe_succeeds_remote():
     )
 
 
-async def test_unavailable_timeout_twice_fails_closed():
+async def test_unavailable_timeout_twice_fails_closed(monkeypatch):
     """Two consecutive read/write timeouts mean the daemon accepted the
     connection but is unresponsive (still mid-switch — a load can outlast the
     client timeout more than once).  Spawning locally would create a second
-    controller on a live daemon's backend -> fail closed with ModelLoadError."""
+    controller on a live daemon's backend -> fail closed with ModelLoadError
+    after the bounded adoption poll finds nothing serving."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
     client = _StubClient()
     client.ensure.side_effect = [_timeout_unavailable(), _timeout_unavailable()]
     mgr = _manager()
@@ -161,11 +163,12 @@ async def test_unavailable_timeout_twice_fails_closed():
     mgr.mark_loaded_by_caretaker.assert_not_called()
 
 
-async def test_unavailable_timeout_twice_adopts_when_backend_now_serves():
+async def test_unavailable_timeout_twice_adopts_when_backend_now_serves(monkeypatch):
     """A cold large-model load can outlast the client timeout more than once
     while the daemon's in-flight /ensure is the only controller.  Pre-F5
     load()/switch_model() waited for backend health, so 503ing would be a
     regression — when the backend now serves the model, adopt it instead."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
     client = _StubClient()
     client.ensure.side_effect = [_timeout_unavailable(), _timeout_unavailable()]
     mgr = _manager()
@@ -179,6 +182,27 @@ async def test_unavailable_timeout_twice_adopts_when_backend_now_serves():
     fallback.assert_not_awaited()
     # Adopt semantics: no restore (no daemon fresh_load confirmation).
     mgr.restore_current_context.assert_not_awaited()
+    mgr.mark_loaded_by_caretaker.assert_called_once_with(
+        "m", enable_vision=None, context_hint=None
+    )
+
+
+async def test_unavailable_timeout_twice_adopts_when_load_confirms_late(monkeypatch):
+    """The adoption poll gives the cold load time to confirm: the backend is
+    still loading at the first probe and only serves the model one probe
+    later -> adopt the confirmed load instead of 503ing."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+    client = _StubClient()
+    client.ensure.side_effect = [_timeout_unavailable(), _timeout_unavailable()]
+    mgr = _manager()
+    mgr.backend_serves_model = AsyncMock(side_effect=[False, True])
+    mgr.backend_health_ok = AsyncMock(return_value=True)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
+    result = await crt.ensure_backend(model="m", local_fallback=fallback)
+    assert result == "remote"
+    assert mgr.backend_serves_model.await_count == 2
+    fallback.assert_not_awaited()
     mgr.mark_loaded_by_caretaker.assert_called_once_with(
         "m", enable_vision=None, context_hint=None
     )
@@ -288,6 +312,65 @@ async def test_unavailable_connection_refused_then_daemon_rebounds_remote():
     mgr.restore_current_context.assert_not_awaited()
 
 
+async def test_unavailable_rebound_recheck_rejected_fails_closed(monkeypatch):
+    """The bounded re-probe after a refused connection can find the daemon
+    RE-BOUND but rejecting us (status_code, e.g. 401/403 after a key
+    rotation): the daemon is back and owns the backend — the local lifecycle
+    must not become a second controller, fail closed with the mapped error."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+    client = _StubClient()
+
+    def _refused() -> CaretakerUnavailable:
+        err = CaretakerUnavailable("http://x:11441")
+        err.__cause__ = httpx.ConnectError("connection refused")
+        return err
+
+    client.ensure.side_effect = [
+        _refused(),
+        _refused(),
+        CaretakerUnavailable("http://x:11441", status_code=401),
+    ]
+    mgr = _manager()
+    mgr.backend_serves_model = AsyncMock(return_value=False)
+    mgr.backend_health_ok = AsyncMock(return_value=True)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
+    with pytest.raises(ModelLoadError, match="status 401"):
+        await crt.ensure_backend(model="m", local_fallback=fallback)
+    assert client.ensure.await_count == 3
+    fallback.assert_not_awaited()
+    mgr.mark_loaded_by_caretaker.assert_not_called()
+
+
+async def test_unavailable_rebound_recheck_timeout_fails_closed(monkeypatch):
+    """The bounded re-probe can find the daemon RE-BOUND but busy (ReadTimeout):
+    it accepted the connection — alive — so the local lifecycle must not run,
+    fail closed even though the backend is healthy."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+    client = _StubClient()
+
+    def _refused() -> CaretakerUnavailable:
+        err = CaretakerUnavailable("http://x:11441")
+        err.__cause__ = httpx.ConnectError("connection refused")
+        return err
+
+    client.ensure.side_effect = [
+        _refused(),
+        _refused(),
+        _timeout_unavailable(),
+    ]
+    mgr = _manager()
+    mgr.backend_serves_model = AsyncMock(return_value=False)
+    mgr.backend_health_ok = AsyncMock(return_value=True)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
+    with pytest.raises(ModelLoadError, match="re-bound but unresponsive"):
+        await crt.ensure_backend(model="m", local_fallback=fallback)
+    assert client.ensure.await_count == 3
+    fallback.assert_not_awaited()
+    mgr.mark_loaded_by_caretaker.assert_not_called()
+
+
 async def test_unavailable_rereprobe_also_fails_then_local():
     """Two non-timeout CaretakerUnavailable in a row (connection refused =
     daemon really gone) let the local lifecycle run — it is then the sole
@@ -307,10 +390,11 @@ async def test_unavailable_rereprobe_also_fails_then_local():
     fallback.assert_awaited_once()
 
 
-async def test_unavailable_refused_then_timeout_fails_closed():
+async def test_unavailable_refused_then_timeout_fails_closed(monkeypatch):
     """First probe connection-refused (daemon restarting, gone at that
     instant), re-probe times out (daemon came back but is busy): the local
     lifecycle must NOT run — the daemon is alive -> fail closed."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
     client = _StubClient()
     client.ensure.side_effect = [
         CaretakerUnavailable("http://x:11441"),  # refused, no cause
