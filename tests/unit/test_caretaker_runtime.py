@@ -89,6 +89,40 @@ async def test_remote_success_calls_ensure_and_marks_loaded():
     mgr.restore_current_context.assert_not_awaited()
 
 
+async def test_remote_success_vision_request_without_mmproj_fails_closed():
+    """The daemon may resolve vision differently than the gateway (own config
+    / hot config edit dropping mmproj).  On the SUCCESS path too, stamping
+    current_vision_enabled=True on a text-only live process would forward
+    image requests to a backend that cannot serve them -> fail closed."""
+    client = _StubClient()
+    mgr = _manager()
+    mgr._resolve_runtime_vision_flag = Mock(return_value=True)
+    mgr.current_runtime_uses_mmproj = Mock(return_value=False)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    with pytest.raises(ModelLoadError, match="without mmproj"):
+        await crt.ensure_backend(
+            model="m", enable_vision=True, local_fallback=AsyncMock()
+        )
+    mgr.mark_loaded_by_caretaker.assert_not_called()
+
+
+async def test_remote_success_vision_request_with_mmproj_marks_loaded():
+    """When the live process DOES use mmproj, the success path marks the model
+    loaded with the requested vision flag."""
+    client = _StubClient()
+    mgr = _manager()
+    mgr._resolve_runtime_vision_flag = Mock(return_value=True)
+    mgr.current_runtime_uses_mmproj = Mock(return_value=True)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    result = await crt.ensure_backend(
+        model="m", enable_vision=True, local_fallback=AsyncMock()
+    )
+    assert result == "remote"
+    mgr.mark_loaded_by_caretaker.assert_called_once_with(
+        "m", enable_vision=True, context_hint=None
+    )
+
+
 async def test_unavailable_timeout_rereprobe_succeeds_remote():
     """A transport TIMEOUT is NOT a dead daemon: the daemon accepted the
     connection, so it is alive (mid-switch).  Re-probing once must recover a
@@ -125,6 +159,29 @@ async def test_unavailable_timeout_twice_fails_closed():
     assert client.ensure.await_count == 2
     fallback.assert_not_awaited()
     mgr.mark_loaded_by_caretaker.assert_not_called()
+
+
+async def test_unavailable_timeout_twice_adopts_when_backend_now_serves():
+    """A cold large-model load can outlast the client timeout more than once
+    while the daemon's in-flight /ensure is the only controller.  Pre-F5
+    load()/switch_model() waited for backend health, so 503ing would be a
+    regression — when the backend now serves the model, adopt it instead."""
+    client = _StubClient()
+    client.ensure.side_effect = [_timeout_unavailable(), _timeout_unavailable()]
+    mgr = _manager()
+    mgr.backend_serves_model = AsyncMock(return_value=True)
+    mgr.backend_health_ok = AsyncMock(return_value=True)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
+    result = await crt.ensure_backend(model="m", local_fallback=fallback)
+    assert result == "remote"
+    assert client.ensure.await_count == 2
+    fallback.assert_not_awaited()
+    # Adopt semantics: no restore (no daemon fresh_load confirmation).
+    mgr.restore_current_context.assert_not_awaited()
+    mgr.mark_loaded_by_caretaker.assert_called_once_with(
+        "m", enable_vision=None, context_hint=None
+    )
 
 
 async def test_unavailable_connect_timeout_runs_local():
