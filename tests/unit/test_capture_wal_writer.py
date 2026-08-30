@@ -429,6 +429,40 @@ class TestWALWriterRetention:
         await writer.stop()
 
     @pytest.mark.asyncio
+    async def test_quota_loop_skips_age_removed_entries(self, config, sink, tmp_capture_root):
+        """Review fix: entries removed by the age loop must be dropped from
+        `units` — the byte-quota loop popped them again, subtracting their
+        size twice, which deflated the quota accounting and could leave a
+        real over-quota file in place until the next sweep."""
+        # quota 500 B; OLD1 (1000 B + sidecar) is pruned by age (10 d old,
+        # retention_days=7), NEW (600 B + sidecar) is fresh.  After the age
+        # loop the real total (~710 B) still exceeds the quota, so NEW must
+        # be removed by the quota loop — with the stale-pop bug the double
+        # subtraction drove the total below the quota and NEW survived.
+        writer = CaptureWALWriter(sink, replace(config, max_capture_bytes=500))
+        await writer.start()
+
+        old_data = tmp_capture_root / "guardian_capture_1000000000_1.jsonl.gz"
+        old_data.write_bytes(b"x" * 1000)
+        old_sidecar = tmp_capture_root / "guardian_capture_1000000000_1.jsonl.sha256"
+        old_sidecar.write_text("0" * 64 + "  guardian_capture_1000000000_1.jsonl.sha256\n")
+        new_data = tmp_capture_root / "guardian_capture_1000000000_2.jsonl.gz"
+        new_data.write_bytes(b"n" * 600)
+        new_sidecar = tmp_capture_root / "guardian_capture_1000000000_2.jsonl.sha256"
+        new_sidecar.write_text("0" * 64 + "  guardian_capture_1000000000_2.jsonl.sha256\n")
+        old_time = time.time() - (10 * 24 * 3600)  # 10 days ago (> retention_days)
+        os.utime(str(old_data), (old_time, old_time))
+        os.utime(str(old_sidecar), (old_time, old_time))
+
+        writer._enforce_retention()
+
+        assert not old_data.exists(), "old file must be pruned by age"
+        assert not old_sidecar.exists(), "old sidecar must go with its data file"
+        assert not new_data.exists(), "fresh file must be pruned by the byte quota"
+        assert not new_sidecar.exists(), "fresh sidecar must go with its data file"
+        await writer.stop()
+
+    @pytest.mark.asyncio
     async def test_retention_removes_sidecar_with_data_file(self, config, sink, tmp_capture_root):
         """A .sha256 sidecar never outlives its data file."""
         writer = CaptureWALWriter(sink, replace(config, retention_days=0))
