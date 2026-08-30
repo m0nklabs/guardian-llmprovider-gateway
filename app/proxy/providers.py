@@ -73,6 +73,27 @@ def _expand_env(value: str) -> str:
     return _ENV_VAR_PATTERN.sub(_replace, value)
 
 
+def _normalize_bool_marker(value):
+    """Normalize a YAML boolean marker (``local`` / ``managed``).
+
+    Quoted booleans (``"false"``/``"true"``, as editors/templates emit) are
+    truthy strings in Python — without normalization a quoted ``managed:
+    "false"`` would silently defeat the F6 ``local: false`` override.
+    Recognized tokens map to True/False; unknown/empty strings and None mean
+    "no marker" (the name-suffix fallback keeps deciding).
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("1", "true", "yes", "on"):
+            return True
+        if normalized in ("0", "false", "no", "off"):
+            return False
+        return None
+    return bool(value)
+
+
 @dataclass
 class CloudProvider:
     """A single upstream cloud LLM provider."""
@@ -211,23 +232,13 @@ class ProviderRegistry:
             # this gateway's lifecycle.  Quoted booleans ("false"/"true",
             # as YAML editors/templates emit) are normalized first — a
             # truthy string must not silently defeat the override.
-            explicit_local = cfg.get("local")
-            if isinstance(explicit_local, str):
-                normalized = explicit_local.strip().lower()
-                if normalized in ("1", "true", "yes", "on"):
-                    explicit_local = True
-                elif normalized in ("0", "false", "no", "off"):
-                    explicit_local = False
-                else:
-                    # Unknown/empty string is NOT an explicit marker — keep
-                    # the name-suffix fallback (F2 semantics) instead of
-                    # silently flipping the provider's lifecycle ownership.
-                    explicit_local = None
+            explicit_local = _normalize_bool_marker(cfg.get("local"))
+            explicit_managed = _normalize_bool_marker(cfg.get("managed"))
             if explicit_local is not None:
-                managed = bool(explicit_local) or bool(cfg.get("managed"))
+                managed = bool(explicit_local) or bool(explicit_managed)
             else:
                 managed = bool(
-                    cfg.get("managed")
+                    explicit_managed
                     or is_local_provider_name(provider_name)
                 )
 

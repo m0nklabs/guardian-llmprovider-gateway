@@ -357,6 +357,7 @@ _End of draft. This register is a living document; update it as files are added/
 | Path | Function | Related processes/files |
 |---|---|---|
 | `deploy/systemd/guardian-llmprovider-gateway.service` | F7 cut-over base unit (new WorkingDirectory/ExecStart, `Alias=llama-guardian.service`) | `deploy/systemd/guardian-llmprovider-gateway.service.d/`, legacy `llama-guardian.service` |
+| `deploy/systemd/guardian-llmprovider-gateway.service.d/20-tls.conf` | TLS drop-in (cert/key paths, 127.0.0.1:11435) — staged 2026-08-26 | systemd drop-in, `app/main.py` TLS env |
 
 ### Docs (2-tier + analyses) (3)
 | Path | Function | Related processes/files |
