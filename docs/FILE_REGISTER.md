@@ -309,3 +309,74 @@
 - **Tracked count:** `git ls-files` = **194 files** at the time of this draft (F1).
 
 _End of draft. This register is a living document; update it as files are added/removed/renamed._
+
+---
+
+## Delta register — F2–F7 additions not yet in the tables above (35 files)
+
+> F6/F7 addendum: every tracked file added since the F1 baseline that the
+> tables above do not yet list. Same one-line convention; consolidated here
+> per phase so the register stays complete without rewriting the F1 tables.
+
+### Root & meta (7)
+| Path | Function | Related processes/files |
+|---|---|---|
+| `AGENTS.md` | Canonical AI-agent context (hot file; two-tier with docs/HANDOFF + journal) | DSH system prompt, `docs/HANDOFF.md` |
+| `CLAUDE.md` | Symlink → `AGENTS.md` (Claude Code entry) | `AGENTS.md` |
+| `.goosehints` | Symlink → `AGENTS.md` (goose entry) | `AGENTS.md` |
+| `README.md` | Repo readme | — |
+| `CHANGELOG.md` | Release/phase changelog (F0 rename entry) | — |
+| `.gitignore` | Ignore rules (secrets, venv, data) | — |
+| `guardian-llmprovider-gateway.code-workspace` | VS Code workspace | — |
+
+### CI / tooling (3)
+| Path | Function | Related processes/files |
+|---|---|---|
+| `.github/workflows/python-ci.yml` | Org-reusable python-ci (lint + tests) | `m0nklabs/github-action-runners` |
+| `.github/workflows/ruff-autofix.yml` | Ruff autofix workflow | `m0nklabs/github-action-runners` |
+| `.github/workflows/pr-piet.yml` | PR-Piet reviewer workflow (/review, /describe) | `m0nklabs/pr-piet` |
+
+### Config (F2 provider split + F6) (8)
+| Path | Function | Related processes/files |
+|---|---|---|
+| `config/providers/ai-kvm2-local.settings.yaml` | Local managed provider (registry/aliases, `local: true`) | `app/proxy/providers.py`, `app/gateway/caretaker_client.py` |
+| `config/providers/openrouter.settings.yaml` | OpenRouter cloud provider (`catalog_url` /models/user override) | `app/proxy/cloud_catalog.py` |
+| `config/providers/nvidia.settings.yaml` | NVIDIA cloud provider (`model_prefixes`) | `app/proxy/providers.py` |
+| `config/providers/google.settings.yaml` | Google cloud provider | `app/proxy/cloud_catalog.py` |
+| `config/providers/openai.settings.yaml` | OpenAI cloud provider | `app/proxy/cloud_catalog.py` |
+| `config/providers/poolside.settings.yaml` | Poolside cloud provider | `app/proxy/cloud_catalog.py` |
+| `config/providers/groq.settings.yaml` | Groq cloud provider | `app/proxy/cloud_catalog.py` |
+| `config/providers/14700k-local.settings.yaml` | F6 Windows/14700K passive LAN provider (`local: false`, `brand: windows`, disabled until Windows-side setup) | `app/proxy/providers.py`, F6 acceptance |
+
+### Gateway / engine code (F4–F6) (1)
+| Path | Function | Related processes/files |
+|---|---|---|
+| `app/local_inference/model_registry.py` | F4 ModelRegistry: choice/discovery logic untangled from `engine/manager.py` | `app/engine/manager.py`, `app/gateway/model_discovery.py` |
+
+### Deploy (F7 staging) (1)
+| Path | Function | Related processes/files |
+|---|---|---|
+| `deploy/systemd/guardian-llmprovider-gateway.service` | F7 cut-over base unit (new WorkingDirectory/ExecStart, `Alias=llama-guardian.service`) | `deploy/systemd/guardian-llmprovider-gateway.service.d/`, legacy `llama-guardian.service` |
+| `deploy/systemd/guardian-llmprovider-gateway.service.d/20-tls.conf` | TLS drop-in (cert/key paths, 127.0.0.1:11435) — staged 2026-08-26 | systemd drop-in, `app/main.py` TLS env |
+
+### Docs (2-tier + analyses) (3)
+| Path | Function | Related processes/files |
+|---|---|---|
+| `docs/HANDOFF.md` | Cold file: current status / open points (two-tier discipline) | `AGENTS.md`, `docs/AGENT_JOURNAL.md` |
+| `docs/AGENT_JOURNAL.md` | Cold file: append-only findings log | `AGENTS.md` |
+| `docs/F5_GATEWAY_WIRING_ANALYSIS.md` | F5 decision-tree / exception-taxonomy full text | `app/gateway/caretaker_runtime.py` |
+
+### Tests (F4–F6) (11)
+| Path | Function | Related processes/files |
+|---|---|---|
+| `tests/unit/test_caretaker_client.py` | CaretakerClient contract tests (ensure/unload/status, fresh_load capability) | `app/gateway/caretaker_client.py` |
+| `tests/unit/test_caretaker_runtime.py` | ensure_backend decision-logic tests (remote-first, adoption, fail-closed) | `app/gateway/caretaker_runtime.py` |
+| `tests/unit/test_f3_local_managed_provider.py` | F3 managed-provider semantics pins | `app/proxy/providers.py` |
+| `tests/unit/test_f6_remote_lan_provider.py` | F6 LAN-provider pins (local:false override, quoted-marker normalization, shipped-file markers) | `app/proxy/providers.py`, `config/providers/14700k-local.settings.yaml` |
+| `tests/unit/test_legacy_env_rejected.py` | Legacy `LLAMA_CPP_GUARDIAN_*` env vars raise (F0 pin) | `app/paths.py` |
+| `tests/unit/test_lifespan_caretaker.py` | Lifespan caretaker wiring tests | `app/proxy/lifespan.py` |
+| `tests/test_pr_piet_clean2.py` | PR-Piet experiment test (test branch artifact) | — |
+| `tests/test_pr_piet_combined.py` | PR-Piet experiment test | — |
+| `tests/test_pr_piet_formal_review.py` | PR-Piet experiment test | — |
+| `finetune_v2.py` | Finetune v2 root entry | `app/tweaker/` |
+| `pyproject.toml` | pytest config (asyncio_mode=auto) | pytest |

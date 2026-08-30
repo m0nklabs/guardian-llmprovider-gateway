@@ -1,0 +1,27 @@
+[Unit]
+Description=Guardian LLM Provider Gateway (llama.cpp + LAN/cloud routing)
+After=network.target llama-server.service caretaker-llamacpp.service
+
+[Service]
+Type=simple
+User=flip
+# F7 cut-over: production runs from /home/flip/guardian-llmprovider-gateway
+# (the legacy /home/flip/llama_cpp_guardian is frozen — see
+# docs/IMPLEMENTATION_PLAN.md §F7).  The venv here is a symlink to the legacy
+# interpreter (same Python 3.14 runtime); .env, keys and data/ were staged
+# 2026-08-26.
+WorkingDirectory=/home/flip/guardian-llmprovider-gateway
+Environment=OLLAMA_URL=http://127.0.0.1:11440
+ExecStart=/home/flip/guardian-llmprovider-gateway/venv/bin/python3.14 -m app.main
+Restart=always
+RestartSec=3
+# Aliased to the legacy unit name so clients and operator muscle memory keep
+# working after the cut-over. Enable only after the legacy unit is stopped,
+# disabled AND its unit file moved aside (or masked): `systemctl enable` must
+# create the alias symlink at /etc/systemd/system/llama-guardian.service and
+# fails with "File exists" while the legacy unit file still exists there —
+# two units may not own the same alias.
+
+[Install]
+WantedBy=default.target
+Alias=llama-guardian.service
