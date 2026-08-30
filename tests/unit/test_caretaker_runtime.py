@@ -338,7 +338,7 @@ async def test_unavailable_connection_refused_alive_backend_runs_local(monkeypat
         err.__cause__ = httpx.ConnectError("connection refused")
         return err
 
-    client.ensure.side_effect = [_refused() for _ in range(7)]
+    client.ensure.side_effect = [_refused() for _ in range(17)]
     mgr = _manager()
     mgr.backend_serves_model = AsyncMock(return_value=False)
     mgr.backend_health_ok = AsyncMock(return_value=True)
@@ -346,7 +346,7 @@ async def test_unavailable_connection_refused_alive_backend_runs_local(monkeypat
     fallback = AsyncMock()
     result = await crt.ensure_backend(model="m", local_fallback=fallback)
     assert result == "local"
-    assert client.ensure.await_count == 7  # 2 probes + 5-iteration re-bind poll
+    assert client.ensure.await_count == 17  # 2 probes + 15-iteration re-bind poll
     fallback.assert_awaited_once()
     mgr.mark_loaded_by_caretaker.assert_not_called()
 
@@ -518,11 +518,13 @@ async def test_unavailable_refused_then_timeout_fails_closed(monkeypatch):
     mgr.mark_loaded_by_caretaker.assert_not_called()
 
 
-async def test_switch_without_fresh_load_support_goes_remote_without_save():
+async def test_switch_without_fresh_load_support_saves_but_does_not_restore():
     """While the daemon does not ship fresh_load, a remote switch cannot
-    restore context (save would be wasted, nothing restores).  The SWITCH stays
-    remote-first — the local lifecycle while the daemon is alive would race a
-    second controller — but the pre-save is skipped and a warning logged."""
+    restore context.  The SWITCH stays remote-first — the local lifecycle
+    while the daemon is alive would race a second controller — and the
+    pre-save ALWAYS runs (pre_switch_save = caller asked for persistence;
+    pre-F5 switch_model always saved; skipping it would lose the active
+    session on every A->B->A cycle).  Only the restore stays gated."""
     client = _StubClient()  # supports_fresh_load False
     mgr = _manager()
     crt.init(model_manager=mgr, caretaker_client=client)
@@ -533,7 +535,7 @@ async def test_switch_without_fresh_load_support_goes_remote_without_save():
     assert result == "remote"
     client.ensure.assert_awaited_once()
     fallback.assert_not_awaited()
-    mgr.save_current_context.assert_not_awaited()
+    mgr.save_current_context.assert_awaited_once()
     mgr.restore_current_context.assert_not_awaited()
 
 
@@ -554,13 +556,14 @@ async def test_remote_ensure_fresh_load_true_restores():
     mgr.restore_current_context.assert_awaited_once()
 
 
-async def test_first_switch_after_capability_transition_gates_save_and_restore():
+async def test_first_switch_after_capability_transition_saves_but_skips_restore():
     """The very first switch after the daemon starts shipping fresh_load must
-    behave like the pre-capability path: the capability is snapshotted BEFORE
-    the /ensure (still False), so neither the save of the switched-away model
-    nor the restore of the target's auto-save runs — otherwise a stale
-    auto-save would be re-injected without the current session ever being
-    saved (asymmetric one-time data loss at the capability boundary)."""
+    behave like the pre-capability path on the RESTORE: the capability is
+    snapshotted BEFORE the /ensure (still False), so the restore of the
+    target's auto-save must NOT run — otherwise a stale auto-save would be
+    re-injected without the current session ever being saved.  The pre-save
+    DOES run (unconditional with pre_switch_save): it only prevents the
+    current session from being lost; it never injects anything."""
     client = _StubClient()
     client.supports_fresh_load = False  # stale pre-upgrade flag
     client.ensure = AsyncMock(
@@ -573,7 +576,7 @@ async def test_first_switch_after_capability_transition_gates_save_and_restore()
     )
     assert result == "remote"
     client.ensure.assert_awaited_once()
-    mgr.save_current_context.assert_not_awaited()
+    mgr.save_current_context.assert_awaited_once()
     mgr.restore_current_context.assert_not_awaited()
 
 
