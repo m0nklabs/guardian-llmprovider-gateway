@@ -1,0 +1,6 @@
+interface:
+  display_name: "Guardian Llmprovider Gateway"
+  short_description: "Repo-specific patterns and workflows for guardian-llmprovider-gateway"
+  default_prompt: "Use the guardian-llmprovider-gateway repo skill to follow existing architecture, testing, and workflow conventions."
+policy:
+  allow_implicit_invocation: true
