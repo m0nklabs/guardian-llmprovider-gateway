@@ -78,6 +78,28 @@ def _merge_providers() -> Dict[str, Any]:
     return provider_settings_documents()
 
 
+# Caretaker-runtime poll windows (F5 follow-up).  Defaults mirror the values
+# that were hardcoded in the caretaker runtime pre-config; every accessor
+# reads the LIVE CONFIG dict, so a POST /api/config/reload changes the
+# effective windows without a restart.
+_CARETAKER_DEFAULTS = {
+    "adopt_poll_seconds": 120,
+    "rebind_poll_attempts": 15,
+    "rebind_poll_interval_seconds": 1.0,
+    "client_timeout_seconds": 5.0,
+}
+# Safety bounds: a too-short adopt window would 503 legitimate cold loads
+# (the in-flight /ensure is the only controller); an unbounded one holds the
+# model-switch lock forever.  A client timeout of 0 disables the daemon path
+# entirely in practice, so the floor keeps the remote-first design alive.
+_CARETAKER_BOUNDS = {
+    "adopt_poll_seconds": (1.0, 600.0),
+    "rebind_poll_attempts": (0, 60),
+    "rebind_poll_interval_seconds": (0.1, 30.0),
+    "client_timeout_seconds": (0.5, 120.0),
+}
+
+
 def load_config() -> dict:
     """Load configuration from the config-schema files with sensible defaults.
 
@@ -93,6 +115,7 @@ def load_config() -> dict:
             "stream_close_timeout_seconds": 5,
         },
         "cloud_retry": RateLimitConfig().to_dict(),
+        "caretaker": dict(_CARETAKER_DEFAULTS),
         "grammar": {
             "enabled": True,
             "cloud_auto_convert_json": False,
@@ -180,6 +203,31 @@ def load_stream_close_timeout_s(config: Optional[Dict[str, Any]] = None) -> floa
     except (TypeError, ValueError):
         timeout = 5.0
     return max(timeout, 0.5)
+
+
+def load_caretaker_runtime_config(config: Optional[Dict[str, Any]] = None) -> dict:
+    """Return the caretaker-runtime poll windows (typed + bounded).
+
+    Reads the ``caretaker`` section of global.settings.yaml; unknown/invalid
+    values fall back to the default, and out-of-bounds values are clamped to
+    the safety bounds (fail-safe: a config typo cannot disable the daemon
+    path or hold the switch lock forever).
+    """
+    cfg = config if config is not None else CONFIG
+    section = cfg.get("caretaker", {})
+    if not isinstance(section, dict):
+        section = {}
+    result: Dict[str, Any] = {}
+    for key, default in _CARETAKER_DEFAULTS.items():
+        try:
+            value = float(section.get(key, default))
+        except (TypeError, ValueError):
+            value = float(default)
+        lo, hi = _CARETAKER_BOUNDS[key]
+        result[key] = max(lo, min(hi, value))
+    # attempts is a count: back to int after the shared float coercion.
+    result["rebind_poll_attempts"] = int(result["rebind_poll_attempts"])
+    return result
 
 
 def load_queue_config(config: Optional[Dict[str, Any]] = None) -> dict:

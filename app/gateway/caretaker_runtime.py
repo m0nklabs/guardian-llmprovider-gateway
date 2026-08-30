@@ -80,6 +80,7 @@ from collections.abc import Awaitable, Callable
 
 import httpx
 
+from app.config_loader import load_caretaker_runtime_config
 from app.engine.manager import CrashRecord, ModelLoadError
 from app.gateway.caretaker_client import (
     CaretakerError,
@@ -117,6 +118,22 @@ _ever_reached_caretaker = False
 # time while a cold load is genuinely in flight.  Configurable via settings
 # once the runtime is wired to global.settings.yaml; tests patch asyncio.sleep.
 _ADOPT_POLL_SECONDS = 120
+
+
+def _adopt_poll_window() -> float:
+    """Return the adoption-poll window from config (hot-reloadable).
+
+    Falls back to the module constant when the config loader is unavailable
+    (unit tests patch the runtime in isolation) or the section is missing.
+    Reading LIVE config keeps ``POST /api/config/reload`` effective without a
+    restart (F5 follow-up: the window-shift cycle ends here).
+    """
+    try:
+        from app.config_loader import load_caretaker_runtime_config
+
+        return float(load_caretaker_runtime_config()["adopt_poll_seconds"])
+    except Exception:  # noqa: BLE001 — defensive: config must not break ensure
+        return float(_ADOPT_POLL_SECONDS)
 
 
 def init(*, model_manager, caretaker_client) -> None:
@@ -229,8 +246,11 @@ async def _await_backend_serving(
     failed closed (the daemon serves a different model the whole time —
     confirmed by the earlier two /ensure timeouts that the daemon was busy).
     """
-    deadline = time.monotonic() + _ADOPT_POLL_SECONDS
-    for _ in range(_ADOPT_POLL_SECONDS):
+    # Read the window once per poll so the deadline and the iteration cap use
+    # the SAME value even if a config reload lands mid-poll.
+    window = int(_adopt_poll_window())
+    deadline = time.monotonic() + window
+    for _ in range(window):
         await asyncio.sleep(1.0)
         adopted = await _backend_now_serving(
             model,
@@ -837,8 +857,11 @@ async def ensure_backend(
                         model,
                     )
                 else:
-                    for _ in range(15):
-                        await asyncio.sleep(1.0)
+                    # Poll windows are hot-reloadable config (caretaker
+                    # section); read once per poll like the adoption window.
+                    _rt = load_caretaker_runtime_config()
+                    for _ in range(int(_rt["rebind_poll_attempts"])):
+                        await asyncio.sleep(_rt["rebind_poll_interval_seconds"])
                         try:
                             rechecked = await _remote_ensure(
                                 model,

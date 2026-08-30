@@ -504,3 +504,40 @@ def test_build_falls_back_to_first_local(monkeypatch: pytest.MonkeyPatch) -> Non
     import asyncio
 
     asyncio.run(client.close())
+
+async def test_client_timeout_hot_reloadable_from_config(monkeypatch):
+    """Per-request daemon timeouts come from the live ``caretaker`` config
+    section (F5 follow-up): the /ensure call uses the configured timeout, not
+    only the constructor default — POST /api/config/reload retunes it."""
+    import httpx
+
+    from app.config_loader import CONFIG, load_caretaker_runtime_config
+
+    monkeypatch.setitem(
+        CONFIG,
+        "caretaker",
+        dict(load_caretaker_runtime_config(), client_timeout_seconds=9.0),
+    )
+    captured: dict = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured["url"] = str(req.url)
+        return _ok({"ok": True, "loaded_model": "m", "needs_reload": False})
+
+    client = _make_client(handler)  # constructor default stays 5.0
+    called_with: dict = {}
+
+    real_post = client._client.post
+
+    async def _spy_post(url: str, **kwargs):
+        called_with["timeout"] = kwargs.get("timeout")
+        return await real_post(url, **kwargs)
+
+    client._client.post = _spy_post
+    result = await client.ensure("m")
+    assert result["ok"] is True
+    assert called_with["timeout"] == httpx.Timeout(9.0)
+    # Fallback: with the section removed, the constructor timeout applies.
+    monkeypatch.delitem(CONFIG, "caretaker", raising=False)
+    assert client._request_timeout() == httpx.Timeout(5.0)
+    await client.close()
