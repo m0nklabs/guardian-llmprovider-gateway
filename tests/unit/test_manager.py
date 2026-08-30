@@ -1586,3 +1586,174 @@ class TestSpeculativeDecodingNoDraft:
         # Config now gains spec_type: draft-mtp → args differ → drift.
         mgr.models["SpecModel"]["spec_type"] = "draft-mtp"
         assert mgr._config_drifted("SpecModel", enable_vision=False) is True
+
+
+class TestCaretakerLoadedMirror:
+    """F5: mark_loaded_by_caretaker / save_current_context (remote-ensure mirror)."""
+
+    def test_mark_loaded_clears_unloaded_and_sets_current(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.is_unloaded = True
+        mgr.current_model = "Other"
+        mgr.current_vision_enabled = False
+
+        mgr.mark_loaded_by_caretaker("GLM-4.7-Flash", enable_vision=False)
+
+        assert mgr.is_unloaded is False
+        assert mgr.current_model == "GLM-4.7-Flash"
+        assert mgr._model_verified is True
+        assert mgr._last_backend_model == "GLM-4.7-Flash"
+
+    def test_mark_loaded_unknown_model_raises(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        with pytest.raises(ValueError, match="not found in configuration"):
+            mgr.mark_loaded_by_caretaker("Nope-Model")
+
+    def test_mark_loaded_persists_launch_signature(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.current_vision_enabled = False
+        mgr.mark_loaded_by_caretaker("GLM-4.7-Flash", enable_vision=False, context_hint=4096)
+        sig_file = tmp_path / "config" / "current_model.sig"
+        assert sig_file.exists()
+        sig = json.loads(sig_file.read_text())
+        assert sig["model"] == "GLM-4.7-Flash"
+        assert sig["vision"] is False
+        assert "args_sha256" in sig and "env_sha256" in sig
+
+    def test_mark_loaded_canonicalizes_alias(self, tmp_path: Path):
+        """mark_loaded_by_caretaker accepts aliases the way the hotpath does —
+        an unknown name still raises before the mirror desyncs current_model."""
+        mgr = _make_manager(tmp_path)
+        mgr.mark_loaded_by_caretaker("glm-4.7-flash", enable_vision=False)
+        assert mgr.current_model == "GLM-4.7-Flash"
+        assert mgr.is_unloaded is False
+        with pytest.raises(ValueError, match="not found in configuration"):
+            mgr.mark_loaded_by_caretaker("totally-unknown-model")
+
+    def test_save_current_context_skips_when_unloaded(self, tmp_path: Path, monkeypatch):
+        mgr = _make_manager(tmp_path)
+        mgr.is_unloaded = True
+        saved = []
+        monkeypatch.setattr(mgr, "_save_context", AsyncMock(side_effect=lambda n: saved.append(n)))
+        import asyncio
+        asyncio.run(mgr.save_current_context())
+        assert saved == []
+
+    def test_save_current_context_saves_auto_save_file(self, tmp_path: Path, monkeypatch):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+        monkeypatch.setattr(mgr, "backend_serves_model", AsyncMock(return_value=True))
+        saved = []
+        monkeypatch.setattr(mgr, "_save_context", AsyncMock(side_effect=lambda n: saved.append(n)))
+        import asyncio
+        asyncio.run(mgr.save_current_context())
+        assert saved == ["auto_save_GLM-4.7-Flash"]
+
+    def test_save_current_context_skips_when_backend_serves_other(self, tmp_path: Path, monkeypatch):
+        """Stale state: gateway thinks a model is active but the backend serves
+        something else -> saving would write the live context under the wrong
+        auto_save file, so the save must be skipped."""
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+        monkeypatch.setattr(mgr, "backend_serves_model", AsyncMock(return_value=False))
+        saved = []
+        monkeypatch.setattr(mgr, "_save_context", AsyncMock(side_effect=lambda n: saved.append(n)))
+        import asyncio
+        asyncio.run(mgr.save_current_context())
+        assert saved == []
+
+    def test_restore_current_context_skips_when_unloaded(self, tmp_path: Path, monkeypatch):
+        mgr = _make_manager(tmp_path)
+        mgr.is_unloaded = True
+        loaded = []
+        monkeypatch.setattr(mgr, "_load_context", AsyncMock(side_effect=lambda n: loaded.append(n)))
+        import asyncio
+        asyncio.run(mgr.restore_current_context())
+        assert loaded == []
+
+    def test_restore_current_context_restores_auto_save_file(self, tmp_path: Path, monkeypatch):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+        loaded = []
+        monkeypatch.setattr(mgr, "_load_context", AsyncMock(side_effect=lambda n: loaded.append(n)))
+        import asyncio
+        asyncio.run(mgr.restore_current_context())
+        assert loaded == ["auto_save_GLM-4.7-Flash"]
+
+    def test_restore_current_context_tolerates_missing_save(self, tmp_path: Path, monkeypatch):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+        async def boom(_n):
+            raise RuntimeError("Restore failed")
+        monkeypatch.setattr(mgr, "_load_context", AsyncMock(side_effect=boom))
+        import asyncio
+        # Must not raise — missing/corrupt save must never block the hotpath.
+        asyncio.run(mgr.restore_current_context())
+
+
+class TestBackendServesModel:
+    """F5: backend_serves_model compares the running GGUF with a requested model."""
+
+    def test_serves_model_matches_running_gguf(self, tmp_path: Path, monkeypatch):
+        mgr = _make_manager(tmp_path)
+        expected = mgr.models["GLM-4.7-Flash"]["path"]
+        monkeypatch.setattr(mgr, "_get_backend_model_path", lambda: expected)
+        import asyncio
+        assert asyncio.run(mgr.backend_serves_model("GLM-4.7-Flash")) is True
+
+    def test_serves_model_false_on_different_gguf(self, tmp_path: Path, monkeypatch):
+        mgr = _make_manager(tmp_path)
+        monkeypatch.setattr(mgr, "_get_backend_model_path", lambda: "/models/other.gguf")
+        import asyncio
+        assert asyncio.run(mgr.backend_serves_model("GLM-4.7-Flash")) is False
+
+    def test_serves_model_false_without_process(self, tmp_path: Path, monkeypatch):
+        mgr = _make_manager(tmp_path)
+        monkeypatch.setattr(mgr, "_get_backend_model_path", lambda: None)
+        import asyncio
+        assert asyncio.run(mgr.backend_serves_model("GLM-4.7-Flash")) is False
+
+    def test_serves_model_canonicalizes_alias(self, tmp_path: Path, monkeypatch):
+        """An alias/lowercase name must still hit the local-healthy adoption
+        (backend_serves_model canonicalizes via resolve_model)."""
+        mgr = _make_manager(tmp_path)
+        expected = mgr.models["GLM-4.7-Flash"]["path"]
+        monkeypatch.setattr(mgr, "_get_backend_model_path", lambda: expected)
+        import asyncio
+        assert asyncio.run(mgr.backend_serves_model("glm-4.7-flash")) is True
+        # Unknown names resolve to False (not an exception).
+        assert asyncio.run(mgr.backend_serves_model("totally-unknown")) is False
+
+
+class TestCaretakerLoadedMirrorVisionFlag:
+    """F5: mark_loaded_by_caretaker must resolve the model's own vision flag
+    (not blindly copy the previous model's) when enable_vision is None."""
+
+    def test_mark_loaded_none_vision_different_model_uses_model_default(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        # Previous model had vision enabled.
+        mgr.current_model = "Qwen3-30B-A3B"
+        mgr.current_vision_enabled = True
+        # Target (GLM-4.7-Flash) has no mmproj -> its own default is False.
+        mgr.mark_loaded_by_caretaker("GLM-4.7-Flash", enable_vision=None)
+        assert mgr.current_model == "GLM-4.7-Flash"
+        assert mgr.current_vision_enabled is False
+
+    def test_mark_loaded_none_vision_same_model_keeps_flag(self, tmp_path: Path):
+        # A model WITHOUT mmproj can never run vision — its resolved default is
+        # False regardless of the previous flag (correct). Use a vision-capable
+        # model to pin the "keep current flag for the same model" branch.
+        vision_yaml = SAMPLE_MODELS_YAML.rstrip() + "\n    GLM-Vision:\n        path: /models/GLM-Vision.gguf\n        vision_mmproj: /models/mmproj.gguf\n"
+        mgr = _make_manager(tmp_path, models_yaml=vision_yaml)
+        mgr.current_model = "GLM-Vision"
+        mgr.current_vision_enabled = True
+        # Same model + no explicit flag -> keep current vision flag.
+        mgr.mark_loaded_by_caretaker("GLM-Vision", enable_vision=None)
+        assert mgr.current_vision_enabled is True
+
+    def test_mark_loaded_explicit_vision_overrides_default(self, tmp_path: Path):
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "Qwen3-30B-A3B"
+        mgr.current_vision_enabled = True
+        mgr.mark_loaded_by_caretaker("GLM-4.7-Flash", enable_vision=False)
+        assert mgr.current_vision_enabled is False

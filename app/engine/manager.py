@@ -313,7 +313,7 @@ class ModelManager:
 
     async def verify_backend_model(self) -> bool:
         """SECURITY: Verify the actual running llama-server model matches what Guardian thinks.
-        
+
         Checks the llama-server process commandline to extract the real .gguf path,
         then matches it against the expected model config.
         Returns True if match, False if mismatch detected.
@@ -432,6 +432,31 @@ class ModelManager:
     async def get_current_model(self) -> str:
         # We can implement a health check or store internal state
         return self.current_model
+
+    async def backend_serves_model(self, model_name: str) -> bool:
+        """F5: True when the running llama-server actually serves ``model_name``.
+
+        Unlike ``verify_backend_model`` (which checks against
+        ``self.current_model``), this compares the running backend's .gguf
+        against the requested model's config path — so the gateway can
+        distinguish "backend is up" from "backend is up AND serving the model
+        a request needs" after a caretaker outage, without adopting a wrong
+        loaded-state.  Canonicalizes aliases the way mark_loaded_by_caretaker
+        does, so a client-facing alias still hits the local-healthy adoption
+        instead of needlessly reloading an already-serving backend.
+        """
+        try:
+            model_name = self.resolve_model(model_name)
+        except ValueError:
+            return False
+        actual_gguf = await asyncio.to_thread(self._get_backend_model_path)
+        if not actual_gguf:
+            return False
+        expected = self.models.get(model_name, {}).get("path", "")
+        if not expected:
+            return False
+        return Path(actual_gguf).resolve() == Path(expected).resolve()
+
 
     async def backend_health_ok(self) -> bool:
         """Return True when the managed llama-server backend accepts requests."""
@@ -648,6 +673,110 @@ class ModelManager:
             self.rollback_unload_state(**prev_state)
             return True
         return False
+
+    def mark_loaded_by_caretaker(
+        self,
+        model_name: str,
+        enable_vision: bool | None = None,
+        context_hint: int | None = None,
+    ) -> None:
+        """F5: the caretaker daemon confirmed (``POST /ensure`` 200) that
+        ``model_name`` is loaded and healthy on the backend.
+
+        The remote lifecycle split means the gateway no longer spawns
+        llama-server itself on the happy path; this mirror brings the
+        gateway-local manager into the same end-state ``load()`` /
+        ``switch_model()`` would have produced — current model + vision flag
+        updated, unloaded flag cleared, backend marked verified (the caretaker
+        verified at ensure time), launch signature persisted so same-model
+        context-hint caching and the drift check keep working, and the
+        vision-validation cache reset.
+        """
+        self._refresh_model_registry()
+        # Accept client-facing aliases the way the hotpath resolves them
+        # (resolve_model canonicalizes aliases / case-insensitive names and
+        # raises for unknown names). The caretaker has already switched the
+        # backend by the time we mirror the state, so a ValueError here would
+        # leave a stale current_model while the backend runs another model.
+        model_name = self.resolve_model(model_name)
+        if model_name not in self.models:
+            raise ValueError(f"Model '{model_name}' not found in configuration")
+        # Same semantics as load()/switch_model(): resolve the vision flag with
+        # the OLD active model still in place — enable_vision=None keeps the
+        # current flag only when the target IS the already-active model, and
+        # otherwise falls back to the target model's own default (False when it
+        # has no mmproj). Copying current_vision_enabled blindly would stamp a
+        # stale flag + launch signature onto a different model (e.g. the
+        # connect-error recovery path switching to another model).
+        desired_vision = self._resolve_runtime_vision_flag(model_name, enable_vision)
+        self.current_model = model_name
+        # Always set the vision flag: resolve already kept the previous flag
+        # for the same model and fell back to the model default otherwise
+        # (mirrors load()/switch_model()).
+        self.current_vision_enabled = desired_vision
+        self.is_unloaded = False
+        self._model_verified = True
+        self._last_backend_model = model_name
+        launch_sig = self._compute_launch_signature(
+            model_name, enable_vision=desired_vision, context_hint=context_hint
+        )
+        if launch_sig is not None:
+            self._write_persisted_signature(launch_sig)
+        self.reset_vision_validation(model_name)
+        logger.info("F5: caretaker confirmed model '%s' loaded", model_name)
+
+    async def save_current_context(self) -> None:
+        """F5: persist the currently loaded model's session context (auto-save).
+
+        The remote ``/ensure`` switch path no longer runs the local
+        ``switch_model`` body (which owned the context auto-save); the gateway
+        calls this before handing a switch to the caretaker so long-running
+        sessions survive a remote model swap the same way they survive a local
+        one. Tolerates a missing/corrupt save file (mirrors load()'s restore).
+        """
+        if not self.current_model or self.is_unloaded:
+            return
+        # Guard on stale state: after a caretaker-initiated switch the gateway
+        # may still believe another model is active while the backend serves
+        # something else.  Saving would write the live backend context under
+        # auto_save_<current_model> and a later switch back would restore the
+        # wrong conversation into the wrong model.  Skip when the backend does
+        # not actually serve what the gateway thinks is loaded.
+        if not await self.backend_serves_model(self.current_model):
+            logger.warning(
+                "Context auto-save skipped: backend does not serve '%s'",
+                self.current_model,
+            )
+            return
+        try:
+            await self._save_context(f"auto_save_{self.current_model}")
+        except Exception as exc:  # noqa: BLE001 — save must never block a model switch
+            logger.warning(
+                "Context auto-save failed for %s (switch continues): %s",
+                self.current_model,
+                exc,
+            )
+
+    async def restore_current_context(self) -> None:
+        """F5: restore the just-activated model's auto-saved session context.
+
+        The remote ``/ensure`` switch path no longer runs the local
+        ``switch_model`` body (which owned the context restore); the gateway
+        calls this after a successful remote ensure so an A->B->A switch
+        recovers A's saved context exactly like the local lifecycle.
+        Tolerates a missing/corrupt save file (mirrors switch_model's
+        restore).  Restore must never block the hotpath.
+        """
+        if not self.current_model or self.is_unloaded:
+            return
+        try:
+            await self._load_context(f"auto_save_{self.current_model}")
+        except Exception as exc:  # noqa: BLE001 — restore must never block the hotpath
+            logger.warning(
+                "Context restore failed for %s (switch continues): %s",
+                self.current_model,
+                exc,
+            )
 
     async def _free_gpu_memory(self) -> None:
         """Ask coexisting GPU services to release VRAM before loading a model.
