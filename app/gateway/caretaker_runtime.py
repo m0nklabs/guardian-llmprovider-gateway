@@ -164,7 +164,19 @@ async def _await_backend_serving(
     Each probe is local and cheap (no daemon round-trip), and the loop exits
     as soon as the backend confirms — a healthy loading daemon only costs the
     lock-hold time a cold switch inherently needs.
+
+    A HEALTHY backend that does not serve the requested model is a
+    determined outcome, not a load in flight: the daemon's switch is
+    stop→start (stop old llama-server, free GPU, start new), so while a
+    model is actually loading the backend is DOWN, not healthy.  If the
+    backend is healthy and serves a different model, the in-flight ensure
+    evidently resolved elsewhere (or never arrived) — waiting the full
+    window cannot change that, and holding the global switch lock for
+    ``_ADOPT_POLL_SECONDS`` would block every other auto-reload/auto-switch
+    across all clients.  Give an in-place model swap a 3s grace, then fail
+    closed promptly (``None``) instead of burning the whole window.
     """
+    wrong_model_probes = 0
     for _ in range(_ADOPT_POLL_SECONDS):
         await asyncio.sleep(1.0)
         adopted = await _backend_now_serving(
@@ -174,6 +186,16 @@ async def _await_backend_serving(
         )
         if adopted is not None:
             return adopted
+        # The backend is healthy but does not serve the requested model:
+        # the in-flight ensure is evidently not loading it (a real load
+        # keeps the backend DOWN during stop→start, so health-ok means the
+        # outcome is already determined).  Give an in-place model swap a
+        # short grace (3s), then fail closed promptly instead of holding
+        # the switch lock for the full _ADOPT_POLL_SECONDS window.
+        if _model_manager is not None and await _model_manager.backend_health_ok():
+            wrong_model_probes += 1
+            if wrong_model_probes >= 3:
+                return None
     return None
 
 
@@ -352,8 +374,14 @@ async def _ensure_with_retry(
     unexpected HTTP statuses.  The transport cause matters for the fallback
     decision:
 
-    - status_code set → daemon alive but rejected the request (deterministic,
-      no re-probe).
+    - status_code set (≠200) → daemon alive but rejected the request
+      (auth/ownership/malformed status — deterministic, no re-probe).
+    - ``status_code == 200`` with a non-dict/empty body → the daemon answered
+      but the body was unparseable (transient intermediary HTML/empty page,
+      momentary glitch).  That is NOT an auth/ownership rejection, so it is
+      re-probed once like transport errors; a second 200-body failure still
+      fails closed (the daemon is demonstrably alive — it answered 200 — so
+      the local lifecycle stays forbidden).
     - ``__cause__`` is :class:`httpx.ReadTimeout`/:class:`httpx.WriteTimeout`
       → a connection was ESTABLISHED, so the daemon is alive but busy (likely
       mid-switch; VRAM freeing + a large-model load can outlast the client
@@ -375,7 +403,13 @@ async def _ensure_with_retry(
             context_hint=context_hint,
         )
     except CaretakerUnavailable as exc:
-        if exc.status_code is not None:
+        # A body-parse failure is mapped with status_code=200 (the daemon
+        # answered, so it IS alive) — but it is not an auth/ownership
+        # rejection, so give it the transport re-probe instead of failing
+        # closed on a single transient glitch (intermediary HTML/empty page).
+        # A second 200-body failure still fails closed below: the daemon is
+        # demonstrably alive, so the local lifecycle stays forbidden.
+        if exc.status_code is not None and exc.status_code != 200:
             raise  # daemon alive but rejected us — no point re-probing
         cause = exc.__cause__
         if isinstance(cause, (httpx.ReadTimeout, httpx.WriteTimeout)):

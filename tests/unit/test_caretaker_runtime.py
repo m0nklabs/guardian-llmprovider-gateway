@@ -186,6 +186,77 @@ async def test_unavailable_timeout_rereprobe_succeeds_remote():
     )
 
 
+async def test_ensure_unparseable_200_body_reprobes_once(monkeypatch):
+    """A malformed/empty 200 body from /ensure is mapped to
+    CaretakerUnavailable(status_code=200) — the daemon answered (alive), but
+    the body was unparseable (intermediary HTML/empty page, momentary
+    glitch).  That is NOT an auth/ownership rejection: re-probe once like
+    transport errors instead of failing closed on a single glitch."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+    client = _StubClient()
+    client.ensure = AsyncMock(
+        side_effect=[
+            CaretakerUnavailable("http://x:11441", status_code=200),
+            {"ok": True, "loaded_model": "m"},
+        ]
+    )
+    mgr = _manager()
+    crt.init(model_manager=mgr, caretaker_client=client)
+    result = await crt.ensure_backend(model="m", local_fallback=AsyncMock())
+    assert result == "remote"
+    assert client.ensure.await_count == 2
+    mgr.mark_loaded_by_caretaker.assert_called_once_with(
+        "m", enable_vision=False, context_hint=None
+    )
+
+
+async def test_ensure_unparseable_200_body_twice_fails_closed(monkeypatch):
+    """A SECOND 200-body parse failure still fails closed: the daemon is
+    demonstrably alive (it answered 200), so the local lifecycle stays
+    forbidden as a second controller."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+    client = _StubClient()
+    client.ensure = AsyncMock(
+        side_effect=[
+            CaretakerUnavailable("http://x:11441", status_code=200),
+            CaretakerUnavailable("http://x:11441", status_code=200),
+        ]
+    )
+    mgr = _manager()
+    crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
+    with pytest.raises(ModelLoadError):
+        await crt.ensure_backend(model="m", local_fallback=fallback)
+    assert client.ensure.await_count == 2
+    fallback.assert_not_awaited()
+    mgr.mark_loaded_by_caretaker.assert_not_called()
+
+
+async def test_unavailable_timeout_twice_healthy_wrong_model_bails_poll(monkeypatch):
+    """A HEALTHY backend that serves a different model is a determined
+    outcome, not a load in flight: the daemon's switch is stop→start, so
+    while a model is actually loading the backend is DOWN, not healthy.
+    The poll bails after the 3s in-place-swap grace instead of holding the
+    global switch lock for the full _ADOPT_POLL_SECONDS window, then fails
+    closed."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+    client = _StubClient()
+    client.ensure.side_effect = [_timeout_unavailable(), _timeout_unavailable()]
+    mgr = _manager()
+    mgr.backend_serves_model = AsyncMock(return_value=False)  # serves other model
+    mgr.backend_health_ok = AsyncMock(return_value=True)  # healthy
+    crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
+    with pytest.raises(ModelLoadError):
+        await crt.ensure_backend(model="m", local_fallback=fallback)
+    assert client.ensure.await_count == 2
+    fallback.assert_not_awaited()
+    mgr.mark_loaded_by_caretaker.assert_not_called()
+    # 3 probes with the in-place-swap grace — far less than the full
+    # _ADOPT_POLL_SECONDS window would have run.
+    assert mgr.backend_serves_model.await_count == 3
+
+
 async def test_unavailable_timeout_twice_fails_closed(monkeypatch):
     """Two consecutive read/write timeouts mean the daemon accepted the
     connection but is unresponsive (still mid-switch — a load can outlast the
