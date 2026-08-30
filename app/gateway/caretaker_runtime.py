@@ -167,13 +167,24 @@ async def _backend_now_serving(
     # already validate the running process.
     #
     # Drift only means a real config change worth failing on when the gateway
-    # ALREADY believes the requested model is current: then the persisted
-    # signature describes the same model the backend serves, and a mismatch
-    # (settings edited in models.yaml / a client context hint that differs
-    # from the running launch) means the running process does not match what
-    # this request needs.
-    if mgr.current_model == model and mgr._config_drifted(
-        model, enable_vision=enable_vision, context_hint=context_hint
+    # ALREADY believes the requested model is current AND the request carries
+    # no parameter delta: then the persisted signature describes the same
+    # model+launch the backend serves, and a mismatch (settings edited in
+    # models.yaml) means the running process does not match what this request
+    # needs.  A request WITH a parameter delta (enable_vision/context_hint
+    # different from the persisted launch) is exactly a same-model switch in
+    # flight — the persisted sig is stale by construction until the daemon's
+    # reload completes and mark_loaded_by_caretaker rewrites it — so drift is
+    # expected there and must not block adoption: the live GGUF identity +
+    # backend health (plus the vision mmproj guard on the success path)
+    # validate the running process.
+    if (
+        mgr.current_model == model
+        and enable_vision is None
+        and context_hint is None
+        and mgr._config_drifted(
+            model, enable_vision=enable_vision, context_hint=context_hint
+        )
     ):
         return None
     return {"loaded_model": model}
@@ -756,16 +767,29 @@ async def ensure_backend(
         # owns the backend, so the local lifecycle is the sole controller and
         # the pre-F5 auto-switch is preserved.  ConnectTimeout is a SUBCLASS
         # of ConnectError and stays fail-closed (SYN never answered — DROP,
-        # not dead).
+        # not dead).  The re-bind poll below also covers the backend-DOWN
+        # restart window (KillMode=control-group takes llama-server down with
+        # the daemon) when the daemon was ever observed up: a hard-refused +
+        # ever-observed daemon may simply be restarting, so we poll before
+        # handing the backend to the local lifecycle.
         backend_healthy = (
             _model_manager is not None
             and await _model_manager.backend_health_ok()
         )
-        if backend_healthy:
-            if (
-                isinstance(exc.__cause__, httpx.ConnectError)
-                and not isinstance(exc.__cause__, httpx.ConnectTimeout)
-            ):
+        hard_refused = (
+            isinstance(exc.__cause__, httpx.ConnectError)
+            and not isinstance(exc.__cause__, httpx.ConnectTimeout)
+        )
+        # The re-bind poll protects against racing a RESTARTING daemon.  With
+        # systemd KillMode=control-group the daemon's llama-server child dies
+        # with it, so during a restart BOTH the management port and the
+        # backend are down — backend_healthy is False there, but an
+        # ever-observed daemon can still be restarting.  Poll for a re-bind
+        # whenever the daemon may exist: healthy backend (the classic case) or
+        # hard-refused + daemon ever observed up (KillMode restart window).  A
+        # never-observed daemon (roll-out) is skipped in both cases.
+        if backend_healthy or (hard_refused and _ever_reached_caretaker):
+            if hard_refused:
                 # A daemon that is merely RESTARTING (systemd Restart=always,
                 # deploy window) can have its management port momentarily
                 # closed (RST) for LONGER than a single re-bind wait while its

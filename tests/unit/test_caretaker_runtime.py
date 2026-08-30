@@ -460,6 +460,60 @@ async def test_timeout_poll_fails_closed_on_drift_when_model_already_current(mon
     mgr.mark_loaded_by_caretaker.assert_not_called()
 
 
+async def test_timeout_poll_adopts_same_model_vision_toggle_despite_drift(monkeypatch):
+    """r32 review: during a timed-out SAME-MODEL parameter switch (vision
+    toggle), the persisted launch signature is stale by construction (it still
+    describes the old text-only launch) — the drift check would report drift
+    for the whole poll and refuse adoption even after the daemon finishes the
+    reload with vision.  A request WITH a parameter delta must not be blocked
+    by the drift check; the live GGUF identity + health + the vision mmproj
+    guard validate the running process (pre-F5 switch_model waited on backend
+    health and succeeded here)."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+    client = _StubClient()
+    client.ensure.side_effect = [_timeout_unavailable(), _timeout_unavailable()]
+    mgr = _manager()
+    mgr.backend_serves_model = AsyncMock(return_value=True)
+    mgr.backend_health_ok = AsyncMock(return_value=True)
+    mgr._config_drifted = Mock(return_value=True)  # stale sig describes old launch
+    mgr.current_model = "m"  # same model, vision toggle in flight
+    mgr.current_runtime_uses_mmproj = Mock(return_value=True)  # live process uses mmproj
+    crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
+    result = await crt.ensure_backend(
+        model="m", enable_vision=True, local_fallback=fallback
+    )
+    assert result == "remote"
+    fallback.assert_not_awaited()
+    mgr.mark_loaded_by_caretaker.assert_called_once_with(
+        "m", enable_vision=True, context_hint=None
+    )
+
+
+async def test_timeout_poll_adopts_same_model_context_hint_change_despite_drift(monkeypatch):
+    """r32 review companion: the same stale-signature reasoning holds for a
+    same-model context_hint change — drift must not block adoption of a load
+    the daemon finished with the hinted context."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+    client = _StubClient()
+    client.ensure.side_effect = [_timeout_unavailable(), _timeout_unavailable()]
+    mgr = _manager()
+    mgr.backend_serves_model = AsyncMock(return_value=True)
+    mgr.backend_health_ok = AsyncMock(return_value=True)
+    mgr._config_drifted = Mock(return_value=True)
+    mgr.current_model = "m"
+    crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
+    result = await crt.ensure_backend(
+        model="m", context_hint=8192, local_fallback=fallback
+    )
+    assert result == "remote"
+    fallback.assert_not_awaited()
+    mgr.mark_loaded_by_caretaker.assert_called_once_with(
+        "m", enable_vision=False, context_hint=8192
+    )
+
+
 async def test_unavailable_connect_timeout_runs_local():
     """ConnectTimeout/PoolTimeout mean NO connection was ever accepted — the
     daemon may as well be down (full backlog, firewall DROP, LAN host powered
@@ -747,6 +801,68 @@ async def test_refused_never_observed_daemon_skips_rebind_poll(monkeypatch):
     assert client.ensure.await_count == 2  # no 15-iteration re-bind poll
     fallback.assert_awaited_once()
     mgr.mark_loaded_by_caretaker.assert_not_called()
+
+
+async def test_refused_backend_down_ever_observed_polls_rebind(monkeypatch):
+    """r32 review: with systemd KillMode=control-group the daemon's llama-server
+    child dies with it, so during a daemon restart BOTH the management port and
+    the backend are down (backend_healthy False).  An ever-observed daemon can
+    still be restarting — the re-bind poll must run there too, otherwise the
+    gateway would spawn locally and race the returning daemon (two controllers
+    on the same backend port)."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+    client = _StubClient()
+
+    def _refused() -> CaretakerUnavailable:
+        err = CaretakerUnavailable("http://x:11441")
+        err.__cause__ = httpx.ConnectError("connection refused")
+        return err
+
+    client.ensure.side_effect = [_refused() for _ in range(17)]
+    mgr = _manager()
+    mgr.backend_serves_model = AsyncMock(return_value=False)
+    mgr.backend_health_ok = AsyncMock(return_value=False)  # backend DOWN (KillMode)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    crt._ever_reached_caretaker = True  # daemon was up before the restart
+    fallback = AsyncMock()
+    result = await crt.ensure_backend(model="m", local_fallback=fallback)
+    assert result == "local"
+    assert client.ensure.await_count == 17  # 2 probes + 15-iteration re-bind poll
+    fallback.assert_awaited_once()
+    mgr.mark_loaded_by_caretaker.assert_not_called()
+
+
+async def test_refused_backend_down_ever_observed_rebinds_remote(monkeypatch):
+    """r32 review companion: with the backend down but an ever-observed daemon
+    that re-binds during the poll, the remote path completes — the local
+    lifecycle must NOT take over the backend while the daemon comes back."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+    client = _StubClient()
+
+    def _refused() -> CaretakerUnavailable:
+        err = CaretakerUnavailable("http://x:11441")
+        err.__cause__ = httpx.ConnectError("connection refused")
+        return err
+
+    client.ensure.side_effect = [
+        _refused(),
+        _refused(),
+        _refused(),
+        {"ok": True, "loaded_model": "m"},
+    ]
+    mgr = _manager()
+    mgr.backend_serves_model = AsyncMock(return_value=False)
+    mgr.backend_health_ok = AsyncMock(return_value=False)  # backend DOWN (KillMode)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    crt._ever_reached_caretaker = True  # daemon was up before the restart
+    fallback = AsyncMock()
+    result = await crt.ensure_backend(model="m", local_fallback=fallback)
+    assert result == "remote"
+    assert client.ensure.await_count == 4  # 2 probes + 2 poll attempts
+    fallback.assert_not_awaited()
+    mgr.mark_loaded_by_caretaker.assert_called_once_with(
+        "m", enable_vision=False, context_hint=None
+    )
 
 
 async def test_unavailable_rereprobe_also_fails_then_local():
