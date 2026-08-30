@@ -1090,6 +1090,9 @@ class TestWALWriterLegacyMigration:
         sink = CaptureSink(max_pending_events=config.max_pending_events)
         writer = CaptureWALWriter(sink, config)
         await writer.start()
+        # The legacy .gz active file is renamed as-is at startup — it is
+        # never appended to, so the plain active file takes over.
+        assert not Path(legacy).exists(), "legacy active file must be migrated away"
         sink.try_put(CaptureEvent(data={"seq": 1}))
         await asyncio.sleep(0.2)
         rotated = writer.rotate()
