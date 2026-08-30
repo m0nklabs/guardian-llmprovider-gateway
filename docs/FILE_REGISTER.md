@@ -306,7 +306,7 @@
 - **TLS identity:** `deploy/tls/guardian-192.168.1.35.crt` is the TLS *certificate* identity for host `guardian-192.168.1.35.crt`; its filename must **not** be renamed to the service name.
 - **`llama-server`** is a separate backend service (llama.cpp) and is distinct from `guardian-llmprovider-gateway` — references to it stay untouched.
 - **Gitignored / not tracked:** `.env`, `config/guardian.keys.yaml`, `data/`, `venv/`, `.scratch/`, logs, caches. Secrets are never committed.
-- **Tracked count:** `git ls-files` = **194 files** at the time of this draft (F1).
+- **Tracked count:** `git ls-files` = **194 files** at the time of this draft (F1; 199 by commit `dce7b87`), **219 at F7-closure** (199 + 23 additions − 3 deletions since `dce7b87`). The delta register below lists files the F1 tables did not yet cover — including F1-era files (root/meta, CI workflows), not only post-F1 additions.
 
 _End of draft. This register is a living document; update it as files are added/removed/renamed._
 
@@ -353,18 +353,19 @@ _End of draft. This register is a living document; update it as files are added/
 |---|---|---|
 | `app/local_inference/model_registry.py` | F4 ModelRegistry: choice/discovery logic untangled from `engine/manager.py` | `app/engine/manager.py`, `app/gateway/model_discovery.py` |
 
-### Deploy (F7 staging) (1)
+### Deploy (F7 staging) (2)
 | Path | Function | Related processes/files |
 |---|---|---|
 | `deploy/systemd/guardian-llmprovider-gateway.service` | F7 cut-over base unit (new WorkingDirectory/ExecStart, `Alias=llama-guardian.service`) | `deploy/systemd/guardian-llmprovider-gateway.service.d/`, legacy `llama-guardian.service` |
 | `deploy/systemd/guardian-llmprovider-gateway.service.d/20-tls.conf` | TLS drop-in (cert/key paths, 127.0.0.1:11435) — staged 2026-08-26 | systemd drop-in, `app/main.py` TLS env |
 
-### Docs (2-tier + analyses) (3)
+### Docs (2-tier + analyses) (4)
 | Path | Function | Related processes/files |
 |---|---|---|
 | `docs/HANDOFF.md` | Cold file: current status / open points (two-tier discipline) | `AGENTS.md`, `docs/AGENT_JOURNAL.md` |
 | `docs/AGENT_JOURNAL.md` | Cold file: append-only findings log | `AGENTS.md` |
 | `docs/F5_GATEWAY_WIRING_ANALYSIS.md` | F5 decision-tree / exception-taxonomy full text | `app/gateway/caretaker_runtime.py` |
+| `docs/AGENT_CONTEXT_ARCHIVE.md` | Archive of superseded AGENTS/HANDOFF voltekst (two-tier cold-file split) | `AGENTS.md`, `docs/HANDOFF.md`, `docs/AGENT_JOURNAL.md` |
 
 ### Tests (F4–F6) (11)
 | Path | Function | Related processes/files |

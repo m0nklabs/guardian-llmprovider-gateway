@@ -20,6 +20,22 @@
 > Alleen `20260826_rename` blijft actief (huidige workspace-transitie) — de écht
 > openstaande zaken staan hieronder in **Open punten**.
 
+### F7-closure (2026-08-30 nacht, take-over V2) — F5–F7 afgerond, cut-over = operator-run
+
+- **Gemerged (alle 4):** caretaker **#8** (`33b8749`) + gateway **#14** (`353d538`), **#15** (`279b67c`), **#16** (`ea615b3`) — squash-merges; #15/#16 tussentijds door take-over V2 union-opgelost (journal resp. providers.py/test_f6) en op de merge-head gereviewd (0 open threads).
+- **Suite op écht post-merge main: 1148 passed / 20 skipped** (legacy venv; main-tree ≡ merge-head-tree `dec3eb3f`). Ijkpunt vooraf (1148/20 op de gecombineerde #16-head) bevestigd; de oude handoff-verwachting (~1144–1146) was een branch-rekensom en is superseded. Caretaker post-merge: **91 passed**.
+- **Merge-criterium-regel gewijzigd (operator-autorisatie):** de agent mag selfstandig mergen zodra het criterium volledig behaald is op de merge-head (0 open/onbeantwoorde bevindingen met bewijs, review-op-head, CI groen) + slot-comment op de PR; human merge blijft de standaard, auto-approve blijft verboden. Vastgelegd in `AGENTS.md` (Deploy-bullet + merge-criterium, 2 plekken) — deze commit.
+- **FILE_REGISTER-audit gefixt:** `docs/AGENT_CONTEXT_ARCHIVE.md` ontbrak in het delta-register (row toegevoegd, Docs-sectie → 4), Deploy-header 1→2 (TLS-dropin stond er al), tracked-count-notitie bijgewerkt (194 draft → 219 nu; 199 + 23 − 3 sinds `dce7b87`).
+- **Cut-over-runbook-correctie (review-bevinding #16, terecht):** `systemctl enable` faalt met "File exists" zolang het legacy-unitbestand op `/etc/systemd/system/llama-guardian.service` bestaat → stap toevoegen tussen stop/disable en enable: `sudo mv /etc/systemd/system/llama-guardian.service /etc/systemd/system/llama-guardian.service.legacy-f7 && sudo systemctl daemon-reload`. Rollback: bestand terugzetten + `daemon-reload` + legacy starten. Unit-comment gecorrigeerd in `58e2a88`.
+- **F7-cut-over = OPERATOR-RUN (bijgewerkte checklist):**
+  1. `sudo cp deploy/systemd/guardian-llmprovider-gateway.service deploy/systemd/guardian-llmprovider-gateway.service.d -r /etc/systemd/system/` (+ `daemon-reload`)
+  2. Legacy: `sudo systemctl stop llama-guardian && sudo systemctl disable llama-guardian`
+  3. **Nieuw (review-correctie):** `sudo mv /etc/systemd/system/llama-guardian.service /etc/systemd/system/llama-guardian.service.legacy-f7 && sudo systemctl daemon-reload`
+  4. `sudo systemctl enable --now guardian-llmprovider-gateway` (alias `llama-guardian.service` ontstaat nu schoon)
+  5. `nginx -t && sudo systemctl reload nginx` → `./venv/bin/python scripts/verify_post_restart.py` + `/v1/models` + lokale/cloud-inference + capture + dashboard checken
+  6. Legacy bevriezen (`/home/flip/llama_cpp_guardian` = archief-link naar `m0nklabs/llama-cpp-guardian`). Rollback = legacy-unitfile terugzetten + `daemon-reload` + legacy `--now`.
+- **Open (onveranderd):** NVIDIA context-overrides, pi-models.json bare-names, CI-adoptie pre-restart-gate, 72h soak-test, HTTP-mock-backend voor de caretaker Phase-C/D swap-tests (flake-by-design op gedeelde GPU-runners), failover-groep `local → windows` zodra de Windows-modellenlijst bekend is.
+
 ### Sessie-overdracht 2026-08-30 avond — F5–F7 (volgende agent start HIER)
 
 > Deze sessie eindigde vóór de F7-cut-over; alles hieronder is de levende staat
