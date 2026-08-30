@@ -389,6 +389,15 @@ def test_filters_client_model_route_event_type_request_id(main_root):
     assert _count(main_root, "--request-id", "rq-minimal", "--model", "local") == 0
 
     assert _count(main_root, "--limit", "3") == 3
+    # Review fix: --limit 0 must select nothing (yield-before-check bug made
+    # rollup mode aggregate exactly one record with --limit 0).
+    assert _count(main_root, "--limit", "0") == 0
+
+
+def test_rollup_daily_limit_zero_selects_nothing(main_root):
+    proc = run_query(main_root, "--rollup", "daily", "--limit", "0")
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == ""
 
 
 def test_json_mode_prints_lines_exactly_as_stored(main_root):

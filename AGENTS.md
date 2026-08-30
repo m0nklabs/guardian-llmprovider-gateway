@@ -174,6 +174,7 @@ Kortom: **pr-agent fork = PR-Piet = workflow = review.** Slash-commando's (`/rev
 
 - Post `/review` van een **mens-account** (`gh pr comment <n> --body "/review"`); bot-senders worden overgeslagen. Post het na **elke laatste commit vóór merge** (review draagt `head=<sha>`; na nieuwe pushes opnieuw `/review`).
 - **Merge-criterium (operator):** pas mergen als er GEEN openstaande bevindingen/threads zijn (met bewijs weerlegd + beantwoord telt niet als openstaand). **Altijd human merge.**
+- **Slot-comment bij merge-gereed (operator, 2026-08-30):** een PR die als merge-gereed wordt aangemerkt krijgt minstens één slot-comment op de PR dat aangeeft dat de laatste review bewijst dat de issues/bevindingen met overwegingen zijn beoordeeld (resolved óf met bewijs beantwoord/weerlegd).
 
 ### Review-output afhandelen (approven bespaart rondes)
 

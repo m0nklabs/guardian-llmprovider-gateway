@@ -295,12 +295,23 @@ def _normalize_correlation_headers(raw: Any) -> List[str]:
     """Normalize the correlation_headers YAML value to lowercase header names.
 
     Non-string/blank entries are dropped silently (configuration tolerance —
-    a broken entry must not disable capture).  Returns the default when the
-    value is not a list at all; CaptureConfig._validate still guards the
-    final shape.
+    a broken entry must not disable capture).  Behaviour:
+
+    - value is not a list at all → default headers;
+    - **explicit empty list → empty result** (a deliberate operator opt-out:
+      "echo no caller headers" is a supported configuration, not a
+      misconfiguration — the default must NOT be silently restored here);
+    - non-empty list whose entries are all invalid → default headers.
+
+    CaptureConfig._validate still guards the final shape.
     """
     if not isinstance(raw, list):
         return list(DEFAULT_CORRELATION_HEADERS)
+    if not raw:
+        # Explicit operator opt-out (review finding: an empty list was
+        # silently replaced by the default, making the echo impossible to
+        # disable via configuration).
+        return []
     normalized: List[str] = []
     for entry in raw:
         if not isinstance(entry, str):

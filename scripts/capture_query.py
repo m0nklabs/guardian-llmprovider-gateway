@@ -609,10 +609,12 @@ def _limited(records: Iterator[dict], limit: int | None) -> Iterator[dict]:
         return
     emitted = 0
     for record in records:
-        yield record
-        emitted += 1
+        # Check BEFORE yielding: `--limit 0` must select nothing (review
+        # finding — the previous yield-first order aggregated one record).
         if emitted >= limit:
             return
+        yield record
+        emitted += 1
 
 
 def _print_stats(stats: ScanStats, selected: int) -> None:
