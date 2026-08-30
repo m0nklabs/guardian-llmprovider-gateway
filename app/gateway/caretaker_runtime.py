@@ -275,26 +275,39 @@ async def _complete_remote(
         )
 
     if _model_manager is not None:
-        # Mirror the adopt-path guard: the daemon may have resolved vision
+        # Mirror the adopt-path guard: when the request EXPLICITLY needs
+        # vision (enable_vision=True) the daemon may have resolved it
         # differently than the gateway (own config / hot config edit /
-        # daemon-side vision resolution dropping mmproj).  If the request
-        # needed vision but the LIVE process launched without mmproj,
-        # stamping current_vision_enabled=True would forward image requests
-        # to a backend that cannot serve them — fail closed instead of
-        # desyncing (the probe is reliable here: the daemon writes the args
-        # file it launches with, in the same CURRENT_MODEL_ARGS_FILE the
-        # gateway reads).
+        # daemon-side vision resolution dropping mmproj).  Stamping
+        # current_vision_enabled=True on a text-only process would forward
+        # image requests to a backend that cannot serve them — fail closed
+        # instead of desyncing (the probe is reliable here: the daemon writes
+        # the args file it launches with, in the same CURRENT_MODEL_ARGS_FILE
+        # the gateway reads).
+        #
+        # With enable_vision=None (ollama bridge / connect-error recovery
+        # reloads) the resolved flag reflects the gateway's CURRENT stamp,
+        # not the request's need — a daemon legitimately serving a
+        # vision-capable model text-only (VRAM limits, daemon config without
+        # mmproj) must NOT 503 a text request.  Mirror the LIVE process's
+        # mmproj state instead so current_vision_enabled stays truthful and a
+        # later image request still triggers a (vision-enabled) switch.
         if (
-            _model_manager._resolve_runtime_vision_flag(model, enable_vision)
+            enable_vision is True
             and not _model_manager.current_runtime_uses_mmproj(model)
         ):
             raise ModelLoadError(
                 f"Caretaker loaded '{loaded}' without mmproj while vision "
                 "was requested"
             )
+        effective_vision = (
+            _model_manager.current_runtime_uses_mmproj(model)
+            if enable_vision is None
+            else bool(enable_vision)
+        )
         _model_manager.mark_loaded_by_caretaker(
             model,
-            enable_vision=enable_vision,
+            enable_vision=effective_vision,
             context_hint=context_hint,
         )
         # The remote path no longer runs the local switch_model body, which
@@ -550,12 +563,16 @@ async def ensure_backend(
             # mmproj).  Adopting then stamps current_vision_enabled=True via
             # mark_loaded_by_caretaker even though the real process is
             # text-only — a subsequent image request would be forwarded to a
-            # backend that cannot serve it.  So when the request needs vision,
-            # also require the LIVE process to actually use mmproj (the args
-            # file is written by whoever launched the backend — gateway OR
-            # daemon — so the probe reflects the real process).
+            # backend that cannot serve it.  So when the request EXPLICITLY
+            # needs vision (enable_vision=True), also require the LIVE
+            # process to actually use mmproj (the args file is written by
+            # whoever launched the backend — gateway OR daemon — so the
+            # probe reflects the real process).  With enable_vision=None
+            # (reloads) the request has no vision need, so adoption must not
+            # fail closed on the stamp mismatch — the mark below mirrors the
+            # live state instead.
             and not (
-                _model_manager._resolve_runtime_vision_flag(model, enable_vision)
+                enable_vision is True
                 and not _model_manager.current_runtime_uses_mmproj(model)
             )
         ):
@@ -564,9 +581,14 @@ async def ensure_backend(
                 "adopting loaded state without respawn",
                 model,
             )
+            effective_vision = (
+                _model_manager.current_runtime_uses_mmproj(model)
+                if enable_vision is None
+                else bool(enable_vision)
+            )
             _model_manager.mark_loaded_by_caretaker(
                 model,
-                enable_vision=enable_vision,
+                enable_vision=effective_vision,
                 context_hint=context_hint,
             )
             # NO restore on the adopt path: adoption only happens when the
