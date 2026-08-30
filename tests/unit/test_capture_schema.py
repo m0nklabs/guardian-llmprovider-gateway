@@ -743,6 +743,22 @@ class TestIntCoercionC2:
         assert event["completion_tokens"] == 3
         assert "total_tokens" not in event
 
+    def test_non_finite_tokens_omit_field_not_crash(self, capture_config, base_ctx):
+        """JSON ``1e999`` parses to ``inf``; ``int(inf)`` raises OverflowError.
+        The event must survive with the field omitted and no bare ``Infinity``
+        may enter the JSONL line (review finding)."""
+        event = build_request_completed_event(
+            capture_config, base_ctx, prompt_tokens=float("inf"),
+            completion_tokens=float("nan"), cost=float("inf"), sequence=1,
+        )
+        assert "prompt_tokens" not in event
+        assert "completion_tokens" not in event
+        assert "total_tokens" not in event
+        assert "cost" not in event
+        import json as _json
+        assert "Infinity" not in _json.dumps(event)
+        assert "NaN" not in _json.dumps(event)
+
 
 # ── Capture-feedback 1.1.0: correlation header config (C6) ──────────────
 

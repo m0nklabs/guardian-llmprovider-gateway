@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -49,7 +50,10 @@ def _coerce_int(value: Any) -> Optional[int]:
 
     Defensive against upstream providers emitting token counters as floats
     or strings: a non-coercible value yields None (field omitted) instead of
-    raising and silently dropping the whole event.
+    raising and silently dropping the whole event.  Non-finite floats
+    (``inf``/``nan`` — Python parses JSON ``1e999`` as ``inf``) also yield
+    None: ``int(inf)`` raises OverflowError and an infinite counter is not a
+    real value (review finding).
     """
     if value is None:
         return None
@@ -57,24 +61,34 @@ def _coerce_int(value: Any) -> Optional[int]:
         return int(value)
     if isinstance(value, int):
         return value
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         pass
     try:
         return int(float(value))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
 def _coerce_float(value: Any) -> Optional[float]:
-    """Best-effort float coercion; returns None when not coercible."""
+    """Best-effort float coercion; returns None when not coercible.
+
+    Non-finite results (``inf``/``nan``) yield None: ``json.dumps`` would
+    emit bare ``Infinity``/``NaN`` which strict JSON parsers (e.g. jq)
+    cannot read (review finding).
+    """
     if value is None or isinstance(value, bool):
         return None
     try:
-        return float(value)
-    except (TypeError, ValueError):
+        result = float(value)
+    except (TypeError, ValueError, OverflowError):
         return None
+    if not math.isfinite(result):
+        return None
+    return result
 
 #: Delimiter used in event_id computation — must not appear in any component.
 EVENT_ID_DELIMITER = "|"

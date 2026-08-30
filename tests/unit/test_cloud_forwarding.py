@@ -297,3 +297,26 @@ async def test_cloud_nonstream_capture_without_finish_reason_marks_incomplete(mo
     assert capture_completed[0]["finish_reason"] is None
     assert capture_completed[0]["incomplete"] is True
     assert capture_completed[0]["streamed"] is False
+
+
+def test_usage_mirror_skips_non_finite_values():
+    """JSON 1e999 parses to inf: int(inf) raises OverflowError, which would
+    turn an already-successful 200 into a client-facing failure.  The mirror
+    must skip non-finite values instead (review finding)."""
+    from app.cloud_inference.forwarding import _extract_cloud_usage_mirror
+
+    payload = {
+        "provider": "Z.AI",
+        "usage": {
+            "completion_tokens_details": {"reasoning_tokens": 3129},
+            "native_tokens_reasoning": 1e999,  # parses to inf
+            "native_tokens_cached": float("inf"),
+            "cost": 1e999,
+        },
+    }
+    mirror = _extract_cloud_usage_mirror(payload)
+    assert mirror["provider_name"] == "Z.AI"
+    assert mirror["completion_tokens_details"] == {"reasoning_tokens": 3129}
+    assert "native_tokens_reasoning" not in mirror
+    assert "native_tokens_cached" not in mirror
+    assert "cost" not in mirror

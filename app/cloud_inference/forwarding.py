@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 import uuid
 from typing import Any, Dict, Optional
@@ -229,13 +230,16 @@ def _extract_cloud_usage_mirror(payload: Any) -> Dict[str, Any]:
         if isinstance(details, dict) and details:
             mirror["completion_tokens_details"] = details
         ntr = usage.get("native_tokens_reasoning")
-        if isinstance(ntr, (int, float)) and not isinstance(ntr, bool):
+        # math.isfinite guards JSON 1e999 → inf: int(inf) raises OverflowError,
+        # which would turn an already-successful 200 into a client-facing
+        # failure (review finding).
+        if isinstance(ntr, (int, float)) and not isinstance(ntr, bool) and math.isfinite(ntr):
             mirror["native_tokens_reasoning"] = int(ntr)
         ntc = usage.get("native_tokens_cached")
-        if isinstance(ntc, (int, float)) and not isinstance(ntc, bool):
+        if isinstance(ntc, (int, float)) and not isinstance(ntc, bool) and math.isfinite(ntc):
             mirror["native_tokens_cached"] = int(ntc)
         cost = usage.get("cost")
-        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool) and math.isfinite(cost):
             mirror["cost"] = float(cost)
     reported_provider = payload.get("provider")
     if isinstance(reported_provider, str) and reported_provider:
