@@ -727,14 +727,14 @@ async def test_remote_ensure_fresh_load_true_restores():
     mgr.restore_current_context.assert_awaited_once()
 
 
-async def test_first_switch_after_capability_transition_saves_but_skips_restore():
-    """The very first switch after the daemon starts shipping fresh_load must
-    behave like the pre-capability path on the RESTORE: the capability is
-    snapshotted BEFORE the /ensure (still False), so the restore of the
-    target's auto-save must NOT run — otherwise a stale auto-save would be
-    re-injected without the current session ever being saved.  The pre-save
-    DOES run (unconditional with pre_switch_save): it only prevents the
-    current session from being lost; it never injects anything."""
+async def test_first_switch_after_capability_transition_saves_and_restores():
+    """The very first switch after the daemon starts shipping fresh_load
+    RESTORES like pre-F5 switch_model did: the pre-save is unconditional with
+    pre_switch_save (r25), so the current session IS saved before the switch —
+    there is no 'restore without save' asymmetry to guard against.  The
+    response-level fresh_load: true is the only authoritative freshness
+    signal; the stale pre-request capability flag must not suppress the
+    restore (that would silently drop one A->B->A recovery)."""
     client = _StubClient()
     client.supports_fresh_load = False  # stale pre-upgrade flag
     client.ensure = AsyncMock(
@@ -748,7 +748,7 @@ async def test_first_switch_after_capability_transition_saves_but_skips_restore(
     assert result == "remote"
     client.ensure.assert_awaited_once()
     mgr.save_current_context.assert_awaited_once()
-    mgr.restore_current_context.assert_not_awaited()
+    mgr.restore_current_context.assert_awaited_once()
 
 
 async def test_remote_ensure_fresh_load_false_skips_restore():
