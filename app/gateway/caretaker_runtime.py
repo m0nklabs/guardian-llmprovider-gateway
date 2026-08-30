@@ -27,14 +27,25 @@ Decision logic:
 - ``CaretakerUnavailable`` (transport/timeout/auth) → a single re-probe of
   ``/ensure`` happens first (a live daemon mid-switch would otherwise race a
   local spawn — two controllers on the same backend).  A read/write timeout
-  means the daemon accepted the connection (alive): a second one fails closed.
-  Connection-refused/DNS/ConnectTimeout mean the daemon may be gone: the
-  backend may still be healthy (daemon died but llama-server survived) — if
-  so, adopt the loaded state without spawning.  If the backend is ALIVE but
-  not serving the requested model, the local lifecycle would race a second
-  controller → fail closed.  Only when the backend is confirmed DOWN does the
-  original local lifecycle (``local_fallback``) run — safe, because with the
-  daemon down nothing else owns the backend port.
+  means the daemon accepted the connection (alive): a second one fails closed
+  UNLESS the backend now serves the requested model (a cold load can outlast
+  the client timeout; the in-flight /ensure is the only controller, so
+  adopting the confirmed load is safe and avoids a 503 regression vs
+  ``load()``/``switch_model()``).  Connection-refused/DNS/ConnectTimeout mean
+  the daemon may be gone: the backend may still be healthy (daemon died but
+  llama-server survived) — if so, adopt the loaded state without spawning.
+  If the backend is ALIVE but not serving the requested model (or serves it
+  without the requested vision config), the local lifecycle would race a
+  second controller → fail closed.  Only when the backend is confirmed DOWN
+  does the original local lifecycle (``local_fallback``) run — safe, because
+  with the daemon down nothing else owns the backend port.
+- Vision integrity: whenever state is mirrored to the gateway manager
+  (``mark_loaded_by_caretaker``) — on the success path or on adoption — and
+  the request needs vision, the LIVE process must confirm mmproj via
+  ``current_runtime_uses_mmproj`` (the daemon writes the args file it launches
+  with, same path the gateway reads).  Stamping ``current_vision_enabled=True``
+  on a text-only process would forward image requests to a backend that cannot
+  serve them; both paths fail closed instead.
 - Any other ``CaretakerError`` (model not found, VRAM limit, load failed,
   invalid request) → mapped to the same error types the hotpath callers
   already handle (``ModelLoadError`` / ``ValueError``), so crash recording
@@ -73,6 +84,37 @@ def init(*, model_manager, caretaker_client) -> None:
     global _caretaker_client, _model_manager
     _caretaker_client = caretaker_client
     _model_manager = model_manager
+
+
+async def _backend_now_serving(
+    model: str,
+    *,
+    enable_vision: bool | None,
+    context_hint: int | None,
+) -> dict | None:
+    """Return a synthetic /ensure success if the backend now serves ``model``.
+
+    Used when the daemon's in-flight /ensure outlived our re-probe timeouts (a
+    cold large-model load can take 10-30s while the client timeout is seconds):
+    adoption only mirrors state the live process already reports — no spawn,
+    no args-file write, no second controller — so the daemon stays the sole
+    controller.  ``None`` when the backend does not serve the requested model,
+    is not healthy, or its launch config drifts from what this request needs
+    (same guards as the outage-adopt path).  The vision guard runs in the
+    common success path that consumes this dict.
+    """
+    mgr = _model_manager
+    if mgr is None:
+        return None
+    if not await mgr.backend_serves_model(model):
+        return None
+    if not await mgr.backend_health_ok():
+        return None
+    if mgr._config_drifted(
+        model, enable_vision=enable_vision, context_hint=context_hint
+    ):
+        return None
+    return {"loaded_model": model}
 
 
 async def _ensure_with_retry(
@@ -126,6 +168,24 @@ async def _ensure_with_retry(
                 if exc2.status_code is not None:
                     raise
                 if isinstance(exc2.__cause__, (httpx.ReadTimeout, httpx.WriteTimeout)):
+                    # A cold model load can outlast the client timeout more
+                    # than once; the daemon's in-flight /ensure is the only
+                    # controller.  Pre-F5 load()/switch_model() waited for
+                    # backend health, so 503ing here would be a regression on
+                    # every cold switch.  Give the backend one non-blocking
+                    # chance to confirm the load before failing closed.
+                    adopted = await _backend_now_serving(
+                        model,
+                        enable_vision=enable_vision,
+                        context_hint=context_hint,
+                    )
+                    if adopted is not None:
+                        logger.info(
+                            "F5: /ensure timed out but backend now serves "
+                            "'%s' — adopting loaded state",
+                            model,
+                        )
+                        return adopted
                     raise ModelLoadError(
                         "Caretaker alive but unresponsive; refusing local "
                         "fallback to avoid a second controller on the backend"
@@ -145,6 +205,20 @@ async def _ensure_with_retry(
             )
         except CaretakerUnavailable as exc2:
             if isinstance(exc2.__cause__, (httpx.ReadTimeout, httpx.WriteTimeout)):
+                # Same as above: the daemon came back but is busy — adopt if
+                # the backend now confirms the load, else fail closed.
+                adopted = await _backend_now_serving(
+                    model,
+                    enable_vision=enable_vision,
+                    context_hint=context_hint,
+                )
+                if adopted is not None:
+                    logger.info(
+                        "F5: /ensure re-probe timed out but backend now serves "
+                        "'%s' — adopting loaded state",
+                        model,
+                    )
+                    return adopted
                 raise ModelLoadError(
                     "Caretaker alive but unresponsive; refusing local "
                     "fallback to avoid a second controller on the backend"
@@ -395,6 +469,23 @@ async def ensure_backend(
         )
 
     if _model_manager is not None:
+        # Mirror the adopt-path guard: the daemon may have resolved vision
+        # differently than the gateway (own config / hot config edit /
+        # daemon-side vision resolution dropping mmproj).  If the request
+        # needed vision but the LIVE process launched without mmproj,
+        # stamping current_vision_enabled=True would forward image requests
+        # to a backend that cannot serve them — fail closed instead of
+        # desyncing (the probe is reliable here: the daemon writes the args
+        # file it launches with, in the same CURRENT_MODEL_ARGS_FILE the
+        # gateway reads).
+        if (
+            _model_manager._resolve_runtime_vision_flag(model, enable_vision)
+            and not _model_manager.current_runtime_uses_mmproj(model)
+        ):
+            raise ModelLoadError(
+                f"Caretaker loaded '{loaded}' without mmproj while vision "
+                "was requested"
+            )
         _model_manager.mark_loaded_by_caretaker(
             model,
             enable_vision=enable_vision,
