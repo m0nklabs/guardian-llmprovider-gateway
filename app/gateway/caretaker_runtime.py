@@ -39,9 +39,10 @@ Decision logic:
   with a healthy backend is the one case that preserves the pre-F5
   auto-switch: nothing listening on the management port is the strongest
   evidence the daemon process is gone, so after a short bounded re-bind poll
-  (5× 1s — a restarting daemon's port can stay closed for RestartSec +
-  startup) the local lifecycle runs — unless any poll attempt finds the
-  daemon re-bound and rejecting (status_code) or re-bound and busy
+  (15× 1s — a restarting daemon's port can stay closed for RestartSec +
+  startup; skipped entirely when the daemon has never been observed up in
+  this process lifetime, since it then cannot be "restarting") the local
+  lifecycle runs — unless any poll attempt finds the daemon re-bound and rejecting (status_code) or re-bound and busy
   (read/write timeout), which fail closed like every other live-daemon case.
   Transport errors where a connection WAS established (``ReadError``/
   ``WriteError`` resets, ``RemoteProtocolError``, ``PoolTimeout``) mean the
@@ -74,6 +75,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Awaitable, Callable
 
 import httpx
@@ -93,6 +95,15 @@ logger = logging.getLogger("Guardian")
 # Injected by server.init(); None = no caretaker configured (legacy behaviour).
 _caretaker_client = None  # CaretakerClient | None
 _model_manager = None  # ModelManager | None
+
+# True once the caretaker daemon has answered ANY control-API call (success
+# or rejection) in this process lifetime.  The refused re-bind poll exists to
+# avoid racing a daemon that is merely RESTARTING (systemd Restart=always);
+# a daemon that has never been observed up cannot be "restarting" from this
+# process's point of view (roll-out / not yet deployed), so skipping the poll
+# there just saves ~15s of lock-hold per local-fallback switch instead of
+# protecting anything.  Once the daemon is ever observed, the full poll stays.
+_ever_reached_caretaker = False
 
 # Bounded adoption-poll window in seconds.  The poll runs under the caller's
 # model-switch lock (auto-reload/auto-switch hold it for the whole ensure), so
@@ -182,7 +193,11 @@ async def _await_backend_serving(
     single probe would still 503 most cold switches — the probe runs right
     after ~2× the client timeout (10s at the 5s default), while a 10-30s load
     is barely started.  Poll once per second up to the bounded
-    ``_ADOPT_POLL_SECONDS`` window; ``None`` if the load never confirms.
+    ``_ADOPT_POLL_SECONDS`` window (wall-clock deadline, not just iteration
+    count: a hung backend that never answers the health probe stretches each
+    iteration to the probe's ~5s timeout, so the deadline keeps the lock-hold
+    at ~``_ADOPT_POLL_SECONDS`` seconds instead of multiplying it); ``None``
+    if the load never confirms.
     Each probe is local and cheap (no daemon round-trip), and the loop exits
     as soon as the backend confirms — a healthy loading daemon only costs the
     lock-hold time a cold switch inherently needs.
@@ -203,6 +218,7 @@ async def _await_backend_serving(
     failed closed (the daemon serves a different model the whole time —
     confirmed by the earlier two /ensure timeouts that the daemon was busy).
     """
+    deadline = time.monotonic() + _ADOPT_POLL_SECONDS
     for _ in range(_ADOPT_POLL_SECONDS):
         await asyncio.sleep(1.0)
         adopted = await _backend_now_serving(
@@ -220,6 +236,14 @@ async def _await_backend_serving(
         # legitimate cold switch that completes moments later into a spurious
         # 503 — pre-F5 waited without a cap, so the bounded window is the
         # safe, strictly-better behavior.
+        # The loop is ALSO wall-clock bounded: a hung backend that accepts
+        # connections but never answers the health probe stretches each
+        # iteration to the probe's ~5s timeout (plus the 1s sleep), which
+        # would otherwise turn the 120-iteration bound into ~12 minutes of
+        # lock-hold instead of the promised ~120s.  The iteration cap stays
+        # as a hard safety net; the deadline is what bounds the real cost.
+        if time.monotonic() >= deadline:
+            break
     return None
 
 
@@ -400,6 +424,39 @@ async def _complete_remote(
     return "remote"
 
 
+async def _remote_ensure(
+    model: str,
+    *,
+    enable_vision: bool | None = None,
+    context_hint: int | None = None,
+) -> dict:
+    """POST /ensure via the injected client, recording that the daemon answered.
+
+    The refused re-bind decision needs to know whether the daemon has EVER
+    been observed up in this process lifetime.  Any actual HTTP response —
+    success or a mapped rejection (status_code) — proves a live daemon exists;
+    only a pure transport failure leaves ``_ever_reached_caretaker`` unset.
+    """
+    global _ever_reached_caretaker
+    try:
+        result = await _caretaker_client.ensure(
+            model,
+            enable_vision=enable_vision,
+            context_hint=context_hint,
+        )
+    except CaretakerUnavailable as exc:
+        if exc.status_code is not None:
+            _ever_reached_caretaker = True
+        raise
+    except CaretakerError:
+        # A mapped error (model not found / VRAM / load failed / invalid
+        # request) is still a daemon answer — it exists.
+        _ever_reached_caretaker = True
+        raise
+    _ever_reached_caretaker = True
+    return result
+
+
 async def _ensure_with_retry(
     model: str,
     *,
@@ -440,7 +497,7 @@ async def _ensure_with_retry(
       backend or run the local fallback (it is then the only controller).
     """
     try:
-        return await _caretaker_client.ensure(
+        return await _remote_ensure(
             model,
             enable_vision=enable_vision,
             context_hint=context_hint,
@@ -459,7 +516,7 @@ async def _ensure_with_retry(
             # Alive but busy: re-probe once; a second timeout must not spawn
             # locally against a live daemon.
             try:
-                return await _caretaker_client.ensure(
+                return await _remote_ensure(
                     model,
                     enable_vision=enable_vision,
                     context_hint=context_hint,
@@ -500,7 +557,7 @@ async def _ensure_with_retry(
         # (alive) — running the local lifecycle would race a live daemon, so
         # fail closed the same way the timeout branch does.
         try:
-            return await _caretaker_client.ensure(
+            return await _remote_ensure(
                 model,
                 enable_vision=enable_vision,
                 context_hint=context_hint,
@@ -720,52 +777,71 @@ async def ensure_backend(
                 # The 15s window covers the deployment's RestartSec + python
                 # startup budget (commonly >7s); both probes only take ~1s
                 # each on refused connects, so the poll dominates the
-                # restart-window wait as intended.
+                # restart-window wait as intended.  A daemon that has NEVER
+                # been observed up in this process lifetime (roll-out / not
+                # deployed) cannot be "restarting" — the poll is skipped there
+                # and the local lifecycle runs immediately (see below).
                 rechecked = None
-                for _ in range(15):
-                    await asyncio.sleep(1.0)
-                    try:
-                        rechecked = await _caretaker_client.ensure(
-                            model,
-                            enable_vision=enable_vision,
-                            context_hint=context_hint,
-                        )
-                        break  # daemon re-bound: remote path completes below
-                    except CaretakerUnavailable as recheck_unavail:
-                        # The re-probe result decides whether the daemon is
-                        # really gone or merely still up:
-                        # - status_code set → the daemon re-bound its port and
-                        #   rejected us (e.g. 401/403 after a key rotation):
-                        #   it owns the backend — fail closed like the outer
-                        #   branch.
-                        # - Read/WriteTimeout → the daemon re-bound and
-                        #   accepted the connection but is busy: alive — fail
-                        #   closed.
-                        # - any other transport error (refused/DNS/
-                        #   ConnectTimeout) → still nothing listening: keep
-                        #   polling; if the window elapses the local lifecycle
-                        #   is treated as the sole controller.
-                        if recheck_unavail.status_code is not None:
-                            raise ModelLoadError(
-                                f"Caretaker control-API rejected the request "
-                                f"(status {recheck_unavail.status_code}); refusing "
-                                "local fallback to avoid a second controller on the "
-                                "backend"
-                            ) from recheck_unavail
-                        if isinstance(
-                            recheck_unavail.__cause__,
-                            (httpx.ReadTimeout, httpx.WriteTimeout),
-                        ):
-                            raise ModelLoadError(
-                                "Caretaker re-bound but unresponsive; refusing "
-                                "local fallback to avoid a second controller on "
-                                "the backend"
-                            ) from recheck_unavail
-                        # still down — continue polling; rechecked stays None
-                    except CaretakerError as recheck_exc:
-                        # The daemon is back and answered with an error: map it
-                        # the same way the main path does (fail closed).
-                        raise _map_caretaker_error(recheck_exc) from recheck_exc
+                if not _ever_reached_caretaker:
+                    # The daemon has never answered a control-API call in this
+                    # process lifetime (roll-out: caretaker configured but the
+                    # daemon not yet deployed, or removed).  It cannot be
+                    # "restarting" from this process's point of view, so the
+                    # 15s re-bind poll would only add lock-hold to every
+                    # local-fallback switch during rollout.  Fall straight to
+                    # the local lifecycle — with the daemon down/absent it is
+                    # the sole controller (pre-F5 behaviour).
+                    logger.warning(
+                        "F5: caretaker management port closed and the daemon "
+                        "was never observed up in this process — running the "
+                        "local lifecycle immediately for '%s'",
+                        model,
+                    )
+                else:
+                    for _ in range(15):
+                        await asyncio.sleep(1.0)
+                        try:
+                            rechecked = await _remote_ensure(
+                                model,
+                                enable_vision=enable_vision,
+                                context_hint=context_hint,
+                            )
+                            break  # daemon re-bound: remote path completes below
+                        except CaretakerUnavailable as recheck_unavail:
+                            # The re-probe result decides whether the daemon is
+                            # really gone or merely still up:
+                            # - status_code set → the daemon re-bound its port and
+                            #   rejected us (e.g. 401/403 after a key rotation):
+                            #   it owns the backend — fail closed like the outer
+                            #   branch.
+                            # - Read/WriteTimeout → the daemon re-bound and
+                            #   accepted the connection but is busy: alive — fail
+                            #   closed.
+                            # - any other transport error (refused/DNS/
+                            #   ConnectTimeout) → still nothing listening: keep
+                            #   polling; if the window elapses the local lifecycle
+                            #   is treated as the sole controller.
+                            if recheck_unavail.status_code is not None:
+                                raise ModelLoadError(
+                                    f"Caretaker control-API rejected the request "
+                                    f"(status {recheck_unavail.status_code}); refusing "
+                                    "local fallback to avoid a second controller on the "
+                                    "backend"
+                                ) from recheck_unavail
+                            if isinstance(
+                                recheck_unavail.__cause__,
+                                (httpx.ReadTimeout, httpx.WriteTimeout),
+                            ):
+                                raise ModelLoadError(
+                                    "Caretaker re-bound but unresponsive; refusing "
+                                    "local fallback to avoid a second controller on "
+                                    "the backend"
+                                ) from recheck_unavail
+                            # still down — continue polling; rechecked stays None
+                        except CaretakerError as recheck_exc:
+                            # The daemon is back and answered with an error: map it
+                            # the same way the main path does (fail closed).
+                            raise _map_caretaker_error(recheck_exc) from recheck_exc
                 if rechecked is not None:
                     logger.info(
                         "F5: caretaker re-bound after restart window — "

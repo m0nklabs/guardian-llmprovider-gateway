@@ -30,6 +30,15 @@ class _StubClient:
         self.supports_fresh_load = False
 
 
+@pytest.fixture(autouse=True)
+def _reset_caretaker_process_state():
+    """The runtime keeps module-global process-lifetime state (whether the
+    caretaker daemon was ever observed up).  Reset it before every test so
+    no test leaks its daemon-observation into the next one."""
+    crt._ever_reached_caretaker = False
+    yield
+
+
 def _timeout_unavailable() -> CaretakerUnavailable:
     """A transport CaretakerUnavailable whose cause is a timeout — the daemon
     accepted the connection, so it is alive but busy."""
@@ -84,6 +93,10 @@ async def test_remote_success_calls_ensure_and_marks_loaded():
         local_fallback=AsyncMock(),
     )
     assert result == "remote"
+    # A successful /ensure records that the daemon was observed up: later
+    # refused re-binds must keep their full 15s poll (the daemon can be
+    # restarting), never skip it.
+    assert crt._ever_reached_caretaker is True
     client.ensure.assert_awaited_once_with(
         "m", enable_vision=True, context_hint=4096
     )
@@ -540,6 +553,7 @@ async def test_unavailable_connection_refused_alive_backend_runs_local(monkeypat
     mgr.backend_serves_model = AsyncMock(return_value=False)
     mgr.backend_health_ok = AsyncMock(return_value=True)
     crt.init(model_manager=mgr, caretaker_client=client)
+    crt._ever_reached_caretaker = True  # daemon was up before it went down
     fallback = AsyncMock()
     result = await crt.ensure_backend(model="m", local_fallback=fallback)
     assert result == "local"
@@ -566,6 +580,7 @@ async def test_refused_alive_backend_log_reflects_not_serving(monkeypatch, caplo
     mgr.backend_serves_model = AsyncMock(return_value=False)
     mgr.backend_health_ok = AsyncMock(return_value=True)
     crt.init(model_manager=mgr, caretaker_client=client)
+    crt._ever_reached_caretaker = True  # daemon was up before it went down
     with caplog.at_level(logging.WARNING, logger="app.gateway.caretaker_runtime"):
         result = await crt.ensure_backend(model="m", local_fallback=AsyncMock())
     assert result == "local"
@@ -596,6 +611,7 @@ async def test_unavailable_connection_refused_then_daemon_rebounds_remote(monkey
     mgr.backend_serves_model = AsyncMock(return_value=False)
     mgr.backend_health_ok = AsyncMock(return_value=True)
     crt.init(model_manager=mgr, caretaker_client=client)
+    crt._ever_reached_caretaker = True  # daemon was up before the restart window
     fallback = AsyncMock()
     result = await crt.ensure_backend(model="m", local_fallback=fallback)
     assert result == "remote"
@@ -629,6 +645,7 @@ async def test_unavailable_rebound_recheck_rejected_fails_closed(monkeypatch):
     mgr.backend_serves_model = AsyncMock(return_value=False)
     mgr.backend_health_ok = AsyncMock(return_value=True)
     crt.init(model_manager=mgr, caretaker_client=client)
+    crt._ever_reached_caretaker = True  # daemon was up before the restart window
     fallback = AsyncMock()
     with pytest.raises(ModelLoadError, match="status 401"):
         await crt.ensure_backend(model="m", local_fallback=fallback)
@@ -658,6 +675,7 @@ async def test_unavailable_rebound_recheck_timeout_fails_closed(monkeypatch):
     mgr.backend_serves_model = AsyncMock(return_value=False)
     mgr.backend_health_ok = AsyncMock(return_value=True)
     crt.init(model_manager=mgr, caretaker_client=client)
+    crt._ever_reached_caretaker = True  # daemon was up before the restart window
     fallback = AsyncMock()
     with pytest.raises(ModelLoadError, match="re-bound but unresponsive"):
         await crt.ensure_backend(model="m", local_fallback=fallback)
@@ -690,6 +708,7 @@ async def test_unavailable_connection_refused_late_rebind_remote(monkeypatch):
     mgr.backend_serves_model = AsyncMock(return_value=False)
     mgr.backend_health_ok = AsyncMock(return_value=True)
     crt.init(model_manager=mgr, caretaker_client=client)
+    crt._ever_reached_caretaker = True  # daemon was up before the restart window
     fallback = AsyncMock()
     result = await crt.ensure_backend(model="m", local_fallback=fallback)
     assert result == "remote"
@@ -699,6 +718,35 @@ async def test_unavailable_connection_refused_late_rebind_remote(monkeypatch):
         "m", enable_vision=False, context_hint=None
     )
     mgr.restore_current_context.assert_not_awaited()
+
+
+async def test_refused_never_observed_daemon_skips_rebind_poll(monkeypatch):
+    """Roll-out: caretaker configured but its daemon never answered a
+    control-API call in this process lifetime.  It cannot be 'restarting', so
+    the 15s re-bind poll is skipped — the local lifecycle runs immediately
+    (2 refused probes only, not 17) instead of stalling every local-fallback
+    switch for ~15s during rollout."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+    client = _StubClient()
+
+    def _refused() -> CaretakerUnavailable:
+        err = CaretakerUnavailable("http://x:11441")
+        err.__cause__ = httpx.ConnectError("connection refused")
+        return err
+
+    client.ensure.side_effect = [_refused() for _ in range(2)]
+    mgr = _manager()
+    mgr.backend_serves_model = AsyncMock(return_value=False)
+    mgr.backend_health_ok = AsyncMock(return_value=True)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    # _ever_reached_caretaker stays False (the autouse reset) — the daemon
+    # has never been observed up in this process lifetime.
+    fallback = AsyncMock()
+    result = await crt.ensure_backend(model="m", local_fallback=fallback)
+    assert result == "local"
+    assert client.ensure.await_count == 2  # no 15-iteration re-bind poll
+    fallback.assert_awaited_once()
+    mgr.mark_loaded_by_caretaker.assert_not_called()
 
 
 async def test_unavailable_rereprobe_also_fails_then_local():
@@ -959,6 +1007,10 @@ async def test_unavailable_auth_status_fails_closed():
     assert client.ensure.await_count == 1  # no pointless re-probe
     fallback.assert_not_awaited()
     mgr.mark_loaded_by_caretaker.assert_not_called()
+    # A rejection still means the daemon EXISTS (it answered with a status) —
+    # the "ever observed up" flag must be set so refused re-binds keep their
+    # full poll instead of skipping it.
+    assert crt._ever_reached_caretaker is True
 
 
 async def test_unavailable_drifted_config_fails_closed():
