@@ -165,6 +165,79 @@ async def test_remote_success_vision_none_process_with_mmproj_marks_true():
     )
 
 
+async def test_remote_success_daemon_confirmed_vision_wins_over_probe():
+    """A daemon-confirmed ``vision_enabled`` bool in the /ensure response is
+    the authoritative vision state (F6 remote-host topology: the local probe
+    reads stale/absent state there).  When the daemon ships the field, it
+    wins over the gateway-local mmproj probe for the guard AND the mark."""
+    client = _StubClient()
+    client.ensure = AsyncMock(
+        return_value={
+            "ok": True,
+            "loaded_model": "m",
+            "vision_enabled": True,
+        }
+    )
+    mgr = _manager()
+    # The local probe would say text-only — must be IGNORED because the
+    # daemon confirmed vision.
+    mgr.current_runtime_uses_mmproj = Mock(return_value=False)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    result = await crt.ensure_backend(
+        model="m", enable_vision=True, local_fallback=AsyncMock()
+    )
+    assert result == "remote"
+    mgr.current_runtime_uses_mmproj.assert_not_called()
+    mgr.mark_loaded_by_caretaker.assert_called_once_with(
+        "m", enable_vision=True, context_hint=None
+    )
+
+
+async def test_remote_success_daemon_confirmed_text_only_fails_vision_request():
+    """Daemon-confirmed text-only (vision_enabled: false) + explicit vision
+    request -> fail closed on the daemon's own state, independent of what the
+    local probe would say."""
+    client = _StubClient()
+    client.ensure = AsyncMock(
+        return_value={
+            "ok": True,
+            "loaded_model": "m",
+            "vision_enabled": False,
+        }
+    )
+    mgr = _manager()
+    mgr.current_runtime_uses_mmproj = Mock(return_value=False)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    with pytest.raises(ModelLoadError, match="without mmproj"):
+        await crt.ensure_backend(
+            model="m", enable_vision=True, local_fallback=AsyncMock()
+        )
+    mgr.current_runtime_uses_mmproj.assert_not_called()
+    mgr.mark_loaded_by_caretaker.assert_not_called()
+
+
+async def test_remote_success_daemon_confirmed_vision_with_none_marks_true():
+    """Daemon-confirmed vision + enable_vision=None -> the mark mirrors the
+    daemon-confirmed state (no local probe involved)."""
+    client = _StubClient()
+    client.ensure = AsyncMock(
+        return_value={
+            "ok": True,
+            "loaded_model": "m",
+            "vision_enabled": True,
+        }
+    )
+    mgr = _manager()
+    mgr.current_runtime_uses_mmproj = Mock(return_value=False)  # must be ignored
+    crt.init(model_manager=mgr, caretaker_client=client)
+    result = await crt.ensure_backend(model="m", local_fallback=AsyncMock())
+    assert result == "remote"
+    mgr.current_runtime_uses_mmproj.assert_not_called()
+    mgr.mark_loaded_by_caretaker.assert_called_once_with(
+        "m", enable_vision=True, context_hint=None
+    )
+
+
 async def test_unavailable_timeout_rereprobe_succeeds_remote():
     """A transport TIMEOUT is NOT a dead daemon: the daemon accepted the
     connection, so it is alive (mid-switch).  Re-probing once must recover a
