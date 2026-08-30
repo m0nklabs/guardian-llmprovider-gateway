@@ -96,12 +96,18 @@ _CARETAKER_BOUNDS = {
     "adopt_poll_seconds": (1.0, 600.0),
     "rebind_poll_attempts": (0, 60),
     "rebind_poll_interval_seconds": (0.1, 30.0),
-    "client_timeout_seconds": (0.5, 120.0),
+    # 30 s ceiling: /ensure answers within seconds when the daemon is alive
+    # (long cold loads are covered by the adoption poll, not by the client
+    # timeout), and a higher ceiling would let a single in-bounds value
+    # silence the re-bind recovery path entirely via the budget cap below.
+    "client_timeout_seconds": (0.5, 30.0),
 }
-# Combined re-bind budget: each poll iteration costs interval + a full
-# /ensure round-trip (up to client_timeout_seconds), and the poll holds the
-# model-switch lock, so the TOTAL per-attempt budget is capped (defaults
-# 15 × (1.0 + 5.0) s = 90 s unaffected).
+# Combined re-bind budget: the WHOLE ensure_backend runs under the caller's
+# model-switch lock — the two initial /ensure probes (up to 2× client_timeout)
+# plus every re-bind iteration (interval + a full /ensure round-trip).  The
+# budget caps the re-bind phase at 120 s (per-attempt divisor), so the
+# in-bounds worst-case lock-hold is 2×30 + 120 = 180 s; with the defaults
+# (15 × (1.0 + 5.0) s = 90 s, probes 10 s) it is ~100 s.
 _REBIND_BUDGET_S = 120.0
 
 
@@ -236,9 +242,11 @@ def load_caretaker_runtime_config(config: Optional[Dict[str, Any]] = None) -> di
     # model-switch lock is held.  Each iteration costs interval + a full
     # /ensure round-trip (up to client_timeout_seconds when the daemon accepts
     # TCP but stops responding — exactly the hung/restarting scenario this
-    # poll exists for), so the budget cap divides by the PER-ATTEMPT cost:
-    # independent in-bounds maxima would otherwise allow a ~30 min hotpath
-    # stall.  The defaults (15 × (1.0 + 5.0) = 90 s) are unaffected.
+    # poll exists for), so the budget cap divides by the PER-ATTEMPT cost.
+    # With the 30 s client_timeout ceiling the divisor stays ≤ 60 s, so the
+    # cap can never reach 0 — the re-bind recovery path always keeps ≥ 2
+    # attempts.  The budget bounds the re-bind phase only; the two initial
+    # probes add up to 2×client_timeout on top (see the bounds comment).
     interval = result["rebind_poll_interval_seconds"]
     per_attempt = interval + result["client_timeout_seconds"]
     if per_attempt > 0:

@@ -1493,7 +1493,7 @@ def test_rebind_combined_budget_capped(monkeypatch):
     assert rt["rebind_poll_interval_seconds"] == 30.0
     # The budget divides by the PER-ATTEMPT cost (interval + a full /ensure
     # round-trip up to client_timeout_seconds): 120 / (30 + 5) = 3 attempts,
-    # so the worst-case lock-hold stays ≤ 120 s.
+    # so the re-bind phase stays ≤ 120 s.
     assert rt["rebind_poll_attempts"] == 3
     assert 3 * (rt["rebind_poll_interval_seconds"] + rt["client_timeout_seconds"]) <= 120.0
     # Defaults remain untouched: 15 × (1.0 + 5.0) = 90 s ≤ 120 s (explicit
@@ -1510,3 +1510,21 @@ def test_rebind_combined_budget_capped(monkeypatch):
     )
     assert default_rt["rebind_poll_attempts"] == 15  # cap 120/(1+5)=20 > 15
     assert default_rt["rebind_poll_interval_seconds"] == 1.0
+    # The recovery path can never be silenced by an in-bounds value: with the
+    # 30 s client_timeout ceiling the per-attempt divisor stays ≤ 60 s, so cap
+    # ≥ 2 always.  Total hotpath worst-case (2 probes + re-bind phase):
+    # 2×30 + 2×60 = 180 s, bounded and finite for every in-bounds config.
+    extreme = load_caretaker_runtime_config(
+        {
+            "caretaker": {
+                "rebind_poll_attempts": 60,
+                "rebind_poll_interval_seconds": 30.0,
+                "client_timeout_seconds": 30.0,
+            }
+        }
+    )
+    assert extreme["rebind_poll_attempts"] == 2  # 120 / (30 + 30)
+    total_worst = 2 * extreme["client_timeout_seconds"] + extreme[
+        "rebind_poll_attempts"
+    ] * (extreme["rebind_poll_interval_seconds"] + extreme["client_timeout_seconds"])
+    assert total_worst <= 2 * 30.0 + 120.0
