@@ -115,7 +115,7 @@ def test_shipped_14700k_provider_file_markers():
     # activates the provider on a deployed checkout.
     assert cfg["local"] is False
     assert cfg["brand"] == "windows"
-    assert cfg["catalog_url"] == "/v1/models"
+    assert cfg["catalog_url"] == "/models"  # appended to base_url (…/v1)
     # Activation switches: only pinned while the placeholder address is still
     # present.  Once the operator fills in the real Windows host (HANDOFF F6),
     # the deployed checkout legitimately diverges — otherwise the full-suite

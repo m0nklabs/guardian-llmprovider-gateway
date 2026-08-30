@@ -339,7 +339,7 @@ across the LAN (the operator's stated goal — not one split model).
 ### Gateway side (mostly config)
 - New provider file `config/providers/14700k-local.settings.yaml`
   (base_url `http://192.168.1.x:11440/v1`, `api_key: ${WINDOWS_LAN_KEY}`,
-  `management_url: http://192.168.1.x:11441`, `catalog_url: /v1/models`).
+  `management_url: http://192.168.1.x:11441`, `catalog_url: /models` (appended to base_url, which already ends in `/v1`)).
 - `windows/…`/`14700k-local/…` model addresses appear in discovery + routing
   automatically via the provider machinery (F2+F3).
 - Optional: `lan: true`-style flag to allow keyless llama-server if the
