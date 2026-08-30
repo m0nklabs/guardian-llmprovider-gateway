@@ -1474,3 +1474,36 @@ async def test_rebind_poll_window_from_config(monkeypatch):
     assert client.ensure.await_count == 4
     assert fallback.await_count == 1
     assert sleeps == [0.25, 0.25], "configured interval, not the hardcoded 1s"
+
+
+def test_rebind_combined_budget_capped(monkeypatch):
+    """The combined re-bind budget (attempts×interval) is capped at 120 s: an
+    in-bounds but badly tuned config (interval 30 s with 15 default attempts
+    would stall the request-hotpath for 7.5 min) clamps the attempts so the
+    poll never holds the model-switch lock longer than the budget.  Defaults
+    (15×1.0 s) are unaffected."""
+    from app.config_loader import CONFIG, load_caretaker_runtime_config
+
+    monkeypatch.setitem(
+        CONFIG,
+        "caretaker",
+        dict(load_caretaker_runtime_config(), rebind_poll_interval_seconds=30.0),
+    )
+    rt = load_caretaker_runtime_config()
+    assert rt["rebind_poll_interval_seconds"] == 30.0
+    assert rt["rebind_poll_attempts"] * rt["rebind_poll_interval_seconds"] <= 120.0
+    assert rt["rebind_poll_attempts"] == 4  # 120 s / 30 s
+    # Defaults remain untouched: 15 × 1.0 s ≤ 120 s (explicit dict — the
+    # monkeypatched CONFIG above must not leak into this check).
+    default_rt = load_caretaker_runtime_config(
+        {
+            "caretaker": {
+                "adopt_poll_seconds": 120,
+                "rebind_poll_attempts": 15,
+                "rebind_poll_interval_seconds": 1.0,
+                "client_timeout_seconds": 5.0,
+            }
+        }
+    )
+    assert default_rt["rebind_poll_attempts"] == 15
+    assert default_rt["rebind_poll_interval_seconds"] == 1.0
