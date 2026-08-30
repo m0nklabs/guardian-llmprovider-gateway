@@ -175,3 +175,24 @@ async def test_unrecognized_local_string_keeps_suffix_fallback(
     )
     reg2 = ProviderRegistry()
     assert reg2._providers["ai-kvm2-local"].managed is True
+
+
+async def test_quoted_managed_marker_does_not_defeat_local_false(
+    tmp_path: Path, monkeypatch
+):
+    """`managed: "false"` (quoted — truthy string) must not keep the provider
+    managed when `local: false` explicitly marks it remote: both markers are
+    normalized through the same boolean-token logic."""
+    d = tmp_path / "providers"
+    d.mkdir()
+    (d / "14700k-local.settings.yaml").write_text(textwrap.dedent("""\
+        local: false
+        managed: "false"
+        enabled: true
+        base_url: http://192.168.1.x:11440/v1
+        api_key: win-test
+        brand: windows
+    """))
+    monkeypatch.setattr("app.paths.PROVIDERS_DIR", d)
+    reg = ProviderRegistry()
+    assert reg._providers["14700k-local"].managed is False
