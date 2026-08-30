@@ -242,7 +242,6 @@ async def _complete_remote(
     enable_vision: bool | None,
     context_hint: int | None,
     pre_switch_save: bool,
-    capability_before: bool,
 ) -> str:
     """Finalize a SUCCESSFUL remote ensure: verify the response names the
     requested model, guard vision integrity, mirror the loaded state and
@@ -362,17 +361,16 @@ async def _complete_remote(
         # signal.  A gateway-side probe (parsing the running llama-server's
         # command line) can misdetect a caretaker-launched process and would
         # clobber a live slot-0 session with a stale auto-save, so never
-        # restore on a probe result alone.  The restore is gated on the SAME
-        # capability snapshot as the pre-save (see the switch gate above), so
-        # the first fresh_load-capable switch after a daemon upgrade behaves
-        # like the pre-capability path (no save, no restore) instead of
-        # restoring a stale auto-save without having saved the current
-        # session.  Reload sites (auto-reload, connect-error recovery) start
-        # a fresh context via load() and must not re-inject a stale auto-save
-        # — they never set pre_switch_save.
+        # restore on a probe result alone.  The pre-save above ALWAYS ran
+        # first (unconditional with pre_switch_save), so the current session
+        # is saved before any restore — there is no "restore without save"
+        # asymmetry to guard against (dropping the old capability_before gate;
+        # the response-level fresh_load check is the only freshness signal).
+        # Reload sites (auto-reload, connect-error recovery) start a fresh
+        # context via load() and must not re-inject a stale auto-save — they
+        # never set pre_switch_save.
         if (
             pre_switch_save
-            and capability_before
             and result.get("fresh_load") is True
             and _model_manager is not None
         ):
@@ -544,19 +542,16 @@ async def ensure_backend(
     ):
         raise ValueError(f"Client '{client_id}' is not allowed to switch models")
 
-    # Snapshot the daemon capability BEFORE the /ensure call.  The RESTORE
-    # stays gated on that snapshot: gating it on the response's fresh_load
-    # instead would be asymmetric on the very first switch after the daemon
-    # starts shipping fresh_load — the restore (gated on the response, now
-    # present) would run while this switch's session was never saved,
-    # re-injecting the target model's possibly stale auto-save and silently
-    # losing the current session.  The PRE-SAVE is deliberately NOT gated:
-    # with pre_switch_save the caller explicitly asked for context
-    # persistence, and skipping it loses the active session on every A->B->A
-    # cycle while the daemon has not shipped fresh_load yet (pre-F5
-    # switch_model always saved).  Saving unconditionally only prevents loss;
-    # the transition switch still behaves pre-capability (no restore) and
-    # save/restore come back symmetrically from the second switch onward.
+    # Snapshot the daemon capability BEFORE the /ensure call for the WARNING
+    # only: while the daemon does not ship fresh_load, remote switches save
+    # but cannot restore (the response-level fresh_load check fails), so the
+    # operator gets a loud heads-up that A->B->A recovery is suspended until
+    # the caretaker follow-up ships the field (self-healing: the capability is
+    # re-validated on every /ensure response).  The RESTORE is gated on the
+    # RESPONSE's fresh_load (see _complete_remote) — the response-level
+    # daemon-confirmed freshness is the only authoritative signal, and the
+    # pre-save always runs first, so a restore can never re-inject a stale
+    # auto-save over an unsaved current session.
     #
     # The SWITCH itself stays remote-first.  A local-lifecycle switch
     # (switch_model) while the caretaker daemon is alive would race a second
@@ -572,11 +567,9 @@ async def ensure_backend(
         # ALWAYS save before a remote switch: with pre_switch_save the caller
         # explicitly asked for context persistence, and skipping it loses the
         # active session on every A->B->A cycle (pre-F5 switch_model always
-        # saved).  Only the RESTORE stays gated on the same capability
-        # snapshot (see _complete_remote), so the first switch after the
-        # daemon starts shipping fresh_load still behaves pre-capability —
-        # saving now only prevents the current session from being lost in the
-        # meantime.
+        # saved).  The restore in _complete_remote then runs on the daemon's
+        # response-level fresh_load confirmation — the save always happened
+        # first, so there is no "restore without save" asymmetry to guard.
         if not capability_before:
             logger.warning(
                 "F5: /ensure cannot confirm fresh_load — remote switch to "
@@ -763,7 +756,6 @@ async def ensure_backend(
                         enable_vision=enable_vision,
                         context_hint=context_hint,
                         pre_switch_save=pre_switch_save,
-                        capability_before=capability_before,
                     )
                 logger.warning(
                     "F5: caretaker management port closed (connection refused) "
@@ -818,5 +810,4 @@ async def ensure_backend(
         enable_vision=enable_vision,
         context_hint=context_hint,
         pre_switch_save=pre_switch_save,
-        capability_before=capability_before,
     )
