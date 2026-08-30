@@ -34,11 +34,12 @@
 | Gateway **#14** (poll-vensters → config) | `f-caretaker-poll-windows-config` / `211016e` | **MERGE-KLAAR** — 5 threads resolved, `mergeable_state: clean` |
 | Gateway **#15** (F6 Windows LAN-provider) | `f6-windows-lan-provider` / `db9d61f` | **MERGE-KLAAR** — 8 threads resolved, `clean` |
 | Gateway **#16** (F7-staging unit + FILE_REGISTER) | `f7-cutover-staging` / `18226ad` | **MERGE-KLAAR** — 2 threads resolved, `clean` |
-| Caretaker **#8** (F6 Phase E Windows-process) | `f6-phase-e-windows-process` / `8310151` | **NOG NIET** — 2 blokkades, zie hieronder |
+| Caretaker **#8** (F6 Phase E Windows-process) | `f6-phase-e-windows-process` / `d6ff3e2` | **MERGE-KLAAR** — 6/6 threads resolved, CI groen, slot-comment geplaatst |
 
-**Caretaker #8 — 2 blokkades (beide nádat de bouw-worker klaar was):**
-1. **CI-fail** op `8310151`: `tests/test_phase_c.py::test_switch_model_swap_frees_old_slot_without_deadlock` (TimeoutError, run `33331064661`, job `99309589234`). Deze test heeft **flake-historie vóór deze PR** (journal 2026-08-30 middag: 1× rood, 3× groen daarna — machine-timing). Protocol: flake-verificatie (lokaal ≥3× + pre-PR-base `6925207` + run-historie) → daarna `gh run rerun 33331064661 --failed`. **Nooit een speculatieve fix pushen op een niet-gereproduceerde CI-fail.**
-2. **1 open review-thread** (`PRRT_kwDOUFFhks6dji7j`, `_split_args_windows` single-quote-strip, op de verse `/review` van `8310151`): premisse **weerlegbaar** — `_build_args_string` (caretaker/manager.py:578–581) bouwt een ongequote space-joined f-string; nergens `shlex.quote` in de builder → enkele quotes worden nooit geëmitteerd. Paths-met-spaties is een pre-existing beperking van het args-file-formaat (treft beide impls, out-of-scope Phase E). Thread beantwoorden met dit bewijs + resolven, **geen code-wijziging** (een push triggert een nieuwe review-cyclus).
+**Caretaker #8 — eindstatus (20:20, na de worker-cyclus): MERGE-KLAAR op head `d6ff3e2`.**
+- **CI-fail bleek runner-contentie-flake:** de Phase-C swap-test praat tegen de échte llama-server op `127.0.0.1:11440` op de gedeelde GPU-runner (de process-laag wél ge-fake'd — dus níét de platform-selectie). Rerun-attempts 1–2 faalden identiek (runner-4/runner-2), attempt 3 groen (runner-1, 91 passed). Lokaal 9× groen (3 worktrees × 3×, incl. pre-PR-basis `6925207`). Geen branch-fix — bewust. **Follow-up (non-blocking):** HTTP-mock-backend voor de Phase-C/D swap-tests zodat ze niet meer tegen een échte backend op de runner praten.
+- **Single-quote-thread resolved (19:50):** het premise-deel ("de builder emit quotes") bleef weerlegd, maar de divergence was reëel — de POSIX-shlexer pelt operator-embedded single quotes af, de Windows-splitter niet → defensieve both-styles-strip gepusht (`d6ff3e2`) + pin uitgebreid; de verse review opende 0 nieuwe threads.
+- **Slot-comment geplaatst** (issuecomment-5471009832). Alle 6 review-threads `is_resolved: true`, `mergeable_state: clean` — door de lead zelf geverifieerd op GitHub.
 
 > Een verse worker was op overdrachtsmoment hiermee bezig; als je dit leest is
 > hij mogelijk al af — check de PR-state (0 open threads + CI groen + verse
@@ -50,10 +51,9 @@
 > daarna de PR-state op GitHub.
 
 **Route na overname (in volgorde):**
-1. Caretaker #8 afmaken (de 2 blokkades hierboven) → slot-comment.
-2. Operator mergt **HUMAN**: gateway #14, #15, #16 + caretaker #8 (per PR, geen batch-auto-merge).
-3. **F7-afsluiting door de agent** (in `/home/flip/guardian-llmprovider-gateway`): AGENTS.md OPERATIONALLY-CRITICAL-flip (deploy-dir → de nieuwe dir), FILE_REGISTER-check, HANDOFF/JOURNAL-closure. **Suite-tellen ZELF verifiëren na merge** (verwachting gateway ~1144–1146, caretaker 91; PR-thread-tellings zijn branch-basis-afhankelijk — draai de volledige suite en gebruik het échte getal).
-4. **F7-cut-over = OPERATOR-RUN.** De volledige checklist staat in de PR #16-body: units stage → legacy stop/disable → nieuw enable (`guardian-llmprovider-gateway.service`, alias `llama-guardian.service`) → `nginx -t` + reload → `scripts/verify_post_restart.py` → legacy bevriezen. Rollback = legacy-unit herstarten. **De agent draait GEEN restarts** (agent-traffic loopt door Guardian).
+1. Operator mergt **HUMAN**: gateway #14, #15, #16 + caretaker #8 (head `d6ff3e2`; per PR, geen batch-auto-merge).
+2. **F7-afsluiting door de agent** (in `/home/flip/guardian-llmprovider-gateway`): AGENTS.md OPERATIONALLY-CRITICAL-flip (deploy-dir → de nieuwe dir), FILE_REGISTER-check, HANDOFF/JOURNAL-closure. **Suite-tellen ZELF verifiëren na merge** (verwachting gateway ~1144–1146, caretaker 91; PR-thread-tellings zijn branch-basis-afhankelijk — draai de volledige suite en gebruik het échte getal).
+3. **F7-cut-over = OPERATOR-RUN.** De volledige checklist staat in de PR #16-body: units stage → legacy stop/disable → nieuw enable (`guardian-llmprovider-gateway.service`, alias `llama-guardian.service`) → `nginx -t` + reload → `scripts/verify_post_restart.py` → legacy bevriezen. Rollback = legacy-unit herstarten. **De agent draait GEEN restarts** (agent-traffic loopt door Guardian).
 
 **Gedeferred / follow-ups (bewust, niet vergeten):**
 - **direct+Windows env-file merge-pariteit** (uit caretaker #8-thread-refutatie): `DirectServerProcess` merged `CURRENT_MODEL_ENV_FILE` ook niet (de reader is de systemd-wrapper `scripts/start_llama.sh`; Windows pinned env via NSSM `AppEnvironmentExtra`) — als env-file-merging voor directe spawns gewenst is: BEIDE impls in één change.
