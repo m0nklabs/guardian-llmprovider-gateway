@@ -633,11 +633,20 @@ class CaptureWALWriter:
                     except OSError:
                         pass
 
-            # Remove old files first (data + sidecar together)
-            for paths, mtime, size in units:
+            # Remove old files first (data + sidecar together).  Entries
+            # removed here are dropped from `units` so the byte-quota loop
+            # below cannot pop stale entries and subtract their size twice
+            # (which deflated the quota accounting and could leave real
+            # files over the quota until the next sweep — review finding).
+            survivors: List[Tuple[List[Path], float, int]] = []
+            for unit in units:
+                paths, mtime, size = unit
                 if mtime < cutoff:
                     _remove(paths)
                     total_size -= size
+                else:
+                    survivors.append(unit)
+            units = survivors
 
             # If still over the byte limit, remove oldest until under quota.
             # max_capture_bytes < 0 = unlimited budget (matches infinite
