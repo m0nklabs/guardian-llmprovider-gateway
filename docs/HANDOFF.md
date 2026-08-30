@@ -20,6 +20,48 @@
 > Alleen `20260826_rename` blijft actief (huidige workspace-transitie) — de écht
 > openstaande zaken staan hieronder in **Open punten**.
 
+### Sessie-overdracht 2026-08-30 avond — F5–F7 (volgende agent start HIER)
+
+> Deze sessie eindigde vóór de F7-cut-over; alles hieronder is de levende staat
+> op overdrachtsmoment. **Regel 1 voor de volgende agent: verifieer de live
+> state vóór je iets gelooft** (thread-check + CI-check per PR — een "klaar"-
+> oordeel heeft houdbaarheid; zie journal "houdbaarheid"-les).
+
+**Merge-signalen (live gecheckt 2026-08-30 ~19:45):**
+
+| PR | branch / head | status |
+|---|---|---|
+| Gateway **#14** (poll-vensters → config) | `f-caretaker-poll-windows-config` / `211016e` | **MERGE-KLAAR** — 5 threads resolved, `mergeable_state: clean` |
+| Gateway **#15** (F6 Windows LAN-provider) | `f6-windows-lan-provider` / `db9d61f` | **MERGE-KLAAR** — 8 threads resolved, `clean` |
+| Gateway **#16** (F7-staging unit + FILE_REGISTER) | `f7-cutover-staging` / `18226ad` | **MERGE-KLAAR** — 2 threads resolved, `clean` |
+| Caretaker **#8** (F6 Phase E Windows-process) | `f6-phase-e-windows-process` / `8310151` | **NOG NIET** — 2 blokkades, zie hieronder |
+
+**Caretaker #8 — 2 blokkades (beide nádat de bouw-worker klaar was):**
+1. **CI-fail** op `8310151`: `tests/test_phase_c.py::test_switch_model_swap_frees_old_slot_without_deadlock` (TimeoutError, run `33331064661`, job `99309589234`). Deze test heeft **flake-historie vóór deze PR** (journal 2026-08-30 middag: 1× rood, 3× groen daarna — machine-timing). Protocol: flake-verificatie (lokaal ≥3× + pre-PR-base `6925207` + run-historie) → daarna `gh run rerun 33331064661 --failed`. **Nooit een speculatieve fix pushen op een niet-gereproduceerde CI-fail.**
+2. **1 open review-thread** (`PRRT_kwDOUFFhks6dji7j`, `_split_args_windows` single-quote-strip, op de verse `/review` van `8310151`): premisse **weerlegbaar** — `_build_args_string` (caretaker/manager.py:578–581) bouwt een ongequote space-joined f-string; nergens `shlex.quote` in de builder → enkele quotes worden nooit geëmitteerd. Paths-met-spaties is een pre-existing beperking van het args-file-formaat (treft beide impls, out-of-scope Phase E). Thread beantwoorden met dit bewijs + resolven, **geen code-wijziging** (een push triggert een nieuwe review-cyclus).
+
+> Een verse worker was op overdrachtsmoment hiermee bezig; als je dit leest is
+> hij mogelijk al af — check de PR-state (0 open threads + CI groen + verse
+> slot-comment "klaar voor human merge") vóór je iets doet. **NB: de workers
+> zijn kinderen van de OUDE DSH-sessie — een nieuwe sessie kan ze niet
+> adopteren; de takeover loopt via het werk zélf** (GitHub-state + filesystem).
+> Begin daarom met `git status` in beide checkouts (een worker kan middenin
+> een turn gedood zijn: dirty tree / half-afgeronde actie) en verifieer
+> daarna de PR-state op GitHub.
+
+**Route na overname (in volgorde):**
+1. Caretaker #8 afmaken (de 2 blokkades hierboven) → slot-comment.
+2. Operator mergt **HUMAN**: gateway #14, #15, #16 + caretaker #8 (per PR, geen batch-auto-merge).
+3. **F7-afsluiting door de agent** (in `/home/flip/guardian-llmprovider-gateway`): AGENTS.md OPERATIONALLY-CRITICAL-flip (deploy-dir → de nieuwe dir), FILE_REGISTER-check, HANDOFF/JOURNAL-closure. **Suite-tellen ZELF verifiëren na merge** (verwachting gateway ~1144–1146, caretaker 91; PR-thread-tellings zijn branch-basis-afhankelijk — draai de volledige suite en gebruik het échte getal).
+4. **F7-cut-over = OPERATOR-RUN.** De volledige checklist staat in de PR #16-body: units stage → legacy stop/disable → nieuw enable (`guardian-llmprovider-gateway.service`, alias `llama-guardian.service`) → `nginx -t` + reload → `scripts/verify_post_restart.py` → legacy bevriezen. Rollback = legacy-unit herstarten. **De agent draait GEEN restarts** (agent-traffic loopt door Guardian).
+
+**Gedeferred / follow-ups (bewust, niet vergeten):**
+- **direct+Windows env-file merge-pariteit** (uit caretaker #8-thread-refutatie): `DirectServerProcess` merged `CURRENT_MODEL_ENV_FILE` ook niet (de reader is de systemd-wrapper `scripts/start_llama.sh`; Windows pinned env via NSSM `AppEnvironmentExtra`) — als env-file-merging voor directe spawns gewenst is: BEIDE impls in één change.
+- Stale module-docstring `app/gateway/caretaker_runtime.py` (~regel 55–62; beschrijft de mmproj-probe nog als primair) — meepakken bij de eerstvolgende code-touch.
+- Pre-existing `UP`/`I001` ruff-stijlissues (buiten de CI-selectie `E4,E7,E9,F`) — alleen in een gebatchte pass.
+- Failover-groep `local → windows` zodra de Windows-modellenlijst bekend is (de groep is per-model).
+- Open punten hierboven (NVIDIA context-overrides, pi-models.json bare-names, CI-adoptie pre-restart-gate, 72h soak-test) — onveranderd.
+
 ### DSH session `20260826_rename` (repo-split: legacy + nieuwe bouwplaats)
 
 - **DRIE repos, definitief:** `m0nklabs/llama-cpp-guardian` = LEGACY/archief; `m0nklabs/guardian-llmprovider-gateway` = NIEUW (bouwplaats, volle git-history); `m0nklabs/caretaker-llamacpp` = publieke per-GPU-host-manager-repo.
@@ -49,4 +91,4 @@
   - **Heuristiek-opruim audit (na PR #7-merge):** de daemon-geautoriseerde `vision_enabled` is al primair op de remote-path (PR #12 bouwde daemon-confirmatie met probe-fallback). Resterende probe-plekken zijn noodzakelijk (outage-path: geen response beschikbaar; routing: lokale state vóór een switch-besluit). Restpost: verouderde module-docstring in caretaker_runtime (~regel 55-62) — deferred naar F6 code-touch.
   - **F6 gebouwd (PR, branch `f6-windows-lan-provider`, 2026-08-30, wacht op review/merge):** gateway-zijde is config-only: `config/providers/14700k-local.settings.yaml` (placeholder-IP, `local: false`, `brand: windows`, `catalog_url /models` — geappend aan base_url die al op `/v1` eindigt, `api_key ${WINDOWS_LAN_KEY}`, `enabled: false` tot de Windows-zijde staat) + de managed-heuristiek-fix in providers.py (expliciete `local: false` overrulet de `-local`-naam-fallback — F2-compat: zonder marker blijft de suffix managed; gequote YAML-booleans worden genormaliseerd). Deze PR voegt 6 tests toe (4 F6-semantiek-pins + de shipped-file-markers-check + de quoted-marker-normalisatie-pin): de volledige suite telt 1142 op de branch-basis (ff8d6bc, vóór #14) → 1146 op main ná de #14-merge. **Operator-acties bij de Windows-zijde:** llama.cpp CUDA release + NSSM caretaker (caretaker PLAN §6) + firewall; daarna provider-file `enabled: true` + echte IP + `POST /api/config/reload` — hot-reload, geen restart. Failover-groep `local → windows` deferred tot de Windows-modellenlijst bekend is.
   - **Poll-vensters-PR #14 (`f-caretaker-poll-windows-config`) — MERGE-KLAAR, wacht op human merge:** `caretaker:`-sectie in `global.settings.yaml` (`adopt_poll_seconds` 120, `rebind_poll_attempts` 15, `rebind_poll_interval_seconds` 1.0, `client_timeout_seconds` 5.0) + `load_caretaker_runtime_config()` met fail-safe clamps + live-config-poll (deadline/cap delen één read) + per-request client-timeout. 3 review-rondes, alle terecht: (r1) gecombineerde budgetcap, (r2) per-attempt-kost (interval + /ensure-roundtrip) + echte constructor-fallback-pins, (r3) client_timeout-ceiling 30 s zodat cap≥2 (herstel valt nooit stil uit) en de exacte totale worst-case (2×30 + 120 = 180 s) gepind. Suite 1140, 0 threads, CLEAN; laatste review "No major issues detected" (2 runtime-verificatiepunten gemarkeerd voor de operator: live hot-reload-check en worst-case timing — beide bij F6/F7-deploy verifieerbaar). mirror-drift-conditie in de outage-adopt-path (de opgeloste review-suggestie van PR #12 r33: adoptie alleen wanneer NIET (`current_model == model and enable_vision is None and context_hint is None and drifted`)) + heuristiek-opruim zodra caretaker PR #7 gemerged is (mmproj-probes/flag-detectie vervangen door de response-velden).
-  - **Poll-vensters naar config (nog te bouwen):** `_ADOPT_POLL_SECONDS` (120), re-bind-poll (15×1 s), client-timeouts → `config/global.settings.yaml` (caretaker-sectie), hot-reload — beëindigt de venster-verschuiving-cyclus (30→60→120, 5→15).
+- **OpenRouter modaliteiten + catalogusvelden (GEWENST, bewust gedeferred tot na de verbouwing — operator-besluit 2026-08-30):** OpenRouter stuurt in `/v1/models` (én `/models/user`) per model `architecture.input_modalities`/`output_modalities`/`modality` mee (live geverify 2026-08-30: 229/396 met image input); Guardian gooit dat weg (alleen `id` + `reasoning` in `cloud_catalog.py`). Dit moet in de Guardian model-info komen voor capability-gebaseerde vision-routing (nu config-only via `failover_groups.image_fallback`). Additief patroon bestaat (`_extract_reasoning` + backwards-compatibele disk cache). **Ook weggegooid:** `pricing` (incl. tijdsvensters), `top_provider.max_completion_tokens`, `supported_parameters`, `canonical_slug`, benchmarks/description/knowledge_cutoff (dashboard-materiaal). **Structureel:** dezelfde catalog-URL wordt 2× onafhankelijk gefetcht (`cloud_catalog.refresh_provider` + `providers._get_context_catalog`, eigen TTLs, andere discard-sets) — consolidatie hoort thuis in de verbouwing, niet als los fixje. Volledige analyse → `docs/AGENT_JOURNAL.md` §2026-08-30 catalogusvelden.
