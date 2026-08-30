@@ -223,6 +223,29 @@ async def test_remote_ensure_fresh_load_true_restores():
     mgr.restore_current_context.assert_awaited_once()
 
 
+async def test_first_switch_after_capability_transition_gates_save_and_restore():
+    """The very first switch after the daemon starts shipping fresh_load must
+    behave like the pre-capability path: the capability is snapshotted BEFORE
+    the /ensure (still False), so neither the save of the switched-away model
+    nor the restore of the target's auto-save runs — otherwise a stale
+    auto-save would be re-injected without the current session ever being
+    saved (asymmetric one-time data loss at the capability boundary)."""
+    client = _StubClient()
+    client.supports_fresh_load = False  # stale pre-upgrade flag
+    client.ensure = AsyncMock(
+        return_value={"ok": True, "loaded_model": "m", "fresh_load": True}
+    )  # daemon upgraded mid-request
+    mgr = _manager()
+    crt.init(model_manager=mgr, caretaker_client=client)
+    result = await crt.ensure_backend(
+        model="m", pre_switch_save=True, local_fallback=AsyncMock()
+    )
+    assert result == "remote"
+    client.ensure.assert_awaited_once()
+    mgr.save_current_context.assert_not_awaited()
+    mgr.restore_current_context.assert_not_awaited()
+
+
 async def test_remote_ensure_fresh_load_false_skips_restore():
     """The daemon says the load was idempotent (fresh_load False) -> no restore
     (live session authoritative)."""
@@ -264,6 +287,51 @@ async def test_unavailable_with_healthy_backend_adopts_state():
     # Adopt never restores: there is no /ensure response to confirm freshness,
     # so the live session in slot 0 is authoritative (no clobbering).
     mgr.restore_current_context.assert_not_awaited()
+
+
+async def test_unavailable_vision_request_backend_with_mmproj_adopts():
+    """A vision request against a healthy backend whose LIVE process uses
+    mmproj may adopt — the vision flag is stamped only when the real process
+    confirms it."""
+    client = _StubClient()
+    client.ensure.side_effect = CaretakerUnavailable("http://x:11441")
+    mgr = _manager()
+    mgr.backend_serves_model = AsyncMock(return_value=True)
+    mgr.backend_health_ok = AsyncMock(return_value=True)
+    mgr._resolve_runtime_vision_flag = Mock(return_value=True)
+    mgr.current_runtime_uses_mmproj = Mock(return_value=True)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    result = await crt.ensure_backend(
+        model="m", enable_vision=True, local_fallback=AsyncMock()
+    )
+    assert result == "local-healthy"
+    mgr.mark_loaded_by_caretaker.assert_called_once_with(
+        "m", enable_vision=True, context_hint=None
+    )
+
+
+async def test_unavailable_vision_request_backend_without_mmproj_fails_closed():
+    """The drift check only compares GATEWAY-side persisted state; the daemon
+    may have launched the backend without mmproj.  Adopting would stamp
+    current_vision_enabled=True on a text-only process — a subsequent image
+    request would be forwarded to a backend that cannot serve it.  When the
+    live process does NOT use mmproj, adoption is refused and the
+    backend-alive guard fails closed."""
+    client = _StubClient()
+    client.ensure.side_effect = CaretakerUnavailable("http://x:11441")
+    mgr = _manager()
+    mgr.backend_serves_model = AsyncMock(return_value=True)
+    mgr.backend_health_ok = AsyncMock(return_value=True)
+    mgr._resolve_runtime_vision_flag = Mock(return_value=True)
+    mgr.current_runtime_uses_mmproj = Mock(return_value=False)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
+    with pytest.raises(ModelLoadError):
+        await crt.ensure_backend(
+            model="m", enable_vision=True, local_fallback=fallback
+        )
+    fallback.assert_not_awaited()
+    mgr.mark_loaded_by_caretaker.assert_not_called()
 
 
 async def test_unavailable_adopt_never_restores():
