@@ -19,6 +19,24 @@
   caused the 500 before it can ship again.
 
 ### Added
+- Capture-feedback batch (2026-08-30, items C1-C11 from the first external
+  capture-analysis session): `started_at_utc`/`completed_at_utc` timestamps on
+  capture events (C1); `finish_reason` always emitted on completed events plus
+  `native_finish_reason` and cloud non-stream plumbing (C4); mirrored upstream
+  usage fields — `completion_tokens_details` as-is, `native_tokens_reasoning`,
+  `native_tokens_cached`, `cost`, `provider_name` (C5); optional caller
+  correlation header echo (`caller_request_id`, C6); per-leg streaming fields
+  `streamed_ingress`/`streamed_upstream` (C8); cloud records now populate
+  `provider` (C11). The ACTIVE capture file is plain
+  `guardian_capture_current.jsonl` (tail -f/jq streaming, no truncated-gzip
+  EOFError for readers) and rotation gzip-compresses it to
+  `guardian_capture_<ts>_<seq>.jsonl.gz` with `.sha256` sidecar (C3 — this
+  partially reverses the 2026-08-26 stream-compression decision). New
+  supported query tool `scripts/capture_query.py` (filters + `--rollup daily`
+  waste/cost rollup, C9/C10) and `docs/schema.md` (record schema + pitfalls).
+  `guardianctl status` now shows retention config and oldest/newest rotated
+  file (C11 visibility). Schema version bumped to 1.1.0; all new fields are
+  additive and tolerant of legacy 1.0.0 records.
 - Qwen3.6 speed benchmark suite `scripts/bench_qwen36_variants.py` +
   `data/bench-qwen36/results.json`: turbo4 KV cache is +11% gen speed
   (80.3 -> 89.1 tok/s) over q4_0 on the cuda128-laguna-tq-full fork build;

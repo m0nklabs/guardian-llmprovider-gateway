@@ -147,7 +147,7 @@
 
 ---
 
-## scripts/ — operator tooling (30)
+## scripts/ — operator tooling (31)
 | Path | Function | Related processes/files |
 |------|----------|------------------------|
 | `scripts/_auth.py` | Shared auth helper for CLI scripts | scripts that hit the API |
@@ -156,6 +156,7 @@
 | `scripts/bench_dflash.sh` | Benchmark helper for dflash binary/model | llama.cpp bench |
 | `scripts/bench_fork_binary.sh` | Fork/binary benchmark helper | llama.cpp build |
 | `scripts/bench_qwen36_variants.py` | Benchmark qwen3.6 variants | `docs/MODEL_BENCHMARKS.md` |
+| `scripts/capture_query.py` | Pitfall-tolerant capture WAL query CLI (filters + daily rollup) | `data/capture/`, `app/capture/gzip_reader.py`, `docs/schema.md` |
 | `scripts/cleanup_invalid_benchmarks.py` | Clean invalid benchmark results | `data/benchmarks` |
 | `scripts/download_new_models.sh` | Download new GGUF models | `config/models.local.settings.yaml` |
 | `scripts/finetune_model_config.py` | Generate v1 finetune model config | `app/tweaker/legacy/*` |
@@ -183,7 +184,7 @@
 
 ---
 
-## tests/ — pytest suite (46)
+## tests/ — pytest suite (48)
 | Path | Function | Related processes/files |
 |------|----------|------------------------|
 | `tests/__init__.py` | Test package marker | — |
@@ -200,6 +201,7 @@
 | `tests/unit/test_capture_keanu_tools.py` | Keanu capture tools tests | `app/capture/*` |
 | `tests/unit/test_capture_media.py` | Capture media tests | `app/capture/media.py` |
 | `tests/unit/test_capture_policy.py` | Capture policy tests | `app/capture/policy.py` |
+| `tests/unit/test_capture_query.py` | Capture query CLI tests (synthetic fixtures) | `scripts/capture_query.py` |
 | `tests/unit/test_capture_raw_passthrough.py` | Raw capture passthrough tests | `app/capture/*` |
 | `tests/unit/test_capture_redactor.py` | Capture redactor tests | `app/capture/redactor.py` |
 | `tests/unit/test_capture_schema.py` | Capture schema tests | `app/capture/schema.py` |
@@ -216,6 +218,7 @@
 | `tests/unit/test_finetune_v2_model_config_script.py` | Finetune v2 config script tests | `scripts/finetune_v2_model_config.py` |
 | `tests/unit/test_finetune_v2_runner.py` | Finetune v2 runner tests | `app/tweaker/finetune_v2_runner.py` |
 | `tests/unit/test_finetune_v2_telemetry.py` | Finetune v2 telemetry tests | `app/tweaker/finetune_v2_telemetry.py` |
+| `tests/unit/test_guardianctl.py` | guardianctl CLI tests (status/retention visibility) | `scripts/guardianctl.py` |
 | `tests/unit/test_grammar_capture_validation.py` | Grammar capture validation tests | `app/capture/*`, `app/gateway/normalization.py` |
 | `tests/unit/test_grammar_cloud_stripping.py` | Cloud grammar stripping tests | `app/cloud_inference/*` |
 | `tests/unit/test_grammar_passthrough.py` | Grammar passthrough pin tests | `app/local_inference/ollama.py` |
@@ -253,7 +256,7 @@
 
 ---
 
-## docs/ — documentation (23)
+## docs/ — documentation (24)
 | Path | Function | Related processes/files |
 |------|----------|------------------------|
 | `docs/ANTHROPIC_BRIDGE.md` | Anthropic API bridge documentation | `app/proxy/anthropic_bridge.py` |
@@ -279,6 +282,7 @@
 | `docs/MTP_STUDY.md` | Multi-Token-Prediction study | llama-server MTP |
 | `docs/free-tier-pool-request.md` | Free-tier provider pool request | provider config |
 | `docs/free-tier-pool-verification.md` | Free-tier pool verification | provider config |
+| `docs/schema.md` | Capture record schema reference (fields, on-disk layout, pitfalls) | `app/capture/schema.py`, `scripts/capture_query.py` |
 | `docs/skills/operator-runbook.md` | Operator runbook (deployment & operations) | `scripts/pre_restart_check.py`, systemd/nginx |
 
 ---

@@ -11,10 +11,10 @@ Usage:
     GUARDIAN_CAPTURE_RECORD_AUTH_SECRET="secret" ./venv/bin/python \\
         scripts/generate_contract_wal.py --out /tmp/contract_wal --request-id req-001
 
-The active WAL file is ``<out>/guardian_capture_current.jsonl.gz`` (stream
-gzip; a completed member, written cleanly on stop). Keanu ingestion should
-use ``--include-active`` (or copy/rename the file so it is treated as a
-completed WAL).
+The active WAL file is ``<out>/guardian_capture_current.jsonl`` (plain JSONL;
+a clean writer stop finalizes it in place). Keanu ingestion should use
+``--include-active`` (or copy/rename the file so it is treated as a completed
+WAL).
 """
 
 from __future__ import annotations
@@ -101,7 +101,9 @@ async def _main(out_dir: Path, request_id: str, instance_id: str) -> None:
     await asyncio.sleep(0.6)
     await writer.stop()
 
-    wals = sorted(out_dir.glob("*.jsonl.gz"))
+    # The active file is plain JSONL (gzip only happens on rotation, which
+    # never triggers for a short generation run) — match both layouts.
+    wals = sorted(out_dir.glob("*.jsonl*"))
     if not wals:
         raise SystemExit("ERROR: no WAL file produced")
     print(f"WAL: {wals[0]}")

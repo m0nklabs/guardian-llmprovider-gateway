@@ -33,6 +33,7 @@ _resolve_cloud_attempts = None
 _prepare_cloud_candidate_request = None
 _extract_cloud_response_content = None
 _extract_cloud_reasoning_content = None
+_extract_cloud_finish_reason = None
 _guardian_debug_headers = None
 _is_retryable_cloud_error = None
 _sanitize_proxied_response_headers = None
@@ -69,6 +70,7 @@ def init(
     prepare_cloud_candidate_request,
     extract_cloud_response_content,
     extract_cloud_reasoning_content,
+    extract_cloud_finish_reason,
     guardian_debug_headers,
     is_retryable_cloud_error,
     sanitize_proxied_response_headers,
@@ -114,11 +116,12 @@ def init(
     global cloud_rate_limiter, failover_health, _GuardianRequestCancelled
     global STREAM_HEARTBEAT_INTERVAL_S
     global _grammar_cloud_auto_convert_json, _grammar_cloud_strict_mode, _grammar_enabled
-    global _extract_cloud_reasoning_content
+    global _extract_cloud_reasoning_content, _extract_cloud_finish_reason
     _resolve_cloud_attempts = resolve_cloud_attempts
     _prepare_cloud_candidate_request = prepare_cloud_candidate_request
     _extract_cloud_response_content = extract_cloud_response_content
     _extract_cloud_reasoning_content = extract_cloud_reasoning_content
+    _extract_cloud_finish_reason = extract_cloud_finish_reason
     _guardian_debug_headers = guardian_debug_headers
     _is_retryable_cloud_error = is_retryable_cloud_error
     _sanitize_proxied_response_headers = sanitize_proxied_response_headers
@@ -185,6 +188,59 @@ def _strip_cloud_grammar(body: Dict[str, Any], *, allow_json_convert: bool) -> D
         if converted is not None and "response_format" not in stripped:
             stripped["response_format"] = converted
     return stripped
+
+
+def _extract_cloud_native_finish_reason(payload: Any) -> Optional[str]:
+    """Extract the provider-reported native stop reason from a response.
+
+    OpenRouter reports ``choices[0].native_finish_reason`` alongside the
+    OpenAI-normalized ``finish_reason``; plain OpenAI-compatible backends
+    (llama.cpp, NVIDIA, …) omit it.  Returns None when absent.
+    """
+    if not isinstance(payload, dict):
+        return None
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices:
+        choice = choices[0] if isinstance(choices[0], dict) else {}
+        native = choice.get("native_finish_reason")
+        if isinstance(native, str) and native:
+            return native
+        message = choice.get("message")
+        if isinstance(message, dict):
+            native = message.get("native_finish_reason")
+            if isinstance(native, str) and native:
+                return native
+    return None
+
+
+def _extract_cloud_usage_mirror(payload: Any) -> Dict[str, Any]:
+    """Mirror rich upstream usage fields from a non-streaming response.
+
+    Returns a dict with any of ``completion_tokens_details``,
+    ``native_tokens_reasoning``, ``native_tokens_cached``, ``cost`` and
+    ``provider_name`` — only the keys the upstream actually reported.
+    """
+    mirror: Dict[str, Any] = {}
+    if not isinstance(payload, dict):
+        return mirror
+    usage = payload.get("usage")
+    if isinstance(usage, dict):
+        details = usage.get("completion_tokens_details")
+        if isinstance(details, dict) and details:
+            mirror["completion_tokens_details"] = details
+        ntr = usage.get("native_tokens_reasoning")
+        if isinstance(ntr, (int, float)) and not isinstance(ntr, bool):
+            mirror["native_tokens_reasoning"] = int(ntr)
+        ntc = usage.get("native_tokens_cached")
+        if isinstance(ntc, (int, float)) and not isinstance(ntc, bool):
+            mirror["native_tokens_cached"] = int(ntc)
+        cost = usage.get("cost")
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+            mirror["cost"] = float(cost)
+    reported_provider = payload.get("provider")
+    if isinstance(reported_provider, str) and reported_provider:
+        mirror["provider_name"] = reported_provider
+    return mirror
 
 
 async def forward_to_cloud_provider(
@@ -265,6 +321,14 @@ async def forward_to_cloud_provider(
 
     for attempt_index, (provider, upstream_model) in enumerate(attempts):
         is_last_attempt = attempt_index == len(attempts) - 1
+        # Capture: record the resolved provider on the capture context (C11)
+        # so every terminal event for this request reports which provider
+        # actually served it (failover candidates update it per attempt).
+        if capture_ctx is not None:
+            try:
+                capture_ctx.provider = provider.name
+            except Exception:
+                pass
         effective_path, candidate_json_body, candidate_body, needs_translation = (
             _prepare_cloud_candidate_request(provider, upstream_model, path, json_body, cloud_key_fingerprint)
         )
@@ -450,6 +514,11 @@ async def forward_to_cloud_provider(
             # Success — this candidate wins. Bind the winning json_body and
             # fall through to the streaming response construction below.
             failover_health.record_success(provider.name, upstream_model)
+            # Winning 1-based attempt for capture events: the streaming branch
+            # breaks out here, before the non-streaming capture block (which
+            # sets the counter), so a first-attempt streaming success would
+            # otherwise report attempts=0.
+            _cloud_capture_attempts = attempt_index + 1
             json_body = candidate_json_body
             break
 
@@ -564,22 +633,45 @@ async def forward_to_cloud_provider(
                 ) if capture_ctx is not None else None
             else:
                 _cloud_content, _cloud_tool_calls = _extract_cloud_response_content(payload)
-                # Reasoning apart doorgeven (raw capture), maar alleen als de
-                # fallback hem niet al in content heeft gestopt (geen content).
-                _cloud_reasoning = None
-                if _cloud_content:
-                    _cloud_reasoning = _extract_cloud_reasoning_content(payload)
+                # Reasoning is always captured separately from content, and
+                # content stays null when the model returned null content
+                # (e.g. OpenRouter puts reasoning at message.reasoning).
+                _cloud_reasoning = _extract_cloud_reasoning_content(payload)
+                _cloud_finish_reason = _extract_cloud_finish_reason(payload)
+                _cloud_native_finish_reason = _extract_cloud_native_finish_reason(payload)
+                _cloud_usage_mirror = _extract_cloud_usage_mirror(payload)
+                # Token counts, None-safe and int-coerced (C2): a missing or
+                # malformed usage object must not raise here (which would
+                # silently drop the whole completed event) nor leak floats.
+                _cloud_usage = payload.get("usage") if isinstance(payload, dict) else None
+                _cloud_usage = _cloud_usage if isinstance(_cloud_usage, dict) else {}
+                _cloud_prompt_tokens = _coerce_usage_int(
+                    _cloud_usage.get("prompt_tokens", _cloud_usage.get("input_tokens", 0))
+                )
+                _cloud_completion_tokens = _coerce_usage_int(
+                    _cloud_usage.get("completion_tokens", _cloud_usage.get("output_tokens", 0))
+                )
                 _dispatch_capture_request_completed(
                     capture_ctx,
                     policy_result=capture_policy_result,
                     response_content=_cloud_content,
                     tool_calls=_cloud_tool_calls,
                     reasoning_content=_cloud_reasoning,
-                    prompt_tokens=payload.get("usage", {}).get("prompt_tokens", payload.get("usage", {}).get("input_tokens", 0)) if isinstance(payload, dict) else None,
-                    completion_tokens=payload.get("usage", {}).get("completion_tokens", payload.get("usage", {}).get("output_tokens", 0)) if isinstance(payload, dict) else None,
+                    finish_reason=_cloud_finish_reason,
+                    native_finish_reason=_cloud_native_finish_reason,
+                    prompt_tokens=_cloud_prompt_tokens,
+                    completion_tokens=_cloud_completion_tokens,
+                    completion_tokens_details=_cloud_usage_mirror.get("completion_tokens_details"),
+                    native_tokens_reasoning=_cloud_usage_mirror.get("native_tokens_reasoning"),
+                    native_tokens_cached=_cloud_usage_mirror.get("native_tokens_cached"),
+                    cost=_cloud_usage_mirror.get("cost"),
+                    provider_name=_cloud_usage_mirror.get("provider_name"),
                     http_status=resp.status_code,
                     streamed=False,
-                    incomplete=False,
+                    # Non-streaming cloud request: neither leg streamed.
+                    streamed_ingress=False,
+                    streamed_upstream=False,
+                    incomplete=(_cloud_finish_reason is None or _cloud_finish_reason == "null"),
                     attempts=_cloud_capture_attempts,
                     duration_ms=_cloud_capture_duration_ms,
                 ) if capture_ctx is not None else None
@@ -679,7 +771,9 @@ async def forward_to_cloud_provider(
                                     if data.get("type") == "message_delta":
                                         usage_totals["completion_tokens"] = max(
                                             usage_totals["completion_tokens"],
-                                            data.get("usage", {}).get("output_tokens", 0),
+                                            _coerce_usage_int(
+                                                data.get("usage", {}).get("output_tokens", 0)
+                                            ),
                                         )
                         except (json.JSONDecodeError, TypeError):
                             pass
@@ -759,29 +853,64 @@ async def forward_to_cloud_provider(
                 else:
                     _cloud_stream_content = None
                     _cloud_stream_tool_calls = None
+                    _cloud_stream_reasoning = None
+                    # Fail-open defaults: no finish reason and the HTTP status
+                    # decides incompleteness when the assembler is unavailable.
+                    _cloud_stream_finish = None
+                    _cloud_stream_incomplete = resp.status_code != 200
+                    _cloud_stream_mirror: Dict[str, Any] = {}
                     if _cloud_assembler is not None:
                         try:
                             _cloud_assembled = _cloud_assembler.assemble()
                             _cloud_stream_content = _cloud_assembled.get("content")
                             _cloud_stream_tool_calls = _cloud_assembled.get("tool_calls")
                             _cloud_stream_reasoning = _cloud_assembled.get("reasoning_content")
+                            _cloud_stream_finish = _cloud_assembled.get("finish_reason")
+                            _cloud_stream_incomplete = _cloud_assembled.get("incomplete")
+                            # Rich usage mirror collected from the final
+                            # usage chunk by the stream assembler (C5).
+                            for _mirror_key in (
+                                "native_finish_reason",
+                                "completion_tokens_details",
+                                "native_tokens_reasoning",
+                                "native_tokens_cached",
+                                "cost",
+                                "provider_name",
+                            ):
+                                _mirror_val = _cloud_assembled.get(_mirror_key)
+                                if _mirror_val is not None:
+                                    _cloud_stream_mirror[_mirror_key] = _mirror_val
                         except Exception:
                             # Fail-open: a broken assembler must never turn a
                             # successful upstream response into a 500.
                             _cloud_stream_content = None
                             _cloud_stream_tool_calls = None
                             _cloud_stream_reasoning = None
+                            _cloud_stream_finish = None
+                            _cloud_stream_incomplete = resp.status_code != 200
+                            _cloud_stream_mirror = {}
                     _dispatch_capture_request_completed(
                         capture_ctx,
                         policy_result=capture_policy_result,
                         response_content=_cloud_stream_content,
                         tool_calls=_cloud_stream_tool_calls,
                         reasoning_content=_cloud_stream_reasoning,
+                        finish_reason=_cloud_stream_finish,
+                        native_finish_reason=_cloud_stream_mirror.get("native_finish_reason"),
+                        completion_tokens_details=_cloud_stream_mirror.get("completion_tokens_details"),
+                        native_tokens_reasoning=_cloud_stream_mirror.get("native_tokens_reasoning"),
+                        native_tokens_cached=_cloud_stream_mirror.get("native_tokens_cached"),
+                        cost=_cloud_stream_mirror.get("cost"),
+                        provider_name=_cloud_stream_mirror.get("provider_name"),
                         prompt_tokens=usage_totals["prompt_tokens"],
                         completion_tokens=usage_totals["completion_tokens"],
                         http_status=resp.status_code,
                         streamed=True,
-                        incomplete=resp.status_code != 200,
+                        # Cloud streaming: the upstream leg streams because the
+                        # client requested streaming (is_stream gates both).
+                        streamed_ingress=True,
+                        streamed_upstream=True,
+                        incomplete=_cloud_stream_incomplete,
                         attempts=_cloud_capture_attempts,
                         duration_ms=(time.monotonic() - cloud_capture_start_time) * 1000 if cloud_capture_start_time else None,
                     )
