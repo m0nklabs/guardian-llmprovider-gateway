@@ -987,6 +987,10 @@ async def test_unavailable_with_healthy_backend_adopts_state():
     client = _StubClient()
     client.ensure.side_effect = CaretakerUnavailable("http://x:11441")
     mgr = _manager()
+    # Same-model + no parameter delta: the narrow case in which the persisted
+    # signature is meaningful, so the drift check actually runs (and passes,
+    # letting adoption proceed).
+    mgr.current_model = "m"
     mgr.backend_serves_model = AsyncMock(return_value=True)
     mgr.backend_health_ok = AsyncMock(return_value=True)
     crt.init(model_manager=mgr, caretaker_client=client)
@@ -1129,28 +1133,79 @@ async def test_unavailable_auth_status_fails_closed():
     assert crt._ever_reached_caretaker is True
 
 
-async def test_unavailable_drifted_config_fails_closed():
-    """Backend serves the model + healthy, but the requested launch config
-    (vision/context_hint) drifts from the persisted one -> must NOT adopt.  The
-    backend is ALIVE, so the local lifecycle must NOT run either (second
-    controller race on a live llama-server) -> fail closed."""
+async def test_unavailable_same_model_no_delta_drifted_fails_closed():
+    """Same-model + no parameter delta + drifted persisted signature -> must
+    NOT adopt: in this narrow case the sig is the only source of truth about
+    how the backend was launched, and a drifted sig means the daemon relaunched
+    with settings this gateway does not know.  The backend is ALIVE, so the
+    local lifecycle must NOT run either (second controller race on a live
+    llama-server) -> fail closed."""
     client = _StubClient()
     client.ensure.side_effect = CaretakerUnavailable("http://x:11441")
     mgr = _manager()
+    mgr.current_model = "m"  # gateway believes the same model is already loaded
     mgr.backend_serves_model = AsyncMock(return_value=True)
     mgr.backend_health_ok = AsyncMock(return_value=True)
     mgr._config_drifted = Mock(return_value=True)
     crt.init(model_manager=mgr, caretaker_client=client)
     fallback = AsyncMock()
     with pytest.raises(ModelLoadError):
-        await crt.ensure_backend(
-            model="m",
-            enable_vision=True,
-            context_hint=4096,
-            local_fallback=fallback,
-        )
+        await crt.ensure_backend(model="m", local_fallback=fallback)
+    mgr._config_drifted.assert_called_once_with(
+        "m", enable_vision=None, context_hint=None
+    )
     fallback.assert_not_awaited()
     mgr.mark_loaded_by_caretaker.assert_not_called()
+
+
+async def test_unavailable_param_delta_adopts_despite_stale_sig():
+    """A parameter-delta request (explicit vision need / context hint) must not
+    be vetoed by the persisted signature: the sig never described the launch
+    this request asks for, so it says nothing useful — the serving, healthy
+    backend is adopted (its launch is stale until mark_loaded_by_caretaker
+    rewrites the sig AFTER adoption) and the explicit need is stamped."""
+    client = _StubClient()
+    client.ensure.side_effect = CaretakerUnavailable("http://x:11441")
+    mgr = _manager()
+    mgr.current_model = "m"
+    mgr.backend_serves_model = AsyncMock(return_value=True)
+    mgr.backend_health_ok = AsyncMock(return_value=True)
+    mgr._config_drifted = Mock(return_value=True)  # sig stale — irrelevant here
+    mgr.current_runtime_uses_mmproj = Mock(return_value=True)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
+    result = await crt.ensure_backend(
+        model="m", enable_vision=True, context_hint=4096, local_fallback=fallback
+    )
+    assert result == "local-healthy"
+    mgr._config_drifted.assert_not_called()
+    fallback.assert_not_awaited()
+    mgr.mark_loaded_by_caretaker.assert_called_once_with(
+        "m", enable_vision=True, context_hint=4096
+    )
+
+
+async def test_unavailable_cross_model_adopts_despite_stale_sig():
+    """Cross-model adoption: the gateway believes another model is loaded, but
+    the LIVE backend serves the requested one and is healthy.  The persisted
+    signature describes the OTHER model's launch, so the drift check is
+    meaningless and must not veto adoption."""
+    client = _StubClient()
+    client.ensure.side_effect = CaretakerUnavailable("http://x:11441")
+    mgr = _manager()
+    mgr.current_model = "other"  # gateway state describes another model
+    mgr.backend_serves_model = AsyncMock(return_value=True)
+    mgr.backend_health_ok = AsyncMock(return_value=True)
+    mgr._config_drifted = Mock(return_value=True)  # stale sig — must not run
+    crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
+    result = await crt.ensure_backend(model="m", local_fallback=fallback)
+    assert result == "local-healthy"
+    mgr._config_drifted.assert_not_called()
+    fallback.assert_not_awaited()
+    mgr.mark_loaded_by_caretaker.assert_called_once_with(
+        "m", enable_vision=False, context_hint=None
+    )
 
 
 async def test_unavailable_hung_backend_runs_local_fallback():
