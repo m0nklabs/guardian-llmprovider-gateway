@@ -98,9 +98,10 @@ _CARETAKER_BOUNDS = {
     "rebind_poll_interval_seconds": (0.1, 30.0),
     "client_timeout_seconds": (0.5, 120.0),
 }
-# Combined re-bind budget: the two independent bounds above compose to a
-# worst-case of 60×30 s = 30 min; the re-bind poll holds the model-switch
-# lock, so the TOTAL budget is capped instead (defaults 15×1.0 s unaffected).
+# Combined re-bind budget: each poll iteration costs interval + a full
+# /ensure round-trip (up to client_timeout_seconds), and the poll holds the
+# model-switch lock, so the TOTAL per-attempt budget is capped (defaults
+# 15 × (1.0 + 5.0) s = 90 s unaffected).
 _REBIND_BUDGET_S = 120.0
 
 
@@ -232,12 +233,16 @@ def load_caretaker_runtime_config(config: Optional[Dict[str, Any]] = None) -> di
     # attempts is a count: back to int after the shared float coercion.
     result["rebind_poll_attempts"] = int(result["rebind_poll_attempts"])
     # Combined budget: the re-bind poll runs inside ensure_backend while the
-    # model-switch lock is held; independent in-bounds maxima (60×30 s) would
-    # allow a ~30 min request-hotpath stall, so cap the TOTAL re-bind budget
-    # (attempts×interval).  The defaults (15×1.0 s) are unaffected.
+    # model-switch lock is held.  Each iteration costs interval + a full
+    # /ensure round-trip (up to client_timeout_seconds when the daemon accepts
+    # TCP but stops responding — exactly the hung/restarting scenario this
+    # poll exists for), so the budget cap divides by the PER-ATTEMPT cost:
+    # independent in-bounds maxima would otherwise allow a ~30 min hotpath
+    # stall.  The defaults (15 × (1.0 + 5.0) = 90 s) are unaffected.
     interval = result["rebind_poll_interval_seconds"]
-    if interval > 0:
-        cap = int(_REBIND_BUDGET_S / interval)
+    per_attempt = interval + result["client_timeout_seconds"]
+    if per_attempt > 0:
+        cap = int(_REBIND_BUDGET_S / per_attempt)
         if result["rebind_poll_attempts"] > cap:
             result["rebind_poll_attempts"] = cap
     return result
