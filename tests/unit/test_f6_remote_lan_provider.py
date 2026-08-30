@@ -34,7 +34,7 @@ def provider_dir(tmp_path: Path) -> Path:
         base_url: http://192.168.1.x:11440/v1
         api_key: win-test
         brand: windows
-        catalog_url: /v1/models
+        catalog_url: /models
         # Registry list-form: statically advertised cloud models (the
         # per-model override dict is a separate mechanism).
         models:
