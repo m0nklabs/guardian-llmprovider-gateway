@@ -187,12 +187,17 @@ async def ensure_backend(
     ):
         raise ValueError(f"Client '{client_id}' is not allowed to switch models")
 
-    # A switch (pre_switch_save) restores the target model's auto-saved
-    # context only when the daemon CONFIRMS the model was freshly loaded
-    # ("fresh_load"), never on a gateway-side probe.  The pre-save is the
-    # counterpart of that restore: running it while the daemon cannot confirm
-    # freshness would be a wasted slot-save POST + ps-scan with nothing ever
-    # restoring it, so the SAVE is gated on the same capability.
+    # Snapshot the daemon capability BEFORE the /ensure call and gate BOTH
+    # the pre-save and the post-ensure restore on that same snapshot.  Gating
+    # them on different observations is asymmetric on the very first switch
+    # after the daemon starts shipping fresh_load: the pre-save (gated on the
+    # pre-call flag, still False) would be skipped while the restore (gated
+    # on the response's fresh_load, now present) would run and re-inject the
+    # target model's possibly stale auto-save — the current session would be
+    # silently lost and the target would boot a stale one.  Snapshotting both
+    # on the same observation keeps the transition switch on the
+    # pre-capability path (no save, no restore) and brings save/restore back
+    # symmetrically from the second switch onward.
     #
     # The SWITCH itself stays remote-first.  A local-lifecycle switch
     # (switch_model) while the caretaker daemon is alive would race a second
@@ -203,8 +208,9 @@ async def ensure_backend(
     # warning; the field ships as the immediate caretaker follow-up, after
     # which the capability is observed on the first reload/switch /ensure and
     # restore comes back automatically (self-healing).
+    capability_before = getattr(_caretaker_client, "supports_fresh_load", False)
     if pre_switch_save and _model_manager is not None:
-        if not getattr(_caretaker_client, "supports_fresh_load", False):
+        if not capability_before:
             logger.warning(
                 "F5: /ensure cannot confirm fresh_load — remote switch to "
                 "'%s' proceeds WITHOUT context restore until the daemon "
@@ -252,6 +258,21 @@ async def ensure_backend(
                 model,
                 enable_vision=enable_vision,
                 context_hint=context_hint,
+            )
+            # The drift check above only compares GATEWAY-side persisted
+            # state; the daemon may have launched the backend with settings
+            # that differ from the gateway's persisted signature (e.g. a hot
+            # config edit or a daemon-side vision resolution that drops
+            # mmproj).  Adopting then stamps current_vision_enabled=True via
+            # mark_loaded_by_caretaker even though the real process is
+            # text-only — a subsequent image request would be forwarded to a
+            # backend that cannot serve it.  So when the request needs vision,
+            # also require the LIVE process to actually use mmproj (the args
+            # file is written by whoever launched the backend — gateway OR
+            # daemon — so the probe reflects the real process).
+            and not (
+                _model_manager._resolve_runtime_vision_flag(model, enable_vision)
+                and not _model_manager.current_runtime_uses_mmproj(model)
             )
         ):
             logger.warning(
@@ -388,13 +409,14 @@ async def ensure_backend(
         # signal.  A gateway-side probe (parsing the running llama-server's
         # command line) can misdetect a caretaker-launched process and would
         # clobber a live slot-0 session with a stale auto-save, so never
-        # restore on a probe result alone.  The pre-save is gated on the same
-        # capability (see the switch gate above): until the daemon ships the
-        # field, no save runs, nothing is lost, and once the field is
-        # observed the save/restore pair comes back together.  Reload sites
-        # (auto-reload, connect-error recovery) start a fresh context via
-        # load() and must not re-inject a stale auto-save — they never set
-        # pre_switch_save.
-        if pre_switch_save and result.get("fresh_load") is True:
+        # restore on a probe result alone.  The restore is gated on the SAME
+        # capability snapshot as the pre-save (see the switch gate above), so
+        # the first fresh_load-capable switch after a daemon upgrade behaves
+        # like the pre-capability path (no save, no restore) instead of
+        # restoring a stale auto-save without having saved the current
+        # session.  Reload sites (auto-reload, connect-error recovery) start
+        # a fresh context via load() and must not re-inject a stale auto-save
+        # — they never set pre_switch_save.
+        if pre_switch_save and capability_before and result.get("fresh_load") is True:
             await _model_manager.restore_current_context()
     return "remote"
