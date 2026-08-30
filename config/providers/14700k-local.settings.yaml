@@ -1,0 +1,31 @@
+# F6: the 14700K Windows GPU as a passive LAN provider (docs/IMPLEMENTATION_PLAN.md
+# §F6 + docs/LAN_GPU_BACKENDS.md step 2).  The host runs its own llama-server +
+# caretaker (operator-managed, NSSM service on Windows); Guardian only forwards
+# traffic — NO lifecycle / idle-unload / VRAM scheduler / auto-switch for this GPU.
+#
+# Naming: the `-local` suffix comes from the plan naming, but this is a REMOTE
+# host — `local: false` overrides the name-based managed heuristic so the
+# provider is cloud-routed (LAN-inference) instead of treated as this gateway's
+# managed llama-server.
+#
+# Fill in the real Windows LAN address, set WINDOWS_LAN_KEY in .env, flip
+# `enabled: true`, then POST /api/config/reload — config-only, no restart.
+local: false
+enabled: false
+base_url: http://192.168.1.x:11440/v1
+api_key: ${WINDOWS_LAN_KEY}
+brand: windows
+# llama-server advertises /v1/models (OpenAI-compatible); bare model ids are
+# normalized to windows/<model> by the catalog (brand above).
+catalog_url: /v1/models
+# Reference for the Windows-side caretaker control API (the gateway's own
+# caretaker runtime only manages THIS host's llama-server; the Windows GPU is
+# operator-managed).  Auth is mandatory from the first LAN bind (CARETAKER_KEY
+# equivalent on the Windows side).
+management_url: http://192.168.1.x:11441
+# llama-server reports no context_length: per-model overrides go here once the
+# operator has sized the models (same pattern as openrouter/nvidia overrides —
+# keys are the brand-normalized windows/<model> ids):
+# models:
+#   windows/qwen3-8b-q5:
+#     context_window: 32768

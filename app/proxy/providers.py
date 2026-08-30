@@ -204,11 +204,19 @@ class ProviderRegistry:
             # Managed: Guardian owns the lifecycle. A local provider is
             # recognised by `local: true` and/or the `-local` name suffix
             # (F2), and/or an explicit `managed: true` (F3 generalisation).
-            managed = bool(
-                cfg.get("managed")
-                or cfg.get("local")
-                or is_local_provider_name(provider_name)
-            )
+            # An EXPLICIT document marker (`local: false`) overrides the
+            # name-based fallback: F6's `14700k-local` carries the -local
+            # suffix from the plan naming but is a REMOTE LAN host managed
+            # by its own caretaker — a passive LAN provider, never owned by
+            # this gateway's lifecycle.
+            explicit_local = cfg.get("local")
+            if explicit_local is not None:
+                managed = bool(explicit_local) or bool(cfg.get("managed"))
+            else:
+                managed = bool(
+                    cfg.get("managed")
+                    or is_local_provider_name(provider_name)
+                )
 
             provider = CloudProvider(
                 name=provider_name,
