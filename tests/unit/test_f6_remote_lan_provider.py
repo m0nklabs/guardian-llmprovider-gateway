@@ -130,3 +130,27 @@ def test_shipped_homelab_provider_file_markers():
         and api_key.startswith("${")
         and api_key.endswith("}")
     ), "api_key must stay ${VAR}-referenced, never an inline secret"
+
+
+async def test_quoted_local_marker_normalized(tmp_path: Path, monkeypatch):
+    """Quoted YAML booleans (`local: "false"` — as editors/templates emit) are
+    normalized before the override decision: a truthy string must not
+    silently defeat the explicit override (the F6 LAN host would stay
+    managed and never be cloud-routable)."""
+    d = tmp_path / "providers"
+    d.mkdir()
+    (d / "windows-gpu-local.settings.yaml").write_text(textwrap.dedent("""\
+        local: "false"
+        enabled: true
+        base_url: http://192.168.1.x:11440/v1
+        api_key: win-test
+        brand: windows
+    """))
+    monkeypatch.setattr("app.paths.PROVIDERS_DIR", d)
+    reg = ProviderRegistry()
+    assert reg._providers["windows-gpu-local"].managed is False
+    (d / "windows-gpu-local.settings.yaml").write_text(
+        (d / "windows-gpu-local.settings.yaml").read_text().replace('"false"', '"true"')
+    )
+    reg2 = ProviderRegistry()
+    assert reg2._providers["windows-gpu-local"].managed is True
