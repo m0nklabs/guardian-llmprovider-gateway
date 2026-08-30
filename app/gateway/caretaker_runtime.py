@@ -300,6 +300,22 @@ async def _complete_remote(
         )
 
     if _model_manager is not None:
+        # A daemon-confirmed ``vision_enabled`` bool in the /ensure response
+        # is the AUTHORITATIVE vision state whenever the daemon ships it:
+        # the gateway-local args-file probe is only reliable while the
+        # caretaker runs on the SAME host and writes the shared
+        # CURRENT_MODEL_ARGS_FILE (the F5 topology — the daemon writes the
+        # file it launches with, in the same file the gateway reads).  In the
+        # F6 remote-host topology (daemon on the Windows/14700K host) the
+        # probe reads stale/absent local state, so the daemon's own
+        # confirmation must win.  Older daemons omit the field -> the probe
+        # remains the fallback.
+        daemon_vision = result.get("vision_enabled")
+        live_vision = (
+            daemon_vision
+            if isinstance(daemon_vision, bool)
+            else _model_manager.current_runtime_uses_mmproj(model)
+        )
         # Mirror the adopt-path guard: when the request EXPLICITLY needs
         # vision (enable_vision=True) the daemon may have resolved it
         # differently than the gateway (own config / hot config edit /
@@ -319,14 +335,14 @@ async def _complete_remote(
         # later image request still triggers a (vision-enabled) switch.
         if (
             enable_vision is True
-            and not _model_manager.current_runtime_uses_mmproj(model)
+            and live_vision is not True
         ):
             raise ModelLoadError(
                 f"Caretaker loaded '{loaded}' without mmproj while vision "
                 "was requested"
             )
         effective_vision = (
-            _model_manager.current_runtime_uses_mmproj(model)
+            live_vision
             if enable_vision is None
             else bool(enable_vision)
         )
@@ -388,10 +404,15 @@ async def _ensure_with_retry(
       timeout).  Re-probe once; a second such timeout must NOT run the local
       lifecycle — a live daemon would race a local spawn (two controllers on
       the same backend port / launch-args file).  Fail closed instead.
-      ``ConnectTimeout``/``PoolTimeout`` are deliberately excluded: no
-      connection was ever accepted there, so the daemon may as well be down
-      (restarting with a full backlog, firewall DROP, LAN host powered off)
-      and the safe local fallback still applies.
+      ``ConnectTimeout`` is deliberately excluded from that branch: no
+      connection was ever accepted there (SYN never answered — backlog,
+      firewall DROP, restart window), so it is NOT proof the daemon is alive;
+      it gets the plain transport re-probe below, and the OUTER caller
+      (``ensure_backend``) decides from the backend health whether the local
+      lifecycle is safe.  ``PoolTimeout`` is NOT a "no connection" error: the
+      pool was exhausted because the daemon accepted and held connections —
+      ``ensure_backend`` groups it with the connection-established errors
+      (ReadError/WriteError/RemoteProtocolError) and fails closed.
     - any other transport error (connection refused, DNS, …) → the daemon is
       really gone; re-probe once more so the caller can adopt a surviving
       backend or run the local fallback (it is then the only controller).
