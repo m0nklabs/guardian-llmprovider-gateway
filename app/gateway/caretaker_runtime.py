@@ -165,18 +165,22 @@ async def _await_backend_serving(
     as soon as the backend confirms — a healthy loading daemon only costs the
     lock-hold time a cold switch inherently needs.
 
-    A HEALTHY backend that does not serve the requested model is a
-    determined outcome, not a load in flight: the daemon's switch is
-    stop→start (stop old llama-server, free GPU, start new), so while a
-    model is actually loading the backend is DOWN, not healthy.  If the
-    backend is healthy and serves a different model, the in-flight ensure
-    evidently resolved elsewhere (or never arrived) — waiting the full
-    window cannot change that, and holding the global switch lock for
-    ``_ADOPT_POLL_SECONDS`` would block every other auto-reload/auto-switch
-    across all clients.  Give an in-place model swap a 3s grace, then fail
-    closed promptly (``None``) instead of burning the whole window.
+    A HEALTHY backend that does not serve the requested model is NOT a
+    determined outcome: the daemon's switch is stop→start (stop old
+    llama-server, free GPU, start new), so while a model is actually loading
+    the backend is DOWN — but the pre-stop phases (VRAM acquire, context
+    auto-save) and the post-switch window between two /ensure requests from
+    concurrent clients can leave a HEALTHY backend serving the OLD model for
+    several seconds or longer while our /ensure is next in line (the daemon
+    serializes switches through its event loop).  Bailing out after a short
+    grace would fail a legitimate cold switch that completes moments later —
+    exactly the switches this adoption poll exists to protect (pre-F5 waited
+    without a cap; the bounded _ADOPT_POLL_SECONDS window is strictly
+    better).  Poll the full window: the outcome is either our model appears
+    (adopt — the daemon got the switch there) or the window elapses and it
+    failed closed (the daemon serves a different model the whole time —
+    confirmed by the earlier two /ensure timeouts that the daemon was busy).
     """
-    wrong_model_probes = 0
     for _ in range(_ADOPT_POLL_SECONDS):
         await asyncio.sleep(1.0)
         adopted = await _backend_now_serving(
@@ -186,16 +190,14 @@ async def _await_backend_serving(
         )
         if adopted is not None:
             return adopted
-        # The backend is healthy but does not serve the requested model:
-        # the in-flight ensure is evidently not loading it (a real load
-        # keeps the backend DOWN during stop→start, so health-ok means the
-        # outcome is already determined).  Give an in-place model swap a
-        # short grace (3s), then fail closed promptly instead of holding
-        # the switch lock for the full _ADOPT_POLL_SECONDS window.
-        if _model_manager is not None and await _model_manager.backend_health_ok():
-            wrong_model_probes += 1
-            if wrong_model_probes >= 3:
-                return None
+        # Keep polling for the FULL bounded window even when the backend is
+        # healthy and serves a different model: the daemon's pre-stop phases
+        # (VRAM acquire, context auto-save) and the serialization of
+        # concurrent /ensure requests leave a healthy old-model backend while
+        # our switch is still on its way.  A short grace would turn a
+        # legitimate cold switch that completes moments later into a spurious
+        # 503 — pre-F5 waited without a cap, so the bounded window is the
+        # safe, strictly-better behavior.
     return None
 
 
@@ -683,7 +685,11 @@ async def ensure_backend(
         # the pre-F5 auto-switch is preserved.  ConnectTimeout is a SUBCLASS
         # of ConnectError and stays fail-closed (SYN never answered — DROP,
         # not dead).
-        if _model_manager is not None and await _model_manager.backend_health_ok():
+        backend_healthy = (
+            _model_manager is not None
+            and await _model_manager.backend_health_ok()
+        )
+        if backend_healthy:
             if (
                 isinstance(exc.__cause__, httpx.ConnectError)
                 and not isinstance(exc.__cause__, httpx.ConnectTimeout)
@@ -796,8 +802,9 @@ async def ensure_backend(
                 "a second controller on the backend"
             ) from exc
         logger.warning(
-            "F5: caretaker unavailable and backend down — local load fallback "
+            "F5: caretaker unavailable and backend %s — local load fallback "
             "for '%s'",
+            "not serving the requested model" if backend_healthy else "down",
             model,
         )
         await local_fallback()

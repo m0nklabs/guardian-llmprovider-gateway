@@ -6,6 +6,7 @@ not configured or unreachable, and error mapping so the hotpath callers keep
 their existing crash/503 handling.
 """
 
+import logging
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import httpx
@@ -305,13 +306,15 @@ async def test_ensure_unparseable_200_body_twice_fails_closed(monkeypatch):
     mgr.mark_loaded_by_caretaker.assert_not_called()
 
 
-async def test_unavailable_timeout_twice_healthy_wrong_model_bails_poll(monkeypatch):
-    """A HEALTHY backend that serves a different model is a determined
-    outcome, not a load in flight: the daemon's switch is stop→start, so
-    while a model is actually loading the backend is DOWN, not healthy.
-    The poll bails after the 3s in-place-swap grace instead of holding the
-    global switch lock for the full _ADOPT_POLL_SECONDS window, then fails
-    closed."""
+async def test_unavailable_timeout_twice_healthy_wrong_model_polls_full_window(monkeypatch):
+    """A HEALTHY backend that serves a different model is NOT a determined
+    outcome: the daemon's pre-stop phases (VRAM acquire, context auto-save)
+    and serialization of concurrent /ensure requests leave a healthy
+    old-model backend while our switch is still on its way.  The poll keeps
+    probing the FULL bounded _ADOPT_POLL_SECONDS window (pre-F5 waited
+    without a cap) and only then fails closed — a short grace would turn a
+    legitimate cold switch that completes moments later into a spurious
+    503."""
     monkeypatch.setattr("asyncio.sleep", AsyncMock())
     client = _StubClient()
     client.ensure.side_effect = [_timeout_unavailable(), _timeout_unavailable()]
@@ -325,9 +328,8 @@ async def test_unavailable_timeout_twice_healthy_wrong_model_bails_poll(monkeypa
     assert client.ensure.await_count == 2
     fallback.assert_not_awaited()
     mgr.mark_loaded_by_caretaker.assert_not_called()
-    # 3 probes with the in-place-swap grace — far less than the full
-    # _ADOPT_POLL_SECONDS window would have run.
-    assert mgr.backend_serves_model.await_count == 3
+    # The full bounded window was polled — not a short grace bailout.
+    assert mgr.backend_serves_model.await_count == crt._ADOPT_POLL_SECONDS
 
 
 async def test_unavailable_timeout_twice_fails_closed(monkeypatch):
@@ -493,6 +495,31 @@ async def test_unavailable_connection_refused_alive_backend_runs_local(monkeypat
     assert client.ensure.await_count == 17  # 2 probes + 15-iteration re-bind poll
     fallback.assert_awaited_once()
     mgr.mark_loaded_by_caretaker.assert_not_called()
+
+
+async def test_refused_alive_backend_log_reflects_not_serving(monkeypatch, caplog):
+    """The connection-refused fallback with a HEALTHY backend must not log
+    'backend down': the backend is alive, just not serving the requested
+    model (the daemon process is gone, its llama-server child survives).  An
+    operator debugging the switch failure gets a truthful signal."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+    client = _StubClient()
+
+    def _refused() -> CaretakerUnavailable:
+        err = CaretakerUnavailable("http://x:11441")
+        err.__cause__ = httpx.ConnectError("connection refused")
+        return err
+
+    client.ensure.side_effect = [_refused() for _ in range(17)]
+    mgr = _manager()
+    mgr.backend_serves_model = AsyncMock(return_value=False)
+    mgr.backend_health_ok = AsyncMock(return_value=True)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    with caplog.at_level(logging.WARNING, logger="app.gateway.caretaker_runtime"):
+        result = await crt.ensure_backend(model="m", local_fallback=AsyncMock())
+    assert result == "local"
+    assert "backend not serving the requested model" in caplog.text
+    assert "backend down" not in caplog.text
 
 
 async def test_unavailable_connection_refused_then_daemon_rebounds_remote(monkeypatch):
