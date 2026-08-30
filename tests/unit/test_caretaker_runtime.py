@@ -1408,3 +1408,69 @@ async def test_remote_success_without_loaded_model_fails_closed():
         await crt.ensure_backend(model="m", local_fallback=fallback)
     fallback.assert_not_awaited()
     mgr.mark_loaded_by_caretaker.assert_not_called()
+
+
+async def test_poll_windows_hot_reloadable_from_config(monkeypatch):
+    """The adoption window comes from the live ``caretaker`` config section
+    (F5 follow-up): patching the section — exactly what POST
+    /api/config/reload does — retunes the poll without a restart, and the
+    iteration cap equals the configured seconds (deadline and cap share one
+    read)."""
+    from app.config_loader import CONFIG, load_caretaker_runtime_config
+
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+    monkeypatch.setitem(
+        CONFIG, "caretaker", dict(load_caretaker_runtime_config(), adopt_poll_seconds=5)
+    )
+    client = _StubClient()
+    client.ensure.side_effect = [_timeout_unavailable(), _timeout_unavailable()]
+    mgr = _manager()
+    mgr.backend_serves_model = AsyncMock(return_value=False)  # healthy, other model
+    mgr.backend_health_ok = AsyncMock(return_value=True)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
+    with pytest.raises(ModelLoadError):
+        await crt.ensure_backend(model="m", local_fallback=fallback)
+    # The configured window — not the 120s module default — bounded the poll.
+    assert mgr.backend_serves_model.await_count == 5
+    fallback.assert_not_awaited()
+
+
+async def test_rebind_poll_window_from_config(monkeypatch):
+    """The re-bind poll attempts/interval come from the live ``caretaker``
+    config section: a reduced attempts count shortens the poll and the sleep
+    receives the configured interval."""
+    from app.config_loader import CONFIG, load_caretaker_runtime_config
+
+    sleeps: list[float] = []
+
+    async def _record_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("asyncio.sleep", _record_sleep)
+    monkeypatch.setitem(
+        CONFIG,
+        "caretaker",
+        dict(load_caretaker_runtime_config(), rebind_poll_attempts=2, rebind_poll_interval_seconds=0.25),
+    )
+    client = _StubClient()
+
+    def _refused() -> CaretakerUnavailable:
+        err = CaretakerUnavailable("http://x:11441")
+        err.__cause__ = httpx.ConnectError("connection refused")
+        return err
+
+    client.ensure.side_effect = [_refused(), _refused(), _refused(), _refused()]
+    mgr = _manager()
+    mgr.backend_serves_model = AsyncMock(return_value=False)
+    mgr.backend_health_ok = AsyncMock(return_value=True)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    crt._ever_reached_caretaker = True  # daemon was up before the restart window
+    fallback = AsyncMock()
+    result = await crt.ensure_backend(model="m", local_fallback=fallback)
+    # 2 initial probes + 2 configured re-bind attempts, then the local
+    # lifecycle (daemon never re-bound within the configured window).
+    assert result == "local"
+    assert client.ensure.await_count == 4
+    assert fallback.await_count == 1
+    assert sleeps == [0.25, 0.25], "configured interval, not the hardcoded 1s"

@@ -40,6 +40,19 @@ queue:
   history_ttl: 300
 services:
   comfyui_url: http://127.0.0.1:8188
+# Caretaker-runtime poll windows (F5 follow-up; hot-reloadable via
+# POST /api/config/reload).  Values mirror the pre-config runtime defaults:
+# adopt_poll_seconds bounds the adoption poll after 2× /ensure timeout (must
+# cover the 10-30s cold-load range plus slow large models; safety-clamped to
+# 1..600s), rebind_poll_attempts/interval bound the re-bind poll after a hard
+# connection refusal, and client_timeout_seconds is the per-request daemon
+# timeout (clamped 0.5..120s).  Invalid/out-of-range values fall back to the
+# built-in defaults/clamps (see app/config_loader.py).
+caretaker:
+  adopt_poll_seconds: 120
+  rebind_poll_attempts: 15
+  rebind_poll_interval_seconds: 1.0
+  client_timeout_seconds: 5.0
 timeouts:
   tiers:
     tier_70b:
