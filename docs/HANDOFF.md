@@ -42,7 +42,12 @@
 
 > Een verse worker was op overdrachtsmoment hiermee bezig; als je dit leest is
 > hij mogelijk al af — check de PR-state (0 open threads + CI groen + verse
-> slot-comment "klaar voor human merge") vóór je iets doet.
+> slot-comment "klaar voor human merge") vóór je iets doet. **NB: de workers
+> zijn kinderen van de OUDE DSH-sessie — een nieuwe sessie kan ze niet
+> adopteren; de takeover loopt via het werk zélf** (GitHub-state + filesystem).
+> Begin daarom met `git status` in beide checkouts (een worker kan middenin
+> een turn gedood zijn: dirty tree / half-afgeronde actie) en verifieer
+> daarna de PR-state op GitHub.
 
 **Route na overname (in volgorde):**
 1. Caretaker #8 afmaken (de 2 blokkades hierboven) → slot-comment.
