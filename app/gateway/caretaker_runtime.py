@@ -99,10 +99,13 @@ _model_manager = None  # ModelManager | None
 # the bound must stay tight — but pre-F5 load()/switch_model() waited on
 # backend health WITHOUT any cap, so a too-short bound would 503 cold loads
 # (the in-flight /ensure is the only controller; the daemon is healthy and
-# mid-load).  60 covers the documented 10-30s cold-load range plus the ~10s
-# the two /ensure attempts already consumed.  Configurable via settings once
-# the runtime is wired to global.settings.yaml; tests patch asyncio.sleep.
-_ADOPT_POLL_SECONDS = 60
+# mid-load).  120 covers the documented 10-30s cold-load range, the ~10s the
+# two /ensure attempts already consumed, and the deployment's largest models
+# (14700K-class GGUFs can exceed 60s on a cold start); the poll is bounded
+# and exits as soon as the backend confirms, so the window only costs lock
+# time while a cold load is genuinely in flight.  Configurable via settings
+# once the runtime is wired to global.settings.yaml; tests patch asyncio.sleep.
+_ADOPT_POLL_SECONDS = 120
 
 
 def init(*, model_manager, caretaker_client) -> None:
@@ -484,17 +487,19 @@ async def ensure_backend(
     ):
         raise ValueError(f"Client '{client_id}' is not allowed to switch models")
 
-    # Snapshot the daemon capability BEFORE the /ensure call and gate BOTH
-    # the pre-save and the post-ensure restore on that same snapshot.  Gating
-    # them on different observations is asymmetric on the very first switch
-    # after the daemon starts shipping fresh_load: the pre-save (gated on the
-    # pre-call flag, still False) would be skipped while the restore (gated
-    # on the response's fresh_load, now present) would run and re-inject the
-    # target model's possibly stale auto-save — the current session would be
-    # silently lost and the target would boot a stale one.  Snapshotting both
-    # on the same observation keeps the transition switch on the
-    # pre-capability path (no save, no restore) and brings save/restore back
-    # symmetrically from the second switch onward.
+    # Snapshot the daemon capability BEFORE the /ensure call.  The RESTORE
+    # stays gated on that snapshot: gating it on the response's fresh_load
+    # instead would be asymmetric on the very first switch after the daemon
+    # starts shipping fresh_load — the restore (gated on the response, now
+    # present) would run while this switch's session was never saved,
+    # re-injecting the target model's possibly stale auto-save and silently
+    # losing the current session.  The PRE-SAVE is deliberately NOT gated:
+    # with pre_switch_save the caller explicitly asked for context
+    # persistence, and skipping it loses the active session on every A->B->A
+    # cycle while the daemon has not shipped fresh_load yet (pre-F5
+    # switch_model always saved).  Saving unconditionally only prevents loss;
+    # the transition switch still behaves pre-capability (no restore) and
+    # save/restore come back symmetrically from the second switch onward.
     #
     # The SWITCH itself stays remote-first.  A local-lifecycle switch
     # (switch_model) while the caretaker daemon is alive would race a second
@@ -507,15 +512,22 @@ async def ensure_backend(
     # restore comes back automatically (self-healing).
     capability_before = getattr(_caretaker_client, "supports_fresh_load", False)
     if pre_switch_save and _model_manager is not None:
+        # ALWAYS save before a remote switch: with pre_switch_save the caller
+        # explicitly asked for context persistence, and skipping it loses the
+        # active session on every A->B->A cycle (pre-F5 switch_model always
+        # saved).  Only the RESTORE stays gated on the same capability
+        # snapshot (see _complete_remote), so the first switch after the
+        # daemon starts shipping fresh_load still behaves pre-capability —
+        # saving now only prevents the current session from being lost in the
+        # meantime.
         if not capability_before:
             logger.warning(
                 "F5: /ensure cannot confirm fresh_load — remote switch to "
-                "'%s' proceeds WITHOUT context restore until the daemon "
+                "'%s' SAVES context but will NOT restore it until the daemon "
                 "ships the field",
                 model,
             )
-        else:
-            await _model_manager.save_current_context()
+        await _model_manager.save_current_context()
 
     try:
         result = await _ensure_with_retry(
@@ -629,8 +641,12 @@ async def ensure_backend(
                 # window completes the remote path instead of taking over the
                 # backend as a second controller, which would then race the
                 # restarting daemon on the shared backend / launch-args file.
+                # The 15s window covers the deployment's RestartSec + python
+                # startup budget (commonly >7s); both probes only take ~1s
+                # each on refused connects, so the poll dominates the
+                # restart-window wait as intended.
                 rechecked = None
-                for _ in range(5):
+                for _ in range(15):
                     await asyncio.sleep(1.0)
                     try:
                         rechecked = await _caretaker_client.ensure(
