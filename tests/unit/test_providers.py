@@ -713,3 +713,49 @@ class TestEmptyConfig:
         reg = ProviderRegistry(settings_path=tmp_path / "nonexistent.yaml")
         assert reg.get_all_cloud_models() == []
         assert not reg.is_cloud_model("any/model")
+
+
+# ── G2: max_call_seconds parsing ──────────────────────────────────────
+
+
+class TestMaxCallSeconds:
+    """``max_call_seconds`` (G2 hard per-attempt duration cap) parsing."""
+
+    def _provider_with(self, tmp_path: Path, max_call_line: str) -> CloudProvider:
+        yaml = textwrap.dedent(
+            f"""\
+            providers:
+              openrouter:
+                enabled: true
+                base_url: https://openrouter.ai/api/v1
+                api_key: sk-or-test-key
+                timeout_seconds: 300
+                {max_call_line}
+                models:
+                  - openai/gpt-4o
+            """
+        )
+        settings = _write_settings(tmp_path, yaml)
+        reg = ProviderRegistry(settings_path=settings)
+        return reg.get_provider_for_model("openai/gpt-4o")
+
+    def test_present_value_parsed(self, tmp_path: Path):
+        provider = self._provider_with(tmp_path, "max_call_seconds: 1200")
+        assert provider.max_call_seconds == 1200.0
+
+    def test_absent_value_is_none(self, tmp_path: Path):
+        """A provider without the key keeps the cap disabled (Optional field)."""
+        provider = self._provider_with(tmp_path, "")
+        assert provider.max_call_seconds is None
+
+    def test_invalid_value_falls_back_to_none(self, tmp_path: Path):
+        provider = self._provider_with(tmp_path, "max_call_seconds: not-a-number")
+        assert provider.max_call_seconds is None
+
+    def test_non_positive_value_disables_cap(self, tmp_path: Path):
+        provider = self._provider_with(tmp_path, "max_call_seconds: 0")
+        assert provider.max_call_seconds is None
+
+    def test_explicit_null_disables_cap(self, tmp_path: Path):
+        provider = self._provider_with(tmp_path, "max_call_seconds: null")
+        assert provider.max_call_seconds is None

@@ -5,6 +5,8 @@ enabled: true
 base_url: https://api.openai.com/v1
 api_key: ${OPENAI_API_KEY}
 timeout_seconds: 1200
+# Hard cap (seconds) on ONE upstream call attempt incl. 429 backoff sleeps (G2).
+max_call_seconds: 1200
 models:
   gpt-4.1:
     context_window: 1047576

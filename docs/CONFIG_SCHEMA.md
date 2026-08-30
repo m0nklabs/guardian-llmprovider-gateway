@@ -97,6 +97,39 @@ providers:
 
 `app/proxy/cloud_catalog.py`: `url = f"{provider.base_url}{provider.catalog_url or '/models'}"`.
 
+### 4b. G2: cloud disconnect-propagatie + harde duur-cap
+
+Per provider optioneel `max_call_seconds` (G2, geen default — afwezig/`null` = cap uit):
+
+```yaml
+# config/providers/<naam>.settings.yaml
+providers:
+  openrouter:
+    timeout_seconds: 1200    # httpx per-read/per-write stall-bound (geen totaal-cap)
+    max_call_seconds: 1200   # harde cap op ÉÉN upstream-call (asyncio.wait_for,
+                             # incl. gebonde 429-backoff sleeps); timeout → 504
+                             # cloud_max_duration + failover naar volgende kandidaat
+```
+
+Waarom beide: httpx kent geen totaal-timeout — `timeout_seconds` is per-socket-read
+en wordt gereset door elke byte die de upstream stuurt; `max_call_seconds` begrenst
+de hele poging (`app/cloud_inference/forwarding.py`, `_upstream_with_cap`).
+
+Global (disconnect-propagatie, non-streamed cloud only):
+
+```yaml
+# config/global.settings.yaml
+proxy:
+  disconnect_poll_seconds: 0.25   # poll-cadence downstream-disconnect
+                                  # (floor 0.05s; queue watch + cloud disconnect-race)
+```
+
+`await_request_disconnect` (`app/gateway/queue_helpers.py`) polled tijdens de
+non-streamed cloud-forward; bij disconnect: upstream-call geannuleerd, 499
+`request_cancelled`, capture `request_cancelled(cancel_reason="client_disconnect")`.
+De streaming-tak armt de poller bewust NIET (Starlette's StreamingResponse
+disconnect-listener is de single consumer van het receive-kanaal).
+
 ## 5. Wie leest de huidige settings.yaml (consumers-impact)
 
 | Key | Reader |

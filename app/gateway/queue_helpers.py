@@ -23,15 +23,21 @@ _inference_queue = None
 _get_queue_owner_id = None  # callable(request, client_id) -> str | None
 _update_live_request_usage = None  # callable(request, **kwargs) -> None
 STREAM_CLOSE_TIMEOUT_S: float = 5.0
+# Downstream-disconnect poll cadence. Overridden once at startup via init()
+# from ``proxy.disconnect_poll_seconds`` (config_loader.load_disconnect_poll_seconds).
+DISCONNECT_POLL_INTERVAL_S: float = 0.25
 
 
-def init(inference_queue, get_queue_owner_id, update_live_request_usage, close_timeout_s: float) -> None:
+def init(inference_queue, get_queue_owner_id, update_live_request_usage, close_timeout_s: float,
+         disconnect_poll_s: float = 0.25) -> None:
     """Inject the queue singleton and helper callables. Called once at startup."""
     global _inference_queue, _get_queue_owner_id, _update_live_request_usage, STREAM_CLOSE_TIMEOUT_S
+    global DISCONNECT_POLL_INTERVAL_S
     _inference_queue = inference_queue
     _get_queue_owner_id = get_queue_owner_id
     _update_live_request_usage = update_live_request_usage
     STREAM_CLOSE_TIMEOUT_S = close_timeout_s
+    DISCONNECT_POLL_INTERVAL_S = float(disconnect_poll_s)
 
 
 # ── Cancel exception ─────────────────────────────────────────────────
@@ -85,23 +91,34 @@ async def stop_background_task(task: Optional[asyncio.Task]) -> None:
         )
 
 
-async def watch_request_disconnect(request: Request, request_id: str, client_id: str) -> None:
-    """Cancel the tracked queue request as soon as the downstream client disconnects."""
+async def await_request_disconnect(request: Request) -> None:
+    """Poll ``request.is_disconnected()`` until the downstream client disconnects.
+
+    Queue-free so paths without a queue request (cloud forwarding, G2) can race
+    it against their upstream await. The caller must own the request's receive
+    channel: no other consumer (e.g. Starlette's StreamingResponse disconnect
+    listener) may read it concurrently.
+    """
     while True:
         if await request.is_disconnected():
-            snapshot = _inference_queue.cancel(
-                request_id,
-                client_id=client_id,
-                reason="client_disconnected",
-            )
-            logger.info(
-                "🔌 [%s] Client '%s' disconnected (%s)",
-                request_id[:8],
-                client_id,
-                (snapshot or {}).get("status", "unknown"),
-            )
             return
-        await asyncio.sleep(0.25)
+        await asyncio.sleep(DISCONNECT_POLL_INTERVAL_S)
+
+
+async def watch_request_disconnect(request: Request, request_id: str, client_id: str) -> None:
+    """Cancel the tracked queue request as soon as the downstream client disconnects."""
+    await await_request_disconnect(request)
+    snapshot = _inference_queue.cancel(
+        request_id,
+        client_id=client_id,
+        reason="client_disconnected",
+    )
+    logger.info(
+        "🔌 [%s] Client '%s' disconnected (%s)",
+        request_id[:8],
+        client_id,
+        (snapshot or {}).get("status", "unknown"),
+    )
 
 
 async def begin_queued_request(request: Request, client_id: str, model: str) -> tuple[str, asyncio.Task]:

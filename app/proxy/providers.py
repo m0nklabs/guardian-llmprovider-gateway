@@ -73,6 +73,22 @@ def _expand_env(value: str) -> str:
     return _ENV_VAR_PATTERN.sub(_replace, value)
 
 
+def _parse_optional_positive_float(value: Any) -> Optional[float]:
+    """Coerce an optional positive-float config value; None/invalid → None.
+
+    Used for optional knobs such as ``max_call_seconds``: an absent, invalid
+    or non-positive value disables the feature (fail-open) instead of
+    rejecting the whole provider document.
+    """
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
 @dataclass
 class CloudProvider:
     """A single upstream cloud LLM provider."""
@@ -83,6 +99,12 @@ class CloudProvider:
     models: List[str] = field(default_factory=list)
     enabled: bool = True
     timeout_seconds: float = 600.0
+    # Hard cap on ONE upstream call attempt (asyncio.wait_for), bounding the
+    # whole attempt window including 429 backoff sleeps — unlike httpx's
+    # per-read ``timeout_seconds``, which only bounds a single silent socket
+    # read and is therefore not a total-duration cap (G2). Optional: absent or
+    # None disables the cap.
+    max_call_seconds: Optional[float] = None
     # Provider-specific extra headers (e.g. OpenRouter ranking headers).
     extra_headers: Dict[str, str] = field(default_factory=dict)
     # Catalog path override (default "/models"). Lets a provider advertise the
@@ -186,6 +208,8 @@ class ProviderRegistry:
                 if isinstance(p, str) and p.strip()
             ]
             timeout = float(cfg.get("timeout_seconds", 600.0))
+            # Hard cap on a single upstream call (G2); None/invalid = disabled.
+            max_call_seconds = _parse_optional_positive_float(cfg.get("max_call_seconds"))
             extra_headers: Dict[str, str] = {}
             if isinstance(cfg.get("extra_headers"), dict):
                 extra_headers = {
@@ -217,6 +241,7 @@ class ProviderRegistry:
                 models=models,
                 enabled=enabled,
                 timeout_seconds=timeout,
+                max_call_seconds=max_call_seconds,
                 extra_headers=extra_headers,
                 catalog_url=catalog_url,
                 catalog_allowlist=allowlist,

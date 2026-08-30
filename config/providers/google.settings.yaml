@@ -3,5 +3,7 @@ enabled: true
 base_url: https://generativelanguage.googleapis.com/v1beta/openai
 api_key: ${GOOGLE_API_KEY}
 timeout_seconds: 1200
+# Hard cap (seconds) on ONE upstream call attempt incl. 429 backoff sleeps (G2).
+max_call_seconds: 1200
 model_prefixes:
 - google/

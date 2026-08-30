@@ -124,6 +124,7 @@ def load_config() -> dict:
         "proxy": {
             "stream_heartbeat_seconds": 15,
             "stream_close_timeout_seconds": 5,
+            "disconnect_poll_seconds": 0.25,
         },
         "cloud_retry": RateLimitConfig().to_dict(),
         "caretaker": dict(_CARETAKER_DEFAULTS),
@@ -214,6 +215,22 @@ def load_stream_close_timeout_s(config: Optional[Dict[str, Any]] = None) -> floa
     except (TypeError, ValueError):
         timeout = 5.0
     return max(timeout, 0.5)
+
+
+def load_disconnect_poll_seconds(config: Optional[Dict[str, Any]] = None) -> float:
+    """Return the downstream-disconnect poll interval (seconds).
+
+    Consumed by the queue disconnect watch and the cloud non-streamed
+    disconnect race (G2). The floor keeps a mistyped near-zero value from
+    becoming a hot poll loop; the default matches the pre-config 0.25 s
+    cadence that ``watch_request_disconnect`` used before this key existed.
+    """
+    cfg = config if config is not None else CONFIG
+    try:
+        interval = float(cfg.get("proxy", {}).get("disconnect_poll_seconds", 0.25))
+    except (TypeError, ValueError):
+        interval = 0.25
+    return max(interval, 0.05)
 
 
 def load_caretaker_runtime_config(config: Optional[Dict[str, Any]] = None) -> dict:

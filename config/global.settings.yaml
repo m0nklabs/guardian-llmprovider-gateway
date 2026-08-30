@@ -17,6 +17,9 @@ proxy:
   pid_file: guardian.pid
   vram_limit_mb: 27000
   stream_heartbeat_seconds: 15
+  # Downstream-disconnect poll cadence (G2): queue disconnect watch + cloud
+  # non-streamed disconnect race. Floor 0.05s (config_loader).
+  disconnect_poll_seconds: 0.25
 grammar:
   enabled: true
   cloud_auto_convert_json: false
