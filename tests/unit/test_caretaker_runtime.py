@@ -1491,10 +1491,13 @@ def test_rebind_combined_budget_capped(monkeypatch):
     )
     rt = load_caretaker_runtime_config()
     assert rt["rebind_poll_interval_seconds"] == 30.0
-    assert rt["rebind_poll_attempts"] * rt["rebind_poll_interval_seconds"] <= 120.0
-    assert rt["rebind_poll_attempts"] == 4  # 120 s / 30 s
-    # Defaults remain untouched: 15 × 1.0 s ≤ 120 s (explicit dict — the
-    # monkeypatched CONFIG above must not leak into this check).
+    # The budget divides by the PER-ATTEMPT cost (interval + a full /ensure
+    # round-trip up to client_timeout_seconds): 120 / (30 + 5) = 3 attempts,
+    # so the worst-case lock-hold stays ≤ 120 s.
+    assert rt["rebind_poll_attempts"] == 3
+    assert 3 * (rt["rebind_poll_interval_seconds"] + rt["client_timeout_seconds"]) <= 120.0
+    # Defaults remain untouched: 15 × (1.0 + 5.0) = 90 s ≤ 120 s (explicit
+    # dict — the monkeypatched CONFIG above must not leak into this check).
     default_rt = load_caretaker_runtime_config(
         {
             "caretaker": {
@@ -1505,5 +1508,5 @@ def test_rebind_combined_budget_capped(monkeypatch):
             }
         }
     )
-    assert default_rt["rebind_poll_attempts"] == 15
+    assert default_rt["rebind_poll_attempts"] == 15  # cap 120/(1+5)=20 > 15
     assert default_rt["rebind_poll_interval_seconds"] == 1.0
