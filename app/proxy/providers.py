@@ -213,12 +213,16 @@ class ProviderRegistry:
             # truthy string must not silently defeat the override.
             explicit_local = cfg.get("local")
             if isinstance(explicit_local, str):
-                explicit_local = explicit_local.strip().lower() in (
-                    "1",
-                    "true",
-                    "yes",
-                    "on",
-                )
+                normalized = explicit_local.strip().lower()
+                if normalized in ("1", "true", "yes", "on"):
+                    explicit_local = True
+                elif normalized in ("0", "false", "no", "off"):
+                    explicit_local = False
+                else:
+                    # Unknown/empty string is NOT an explicit marker — keep
+                    # the name-suffix fallback (F2 semantics) instead of
+                    # silently flipping the provider's lifecycle ownership.
+                    explicit_local = None
             if explicit_local is not None:
                 managed = bool(explicit_local) or bool(cfg.get("managed"))
             else:

@@ -154,3 +154,24 @@ async def test_quoted_local_marker_normalized(tmp_path: Path, monkeypatch):
     )
     reg2 = ProviderRegistry()
     assert reg2._providers["14700k-local"].managed is True
+
+
+async def test_unrecognized_local_string_keeps_suffix_fallback(
+    tmp_path: Path, monkeypatch
+):
+    """An unknown/empty `local:` string ("" or a typo like "flase") is NOT an
+    explicit marker: the -local name-suffix fallback decides, so a keyless
+    -local provider cannot be silently flipped to non-managed."""
+    d = tmp_path / "providers"
+    d.mkdir()
+    (d / "ai-kvm2-local.settings.yaml").write_text(
+        "local: \"flase\"\nenabled: true\nbase_url: http://127.0.0.1:11440/v1\n"
+    )
+    monkeypatch.setattr("app.paths.PROVIDERS_DIR", d)
+    reg = ProviderRegistry()
+    assert reg._providers["ai-kvm2-local"].managed is True  # suffix fallback
+    (d / "ai-kvm2-local.settings.yaml").write_text(
+        "local: \"\"\nenabled: true\nbase_url: http://127.0.0.1:11440/v1\n"
+    )
+    reg2 = ProviderRegistry()
+    assert reg2._providers["ai-kvm2-local"].managed is True
