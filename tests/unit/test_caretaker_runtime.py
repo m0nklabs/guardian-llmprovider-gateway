@@ -206,6 +206,54 @@ async def test_unavailable_connect_timeout_runs_local():
     fallback.assert_awaited_once()
 
 
+async def test_unavailable_connect_timeout_alive_backend_fails_closed():
+    """ConnectTimeout means the SYN was never answered (DROP/backlog), so the
+    daemon may STILL be alive owning the backend.  A live backend serving a
+    different model -> the local lifecycle would race it -> fail closed."""
+    client = _StubClient()
+
+    def _connect_timeout() -> CaretakerUnavailable:
+        err = CaretakerUnavailable("http://x:11441")
+        err.__cause__ = httpx.ConnectTimeout("connect timed out")
+        return err
+
+    client.ensure.side_effect = [_connect_timeout(), _connect_timeout()]
+    mgr = _manager()
+    mgr.backend_serves_model = AsyncMock(return_value=False)
+    mgr.backend_health_ok = AsyncMock(return_value=True)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
+    with pytest.raises(ModelLoadError):
+        await crt.ensure_backend(model="m", local_fallback=fallback)
+    fallback.assert_not_awaited()
+
+
+async def test_unavailable_connection_refused_alive_backend_runs_local():
+    """A hard connection-refused (RST — nothing listening on the management
+    port) is the strongest evidence the daemon process is definitively gone:
+    no live daemon owns the backend, so the local lifecycle is the sole
+    controller and the pre-F5 auto-switch is preserved even when a llama-server
+    survives serving a different model."""
+    client = _StubClient()
+
+    def _refused() -> CaretakerUnavailable:
+        err = CaretakerUnavailable("http://x:11441")
+        err.__cause__ = httpx.ConnectError("connection refused")
+        return err
+
+    client.ensure.side_effect = [_refused(), _refused()]
+    mgr = _manager()
+    mgr.backend_serves_model = AsyncMock(return_value=False)
+    mgr.backend_health_ok = AsyncMock(return_value=True)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
+    result = await crt.ensure_backend(model="m", local_fallback=fallback)
+    assert result == "local"
+    assert client.ensure.await_count == 2
+    fallback.assert_awaited_once()
+    mgr.mark_loaded_by_caretaker.assert_not_called()
+
+
 async def test_unavailable_rereprobe_also_fails_then_local():
     """Two non-timeout CaretakerUnavailable in a row (connection refused =
     daemon really gone) let the local lifecycle run — it is then the sole

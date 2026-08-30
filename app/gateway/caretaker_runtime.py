@@ -368,20 +368,37 @@ async def ensure_backend(
             # process) — the live session is authoritative.  A later A->B->A
             # re-ensure restores correctly once the daemon reports fresh_load.
             return "local-healthy"
-        # ConnectTimeout/connection-refused does NOT prove the daemon is gone:
-        # a firewall DROP on the management port, saturated accept backlog or
-        # a restart window all surface as transport errors while the daemon
-        # still owns llama-server.  If the backend is ALIVE (a real llama-server
-        # answers), spawning/switching locally would race a second controller
-        # on it (args-file write + systemctl stop/start) — the same hazard the
+        # A transport failure does NOT by itself prove the daemon is gone: a
+        # firewall DROP on the management port, saturated accept backlog or a
+        # restart window all surface as timeouts while the daemon still owns
+        # llama-server.  If the backend is ALIVE (a real llama-server answers),
+        # spawning/switching locally would race a second controller on it
+        # (args-file write + systemctl stop/start) — the same hazard the
         # timeout branch fails closed on, and the state may be a live daemon
-        # serving a different model than requested.  Only run the local
-        # lifecycle when the backend is confirmed DOWN.
+        # serving a different model than requested.
+        #
+        # A hard connection-refused is the one exception: nothing is listening
+        # on the management port (RST on connect), which is the strongest
+        # evidence the daemon process is definitively gone — no live daemon
+        # owns the backend, so the local lifecycle is the sole controller and
+        # the pre-F5 auto-switch is preserved.  ConnectTimeout is a SUBCLASS
+        # of ConnectError and stays fail-closed (SYN never answered — DROP,
+        # not dead).
         if _model_manager is not None and await _model_manager.backend_health_ok():
-            raise ModelLoadError(
-                "Caretaker unreachable but backend is alive; refusing local "
-                "fallback to avoid a second controller on the backend"
-            ) from exc
+            if (
+                isinstance(exc.__cause__, httpx.ConnectError)
+                and not isinstance(exc.__cause__, httpx.ConnectTimeout)
+            ):
+                logger.warning(
+                    "F5: caretaker management port closed (connection refused) "
+                    "— running local lifecycle fallback for '%s'",
+                    model,
+                )
+            else:
+                raise ModelLoadError(
+                    "Caretaker unreachable but backend is alive; refusing local "
+                    "fallback to avoid a second controller on the backend"
+                ) from exc
         logger.warning(
             "F5: caretaker unavailable and backend down — local load fallback "
             "for '%s'",
@@ -508,6 +525,11 @@ async def ensure_backend(
         # session.  Reload sites (auto-reload, connect-error recovery) start
         # a fresh context via load() and must not re-inject a stale auto-save
         # — they never set pre_switch_save.
-        if pre_switch_save and capability_before and result.get("fresh_load") is True:
+        if (
+            pre_switch_save
+            and capability_before
+            and result.get("fresh_load") is True
+            and _model_manager is not None
+        ):
             await _model_manager.restore_current_context()
     return "remote"
