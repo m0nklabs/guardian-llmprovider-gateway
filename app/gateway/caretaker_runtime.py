@@ -43,11 +43,17 @@ Decision logic:
   startup) the local lifecycle runs — unless any poll attempt finds the
   daemon re-bound and rejecting (status_code) or re-bound and busy
   (read/write timeout), which fail closed like every other live-daemon case.
-  If the backend is ALIVE but not serving the requested model (or serves it
-  without the requested vision config), the local lifecycle would race a
-  second controller → fail closed.  Only when the backend is confirmed DOWN
-  does the original local lifecycle (``local_fallback``) run — safe, because
-  with the daemon down nothing else owns the backend port.
+  Transport errors where a connection WAS established (``ReadError``/
+  ``WriteError`` resets, ``RemoteProtocolError``, ``PoolTimeout``) mean the
+  daemon accepted a connection — it is alive (or was when it dropped us) and
+  still owns the backend, even when the backend health probe fails; those
+  fail closed too.  Only a hard refused/ConnectTimeout reaches the local
+  lifecycle with the backend down.  If the backend is ALIVE but not serving
+  the requested model (or serves it without the requested vision config),
+  the local lifecycle would race a second controller → fail closed.  Only
+  when the backend is confirmed DOWN does the original local lifecycle
+  (``local_fallback``) run — safe, because with the daemon down nothing else
+  owns the backend port.
 - Vision integrity: whenever state is mirrored to the gateway manager
   (``mark_loaded_by_caretaker``) — on the success path or on adoption — and
   the request needs vision, the LIVE process must confirm mmproj via
@@ -87,6 +93,16 @@ logger = logging.getLogger("Guardian")
 # Injected by server.init(); None = no caretaker configured (legacy behaviour).
 _caretaker_client = None  # CaretakerClient | None
 _model_manager = None  # ModelManager | None
+
+# Bounded adoption-poll window in seconds.  The poll runs under the caller's
+# model-switch lock (auto-reload/auto-switch hold it for the whole ensure), so
+# the bound must stay tight — but pre-F5 load()/switch_model() waited on
+# backend health WITHOUT any cap, so a too-short bound would 503 cold loads
+# (the in-flight /ensure is the only controller; the daemon is healthy and
+# mid-load).  60 covers the documented 10-30s cold-load range plus the ~10s
+# the two /ensure attempts already consumed.  Configurable via settings once
+# the runtime is wired to global.settings.yaml; tests patch asyncio.sleep.
+_ADOPT_POLL_SECONDS = 60
 
 
 def init(*, model_manager, caretaker_client) -> None:
@@ -140,11 +156,13 @@ async def _await_backend_serving(
     load()/switch_model() waited for backend health, so fail-closing on a
     single probe would still 503 most cold switches — the probe runs right
     after ~2× the client timeout (10s at the 5s default), while a 10-30s load
-    is barely started.  Poll once per second up to a bounded window (~30s,
-    covering the documented cold-load range); ``None`` if the load never
-    confirms.  Each probe is local and cheap (no daemon round-trip).
+    is barely started.  Poll once per second up to the bounded
+    ``_ADOPT_POLL_SECONDS`` window; ``None`` if the load never confirms.
+    Each probe is local and cheap (no daemon round-trip), and the loop exits
+    as soon as the backend confirms — a healthy loading daemon only costs the
+    lock-hold time a cold switch inherently needs.
     """
-    for _ in range(60):
+    for _ in range(_ADOPT_POLL_SECONDS):
         await asyncio.sleep(1.0)
         adopted = await _backend_now_serving(
             model,
@@ -658,6 +676,32 @@ async def ensure_backend(
                     "Caretaker unreachable but backend is alive; refusing local "
                     "fallback to avoid a second controller on the backend"
                 ) from exc
+        # Transport errors where a connection was ESTABLISHED (read/write
+        # resets, protocol errors, pool exhaustion) mean the daemon accepted a
+        # connection — it is alive (or was alive when it dropped us) and still
+        # owns the backend, even when the backend health probe fails (the
+        # daemon is busy mid-switch and dropped the control connection while
+        # llama-server restarts).  Spawning/switching locally would race it;
+        # fail closed instead — same rationale as the timeout branch.  Only a
+        # hard connection-refused (RST) or ConnectTimeout is strong evidence
+        # the daemon process is truly gone, and only those reach the local
+        # lifecycle below.  ReadTimeout/WriteTimeout are handled inside
+        # _ensure_with_retry and never surface here.
+        cause = exc.__cause__
+        if isinstance(
+            cause,
+            (
+                httpx.ReadError,
+                httpx.WriteError,
+                httpx.PoolTimeout,
+                httpx.RemoteProtocolError,
+            ),
+        ):
+            raise ModelLoadError(
+                "Caretaker unreachable but accepted a connection "
+                f"({type(cause).__name__}); refusing local fallback to avoid "
+                "a second controller on the backend"
+            ) from exc
         logger.warning(
             "F5: caretaker unavailable and backend down — local load fallback "
             "for '%s'",

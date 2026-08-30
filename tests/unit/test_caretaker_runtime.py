@@ -252,6 +252,35 @@ async def test_unavailable_connect_timeout_alive_backend_fails_closed():
     fallback.assert_not_awaited()
 
 
+async def test_unavailable_connection_established_error_fails_closed(monkeypatch):
+    """Transport errors that prove a connection WAS established (read/write
+    resets, protocol errors, pool exhaustion) mean the daemon accepted a
+    connection — it is alive (or was when it dropped us) and still owns the
+    backend, even when the backend health probe fails (busy mid-switch while
+    llama-server restarts).  The local lifecycle would race it -> fail closed
+    just like the timeout branch."""
+    for cause_cls in (httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError, httpx.PoolTimeout):
+        monkeypatch.setattr("asyncio.sleep", AsyncMock())
+        client = _StubClient()
+
+        def _established(cause_cls=cause_cls) -> CaretakerUnavailable:
+            err = CaretakerUnavailable("http://x:11441")
+            err.__cause__ = cause_cls("connection dropped")
+            return err
+
+        client.ensure.side_effect = [_established(), _established()]
+        mgr = _manager()
+        mgr.backend_serves_model = AsyncMock(return_value=False)
+        mgr.backend_health_ok = AsyncMock(return_value=False)  # backend down too
+        crt.init(model_manager=mgr, caretaker_client=client)
+        fallback = AsyncMock()
+        with pytest.raises(ModelLoadError, match=cause_cls.__name__):
+            await crt.ensure_backend(model="m", local_fallback=fallback)
+        assert client.ensure.await_count == 2
+        fallback.assert_not_awaited()
+        mgr.mark_loaded_by_caretaker.assert_not_called()
+
+
 async def test_unavailable_connection_refused_alive_backend_runs_local(monkeypatch):
     """A hard connection-refused (RST — nothing listening on the management
     port) is the strongest evidence the daemon process is definitively gone:
