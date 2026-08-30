@@ -29,7 +29,7 @@ Decision logic:
   local spawn — two controllers on the same backend).  A read/write timeout
   means the daemon accepted the connection (alive): a second one fails closed
   UNLESS the backend now serves the requested model — the adoption probe polls
-  a bounded ~30s window (a cold load can outlast the client timeout and pre-F5
+  a bounded ~60s window (a cold load can outlast the client timeout and pre-F5
   ``load()``/``switch_model()`` waited for backend health, so a single probe
   right after ~2× the client timeout would 503 most cold switches; the
   in-flight /ensure is the only controller, so adopting the confirmed load is
@@ -38,16 +38,16 @@ Decision logic:
   if so, adopt the loaded state without spawning.  A hard connection-refused
   with a healthy backend is the one case that preserves the pre-F5
   auto-switch: nothing listening on the management port is the strongest
-  evidence the daemon process is gone, so after a short bounded re-probe (to
-  let a merely-restarting daemon re-bind) the local lifecycle runs — unless
-  that re-probe finds the daemon re-bound and rejecting (status_code) or
-  re-bound and busy (read/write timeout), which fail closed like every other
-  live-daemon case.  If the backend is ALIVE but not serving the requested
-  model (or serves it without the requested vision config), the local
-  lifecycle would race a second controller → fail closed.  Only when the
-  backend is confirmed DOWN does the original local lifecycle
-  (``local_fallback``) run — safe, because with the daemon down nothing else
-  owns the backend port.
+  evidence the daemon process is gone, so after a short bounded re-bind poll
+  (5× 1s — a restarting daemon's port can stay closed for RestartSec +
+  startup) the local lifecycle runs — unless any poll attempt finds the
+  daemon re-bound and rejecting (status_code) or re-bound and busy
+  (read/write timeout), which fail closed like every other live-daemon case.
+  If the backend is ALIVE but not serving the requested model (or serves it
+  without the requested vision config), the local lifecycle would race a
+  second controller → fail closed.  Only when the backend is confirmed DOWN
+  does the original local lifecycle (``local_fallback``) run — safe, because
+  with the daemon down nothing else owns the backend port.
 - Vision integrity: whenever state is mirrored to the gateway manager
   (``mark_loaded_by_caretaker``) — on the success path or on adoption — and
   the request needs vision, the LIVE process must confirm mmproj via
@@ -144,7 +144,7 @@ async def _await_backend_serving(
     covering the documented cold-load range); ``None`` if the load never
     confirms.  Each probe is local and cheap (no daemon round-trip).
     """
-    for _ in range(30):
+    for _ in range(60):
         await asyncio.sleep(1.0)
         adopted = await _backend_now_serving(
             model,
@@ -583,50 +583,57 @@ async def ensure_backend(
             ):
                 # A daemon that is merely RESTARTING (systemd Restart=always,
                 # deploy window) can have its management port momentarily
-                # closed (RST) while its llama-server child survives.  Give it
-                # a short bounded window to re-bind before taking over the
-                # backend as a second controller; if the re-probe succeeds the
-                # daemon is back and still owns the backend, so the remote
-                # path completes normally.
-                await asyncio.sleep(1.0)
-                try:
-                    rechecked = await _caretaker_client.ensure(
-                        model,
-                        enable_vision=enable_vision,
-                        context_hint=context_hint,
-                    )
-                except CaretakerUnavailable as recheck_unavail:
-                    # The re-probe result decides whether the daemon is really
-                    # gone or merely still up:
-                    # - status_code set → the daemon re-bound its port and
-                    #   rejected us (e.g. 401/403 after a key rotation): it
-                    #   owns the backend — fail closed like the outer branch.
-                    # - Read/WriteTimeout → the daemon re-bound and accepted
-                    #   the connection but is busy: alive — fail closed.
-                    # - any other transport error (refused/DNS/ConnectTimeout)
-                    #   → still nothing listening: the daemon is definitively
-                    #   gone and the local lifecycle is the sole controller.
-                    if recheck_unavail.status_code is not None:
-                        raise ModelLoadError(
-                            f"Caretaker control-API rejected the request "
-                            f"(status {recheck_unavail.status_code}); refusing "
-                            "local fallback to avoid a second controller on the "
-                            "backend"
-                        ) from recheck_unavail
-                    if isinstance(
-                        recheck_unavail.__cause__,
-                        (httpx.ReadTimeout, httpx.WriteTimeout),
-                    ):
-                        raise ModelLoadError(
-                            "Caretaker re-bound but unresponsive; refusing "
-                            "local fallback to avoid a second controller on "
-                            "the backend"
-                        ) from recheck_unavail
-                    rechecked = None  # still down — local lifecycle is sole controller
-                except CaretakerError as recheck_exc:
-                    # The daemon is back and answered with an error: map it the
-                    # same way the main path does (fail closed).
-                    raise _map_caretaker_error(recheck_exc) from recheck_exc
+                # closed (RST) for LONGER than a single re-bind wait while its
+                # llama-server child survives (RestartSec + startup).  Poll
+                # the port in small bounded steps so a re-bind within the
+                # window completes the remote path instead of taking over the
+                # backend as a second controller, which would then race the
+                # restarting daemon on the shared backend / launch-args file.
+                rechecked = None
+                for _ in range(5):
+                    await asyncio.sleep(1.0)
+                    try:
+                        rechecked = await _caretaker_client.ensure(
+                            model,
+                            enable_vision=enable_vision,
+                            context_hint=context_hint,
+                        )
+                        break  # daemon re-bound: remote path completes below
+                    except CaretakerUnavailable as recheck_unavail:
+                        # The re-probe result decides whether the daemon is
+                        # really gone or merely still up:
+                        # - status_code set → the daemon re-bound its port and
+                        #   rejected us (e.g. 401/403 after a key rotation):
+                        #   it owns the backend — fail closed like the outer
+                        #   branch.
+                        # - Read/WriteTimeout → the daemon re-bound and
+                        #   accepted the connection but is busy: alive — fail
+                        #   closed.
+                        # - any other transport error (refused/DNS/
+                        #   ConnectTimeout) → still nothing listening: keep
+                        #   polling; if the window elapses the local lifecycle
+                        #   is treated as the sole controller.
+                        if recheck_unavail.status_code is not None:
+                            raise ModelLoadError(
+                                f"Caretaker control-API rejected the request "
+                                f"(status {recheck_unavail.status_code}); refusing "
+                                "local fallback to avoid a second controller on the "
+                                "backend"
+                            ) from recheck_unavail
+                        if isinstance(
+                            recheck_unavail.__cause__,
+                            (httpx.ReadTimeout, httpx.WriteTimeout),
+                        ):
+                            raise ModelLoadError(
+                                "Caretaker re-bound but unresponsive; refusing "
+                                "local fallback to avoid a second controller on "
+                                "the backend"
+                            ) from recheck_unavail
+                        # still down — continue polling; rechecked stays None
+                    except CaretakerError as recheck_exc:
+                        # The daemon is back and answered with an error: map it
+                        # the same way the main path does (fail closed).
+                        raise _map_caretaker_error(recheck_exc) from recheck_exc
                 if rechecked is not None:
                     logger.info(
                         "F5: caretaker re-bound after restart window — "

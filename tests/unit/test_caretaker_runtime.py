@@ -252,13 +252,14 @@ async def test_unavailable_connect_timeout_alive_backend_fails_closed():
     fallback.assert_not_awaited()
 
 
-async def test_unavailable_connection_refused_alive_backend_runs_local():
+async def test_unavailable_connection_refused_alive_backend_runs_local(monkeypatch):
     """A hard connection-refused (RST — nothing listening on the management
     port) is the strongest evidence the daemon process is definitively gone:
     no live daemon owns the backend, so the local lifecycle is the sole
     controller and the pre-F5 auto-switch is preserved even when a llama-server
-    survives serving a different model.  A bounded re-probe first gives a
+    survives serving a different model.  A bounded re-probe poll first gives a
     merely-restarting daemon a window to re-bind."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
     client = _StubClient()
 
     def _refused() -> CaretakerUnavailable:
@@ -266,7 +267,7 @@ async def test_unavailable_connection_refused_alive_backend_runs_local():
         err.__cause__ = httpx.ConnectError("connection refused")
         return err
 
-    client.ensure.side_effect = [_refused(), _refused(), _refused()]
+    client.ensure.side_effect = [_refused() for _ in range(7)]
     mgr = _manager()
     mgr.backend_serves_model = AsyncMock(return_value=False)
     mgr.backend_health_ok = AsyncMock(return_value=True)
@@ -274,17 +275,18 @@ async def test_unavailable_connection_refused_alive_backend_runs_local():
     fallback = AsyncMock()
     result = await crt.ensure_backend(model="m", local_fallback=fallback)
     assert result == "local"
-    assert client.ensure.await_count == 3  # 2 probes + bounded re-probe
+    assert client.ensure.await_count == 7  # 2 probes + 5-iteration re-bind poll
     fallback.assert_awaited_once()
     mgr.mark_loaded_by_caretaker.assert_not_called()
 
 
-async def test_unavailable_connection_refused_then_daemon_rebounds_remote():
+async def test_unavailable_connection_refused_then_daemon_rebounds_remote(monkeypatch):
     """A merely-restarting daemon (systemd Restart=always, deploy window) can
     have its management port briefly closed while its llama-server child
-    survives.  The bounded re-probe succeeds after the daemon re-binds -> the
-    remote path completes normally instead of taking over as a second
+    survives.  The bounded re-probe poll succeeds after the daemon re-binds ->
+    the remote path completes normally instead of taking over as a second
     controller."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
     client = _StubClient()
 
     def _refused() -> CaretakerUnavailable:
@@ -369,6 +371,41 @@ async def test_unavailable_rebound_recheck_timeout_fails_closed(monkeypatch):
     assert client.ensure.await_count == 3
     fallback.assert_not_awaited()
     mgr.mark_loaded_by_caretaker.assert_not_called()
+
+
+async def test_unavailable_connection_refused_late_rebind_remote(monkeypatch):
+    """The re-bind poll gives a restarting daemon (RestartSec + startup,
+    longer than a single second) time to re-bind: nothing answers the first
+    two poll attempts, then the daemon is back -> the remote path completes
+    instead of handing the backend to the local lifecycle."""
+    monkeypatch.setattr("asyncio.sleep", AsyncMock())
+    client = _StubClient()
+
+    def _refused() -> CaretakerUnavailable:
+        err = CaretakerUnavailable("http://x:11441")
+        err.__cause__ = httpx.ConnectError("connection refused")
+        return err
+
+    client.ensure.side_effect = [
+        _refused(),
+        _refused(),
+        _refused(),
+        _refused(),
+        {"ok": True, "loaded_model": "m"},
+    ]
+    mgr = _manager()
+    mgr.backend_serves_model = AsyncMock(return_value=False)
+    mgr.backend_health_ok = AsyncMock(return_value=True)
+    crt.init(model_manager=mgr, caretaker_client=client)
+    fallback = AsyncMock()
+    result = await crt.ensure_backend(model="m", local_fallback=fallback)
+    assert result == "remote"
+    assert client.ensure.await_count == 5  # 2 probes + 3 poll attempts
+    fallback.assert_not_awaited()
+    mgr.mark_loaded_by_caretaker.assert_called_once_with(
+        "m", enable_vision=None, context_hint=None
+    )
+    mgr.restore_current_context.assert_not_awaited()
 
 
 async def test_unavailable_rereprobe_also_fails_then_local():
