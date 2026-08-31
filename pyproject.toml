@@ -8,3 +8,20 @@ markers = [
     "integration: tests that hit the live Guardian proxy (require running service)",
     "finetune_v2_live: opt-in Guardian-backed finetune v2 smoke checks",
 ]
+
+[tool.ruff.lint]
+# Pin the effective ruleset to ruff 0.15's defaults: 0.16 expanded the default
+# selection and added ~340 opinionated findings repo-wide (BLE/S/PLW/TRY/SIM/
+# EXE/RUF) without any code change, turning CI lint red on every branch.
+# Restoring the narrower baseline explicitly keeps lint stable across ruff
+# releases; widening it is a deliberate, separate decision.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# Intentional late imports: these modules must run after .env / path bootstrap.
+# The ruff-autofix bot keeps stripping inline `# noqa: E402` markers while
+# re-sorting imports, so the exemption lives here (bot-proof).
+"app/main.py" = ["E402"]
+"scripts/_paths.py" = ["E402", "F401"]
+"scripts/generate_contract_wal.py" = ["E402"]
+"tests/unit/test_server.py" = ["E402"]
