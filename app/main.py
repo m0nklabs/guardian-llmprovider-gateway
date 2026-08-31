@@ -335,6 +335,17 @@ class GuardianService:
 
         self.proxy_config = uvicorn.Config(proxy_app, **proxy_config_options)
         self.proxy_server = uvicorn.Server(self.proxy_config)
+
+        # Dashboard/UI listener: 11437 by default, env-overridable so a test or
+        # parallel instance never has to fight the production port.
+        ui_port_value = os.environ.get("GUARDIAN_UI_PORT", "11437")
+        try:
+            self.ui_port = int(ui_port_value)
+        except ValueError as exc:
+            raise RuntimeError("GUARDIAN_UI_PORT must be a valid TCP port") from exc
+        if not 1 <= self.ui_port <= 65535:
+            raise RuntimeError("GUARDIAN_UI_PORT must be between 1 and 65535")
+
         self.scheduler_task = None
         self.proxy_task = None
 
@@ -350,8 +361,8 @@ class GuardianService:
         # Start Scheduler
         self.scheduler_task = asyncio.create_task(self.scheduler.run_loop())
         
-        # Start UI Server (on port 11437)
-        ui_config = uvicorn.Config(app, host="127.0.0.1", port=11437, log_level="info")
+        # Start UI Server (port from GUARDIAN_UI_PORT, default 11437)
+        ui_config = uvicorn.Config(app, host="127.0.0.1", port=self.ui_port, log_level="info")
         ui_server = uvicorn.Server(ui_config)
         
         await asyncio.gather(

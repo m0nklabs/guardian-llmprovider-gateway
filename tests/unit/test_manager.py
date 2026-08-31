@@ -622,6 +622,44 @@ class TestStartupCheck:
         mock_switch.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_startup_adopts_known_model_despite_args_drift_when_target_differs(self, tmp_path: Path):
+        """Cut-over safety: with drifted args state the resolved target may
+        point at a STALE model while the live backend serves a different known
+        model. Startup must adopt the live model instead of force-switching
+        the shared production backend (2026-08-31 e2e incident: a stale staged
+        args state made the startup force-reload the running model)."""
+        kv_yaml = """\
+models:
+    GLM-4.7-Flash:
+        path: /models/GLM-4.7-Flash.gguf
+        context: 8192
+        ngl: 99
+        kv_type: turbo4
+    Qwen3-30B-A3B:
+        path: /models/Qwen3-30B.gguf
+        context: 4096
+        ngl: 99
+        kv_type: turbo4
+"""
+        mgr = _make_manager(tmp_path, models_yaml=kv_yaml)
+        mgr.current_model = "GLM-4.7-Flash"
+        mgr.current_vision_enabled = False
+
+        # Config edited while the backend kept running: kv_type turbo4 -> q8_0
+        mgr.config_path.write_text(kv_yaml.replace("kv_type: turbo4", "kv_type: q8_0"))
+
+        with (
+            patch.object(mgr, "verify_backend_model", new_callable=AsyncMock, return_value=True),
+            patch.object(mgr, "_get_backend_model_path", return_value="/models/Qwen3-30B.gguf"),
+            patch.object(mgr, "switch_model", new_callable=AsyncMock) as mock_switch,
+        ):
+            await mgr.startup_check()
+
+        # The live backend serves a DIFFERENT known model: adopt it, never swap it.
+        assert mgr.current_model == "Qwen3-30B-A3B"
+        mock_switch.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_no_switch_when_backend_already_verified(self, tmp_path: Path):
         mgr = _make_manager(tmp_path)
         with (
