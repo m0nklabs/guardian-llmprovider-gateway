@@ -167,6 +167,10 @@ def _load_stream_heartbeat_interval_s() -> float | None:
     return _config_loader.load_stream_heartbeat_interval_s(CONFIG)
 
 
+def _get_catalog_refresh_interval_seconds() -> float:
+    return _config_loader.get_catalog_refresh_interval_seconds(CONFIG)
+
+
 STREAM_HEARTBEAT_INTERVAL_S = _load_stream_heartbeat_interval_s()
 
 
@@ -1039,6 +1043,8 @@ _lifespan.init(
     capture_controller=capture_controller,
     inference_queue=inference_queue,
     caretaker_client=caretaker_client,
+    cloud_catalog=cloud_catalog,
+    catalog_refresh_interval_s=_get_catalog_refresh_interval_seconds(),
 )
 
 # Initialize session slots with the llama-server URL + slots dir

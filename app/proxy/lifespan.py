@@ -34,6 +34,8 @@ _operation_state_for_phase = None
 _run_startup_check_in_background = None
 _set_startup_check_task = None
 _cancel_startup_check_task = None
+_cloud_catalog = None
+_catalog_refresh_interval_s = 60.0
 _model_manager = None
 _capture_controller = None
 _inference_queue = None
@@ -62,6 +64,8 @@ def init(
     capture_controller,
     inference_queue,
     caretaker_client=None,
+    cloud_catalog=None,
+    catalog_refresh_interval_s: float = 60.0,
 ) -> None:
     """Inject all dependencies. Called once at startup."""
     globals()["_cancel_startup_check_task"] = cancel_startup_check_task
@@ -82,6 +86,25 @@ def init(
     globals()["_capture_controller"] = capture_controller
     globals()["_inference_queue"] = inference_queue
     globals()["_caretaker_client"] = caretaker_client
+    globals()["_cloud_catalog"] = cloud_catalog
+    globals()["_catalog_refresh_interval_s"] = float(catalog_refresh_interval_s)
+
+
+async def _catalog_refresh_loop() -> None:
+    """Periodically refresh stale provider catalogs (fail-open).
+
+    Each pass is TTL-gated per provider: while every cached catalog is fresh
+    the pass costs nothing; a cold cache (fresh install) or an expired TTL
+    self-heals without operator action. Any pass failure is logged and the
+    loop continues — a broken provider catalog must never take the refresher
+    down.
+    """
+    while True:
+        try:
+            await _cloud_catalog.ensure_all_fresh()
+        except Exception as exc:  # noqa: BLE001 — the loop must survive anything
+            logger.warning("☁️  Catalog refresh pass failed: %s", exc)
+        await asyncio.sleep(_catalog_refresh_interval_s)
 
 
 @asynccontextmanager
@@ -197,12 +220,23 @@ async def run_lifespan(app):
     # Start idle-unload background watcher
     idle_task = asyncio.create_task(idle_unload_watcher())
 
+    # Start TTL-gated cloud-catalog refresher (self-heals a cold/stale cache;
+    # None when the catalog was not injected — e.g. in unit tests).
+    catalog_task: Optional[asyncio.Task] = None
+    if _cloud_catalog is not None:
+        catalog_task = asyncio.create_task(_catalog_refresh_loop())
+
     yield
 
+    if catalog_task is not None:
+        catalog_task.cancel()
     idle_task.cancel()
     _set_startup_check_task(None)
     _cancel_startup_check_task()
 
+    if catalog_task is not None:
+        with suppress(asyncio.CancelledError):
+            await catalog_task
     with suppress(asyncio.CancelledError):
         await idle_task
 
