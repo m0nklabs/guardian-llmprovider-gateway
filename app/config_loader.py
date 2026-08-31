@@ -271,6 +271,23 @@ def load_grammar_config(config: dict[str, Any] | None = None) -> dict:
     return cfg.get("grammar", {}) or {}
 
 
+def get_catalog_refresh_interval_seconds(config: dict[str, Any] | None = None) -> float:
+    """Return the TTL-gated cloud-catalog refresh loop interval in seconds.
+
+    Reads ``proxy.catalog_refresh_interval_seconds``. Invalid or sub-floor
+    values fall back to the built-in default (fail-safe, like the other
+    accessors): a mistyped near-zero value must not become a hot poll loop
+    against provider /models endpoints.
+    """
+    cfg = config if config is not None else CONFIG
+    raw = (cfg.get("proxy") or {}).get("catalog_refresh_interval_seconds", 60.0)
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return 60.0
+    return value if value >= 10.0 else 60.0
+
+
 def get_grammar_enabled(config: dict[str, Any] | None = None) -> bool:
     """Return whether GCD is enabled process-wide (kill-switch)."""
     return bool(load_grammar_config(config).get("enabled", True))
