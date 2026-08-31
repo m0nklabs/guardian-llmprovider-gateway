@@ -9,7 +9,6 @@ import pytest
 
 from app.tweaker.finetune_v2_runner import FinetuneV2Runner, GuardianV2ProbeRunner
 
-
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.finetune_v2_live,

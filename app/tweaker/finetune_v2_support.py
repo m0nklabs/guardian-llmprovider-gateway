@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import copy
 import re
-from typing import Mapping, Optional
+from collections.abc import Mapping
 
 
-def detect_oom_gpu(error: Optional[str]) -> Optional[int]:
+def detect_oom_gpu(error: str | None) -> int | None:
     """Infer which GPU hit OOM from a Guardian/llama.cpp error string."""
     if not error:
         return None
@@ -22,7 +22,7 @@ def detect_oom_gpu(error: Optional[str]) -> Optional[int]:
     return None
 
 
-def build_smoke_messages(smoke_prompt: str, smoke_image_url: Optional[str] = None) -> list[dict[str, object]]:
+def build_smoke_messages(smoke_prompt: str, smoke_image_url: str | None = None) -> list[dict[str, object]]:
     """Build the minimal post-load smoke-test message list."""
     if smoke_image_url:
         return [
@@ -37,7 +37,7 @@ def build_smoke_messages(smoke_prompt: str, smoke_image_url: Optional[str] = Non
     return [{"role": "user", "content": smoke_prompt}]
 
 
-def resolve_runtime_mode(runtime_mode: str, smoke_image_url: Optional[str]) -> str:
+def resolve_runtime_mode(runtime_mode: str, smoke_image_url: str | None) -> str:
     """Resolve `auto` finetune mode to the effective text or vision runtime."""
     normalized = runtime_mode.strip().lower()
     if normalized == "auto":
@@ -67,7 +67,7 @@ def resolve_runtime_config_value(model_config: Mapping[str, object], key: str, r
     return model_config.get(key)
 
 
-def resolve_runtime_total_layers(model_config: Mapping[str, object], runtime_mode: str) -> Optional[int]:
+def resolve_runtime_total_layers(model_config: Mapping[str, object], runtime_mode: str) -> int | None:
     """Return the configured main-model layer ceiling for `ngl` search."""
     value = resolve_runtime_config_value(model_config, "total_layers", runtime_mode)
     if value in (None, ""):
@@ -84,7 +84,7 @@ def apply_runtime_search_values(
     *,
     context: int,
     ngl: int,
-    tensor_split: Optional[str],
+    tensor_split: str | None,
     runtime_mode: str,
 ) -> dict[str, object]:
     """Apply tuned fields to the correct text or vision config keys."""
@@ -116,7 +116,7 @@ def apply_runtime_search_values(
     return target
 
 
-def parse_two_gpu_split(tensor_split: Optional[str]) -> Optional[float]:
+def parse_two_gpu_split(tensor_split: str | None) -> float | None:
     """Return the primary-GPU ratio from a two-GPU tensor split string."""
     if not tensor_split:
         return None
@@ -143,13 +143,13 @@ def format_two_gpu_split(primary_ratio: float, decimals: int = 2) -> str:
 
 
 def build_split_candidates(
-    anchor_split: Optional[str],
+    anchor_split: str | None,
     step: float,
     min_primary: float,
     max_primary: float,
     *,
     include_auto: bool = False,
-) -> list[Optional[str]]:
+) -> list[str | None]:
     """Build ordered two-GPU tensor split candidates, preferring balanced splits first."""
     if step <= 0:
         raise ValueError("step must be > 0")
@@ -174,13 +174,13 @@ def build_split_candidates(
             value,
         ),
     )
-    candidates: list[Optional[str]] = [format_two_gpu_split(value) for value in ordered]
+    candidates: list[str | None] = [format_two_gpu_split(value) for value in ordered]
     if include_auto:
         return [*candidates, None]
     return candidates
 
 
-def smaller_split_step(step: float) -> Optional[float]:
+def smaller_split_step(step: float) -> float | None:
     """Return the next smaller split step, down to a 1% minimum increment."""
     if step <= 0.01:
         return None
@@ -214,8 +214,8 @@ def render_model_block(model_name: str, model_config: Mapping[str, object]) -> s
 def replace_model_block(config_text: str, model_name: str, replacement_block: str) -> str:
     """Replace exactly one model block inside `models.yaml`."""
     lines = config_text.splitlines()
-    start: Optional[int] = None
-    end: Optional[int] = None
+    start: int | None = None
+    end: int | None = None
     header = f"  {model_name}:"
     for index, line in enumerate(lines):
         if line == header:

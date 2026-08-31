@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 import yaml
 
@@ -43,7 +43,7 @@ def _load_yaml_map(path: Path) -> dict:
         return {}
 
 
-def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     """Merge *override* over *base* recursively (override wins)."""
     out = dict(base)
     for key, value in override.items():
@@ -58,7 +58,7 @@ def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any
     return out
 
 
-def provider_settings_documents() -> Dict[str, Any]:
+def provider_settings_documents() -> dict[str, Any]:
     """Read every ``config/providers/*.settings.yaml`` into ``{name: doc}``.
 
     F2 directory-scan (docs/CONFIG_PROVIDER_FILES.md): one document per
@@ -67,13 +67,13 @@ def provider_settings_documents() -> Dict[str, Any]:
     block).  A missing/unparseable file yields ``{}`` for that provider rather
     than failing the whole scan.
     """
-    documents: Dict[str, Any] = {}
+    documents: dict[str, Any] = {}
     for name in provider_names():
         documents[name] = _load_yaml_map(provider_settings_file(name))
     return documents
 
 
-def _merge_providers() -> Dict[str, Any]:
+def _merge_providers() -> dict[str, Any]:
     """Scan the ``providers/`` directory into ``{provider_name: document}``."""
     return provider_settings_documents()
 
@@ -120,7 +120,7 @@ def load_config() -> dict:
     consumers like the inference queue on the configured values while direct
     readers/writers of the domain files continue to work.
     """
-    default_config: Dict[str, Any] = {
+    default_config: dict[str, Any] = {
         "proxy": {
             "stream_heartbeat_seconds": 15,
             "stream_close_timeout_seconds": 5,
@@ -187,7 +187,7 @@ def reload_config() -> dict:
     return CONFIG
 
 
-def load_vram_limit(config: Optional[Dict[str, Any]] = None) -> int:
+def load_vram_limit(config: dict[str, Any] | None = None) -> int:
     """Return the VRAM budget (MB) from ``proxy.vram_limit_mb``."""
     cfg = config if config is not None else CONFIG
     try:
@@ -196,7 +196,7 @@ def load_vram_limit(config: Optional[Dict[str, Any]] = None) -> int:
         return 27000
 
 
-def load_stream_heartbeat_interval_s(config: Optional[Dict[str, Any]] = None) -> Optional[float]:
+def load_stream_heartbeat_interval_s(config: dict[str, Any] | None = None) -> float | None:
     """Return the configured SSE heartbeat interval, or None when disabled."""
     cfg = config if config is not None else CONFIG
     try:
@@ -206,7 +206,7 @@ def load_stream_heartbeat_interval_s(config: Optional[Dict[str, Any]] = None) ->
     return interval if interval > 0 else None
 
 
-def load_stream_close_timeout_s(config: Optional[Dict[str, Any]] = None) -> float:
+def load_stream_close_timeout_s(config: dict[str, Any] | None = None) -> float:
     """Return the bounded timeout used for upstream stream cleanup."""
     cfg = config if config is not None else CONFIG
     try:
@@ -216,7 +216,7 @@ def load_stream_close_timeout_s(config: Optional[Dict[str, Any]] = None) -> floa
     return max(timeout, 0.5)
 
 
-def load_caretaker_runtime_config(config: Optional[Dict[str, Any]] = None) -> dict:
+def load_caretaker_runtime_config(config: dict[str, Any] | None = None) -> dict:
     """Return the caretaker-runtime poll windows (typed + bounded).
 
     Reads the ``caretaker`` section of global.settings.yaml; unknown/invalid
@@ -228,7 +228,7 @@ def load_caretaker_runtime_config(config: Optional[Dict[str, Any]] = None) -> di
     section = cfg.get("caretaker", {})
     if not isinstance(section, dict):
         section = {}
-    result: Dict[str, Any] = {}
+    result: dict[str, Any] = {}
     for key, default in _CARETAKER_DEFAULTS.items():
         try:
             value = float(section.get(key, default))
@@ -251,18 +251,17 @@ def load_caretaker_runtime_config(config: Optional[Dict[str, Any]] = None) -> di
     per_attempt = interval + result["client_timeout_seconds"]
     if per_attempt > 0:
         cap = int(_REBIND_BUDGET_S / per_attempt)
-        if result["rebind_poll_attempts"] > cap:
-            result["rebind_poll_attempts"] = cap
+        result["rebind_poll_attempts"] = min(result["rebind_poll_attempts"], cap)
     return result
 
 
-def load_queue_config(config: Optional[Dict[str, Any]] = None) -> dict:
+def load_queue_config(config: dict[str, Any] | None = None) -> dict:
     """Return the ``queue`` section of the configuration."""
     cfg = config if config is not None else CONFIG
     return cfg.get("queue", {}) or {}
 
 
-def load_grammar_config(config: Optional[Dict[str, Any]] = None) -> dict:
+def load_grammar_config(config: dict[str, Any] | None = None) -> dict:
     """Return the ``grammar`` section of the configuration.
 
     Grammar-Constrained Decoding (GCD) controls. See docs/API_REFERENCE.md
@@ -272,21 +271,21 @@ def load_grammar_config(config: Optional[Dict[str, Any]] = None) -> dict:
     return cfg.get("grammar", {}) or {}
 
 
-def get_grammar_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
+def get_grammar_enabled(config: dict[str, Any] | None = None) -> bool:
     """Return whether GCD is enabled process-wide (kill-switch)."""
     return bool(load_grammar_config(config).get("enabled", True))
 
 
-def get_grammar_cloud_auto_convert_json(config: Optional[Dict[str, Any]] = None) -> bool:
+def get_grammar_cloud_auto_convert_json(config: dict[str, Any] | None = None) -> bool:
     """Return whether JSON-targeting grammars auto-convert to response_format on cloud."""
     return bool(load_grammar_config(config).get("cloud_auto_convert_json", False))
 
 
-def get_grammar_cloud_strict_mode(config: Optional[Dict[str, Any]] = None) -> bool:
+def get_grammar_cloud_strict_mode(config: dict[str, Any] | None = None) -> bool:
     """Return whether cloud routes 400 on unsupported grammars instead of stripping."""
     return bool(load_grammar_config(config).get("cloud_strict_mode", False))
 
 
-def get_grammar_validate_gbnf(config: Optional[Dict[str, Any]] = None) -> bool:
+def get_grammar_validate_gbnf(config: dict[str, Any] | None = None) -> bool:
     """Return whether GBNF grammars are pre-validated before local forwarding."""
     return bool(load_grammar_config(config).get("validate_gbnf", False))

@@ -8,22 +8,21 @@ parameter defaults, and qwen chat-template sanitization.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import logging
 import struct
 import zlib
-from typing import Any, Dict, Optional
+from typing import Any
 
-import asyncio
 import httpx
 from fastapi.responses import JSONResponse
-
-import logging
 
 logger = logging.getLogger("Guardian")
 
 # ── Module state ─────────────────────────────────────────────────────
-_VISION_PROBE_IMAGE_DATA_URL: Optional[str] = None
+_VISION_PROBE_IMAGE_DATA_URL: str | None = None
 _grammar_validate_gbnf = False
 
 # ── Injected (set once at startup by init()) ─────────────────────────
@@ -109,7 +108,7 @@ def truncate_error_message(message: str, limit: int = 300) -> str:
     return cleaned[: limit - 3] + "..."
 
 
-def _check_gbnf_structure(grammar: str) -> Optional[str]:
+def _check_gbnf_structure(grammar: str) -> str | None:
     """Lightweight structural GBNF sanity check (fail-open, best effort).
 
     Full GBNF parsing is deferred to llama-server; this catches the most
@@ -145,7 +144,7 @@ def _check_gbnf_structure(grammar: str) -> Optional[str]:
     return None
 
 
-def validate_grammar_field(json_body: Dict[str, Any]) -> Optional[JSONResponse]:
+def validate_grammar_field(json_body: dict[str, Any]) -> JSONResponse | None:
     """Pre-validate a ``grammar`` field's GBNF syntax when configured.
 
     Returns a 400 JSONResponse for invalid GBNF when
@@ -174,7 +173,7 @@ def openai_error_response(
     message: str,
     error_type: str,
     code: str,
-    headers: Optional[Dict[str, str]] = None,
+    headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     payload = {
         "error": {
@@ -186,7 +185,7 @@ def openai_error_response(
     return JSONResponse(status_code=status_code, content=payload, headers=headers or {})
 
 
-async def probe_multimodal_runtime(model_name: str) -> Dict[str, Any]:
+async def probe_multimodal_runtime(model_name: str) -> dict[str, Any]:
     capability = _model_manager.get_vision_capability(model_name)
     if capability["status"] in {"supported", "unsupported", "misconfigured", "text_only", "load_failed"}:
         return capability
@@ -239,7 +238,7 @@ async def preflight_multimodal_request(
     model_name: str,
     request_id: str,
     queue_wait_ms: float,
-) -> Optional[JSONResponse]:
+) -> JSONResponse | None:
     headers = _queue_headers(request_id, queue_wait_ms)
     capability = _model_manager.get_vision_capability(model_name)
 
@@ -312,7 +311,7 @@ def model_disables_thinking_by_default(model_name: str) -> bool:
     return "embed" in searchable or "--reasoning off" in searchable
 
 
-def request_explicitly_disables_thinking(payload: Dict[str, Any]) -> bool:
+def request_explicitly_disables_thinking(payload: dict[str, Any]) -> bool:
     if payload.get("reasoning_budget") == 0:
         return True
     template_kwargs = payload.get("chat_template_kwargs")
@@ -325,7 +324,7 @@ def request_explicitly_disables_thinking(payload: Dict[str, Any]) -> bool:
     return False
 
 
-def apply_anthropic_thinking_to_llama_params(payload: Dict[str, Any]) -> bool:
+def apply_anthropic_thinking_to_llama_params(payload: dict[str, Any]) -> bool:
     """Convert Anthropic ``thinking`` config to llama-server parameters.
 
     llama-server's ``/v1/messages`` endpoint doesn't properly handle
@@ -369,7 +368,7 @@ def apply_anthropic_thinking_to_llama_params(payload: Dict[str, Any]) -> bool:
     return changed
 
 
-def apply_request_reasoning_defaults(path: str, payload: Dict[str, Any], model_name: str) -> bool:
+def apply_request_reasoning_defaults(path: str, payload: dict[str, Any], model_name: str) -> bool:
     """Apply no-thinking request flags only for explicit or special runtimes."""
     if path not in {"chat/completions", "messages", "completions"}:
         return False
@@ -455,7 +454,7 @@ def map_multimodal_backend_error(
     body: bytes,
     request_id: str,
     queue_wait_ms: float,
-) -> Optional[JSONResponse]:
+) -> JSONResponse | None:
     message = extract_backend_error_message(body)
     lowered = message.lower()
     headers = _queue_headers(request_id, queue_wait_ms)

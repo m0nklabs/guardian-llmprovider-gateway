@@ -1,15 +1,16 @@
-import json
 import hashlib
-import os
-import secrets
-import time
+import json
 import logging
+import os
 import re
+import secrets
 import subprocess
-from typing import Any, Dict, Optional
+import time
+from typing import Any
+
 import yaml
-from fastapi import HTTPException, Security, Request
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import HTTPException, Request, Security
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette.status import HTTP_401_UNAUTHORIZED
 
 from app.paths import GUARDIAN_APIKEYS_FILE, LEGACY_APIKEYS_FILE
@@ -33,7 +34,7 @@ def _ensure_api_keys_file_permissions() -> None:
         logger.error("Failed to secure Guardian API key file permissions: %s", exc)
 
 
-def _normalize_api_key_prefix(prefix: Optional[str]) -> str:
+def _normalize_api_key_prefix(prefix: str | None) -> str:
     """Return a safe API key prefix with exactly one trailing underscore."""
     normalized = (prefix or DEFAULT_API_KEY_PREFIX).strip().strip("_")
     if not normalized:
@@ -41,7 +42,7 @@ def _normalize_api_key_prefix(prefix: Optional[str]) -> str:
     return f"{normalized}_"
 
 
-def _get_request_header(request: Request, header_name: str) -> Optional[str]:
+def _get_request_header(request: Request, header_name: str) -> str | None:
     """Read a request header safely without trusting mock objects."""
     headers = getattr(request, "headers", None)
     if headers is None:
@@ -56,7 +57,7 @@ def _get_request_header(request: Request, header_name: str) -> Optional[str]:
     return value or None
 
 
-def _request_client_address(request: Request) -> tuple[Optional[str], Optional[int]]:
+def _request_client_address(request: Request) -> tuple[str | None, int | None]:
     """Extract the immediate client host and port when FastAPI provides them."""
     client = getattr(request, "client", None)
     host = getattr(client, "host", None)
@@ -68,7 +69,7 @@ def _request_client_address(request: Request) -> tuple[Optional[str], Optional[i
     return host, port
 
 
-def _request_method(request: Request) -> Optional[str]:
+def _request_method(request: Request) -> str | None:
     """Extract the HTTP method when the request object exposes it."""
     method = getattr(request, "method", None)
     if not isinstance(method, str) or not method.strip():
@@ -76,7 +77,7 @@ def _request_method(request: Request) -> Optional[str]:
     return method
 
 
-def _request_path(request: Request) -> Optional[str]:
+def _request_path(request: Request) -> str | None:
     """Extract the request path without assuming a concrete FastAPI request type."""
     url = getattr(request, "url", None)
     path = getattr(url, "path", None)
@@ -85,7 +86,7 @@ def _request_path(request: Request) -> Optional[str]:
     return path
 
 
-def _resolve_local_process_for_port(source_port: Optional[int]) -> tuple[Optional[int], Optional[str]]:
+def _resolve_local_process_for_port(source_port: int | None) -> tuple[int | None, str | None]:
     """Best-effort mapping from a localhost client port to a live process."""
     if source_port is None:
         return None, None
@@ -131,9 +132,9 @@ def _token_fingerprint(token: str) -> str:
 
 def _build_auth_context(
     request: Request,
-    token: Optional[str],
-    header_name: Optional[str],
-    user_data: Optional[dict],
+    token: str | None,
+    header_name: str | None,
+    user_data: dict | None,
 ) -> dict[str, Any]:
     """Build request attribution details for usage monitoring and debugging."""
     metadata = user_data.get("metadata") if isinstance(user_data, dict) else {}
@@ -165,7 +166,7 @@ def _build_auth_context(
     }
 
 
-def get_request_auth_context(request: Request) -> Optional[dict[str, Any]]:
+def get_request_auth_context(request: Request) -> dict[str, Any] | None:
     """Return any auth context already stored on the request or its shared scope."""
     state_obj = getattr(request, "state", None)
     auth_context = getattr(state_obj, "auth_context", None)
@@ -185,7 +186,7 @@ def set_request_auth_context(request: Request, auth_context: dict[str, Any]) -> 
     """Store auth context on both request.state and the shared ASGI scope."""
     state_obj = getattr(request, "state", None)
     if state_obj is not None:
-        setattr(state_obj, "auth_context", auth_context)
+        state_obj.auth_context = auth_context
 
     scope = getattr(request, "scope", None)
     if isinstance(scope, dict):
@@ -197,9 +198,9 @@ def set_request_auth_context(request: Request, auth_context: dict[str, Any]) -> 
 def build_request_auth_context(
     request: Request,
     *,
-    token: Optional[str] = None,
-    header_name: Optional[str] = None,
-    user_data: Optional[dict] = None,
+    token: str | None = None,
+    header_name: str | None = None,
+    user_data: dict | None = None,
 ) -> dict[str, Any]:
     """Build request attribution even when authentication has not succeeded yet."""
     resolved_token = token
@@ -218,8 +219,8 @@ def build_request_auth_context(
 
 def _extract_api_key(
     request: Request,
-    creds: Optional[HTTPAuthorizationCredentials],
-) -> tuple[Optional[str], Optional[str]]:
+    creds: HTTPAuthorizationCredentials | None,
+) -> tuple[str | None, str | None]:
     """Accept both OpenAI-style Bearer tokens and Anthropic-style x-api-key headers."""
     if creds and creds.credentials:
         return creds.credentials, "authorization"
@@ -235,8 +236,8 @@ def _extract_api_key(
 def _log_unauthorized_attempt(
     request: Request,
     reason: str,
-    token: Optional[str],
-    header_name: Optional[str],
+    token: str | None,
+    header_name: str | None,
 ) -> None:
     """Emit a searchable warning for every unauthorized auth failure."""
     source_ip, source_port = _request_client_address(request)
@@ -293,7 +294,7 @@ def _record_unauthorized_api_usage(request: Request, *, status_code: int = HTTP_
     )
     state_obj.guardian_usage_finished = True
 
-def _migrate_legacy_keys() -> Dict[str, dict]:
+def _migrate_legacy_keys() -> dict[str, dict]:
     """Load keys from the legacy ``api_keys.json`` if the new file is absent.
 
     The legacy store is a JSON object mapping a token to its metadata dict.
@@ -313,7 +314,7 @@ def _migrate_legacy_keys() -> Dict[str, dict]:
     return data
 
 
-def _normalize_key_entry(token: str, raw: Any) -> Dict[str, Any]:
+def _normalize_key_entry(token: str, raw: Any) -> dict[str, Any]:
     """Coerce a stored key entry to the canonical dict shape.
 
     Ensures every key carries ``name``, ``created_at``, ``metadata`` and the
@@ -331,7 +332,7 @@ def _normalize_key_entry(token: str, raw: Any) -> Dict[str, Any]:
     return entry
 
 
-def load_api_keys() -> Dict[str, dict]:
+def load_api_keys() -> dict[str, dict]:
     if API_KEYS_FILE.exists():
         try:
             _ensure_api_keys_file_permissions()
@@ -351,7 +352,7 @@ def load_api_keys() -> Dict[str, dict]:
     }
 
 
-def save_api_keys(keys: Dict[str, dict]):
+def save_api_keys(keys: dict[str, dict]):
     API_KEYS_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = API_KEYS_FILE.with_suffix(API_KEYS_FILE.suffix + ".tmp")
     file_descriptor = os.open(
@@ -367,7 +368,7 @@ def save_api_keys(keys: Dict[str, dict]):
 
 _ensure_api_keys_file_permissions()
 
-def generate_api_key(name: str, metadata: dict = None, prefix: Optional[str] = None) -> str:
+def generate_api_key(name: str, metadata: dict = None, prefix: str | None = None) -> str:
     """Generate a new API key with a normalized prefix."""
     prefix = _normalize_api_key_prefix(prefix)
     random_part = secrets.token_hex(16)
@@ -384,7 +385,7 @@ def generate_api_key(name: str, metadata: dict = None, prefix: Optional[str] = N
     logger.info(f"Generated new API key for '{name}'")
     return api_key
 
-async def verify_api_key(request: Request, creds: Optional[HTTPAuthorizationCredentials] = Security(security_scheme)):
+async def verify_api_key(request: Request, creds: HTTPAuthorizationCredentials | None = Security(security_scheme)):
     """
     Verify API key from Bearer token or Anthropic-style API key headers.
     Returns the metadata associated with the key (including name).

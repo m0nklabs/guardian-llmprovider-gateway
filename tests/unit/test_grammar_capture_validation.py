@@ -9,9 +9,8 @@ boolean flags and never leak raw grammar/schema content.
 
 import json
 
-
-from app.capture import schema as capture_schema
 from app.capture import redactor as redactor_mod
+from app.capture import schema as capture_schema
 from app.gateway import normalization as _normalization
 
 

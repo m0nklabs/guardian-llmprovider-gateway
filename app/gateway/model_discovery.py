@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from fastapi import HTTPException, Request
 
@@ -73,7 +73,7 @@ def _key_can_access_cloud(request: Request, client_id: str) -> bool:
     return bool(auth_ctx.get("cloud_gateway_access", True))
 
 
-def _cloud_entries_for_provider(provider_name: str) -> List[str]:
+def _cloud_entries_for_provider(provider_name: str) -> list[str]:
     """Return the full ``{provider}/{brand}/{model}`` addresses for a provider.
 
     Uses the dynamic catalog when available; falls back to the configured
@@ -88,7 +88,7 @@ def _cloud_entries_for_provider(provider_name: str) -> List[str]:
     return [f"{provider_name}/{m}" for m in provider.models]
 
 
-async def _build_cloud_entry(full_id: str, provider_name: str) -> Dict[str, Any]:
+async def _build_cloud_entry(full_id: str, provider_name: str) -> dict[str, Any]:
     """Build and context-enrich a single cloud model entry."""
     entry = _provider_registry.build_model_metadata_entry(full_id)
     if entry is None:
@@ -106,7 +106,7 @@ async def _build_cloud_entry(full_id: str, provider_name: str) -> Dict[str, Any]
     return entry
 
 
-def _attach_reasoning_metadata(model_entry: Dict[str, Any], provider_name: str) -> None:
+def _attach_reasoning_metadata(model_entry: dict[str, Any], provider_name: str) -> None:
     """Attach per-model reasoning-effort metadata when the catalog has it.
 
     Uses the ``{brand}/{model}`` remainder of the full ``{provider}/...``
@@ -118,13 +118,13 @@ def _attach_reasoning_metadata(model_entry: Dict[str, Any], provider_name: str) 
     if not isinstance(full_id, str):
         return
     _prefix = f"{provider_name}/"
-    normalized = full_id[len(_prefix) :] if full_id.startswith(_prefix) else full_id
+    normalized = full_id.removeprefix(_prefix)
     reasoning = _cloud_catalog.get_model_reasoning(provider_name, normalized)
     if reasoning:
         model_entry["reasoning"] = reasoning
 
 
-async def tags_ollama() -> Dict[str, Any]:
+async def tags_ollama() -> dict[str, Any]:
     """Build the Ollama /api/tags model list (Phase 5: delegated)."""
     import traceback
     models = []
@@ -154,11 +154,10 @@ async def tags_ollama() -> Dict[str, Any]:
         logger.error(f"Error in proxy_tags_ollama: {e}")
         traceback.print_exc()
         # Return empty list instead of crashing
-        pass
     return {"models": models}
 
 
-async def list_models(request: Request, client_id: str) -> Dict[str, Any]:
+async def list_models(request: Request, client_id: str) -> dict[str, Any]:
     """List available models from config and cloud providers (Phase 5: delegated)."""
     models_list = []
     try:
@@ -218,7 +217,7 @@ async def list_models(request: Request, client_id: str) -> Dict[str, Any]:
     return {"object": "list", "data": models_list}
 
 
-async def model_metadata(model_id: str, request: Request, client_id: str) -> Dict[str, Any]:
+async def model_metadata(model_id: str, request: Request, client_id: str) -> dict[str, Any]:
     """Return metadata for a configured canonical model, public alias, or cloud model (Phase 5: delegated)."""
     # Failover groups surface as failover/{group}; resolve them here so
     # /v1/models/<id> returns a stable shape rather than 404'ing on the discovery
@@ -266,7 +265,7 @@ async def model_metadata(model_id: str, request: Request, client_id: str) -> Dic
     return await build_model_metadata_entry(model_id, canonical_name, client_id)
 
 
-async def show_model(request: Request, client_id: str) -> Dict[str, Any]:
+async def show_model(request: Request, client_id: str) -> dict[str, Any]:
     """Return Ollama-compatible metadata with an always-present context size (Phase 5: delegated)."""
     try:
         body = await request.json()
@@ -280,8 +279,8 @@ async def show_model(request: Request, client_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="'model' must be a non-empty string")
     model_name = model_name.strip()
 
-    canonical_name: Optional[str] = None
-    cloud_attempts: Optional[List[Tuple[Any, str]]] = None
+    canonical_name: str | None = None
+    cloud_attempts: list[tuple[Any, str]] | None = None
     if _is_failover_address(model_name):
         group_name = model_name.partition("/")[2]
         if _failover_registry.get_group(group_name) is None:

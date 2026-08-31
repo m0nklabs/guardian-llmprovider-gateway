@@ -11,7 +11,6 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
 
 logger = logging.getLogger("Queue")
 
@@ -19,7 +18,7 @@ FINAL_STATES = {"completed", "cancelled", "failed", "expired"}
 ACTIVE_STATES = {"running", "cancelling"}
 
 
-def _normalize_client_id(client_id: object) -> Optional[str]:
+def _normalize_client_id(client_id: object) -> str | None:
     """Return a safe queue client id, or ``None`` when the caller is not authenticated."""
     if not isinstance(client_id, str):
         return None
@@ -31,7 +30,7 @@ def _normalize_client_id(client_id: object) -> Optional[str]:
     return normalized
 
 
-def _normalize_owner_id(owner_id: object, fallback_client_id: object = None) -> Optional[str]:
+def _normalize_owner_id(owner_id: object, fallback_client_id: object = None) -> str | None:
     """Return the queue ownership identity, falling back to the client name when needed."""
     if isinstance(owner_id, str):
         normalized_owner = owner_id.strip()
@@ -81,14 +80,14 @@ class QueueEntry:
     model: str
     enqueued_at: float
     status: str = "queued"
-    started_at: Optional[float] = None
-    completed_at: Optional[float] = None
-    cancel_requested_at: Optional[float] = None
-    cancel_reason: Optional[str] = None
-    detail: Optional[str] = None
+    started_at: float | None = None
+    completed_at: float | None = None
+    cancel_requested_at: float | None = None
+    cancel_reason: str | None = None
+    detail: str | None = None
     cancel_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False, compare=False)
 
-    def snapshot(self, now: Optional[float] = None, position: Optional[int] = None) -> dict:
+    def snapshot(self, now: float | None = None, position: int | None = None) -> dict:
         """Return a client-facing status payload for this queue entry."""
         now = now or time.time()
         payload = {
@@ -134,9 +133,9 @@ class InferenceQueue:
         self.queue_timeout = queue_timeout
         self.history_ttl = history_ttl
 
-        self._waiting: List[str] = []
-        self._active: List[str] = []
-        self._entries: Dict[str, QueueEntry] = {}
+        self._waiting: list[str] = []
+        self._active: list[str] = []
+        self._entries: dict[str, QueueEntry] = {}
         self._change_event = asyncio.Event()
         # Guards the async reserve path in wait_for_turn() so two parallel waiters
         # cannot both cross len(_active) < max_concurrent and grab a slot (double
@@ -175,7 +174,7 @@ class InferenceQueue:
                 continue
             self._entries.pop(request_id, None)
 
-    def _get_entry(self, request_id: str) -> Optional[QueueEntry]:
+    def _get_entry(self, request_id: str) -> QueueEntry | None:
         self._prune_history()
         return self._entries.get(request_id)
 
@@ -193,9 +192,9 @@ class InferenceQueue:
         self,
         client_id: str,
         model: str,
-        request_id: Optional[str] = None,
+        request_id: str | None = None,
         *,
-        owner_id: Optional[str] = None,
+        owner_id: str | None = None,
     ) -> str:
         """Register a new queued request and return its request id immediately."""
         self._prune_history()
@@ -292,7 +291,7 @@ class InferenceQueue:
                 if not cancel_task.done():
                     cancel_task.cancel()
 
-    async def acquire(self, client_id: str, model: str, *, owner_id: Optional[str] = None) -> str:
+    async def acquire(self, client_id: str, model: str, *, owner_id: str | None = None) -> str:
         """Legacy convenience wrapper: submit then wait for execution."""
         request_id = self.submit(client_id, model, owner_id=owner_id)
         await self.wait_for_turn(request_id)
@@ -302,11 +301,11 @@ class InferenceQueue:
         self,
         request_id: str,
         *,
-        client_id: Optional[str] = None,
-        owner_id: Optional[str] = None,
+        client_id: str | None = None,
+        owner_id: str | None = None,
         reason: str = "cancelled",
-        detail: Optional[str] = None,
-    ) -> Optional[dict]:
+        detail: str | None = None,
+    ) -> dict | None:
         """Cancel a queued request or request cancellation of a running one."""
         entry = self._get_entry(request_id)
         if entry is None:
@@ -340,7 +339,7 @@ class InferenceQueue:
         self._signal_change()
         return self.get_request_status(request_id, client_id=client_id, owner_id=owner_id)
 
-    def finish(self, request_id: str, outcome: str = "completed", detail: Optional[str] = None) -> float:
+    def finish(self, request_id: str, outcome: str = "completed", detail: str | None = None) -> float:
         """Finalize a request and free its slot if it was running."""
         entry = self._get_entry(request_id)
         if entry is None:
@@ -388,7 +387,7 @@ class InferenceQueue:
         """Legacy alias for ``finish(..., outcome='completed')``."""
         return self.finish(request_id, outcome="completed")
 
-    def get_cancel_event(self, request_id: str) -> Optional[asyncio.Event]:
+    def get_cancel_event(self, request_id: str) -> asyncio.Event | None:
         """Return the cancellation event for a tracked request, if present."""
         entry = self._get_entry(request_id)
         return entry.cancel_event if entry is not None else None
@@ -408,9 +407,9 @@ class InferenceQueue:
     def get_request_status(
         self,
         request_id: str,
-        client_id: Optional[str] = None,
-        owner_id: Optional[str] = None,
-    ) -> Optional[dict]:
+        client_id: str | None = None,
+        owner_id: str | None = None,
+    ) -> dict | None:
         """Return a request-specific status payload, if visible to the caller."""
         entry = self._get_entry(request_id)
         if entry is None:
@@ -431,7 +430,7 @@ class InferenceQueue:
             position = -1
         return entry.snapshot(now=time.time(), position=position)
 
-    def get_status(self, client_id: Optional[str] = None, owner_id: Optional[str] = None) -> dict:
+    def get_status(self, client_id: str | None = None, owner_id: str | None = None) -> dict:
         """Build a status dict for the ``GET /v1/queue/status`` endpoint."""
         self._prune_history()
         now = time.time()

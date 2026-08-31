@@ -40,11 +40,11 @@ import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from app.capture.config import CaptureConfig
-from app.capture.sink import CaptureSink, CaptureEvent
 from app.capture.schema import compute_record_auth
+from app.capture.sink import CaptureEvent, CaptureSink
 
 logger = logging.getLogger("Guardian.Capture.WAL")
 
@@ -97,19 +97,19 @@ class CaptureWALWriter:
         self._sink = sink
         self._config = config
         self._metrics = WALWriterMetrics()
-        self._task: Optional[asyncio.Task] = None
+        self._task: asyncio.Task | None = None
         self._stopping = False
 
         # File rotation state
         self._rotation_seq = 0
-        self._active_file: Optional[Path] = None
+        self._active_file: Path | None = None
         self._active_fd = None  # raw file descriptor for append-only writes
         self._active_file_size = 0  # plain byte count used for rotation thresholds
         self._active_file_start = 0.0  # monotonic time of file (re)open
 
         # State file (persisted across restarts)
         self._state_path = Path(config.capture_root) / STATE_FILENAME
-        self._state: Dict[str, Any] = {}
+        self._state: dict[str, Any] = {}
 
         # Capture root
         self._capture_root = Path(config.capture_root)
@@ -199,14 +199,14 @@ class CaptureWALWriter:
 
     # ── Startup sweep (migration + crash hardening) ────────────────────
 
-    def _next_completed_path(self, timestamp: int) -> Tuple[Path, int]:
+    def _next_completed_path(self, timestamp: int) -> tuple[Path, int]:
         """Return a free completed-file path and its sequence number.
 
         Bumps the sequence until the name is not already taken (guards
         against collisions after a state reset or a same-second rotation).
         """
         seq = self._state.get("rotation_seq", 0) + 1
-        candidate: Optional[Path] = None
+        candidate: Path | None = None
         for _ in range(1000):
             path = self._capture_root / COMPLETED_PATTERN.format(timestamp=timestamp, seq=seq)
             if not path.exists():
@@ -447,7 +447,7 @@ class CaptureWALWriter:
         self._active_file_size = 0
         self._active_file_start = 0.0
 
-    def rotate(self) -> Optional[str]:
+    def rotate(self) -> str | None:
         """Force rotation of the active file.
 
         Returns the path of the rotated (.gz) file, or None if there was
@@ -509,7 +509,7 @@ class CaptureWALWriter:
             logger.error("Rotation failed and sidecar regeneration failed for %s: %s",
                          completed_path.name, exc)
 
-    def _rotate_file(self) -> Optional[str]:
+    def _rotate_file(self) -> str | None:
         """Close the active plain file, rename it to its completed name, and
         gzip-compress it atomically.
 
@@ -588,7 +588,7 @@ class CaptureWALWriter:
         try:
             # Collect removable units: (paths_to_unlink, mtime, total_size).
             # A data file carries its sidecar (removed together).
-            units: List[Tuple[List[Path], float, int]] = []
+            units: list[tuple[list[Path], float, int]] = []
             seen_sidecars: set = set()
             total_size = 0
             for entry in root.iterdir():
@@ -628,7 +628,7 @@ class CaptureWALWriter:
             # Sort by modification time (oldest first)
             units.sort(key=lambda u: u[1])
 
-            def _remove(paths: List[Path]) -> None:
+            def _remove(paths: list[Path]) -> None:
                 for path in paths:
                     try:
                         path.unlink()
@@ -642,7 +642,7 @@ class CaptureWALWriter:
             # below cannot pop stale entries and subtract their size twice
             # (which deflated the quota accounting and could leave real
             # files over the quota until the next sweep — review finding).
-            survivors: List[Tuple[List[Path], float, int]] = []
+            survivors: list[tuple[list[Path], float, int]] = []
             for unit in units:
                 paths, mtime, size = unit
                 if mtime < cutoff:
@@ -765,7 +765,7 @@ class CaptureWALWriter:
 
     # ── Metrics ────────────────────────────────────────────────────────
 
-    def snapshot(self) -> Dict[str, Any]:
+    def snapshot(self) -> dict[str, Any]:
         """Return a metrics snapshot."""
         root = self.get_write_path()
         disk_bytes = 0

@@ -3,21 +3,20 @@
 import time
 from unittest.mock import MagicMock, patch
 
-
 from app.proxy.metrics import (
+    ACTIVE_REQUESTS,
+    ALIAS_RESOLUTIONS,
+    AUTH_FAILURES,
+    IDLE_SECONDS,
+    MODEL_CRASHES,
+    MODEL_SWITCHES,
+    QUEUE_WAITING,
+    REQUEST_COUNT,
+    UNLOADED,
+    get_metrics_output,
     track_request,
     update_queue_metrics,
     update_system_metrics,
-    get_metrics_output,
-    REQUEST_COUNT,
-    ACTIVE_REQUESTS,
-    QUEUE_WAITING,
-    UNLOADED,
-    IDLE_SECONDS,
-    MODEL_SWITCHES,
-    MODEL_CRASHES,
-    AUTH_FAILURES,
-    ALIAS_RESOLUTIONS,
 )
 
 
@@ -110,7 +109,7 @@ class TestSystemMetrics:
 
 class TestGpuMetrics:
     def test_updates_vram_from_nvidia_smi(self):
-        from app.proxy.metrics import update_gpu_metrics, VRAM_USED_MB, VRAM_TOTAL_MB
+        from app.proxy.metrics import VRAM_TOTAL_MB, VRAM_USED_MB, update_gpu_metrics
 
         mock_result = MagicMock()
         mock_result.returncode = 0

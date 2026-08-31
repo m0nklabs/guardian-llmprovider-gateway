@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import os
 
+import _paths  # noqa: F401  (adds repo root to sys.path)
 import yaml
 
-import _paths  # noqa: F401  (adds repo root to sys.path)
 from app.paths import guardian_apikeys_file
 
 

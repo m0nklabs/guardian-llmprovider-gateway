@@ -1,7 +1,6 @@
 import json
-import os
 import logging
-from typing import Dict, Optional
+import os
 
 logger = logging.getLogger("Optimizer")
 
@@ -15,7 +14,7 @@ class RequestOptimizer:
         self.legacy_state_file = legacy_state_file
         self.context_results_file = context_results_file
         
-        self.best_configs: Dict[str, Dict] = {} # model_name -> {num_ctx, tps}
+        self.best_configs: dict[str, dict] = {} # model_name -> {num_ctx, tps}
         self.last_load = 0
         self.load_benchmarks()
 
@@ -91,7 +90,7 @@ class RequestOptimizer:
             
         logger.info(f"Loaded optimizations for {len(self.best_configs)} models")
 
-    def optimize_options(self, model_name: str, current_options: Dict, context_limit: Optional[int] = None) -> Dict:
+    def optimize_options(self, model_name: str, current_options: dict, context_limit: int | None = None) -> dict:
         """Injects optimized settings if they are not explicitly set by the user.
         
         Args:

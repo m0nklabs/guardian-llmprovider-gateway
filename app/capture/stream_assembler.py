@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import math
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 logger = logging.getLogger("Guardian.Capture.StreamAssembler")
 
@@ -29,26 +29,26 @@ class StreamResponseAssembler:
     """
 
     def __init__(self) -> None:
-        self._content_parts: List[str] = []
-        self._reasoning_parts: List[str] = []
-        self._tool_calls: List[Dict[str, Any]] = []
-        self._finish_reason: Optional[str] = None
+        self._content_parts: list[str] = []
+        self._reasoning_parts: list[str] = []
+        self._tool_calls: list[dict[str, Any]] = []
+        self._finish_reason: str | None = None
         # Provider-reported raw stop reason (OpenRouter ``native_finish_reason``
         # on the choice; llama.cpp/OpenAI-compatible backends simply omit it).
-        self._native_finish_reason: Optional[str] = None
-        self._prompt_tokens: Optional[int] = None
-        self._completion_tokens: Optional[int] = None
+        self._native_finish_reason: str | None = None
+        self._prompt_tokens: int | None = None
+        self._completion_tokens: int | None = None
         # Rich upstream usage mirror (C5) — kept as reported by the provider.
-        self._completion_tokens_details: Optional[Dict[str, Any]] = None
-        self._native_tokens_reasoning: Optional[int] = None
-        self._native_tokens_cached: Optional[int] = None
-        self._cost: Optional[float] = None
+        self._completion_tokens_details: dict[str, Any] | None = None
+        self._native_tokens_reasoning: int | None = None
+        self._native_tokens_cached: int | None = None
+        self._cost: float | None = None
         # Provider-reported serving provider slug (OpenRouter top-level
         # ``provider`` string on stream chunks).
-        self._provider_name: Optional[str] = None
+        self._provider_name: str | None = None
         self._has_content: bool = False
         self._line_count: int = 0
-        self._error: Optional[str] = None
+        self._error: str | None = None
 
     def add_sse_line(self, line: str) -> None:
         """Process one SSE line from the upstream stream.
@@ -169,7 +169,7 @@ class StreamResponseAssembler:
         if isinstance(usage, dict):
             self._extract_usage(usage)
 
-    def _merge_tool_calls(self, tool_calls: List[Dict[str, Any]]) -> None:
+    def _merge_tool_calls(self, tool_calls: list[dict[str, Any]]) -> None:
         """Merge incremental tool call deltas into the accumulated list."""
         for tc in tool_calls:
             if not isinstance(tc, dict):
@@ -199,7 +199,7 @@ class StreamResponseAssembler:
                     existing_fn = existing["function"]
                     existing_fn["arguments"] = existing_fn.get("arguments", "") + fn_delta["arguments"]
 
-    def _extract_usage(self, usage: Dict[str, Any]) -> None:
+    def _extract_usage(self, usage: dict[str, Any]) -> None:
         """Extract token usage and rich usage fields from OpenAI/Anthropic usage objects."""
         pt = usage.get("prompt_tokens") or usage.get("input_tokens")
         ct = usage.get("completion_tokens") or usage.get("output_tokens")
@@ -239,53 +239,53 @@ class StreamResponseAssembler:
         return "".join(self._content_parts)
 
     @property
-    def reasoning_content(self) -> Optional[str]:
+    def reasoning_content(self) -> str | None:
         """The assembled reasoning content text (or None if no reasoning)."""
         parts = self._reasoning_parts
         return "".join(parts) if parts else None
 
     @property
-    def tool_calls(self) -> Optional[List[Dict[str, Any]]]:
+    def tool_calls(self) -> list[dict[str, Any]] | None:
         """The assembled tool calls (or None if none)."""
         return self._tool_calls if self._tool_calls else None
 
     @property
-    def finish_reason(self) -> Optional[str]:
+    def finish_reason(self) -> str | None:
         return self._finish_reason
 
     @property
-    def native_finish_reason(self) -> Optional[str]:
+    def native_finish_reason(self) -> str | None:
         """Provider-reported raw stop reason (None when not reported)."""
         return self._native_finish_reason
 
     @property
-    def completion_tokens_details(self) -> Optional[Dict[str, Any]]:
+    def completion_tokens_details(self) -> dict[str, Any] | None:
         """Upstream usage.completion_tokens_details dict, as reported."""
         return self._completion_tokens_details
 
     @property
-    def native_tokens_reasoning(self) -> Optional[int]:
+    def native_tokens_reasoning(self) -> int | None:
         return self._native_tokens_reasoning
 
     @property
-    def native_tokens_cached(self) -> Optional[int]:
+    def native_tokens_cached(self) -> int | None:
         return self._native_tokens_cached
 
     @property
-    def cost(self) -> Optional[float]:
+    def cost(self) -> float | None:
         return self._cost
 
     @property
-    def provider_name(self) -> Optional[str]:
+    def provider_name(self) -> str | None:
         """Provider-reported serving provider slug (None when not reported)."""
         return self._provider_name
 
     @property
-    def prompt_tokens(self) -> Optional[int]:
+    def prompt_tokens(self) -> int | None:
         return self._prompt_tokens
 
     @property
-    def completion_tokens(self) -> Optional[int]:
+    def completion_tokens(self) -> int | None:
         return self._completion_tokens
 
     @property
@@ -297,16 +297,16 @@ class StreamResponseAssembler:
         """True when no content was accumulated at all."""
         return not self._has_content and not self._reasoning_parts and not self._tool_calls
 
-    def get_usage(self) -> Tuple[Optional[int], Optional[int]]:
+    def get_usage(self) -> tuple[int | None, int | None]:
         """Return (prompt_tokens, completion_tokens)."""
         return self._prompt_tokens, self._completion_tokens
 
-    def assemble(self) -> Dict[str, Any]:
+    def assemble(self) -> dict[str, Any]:
         """Return the final assembled response as a semantic dict.
 
         This is the single source of truth for the captured response content.
         """
-        result: Dict[str, Any] = {
+        result: dict[str, Any] = {
             "content": self.content,
             "finish_reason": self._finish_reason,
             "native_finish_reason": self._native_finish_reason,

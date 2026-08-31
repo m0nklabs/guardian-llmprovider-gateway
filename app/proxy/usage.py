@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict, deque
 import json
 import logging
+import time
+from collections import Counter, defaultdict, deque
 from pathlib import Path
 from threading import Lock
-import time
-from typing import Any, Optional
+from typing import Any
 
 from app.paths import DATA_DIR
-
 
 logger = logging.getLogger("guardian-usage")
 
@@ -49,7 +48,7 @@ def _safe_float(value: object) -> float:
         return 0.0
 
 
-def _normalize_request_id(value: object) -> Optional[str]:
+def _normalize_request_id(value: object) -> str | None:
     """Normalize an active-request identifier into a non-empty string."""
     if value is None:
         return None
@@ -57,7 +56,7 @@ def _normalize_request_id(value: object) -> Optional[str]:
     return text or None
 
 
-def _normalize_client_id(value: object) -> Optional[str]:
+def _normalize_client_id(value: object) -> str | None:
     """Normalize a client identifier into a non-empty string."""
     if not isinstance(value, str):
         return None
@@ -65,7 +64,7 @@ def _normalize_client_id(value: object) -> Optional[str]:
     return text or None
 
 
-def _identity_bucket_key(client_id: object, attribution: Optional[dict[str, Any]] = None) -> Optional[str]:
+def _identity_bucket_key(client_id: object, attribution: dict[str, Any] | None = None) -> str | None:
     """Return the aggregate bucket key for a request identity."""
     normalized_client = _normalize_client_id(client_id)
     if normalized_client is None:
@@ -93,7 +92,7 @@ def _category_for_endpoint(endpoint: str) -> str:
 class ApiUsageTracker:
     """Track authenticated API usage in memory and persist it for restarts."""
 
-    def __init__(self, recent_limit: int = 1000, state_file: Optional[Path | str] = None):
+    def __init__(self, recent_limit: int = 1000, state_file: Path | str | None = None):
         self._lock = Lock()
         self._recent_limit = recent_limit
         self._state_file = Path(state_file) if state_file is not None else DATA_DIR / "api_usage_state.json"
@@ -358,7 +357,7 @@ class ApiUsageTracker:
             self._clear_state_locked()
             self._save_locked()
 
-    def _apply_attribution(self, bucket: dict[str, Any], attribution: Optional[dict[str, Any]]) -> None:
+    def _apply_attribution(self, bucket: dict[str, Any], attribution: dict[str, Any] | None) -> None:
         """Merge request attribution into the per-client usage bucket."""
         if not isinstance(attribution, dict):
             return
@@ -398,7 +397,7 @@ class ApiUsageTracker:
             bucket["preferred_host"] = preferred_host
 
     @staticmethod
-    def _first_forwarded_ip(value: object) -> Optional[str]:
+    def _first_forwarded_ip(value: object) -> str | None:
         """Return the first forwarded IP from a comma-separated header value."""
         if not isinstance(value, str):
             return None
@@ -423,7 +422,7 @@ class ApiUsageTracker:
         return host in LOOPBACK_SOURCES
 
     @classmethod
-    def _preferred_source_ip(cls, attribution: dict[str, Any]) -> Optional[str]:
+    def _preferred_source_ip(cls, attribution: dict[str, Any]) -> str | None:
         """Select the most meaningful non-loopback source IP for a client bucket."""
         forwarded_ip = cls._first_forwarded_ip(attribution.get("forwarded_for"))
         if forwarded_ip and not cls._is_loopback_host(forwarded_ip):
@@ -436,7 +435,7 @@ class ApiUsageTracker:
         return None
 
     @classmethod
-    def _preferred_forwarded_for(cls, attribution: dict[str, Any]) -> Optional[str]:
+    def _preferred_forwarded_for(cls, attribution: dict[str, Any]) -> str | None:
         """Persist the forwarded chain only when it points at a non-loopback source."""
         value = attribution.get("forwarded_for")
         first_ip = cls._first_forwarded_ip(value)
@@ -445,7 +444,7 @@ class ApiUsageTracker:
         return None
 
     @classmethod
-    def _preferred_host(cls, attribution: dict[str, Any]) -> Optional[str]:
+    def _preferred_host(cls, attribution: dict[str, Any]) -> str | None:
         """Persist the target host associated with a non-loopback source when available."""
         host = attribution.get("host")
         if isinstance(host, str) and host.strip() and not cls._is_loopback_host(host):
@@ -456,13 +455,13 @@ class ApiUsageTracker:
         self,
         *,
         request_id: object,
-        client_id: Optional[str],
+        client_id: str | None,
         endpoint: str,
         method: str,
-        model: Optional[str] = None,
+        model: str | None = None,
         request_bytes: object = 0,
         streamed: bool = False,
-        attribution: Optional[dict[str, Any]] = None,
+        attribution: dict[str, Any] | None = None,
     ) -> None:
         """Register an in-flight request so the dashboard can show it live."""
         normalized_request_id = _normalize_request_id(request_id)
@@ -519,13 +518,13 @@ class ApiUsageTracker:
         self,
         *,
         request_id: object,
-        model: Optional[str] = None,
-        streamed: Optional[bool] = None,
-        queue_request_id: Optional[str] = None,
-        phase: Optional[str] = None,
-        queue_wait_ms: Optional[float] = None,
-        prompt_tokens: Optional[object] = None,
-        completion_tokens: Optional[object] = None,
+        model: str | None = None,
+        streamed: bool | None = None,
+        queue_request_id: str | None = None,
+        phase: str | None = None,
+        queue_wait_ms: float | None = None,
+        prompt_tokens: object | None = None,
+        completion_tokens: object | None = None,
         output_chars_delta: object = 0,
         response_bytes_delta: object = 0,
     ) -> None:
@@ -563,16 +562,16 @@ class ApiUsageTracker:
     def _record_request_locked(
         self,
         *,
-        client_id: Optional[str],
+        client_id: str | None,
         endpoint: str,
         method: str,
         status_code: int,
-        model: Optional[str] = None,
-        duration_ms: Optional[float] = None,
+        model: str | None = None,
+        duration_ms: float | None = None,
         request_bytes: object = 0,
         response_bytes: object = 0,
         streamed: bool = False,
-        attribution: Optional[dict[str, Any]] = None,
+        attribution: dict[str, Any] | None = None,
     ) -> None:
         """Record a completed request while the caller already holds the lock."""
         now = time.time()
@@ -643,16 +642,16 @@ class ApiUsageTracker:
         self,
         *,
         request_id: object,
-        client_id: Optional[str] = None,
-        endpoint: Optional[str] = None,
-        method: Optional[str] = None,
+        client_id: str | None = None,
+        endpoint: str | None = None,
+        method: str | None = None,
         status_code: int,
-        model: Optional[str] = None,
-        duration_ms: Optional[float] = None,
+        model: str | None = None,
+        duration_ms: float | None = None,
         request_bytes: object | None = None,
         response_bytes: object | None = None,
-        streamed: Optional[bool] = None,
-        attribution: Optional[dict[str, Any]] = None,
+        streamed: bool | None = None,
+        attribution: dict[str, Any] | None = None,
     ) -> None:
         """Finalize an active request and fold it into the aggregate history."""
         normalized_request_id = _normalize_request_id(request_id)
@@ -709,16 +708,16 @@ class ApiUsageTracker:
     def record_request(
         self,
         *,
-        client_id: Optional[str],
+        client_id: str | None,
         endpoint: str,
         method: str,
         status_code: int,
-        model: Optional[str] = None,
-        duration_ms: Optional[float] = None,
+        model: str | None = None,
+        duration_ms: float | None = None,
         request_bytes: object = 0,
         response_bytes: object = 0,
         streamed: bool = False,
-        attribution: Optional[dict[str, Any]] = None,
+        attribution: dict[str, Any] | None = None,
     ) -> None:
         """Record a completed API request."""
         with self._lock:
@@ -739,12 +738,12 @@ class ApiUsageTracker:
     def record_tokens(
         self,
         *,
-        client_id: Optional[str],
+        client_id: str | None,
         endpoint: str,
-        model: Optional[str],
+        model: str | None,
         prompt_tokens: object = 0,
         completion_tokens: object = 0,
-        attribution: Optional[dict[str, Any]] = None,
+        attribution: dict[str, Any] | None = None,
     ) -> None:
         """Record token usage for a request when the backend reports it."""
         prompt_count = _safe_int(prompt_tokens)

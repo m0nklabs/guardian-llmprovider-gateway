@@ -26,7 +26,7 @@ logger = logging.getLogger("Guardian")
 
 # ── Injected dependencies ────────────────────────────────────────────
 
-_provider_registry: Optional[ProviderRegistry] = None
+_provider_registry: ProviderRegistry | None = None
 
 
 def init(provider_registry: ProviderRegistry) -> None:
@@ -37,7 +37,7 @@ def init(provider_registry: ProviderRegistry) -> None:
 
 # ── Provider base URLs ───────────────────────────────────────────────
 
-_PROVIDER_BASE_URLS: Dict[str, str] = {
+_PROVIDER_BASE_URLS: dict[str, str] = {
     "openrouter": "https://openrouter.ai/api/v1",
     "nvidia": "https://integrate.api.nvidia.com/v1",
     "poolside": "https://inference.poolside.ai/v1",
@@ -55,12 +55,11 @@ _GOOGLE_MODEL_CATALOG_TIMEOUT_S = 30.0
 def normalize_google_model_id(model_id: str) -> str:
     """Normalize Google catalog IDs to bare OpenAI-compatible model names."""
     normalized = model_id.strip()
-    if normalized.startswith("models/"):
-        normalized = normalized[len("models/") :]
+    normalized = normalized.removeprefix("models/")
     return normalized
 
 
-def parse_google_model_catalog(payload: Any) -> List[str]:
+def parse_google_model_catalog(payload: Any) -> list[str]:
     """Validate and normalize Google OpenAI-compatible model catalog data."""
     if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
         raise ValueError("Google model catalog response is missing model data")
@@ -80,7 +79,7 @@ def parse_google_model_catalog(payload: Any) -> List[str]:
     return models
 
 
-async def discover_google_models(api_key: str) -> List[str]:
+async def discover_google_models(api_key: str) -> list[str]:
     """Fetch the current Google AI Studio OpenAI-compatible model catalog."""
     try:
         timeout = httpx.Timeout(_GOOGLE_MODEL_CATALOG_TIMEOUT_S, connect=5.0)
@@ -110,7 +109,7 @@ def provider_base_url(provider_name: str) -> str:
     return _PROVIDER_BASE_URLS.get(provider_name, "")
 
 
-def cloud_provider_for_request(model_name: str) -> Optional[CloudProvider]:
+def cloud_provider_for_request(model_name: str) -> CloudProvider | None:
     """Return the configured cloud provider for *model_name*, or None."""
     return _provider_registry.get_provider_for_model(model_name)
 
@@ -200,7 +199,7 @@ _HOP_BY_HOP_RESPONSE_HEADERS = frozenset(
 )
 
 
-def sanitize_proxied_response_headers(headers: Any) -> Dict[str, str]:
+def sanitize_proxied_response_headers(headers: Any) -> dict[str, str]:
     """Strip hop-by-hop and body-framing headers from an upstream response."""
     return {
         key: value
@@ -212,10 +211,10 @@ def sanitize_proxied_response_headers(headers: Any) -> Dict[str, str]:
 def guardian_debug_headers(
     provider: CloudProvider,
     upstream_model: str,
-    failover_group: Optional[str],
-) -> Dict[str, str]:
+    failover_group: str | None,
+) -> dict[str, str]:
     """Build response headers revealing which provider served a request."""
-    headers: Dict[str, str] = {
+    headers: dict[str, str] = {
         "X-Guardian-Provider": provider.name,
         "X-Guardian-Upstream-Model": upstream_model,
     }
@@ -226,14 +225,14 @@ def guardian_debug_headers(
 
 # ── OpenAI reasoning-model parameter adaptation ──────────────────────
 
-_OPENAI_REASONING_MODEL_PREFIXES: Tuple[str, ...] = (
+_OPENAI_REASONING_MODEL_PREFIXES: tuple[str, ...] = (
     "o1",
     "o3",
     "o4",
     "gpt-5",
 )
 
-_OPENAI_TEMP_RESTRICTED_PREFIXES: Tuple[str, ...] = (
+_OPENAI_TEMP_RESTRICTED_PREFIXES: tuple[str, ...] = (
     "o1",
     "o3",
     "o4",
@@ -249,8 +248,8 @@ def is_openai_reasoning_model(model_name: str) -> bool:
 def adapt_openai_reasoning_params(
     provider: CloudProvider,
     upstream_model: str,
-    body: Dict[str, Any],
-) -> Dict[str, Any]:
+    body: dict[str, Any],
+) -> dict[str, Any]:
     """Translate client params for direct-OpenAI reasoning models.
 
     Many OpenAI-compatible clients send ``max_tokens`` and ``temperature``
@@ -289,6 +288,6 @@ def adapt_openai_reasoning_params(
 
 # ── Provider base URLs dict (for list_cloud_providers endpoint) ──────
 
-def get_provider_base_urls() -> Dict[str, str]:
+def get_provider_base_urls() -> dict[str, str]:
     """Return a copy of the provider base URL mapping."""
     return dict(_PROVIDER_BASE_URLS)

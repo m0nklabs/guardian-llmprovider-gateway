@@ -12,7 +12,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 # CI has no venv/ (setup-python); reuse the interpreter running pytest.
 VENV_PY = sys.executable

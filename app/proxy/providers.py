@@ -36,7 +36,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import httpx
 import yaml
@@ -58,7 +58,7 @@ class ContextCatalog:
     """A timestamped upstream model catalog reduced to context windows."""
 
     fetched_at: float
-    context_windows: Dict[str, int]
+    context_windows: dict[str, int]
 
 
 def _expand_env(value: str) -> str:
@@ -101,20 +101,20 @@ class CloudProvider:
     name: str
     base_url: str
     api_key: str
-    models: List[str] = field(default_factory=list)
+    models: list[str] = field(default_factory=list)
     enabled: bool = True
     timeout_seconds: float = 600.0
     # Provider-specific extra headers (e.g. OpenRouter ranking headers).
-    extra_headers: Dict[str, str] = field(default_factory=dict)
+    extra_headers: dict[str, str] = field(default_factory=dict)
     # Catalog path override (default "/models"). Lets a provider advertise the
     # models actually reachable through its guardrails/privacy filters, e.g.
     # openrouter -> "/models/user". Empty/None -> "/models".
-    catalog_url: Optional[str] = None
+    catalog_url: str | None = None
     # Optional allowlist of normalized {brand}/{model} ids to advertise from the
     # dynamic catalog. Used e.g. for NVIDIA's free tier, whose /v1/models lists
     # every model regardless of what the free token can actually reach. When
     # non-empty, only these ids are surfaced in discovery and routed.
-    catalog_allowlist: Optional[List[str]] = None
+    catalog_allowlist: list[str] | None = None
     # Managed providers are served by Guardian's own lifecycle (engine/manager):
     # the local llama-server is the only ``managed: true`` entry (F3, docs/
     # LAN_GPU_BACKENDS.md §Unificatie). Everything else (Windows, cloud) is a
@@ -143,7 +143,7 @@ class ProviderRegistry:
     model lists without restarting Guardian.
     """
 
-    def __init__(self, settings_path: Optional[Path] = None) -> None:
+    def __init__(self, settings_path: Path | None = None) -> None:
         # When no explicit settings_path is given (production default), read the
         # per-provider files in config/providers/ (F2 directory scan, excluding
         # the local provider).  An explicit path (tests/legacy) reads that single
@@ -152,16 +152,16 @@ class ProviderRegistry:
         if settings_path is None:
             settings_path = PROVIDERS_SETTINGS_FILE
         self._settings_path = settings_path
-        self._providers: Dict[str, CloudProvider] = {}
-        self._model_to_provider: Dict[str, CloudProvider] = {}
+        self._providers: dict[str, CloudProvider] = {}
+        self._model_to_provider: dict[str, CloudProvider] = {}
         # Ordered (prefix, provider) pairs for namespace-based cloud
         # recognition; populated in :meth:`reload` from each provider's
         # ``model_prefixes`` config.  Exact ``models`` entries always win
         # over prefix matches (see :meth:`get_provider_for_model`).
-        self._prefix_to_provider: List[Tuple[str, CloudProvider]] = []
-        self._context_overrides: Dict[str, int] = {}
-        self._context_catalogs: Dict[str, ContextCatalog] = {}
-        self._context_catalog_locks: Dict[str, asyncio.Lock] = {}
+        self._prefix_to_provider: list[tuple[str, CloudProvider]] = []
+        self._context_overrides: dict[str, int] = {}
+        self._context_catalogs: dict[str, ContextCatalog] = {}
+        self._context_catalog_locks: dict[str, asyncio.Lock] = {}
         self.reload()
 
     # ── Loading ──────────────────────────────────────────────────────
@@ -207,7 +207,7 @@ class ProviderRegistry:
                 if isinstance(p, str) and p.strip()
             ]
             timeout = float(cfg.get("timeout_seconds", 600.0))
-            extra_headers: Dict[str, str] = {}
+            extra_headers: dict[str, str] = {}
             if isinstance(cfg.get("extra_headers"), dict):
                 extra_headers = {
                     str(k): _expand_env(str(v))
@@ -299,7 +299,7 @@ class ProviderRegistry:
                 ", ".join(sorted(p for p, _ in self._prefix_to_provider)),
             )
 
-    def _load_settings_config(self) -> Dict[str, Any]:
+    def _load_settings_config(self) -> dict[str, Any]:
         """Read the complete config document.
 
         With an explicit ``settings_path`` (tests/legacy single file) this reads
@@ -327,8 +327,8 @@ class ProviderRegistry:
         # Production default: per-provider directory scan.
         try:
             documents = provider_settings_documents()
-            providers: Dict[str, Any] = {}
-            context_overrides: Dict[str, int] = {}
+            providers: dict[str, Any] = {}
+            context_overrides: dict[str, int] = {}
             for name, doc in documents.items():
                 if not isinstance(doc, dict):
                     continue
@@ -354,7 +354,7 @@ class ProviderRegistry:
             return {}
 
     @staticmethod
-    def _parse_positive_integer(value: Any) -> Optional[int]:
+    def _parse_positive_integer(value: Any) -> int | None:
         """Return *value* as a positive integer, or ``None`` when invalid."""
         if isinstance(value, bool):
             return None
@@ -380,18 +380,17 @@ class ProviderRegistry:
         if not isinstance(model_name, str):
             return ""
         canonical = model_name
-        if canonical.startswith("openrouter/"):
-            canonical = canonical[len("openrouter/"):]
+        canonical = canonical.removeprefix("openrouter/")
         return canonical
 
     @classmethod
-    def _parse_context_overrides(cls, raw_overrides: Any) -> Dict[str, int]:
+    def _parse_context_overrides(cls, raw_overrides: Any) -> dict[str, int]:
         """Normalize configured context override values by canonical model ID."""
         if not isinstance(raw_overrides, dict):
             logger.warning("⚠️  'context_overrides' in settings.yaml is not a map; ignoring")
             return {}
 
-        overrides: Dict[str, int] = {}
+        overrides: dict[str, int] = {}
         for model_name, value in raw_overrides.items():
             context_window = cls._parse_positive_integer(value)
             canonical_name = cls.canonical_model_id(str(model_name))
@@ -421,7 +420,7 @@ class ProviderRegistry:
             return False
         return True
 
-    def get_provider_for_model(self, model_name: str) -> Optional[CloudProvider]:
+    def get_provider_for_model(self, model_name: str) -> CloudProvider | None:
         """Return the :class:`CloudProvider` that serves *model_name*.
 
         Resolution order: an exact ``models`` entry wins (this preserves
@@ -449,7 +448,7 @@ class ProviderRegistry:
 
         return self._get_configured_provider_for_model(model_name)
 
-    def _provider_from_address(self, model_name: str) -> Optional[CloudProvider]:
+    def _provider_from_address(self, model_name: str) -> CloudProvider | None:
         """Resolve a ``{provider}/{brand}/{model}`` address by its first segment.
 
         Returns the provider whose configured name matches the first path
@@ -463,7 +462,7 @@ class ProviderRegistry:
         provider = self._providers.get(first)
         return provider if provider is not None and provider.enabled else None
 
-    def _get_configured_provider_for_model(self, model_name: str) -> Optional[CloudProvider]:
+    def _get_configured_provider_for_model(self, model_name: str) -> CloudProvider | None:
         """Resolve an unprefixed model against configured exact names and namespaces."""
         provider = self._model_to_provider.get(model_name)
         if provider is not None:
@@ -473,7 +472,7 @@ class ProviderRegistry:
                 return candidate
         return None
 
-    def get_all_cloud_models(self) -> List[str]:
+    def get_all_cloud_models(self) -> list[str]:
         """Return global cloud models backed by configured provider keys.
 
         Managed (local) providers are excluded: they are keyless yet
@@ -486,11 +485,11 @@ class ProviderRegistry:
             if provider.is_configured and not provider.managed
         ]
 
-    def get_enabled_providers(self) -> List[CloudProvider]:
+    def get_enabled_providers(self) -> list[CloudProvider]:
         """Return all enabled providers (regardless of API-key presence)."""
         return [p for p in self._providers.values() if p.enabled]
 
-    def get_context_override(self, model_name: str) -> Optional[int]:
+    def get_context_override(self, model_name: str) -> int | None:
         """Return a configured context override for any supported ID variant."""
         return self._context_overrides.get(self.canonical_model_id(model_name))
 
@@ -503,14 +502,14 @@ class ProviderRegistry:
     def _get_cloud_context_target(
         self,
         model_name: str,
-    ) -> Tuple[Optional[CloudProvider], str]:
+    ) -> tuple[CloudProvider | None, str]:
         """Return the upstream provider and canonical model ID for a cloud route."""
         canonical_name = self.canonical_model_id(model_name)
         provider = self.get_provider_for_model(model_name)
         return provider, canonical_name
 
     @classmethod
-    def _extract_context_windows(cls, payload: Any) -> Dict[str, int]:
+    def _extract_context_windows(cls, payload: Any) -> dict[str, int]:
         """Extract valid context sizes from OpenAI-compatible model catalogs."""
         if not isinstance(payload, dict):
             return {}
@@ -518,7 +517,7 @@ class ProviderRegistry:
         if not isinstance(entries, list):
             return {}
 
-        context_windows: Dict[str, int] = {}
+        context_windows: dict[str, int] = {}
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
@@ -547,7 +546,7 @@ class ProviderRegistry:
             if cached is not None and now - cached.fetched_at < CONTEXT_CATALOG_TTL_SECONDS:
                 return cached
 
-            context_windows: Dict[str, int] = {}
+            context_windows: dict[str, int] = {}
             catalog_url = f"{provider.base_url}{provider.catalog_url or '/models'}"
             try:
                 headers = self.build_forward_headers(provider)
@@ -572,8 +571,8 @@ class ProviderRegistry:
     async def get_cloud_context_window(
         self,
         model_name: str,
-        provider: Optional[CloudProvider] = None,
-    ) -> Optional[int]:
+        provider: CloudProvider | None = None,
+    ) -> int | None:
         """Return the configured or upstream-catalog context size for a cloud model."""
         override = self.get_context_override(model_name)
         if override is not None:
@@ -588,7 +587,7 @@ class ProviderRegistry:
 
     # ── Model metadata ───────────────────────────────────────────────
 
-    def build_model_metadata_entry(self, model_name: str) -> Optional[Dict[str, Any]]:
+    def build_model_metadata_entry(self, model_name: str) -> dict[str, Any] | None:
         """Build an OpenAI-style ``/v1/models`` entry for a cloud model."""
         provider = self.get_provider_for_model(model_name)
         if provider is None:
@@ -608,9 +607,9 @@ class ProviderRegistry:
     @staticmethod
     def build_forward_headers(
         provider: CloudProvider,
-        client_user_id: Optional[str] = None,
-        app_name: Optional[str] = None,
-    ) -> Dict[str, str]:
+        client_user_id: str | None = None,
+        app_name: str | None = None,
+    ) -> dict[str, str]:
         """Build the HTTP headers for forwarding a request to *provider*.
 
         When *app_name* is provided, it is used for OpenRouter attribution
@@ -623,7 +622,7 @@ class ProviderRegistry:
         This parameter is accepted here for future providers that may use a
         header-based approach.
         """
-        headers: Dict[str, str] = {
+        headers: dict[str, str] = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {provider.api_key}",
         }

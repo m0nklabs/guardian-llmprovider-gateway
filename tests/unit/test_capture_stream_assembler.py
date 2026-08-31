@@ -1,6 +1,7 @@
 """Unit tests for the stream response assembler."""
 
 import json
+
 from app.capture.stream_assembler import StreamResponseAssembler
 
 

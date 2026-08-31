@@ -13,7 +13,6 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager, suppress
-from typing import Optional
 
 from app.gateway.caretaker_client import CaretakerError, CaretakerUnavailable
 
@@ -183,7 +182,7 @@ async def run_lifespan(app):
     )
 
     # Start capture writer (fail-open: disabled by default, errors are logged not raised)
-    _capture_writer_task: Optional[asyncio.Task] = None  # writer task owned by _capture_controller
+    _capture_writer_task: asyncio.Task | None = None  # writer task owned by _capture_controller
     try:
         _capture_controller.initialize_writer()
         if _capture_controller.config.is_active:

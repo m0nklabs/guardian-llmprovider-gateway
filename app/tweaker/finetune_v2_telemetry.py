@@ -11,12 +11,11 @@ import math
 import os
 import re
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping, Optional
 
 from app.paths import CURRENT_MODEL_ARGS_FILE, CURRENT_MODEL_ENV_FILE
 from app.tweaker.finetune_v2_support import format_two_gpu_split, parse_two_gpu_split
-
 
 DEFAULT_MIN_FREE_MIB_FOR_COARSE_SPLIT_SHIFT = 1024.0
 
@@ -155,7 +154,7 @@ def _llama_index_by_nvidia_index(identities: list[GpuIdentity]) -> dict[str, str
     return {gpu.nvidia_index: str(index) for index, gpu in enumerate(_llama_ordered_gpus(identities))}
 
 
-def read_gpu_vram_snapshot() -> Optional[dict[str, dict[str, float]]]:
+def read_gpu_vram_snapshot() -> dict[str, dict[str, float]] | None:
     """Read host VRAM telemetry keyed by llama/CUDA device index."""
     identities = _read_gpu_identities()
     if identities is None:
@@ -191,7 +190,7 @@ def read_gpu_vram_snapshot() -> Optional[dict[str, dict[str, float]]]:
     return dict(sorted(snapshot.items(), key=lambda item: int(item[0]))) or None
 
 
-def read_backend_gpu_vram_snapshot(process_name: str = "llama-server") -> Optional[dict[str, dict[str, float]]]:
+def read_backend_gpu_vram_snapshot(process_name: str = "llama-server") -> dict[str, dict[str, float]] | None:
     """Read active llama-server VRAM keyed by llama/CUDA device index."""
     try:
         pid_result = subprocess.run(
@@ -254,7 +253,7 @@ def read_backend_gpu_vram_snapshot(process_name: str = "llama-server") -> Option
     return snapshot or None
 
 
-def read_current_tensor_split_arg() -> Optional[str]:
+def read_current_tensor_split_arg() -> str | None:
     """Read the effective --tensor-split value from current_model.args when present."""
     try:
         args = CURRENT_MODEL_ARGS_FILE.read_text()
@@ -266,7 +265,7 @@ def read_current_tensor_split_arg() -> Optional[str]:
     return match.group(1).strip() or None
 
 
-def free_vram_delta_pct(gpu_vram: Optional[Mapping[str, Mapping[str, float]]]) -> Optional[float]:
+def free_vram_delta_pct(gpu_vram: Mapping[str, Mapping[str, float]] | None) -> float | None:
     """Return the absolute free-VRAM percentage difference across llama CUDA0 and CUDA1."""
     if not gpu_vram or len(gpu_vram) < 2:
         return None
@@ -278,13 +277,13 @@ def free_vram_delta_pct(gpu_vram: Optional[Mapping[str, Mapping[str, float]]]) -
 
 
 def next_split_from_vram_balance(
-    tensor_split: Optional[str],
+    tensor_split: str | None,
     *,
-    gpu_vram: Optional[Mapping[str, Mapping[str, float]]],
+    gpu_vram: Mapping[str, Mapping[str, float]] | None,
     step: float,
     split_min: float,
     split_max: float,
-) -> Optional[str]:
+) -> str | None:
     """Shift split toward the llama/CUDA device with more free VRAM."""
     if not gpu_vram or len(gpu_vram) < 2:
         return None
@@ -304,7 +303,7 @@ def next_split_from_vram_balance(
     return candidate_split
 
 
-def target_gpu_free_mib_for_balance_shift(gpu_vram: Optional[Mapping[str, Mapping[str, float]]]) -> Optional[float]:
+def target_gpu_free_mib_for_balance_shift(gpu_vram: Mapping[str, Mapping[str, float]] | None) -> float | None:
     """Return free MiB on the llama/CUDA device that would receive more load."""
     if not gpu_vram or len(gpu_vram) < 2:
         return None
@@ -322,7 +321,7 @@ def target_gpu_free_mib_for_balance_shift(gpu_vram: Optional[Mapping[str, Mappin
     return float(free_mib) if free_mib is not None else None
 
 
-def two_gpu_free_mib(gpu_vram: Optional[Mapping[str, Mapping[str, float]]]) -> Optional[tuple[float, float]]:
+def two_gpu_free_mib(gpu_vram: Mapping[str, Mapping[str, float]] | None) -> tuple[float, float] | None:
     """Return real MiB headroom for llama/CUDA0 and CUDA1."""
     if not gpu_vram or len(gpu_vram) < 2:
         return None
@@ -340,7 +339,7 @@ def two_gpu_free_mib(gpu_vram: Optional[Mapping[str, Mapping[str, float]]]) -> O
 
 
 def should_skip_coarse_split_shift(
-    gpu_vram: Optional[Mapping[str, Mapping[str, float]]],
+    gpu_vram: Mapping[str, Mapping[str, float]] | None,
     *,
     step: float,
     min_free_mib: float = DEFAULT_MIN_FREE_MIB_FOR_COARSE_SPLIT_SHIFT,

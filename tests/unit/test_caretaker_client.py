@@ -548,7 +548,7 @@ async def test_client_timeout_hot_reloadable_from_config(monkeypatch):
     # Fallback 2: accessor unavailable (import/load failure) -> the
     # constructor timeout (3.0) applies — the except-branch is exercised for
     # real, not bypassed by a defaults return.
-    import app.config_loader as config_loader
+    from app import config_loader
 
     def _raise() -> dict:
         raise RuntimeError("config unavailable")

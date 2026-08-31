@@ -24,7 +24,7 @@ import json
 import logging
 import re
 import struct
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 logger = logging.getLogger("Guardian.Capture.Redactor")
 
@@ -102,8 +102,8 @@ def _redact_ip_in_text(text: str) -> str:
 
 def redact_request_messages(
     messages: Any,
-    config_field_policies: Optional[Dict[str, str]] = None,
-) -> Optional[List[Dict[str, Any]]]:
+    config_field_policies: dict[str, str] | None = None,
+) -> list[dict[str, Any]] | None:
     """Redact request messages according to field policies.
 
     - System messages: stripped when policy is "strip" (default).
@@ -122,7 +122,7 @@ def redact_request_messages(
     unknown_policy = policies.get("unknown_content_blocks", "strip")
     reasoning_policy = policies.get("reasoning", "strip")
 
-    result: List[Dict[str, Any]] = []
+    result: list[dict[str, Any]] = []
     for msg in messages:
         if not isinstance(msg, dict):
             continue
@@ -134,7 +134,7 @@ def redact_request_messages(
         if role == "system" and system_policy == "strip":
             continue
 
-        redacted_msg: Dict[str, Any] = {"role": role}
+        redacted_msg: dict[str, Any] = {"role": role}
 
         # Process reasoning_content
         if "reasoning_content" in msg:
@@ -151,7 +151,7 @@ def redact_request_messages(
         if isinstance(content, str):
             redacted_msg["content"] = _redact_secrets_in_text(content)
         elif isinstance(content, list):
-            redacted_blocks: List[Dict[str, Any]] = []
+            redacted_blocks: list[dict[str, Any]] = []
             for block in content:
                 if not isinstance(block, dict):
                     if unknown_policy == "capture":
@@ -238,7 +238,7 @@ def redact_request_messages(
 def redact_response_content(
     content: Any,
     response_format: str = "auto",
-) -> Optional[str]:
+) -> str | None:
     """Redact sensitive data from a response content string.
 
     Delegates to :func:`_redact_secrets_in_text` which performs comprehensive
@@ -254,8 +254,8 @@ def redact_response_content(
 
 def redact_request_parameters(
     params: Any,
-    config_field_policies: Optional[Dict[str, str]] = None,
-) -> Optional[Dict[str, Any]]:
+    config_field_policies: dict[str, str] | None = None,
+) -> dict[str, Any] | None:
     """Redact request parameters, stripping credentials and tool definitions when configured.
 
     - api_key, authorization, headers are never persisted.
@@ -279,7 +279,7 @@ def redact_request_parameters(
     # sensitive structure — strip by default (presence flags carry the info).
     STRUCTURED_OUTPUT_KEYS = frozenset({"grammar", "json_schema", "response_format"})
 
-    safe_params: Dict[str, Any] = {}
+    safe_params: dict[str, Any] = {}
 
     for key, value in params.items():
         key_lower = key.lower() if isinstance(key, str) else ""
@@ -335,7 +335,7 @@ def redact_request_parameters(
 def redact_reasoning_content(
     reasoning: Any,
     policy: str = "strip",
-) -> Optional[str]:
+) -> str | None:
     """Redact reasoning content — stripped by default."""
     if policy == "strip":
         return None
@@ -349,13 +349,13 @@ def redact_reasoning_content(
 def redact_tool_results(
     tool_results: Any,
     policy: str = "strip",
-) -> Optional[List[Dict[str, Any]]]:
+) -> list[dict[str, Any]] | None:
     """Redact tool results — stripped by default."""
     if policy == "strip":
         return None
     if not isinstance(tool_results, list):
         return None
-    result: List[Dict[str, Any]] = []
+    result: list[dict[str, Any]] = []
     for tr in tool_results:
         if not isinstance(tr, dict):
             continue
@@ -380,13 +380,13 @@ def redact_tool_results(
 def redact_tool_calls(
     tool_calls: Any,
     policy: str = "capture",
-) -> Optional[List[Dict[str, Any]]]:
+) -> list[dict[str, Any]] | None:
     """Redact tool calls — capture by default but strip sensitive fields."""
     if policy == "strip":
         return None
     if not isinstance(tool_calls, list):
         return None
-    result: List[Dict[str, Any]] = []
+    result: list[dict[str, Any]] = []
     for tc in tool_calls:
         if not isinstance(tc, dict):
             continue
@@ -407,7 +407,7 @@ def redact_tool_calls(
 def redact_image_blocks(
     content_blocks: Any,
     policy: str = "hash_and_metadata",
-) -> Optional[List[Dict[str, Any]]]:
+) -> list[dict[str, Any]] | None:
     """Replace raw image data with policy-approved metadata.
 
     For OpenAI-style ``image_url`` blocks:
@@ -425,7 +425,7 @@ def redact_image_blocks(
     if not isinstance(content_blocks, list):
         return None
 
-    result: List[Dict[str, Any]] = []
+    result: list[dict[str, Any]] = []
     for block in content_blocks:
         if not isinstance(block, dict):
             continue
@@ -460,7 +460,7 @@ def redact_image_blocks(
     return result if result else None
 
 
-def _extract_image_metadata(data_url: str) -> Optional[Dict[str, Any]]:
+def _extract_image_metadata(data_url: str) -> dict[str, Any] | None:
     """Decode a data URL and compute SHA-256, MIME type, size, and dimensions.
 
     Returns None if the data URL is malformed or decoding fails.
@@ -486,7 +486,7 @@ def _extract_image_metadata(data_url: str) -> Optional[Dict[str, Any]]:
     size_bytes = len(image_bytes)
     dimensions = _try_extract_image_dimensions(image_bytes, mime_type)
 
-    metadata: Dict[str, Any] = {
+    metadata: dict[str, Any] = {
         "type": "image_metadata",
         "sha256": sha256,
         "mime_type": mime_type,
@@ -498,7 +498,7 @@ def _extract_image_metadata(data_url: str) -> Optional[Dict[str, Any]]:
     return metadata
 
 
-def _try_extract_image_dimensions(image_bytes: bytes, mime_type: str) -> Optional[tuple[int, int]]:
+def _try_extract_image_dimensions(image_bytes: bytes, mime_type: str) -> tuple[int, int] | None:
     """Best-effort extraction of image dimensions from raw bytes.
 
     Supports PNG, JPEG, GIF, and WebP.  Returns None if dimensions cannot
@@ -552,23 +552,23 @@ def _try_extract_image_dimensions(image_bytes: bytes, mime_type: str) -> Optiona
     return None
 
 
-def redact_source_ip(ip_address: Optional[str]) -> Optional[str]:
+def redact_source_ip(ip_address: str | None) -> str | None:
     """Always returns None — raw client IP addresses are never persisted."""
     return None
 
 
-def redact_authorization_header(auth_header: Optional[str]) -> Optional[str]:
+def redact_authorization_header(auth_header: str | None) -> str | None:
     """Always returns None — authorization headers are never persisted."""
     return None
 
 
-def scan_for_secrets(text: str) -> List[str]:
+def scan_for_secrets(text: str) -> list[str]:
     """Scan text for potential secret patterns (for canary testing).
 
     Returns a list of human-readable descriptions of detected secrets.
     Used by the secret canary test suite.
     """
-    findings: List[str] = []
+    findings: list[str] = []
     if not isinstance(text, str):
         return findings
 
@@ -591,7 +591,7 @@ def scan_for_secrets(text: str) -> List[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _anthropic_content_block_to_openai(block: Dict[str, Any]) -> Dict[str, Any]:
+def _anthropic_content_block_to_openai(block: dict[str, Any]) -> dict[str, Any]:
     """Translate an Anthropic content block to an OpenAI message fragment.
 
     Only ``text`` and ``tool_use`` block types are translated. ``image``
@@ -649,9 +649,9 @@ def _anthropic_content_block_to_openai(block: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def anthropic_messages_to_openai(
-    messages: List[Dict[str, Any]],
-    system: Optional[Union[str, List[Dict[str, Any]]]] = None,
-) -> List[Dict[str, Any]]:
+    messages: list[dict[str, Any]],
+    system: str | list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """Translate Anthropic messages format to OpenAI-style messages for capture.
 
     Anthropic ``messages`` is a list of ``{role, content}`` where content
@@ -661,7 +661,7 @@ def anthropic_messages_to_openai(
     and translates content blocks into the OpenAI message format used
     in capture events.
     """
-    openai_messages: List[Dict[str, Any]] = []
+    openai_messages: list[dict[str, Any]] = []
 
     # System prompt
     if system is not None:

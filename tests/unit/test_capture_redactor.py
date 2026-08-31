@@ -6,15 +6,15 @@ import json
 import pytest
 
 from app.capture.redactor import (
-    redact_request_messages,
-    redact_response_content,
-    redact_request_parameters,
-    redact_reasoning_content,
-    redact_tool_results,
-    redact_tool_calls,
-    redact_image_blocks,
-    redact_source_ip,
     redact_authorization_header,
+    redact_image_blocks,
+    redact_reasoning_content,
+    redact_request_messages,
+    redact_request_parameters,
+    redact_response_content,
+    redact_source_ip,
+    redact_tool_calls,
+    redact_tool_results,
     scan_for_secrets,
 )
 
