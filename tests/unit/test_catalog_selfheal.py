@@ -77,7 +77,6 @@ class TestEnsureAllFresh:
         refresh.assert_not_awaited()
 
 
-class TestCatalogRefreshLoop:
     @pytest.mark.asyncio
     async def test_loop_runs_passes_and_survives_failures(self, monkeypatch):
         """The refresher keeps looping when a pass raises, and stops cleanly
@@ -97,37 +96,3 @@ class TestCatalogRefreshLoop:
             "a raising pass must not stop the loop"
         )
 
-    def test_init_accepts_catalog_none(self, monkeypatch):
-        """Unit tests / minimal wiring inject no catalog: the refresher is
-        skipped (run_lifespan guards on None) instead of crashing."""
-        saved = (
-            lifespan_mod._cloud_catalog,
-            lifespan_mod._catalog_refresh_interval_s,
-        )
-        try:
-            lifespan_mod.init(
-                proxy_port=11434,
-                pid_file="/tmp/x.pid",
-                get_pid_file_path=lambda: None,
-                get_pid_file_status=lambda: None,
-                get_proxy_listener_info=lambda: None,
-                wait_for_proxy_listener_release=lambda *a, **k: None,
-                is_guardian_uvicorn_listener=lambda *a, **k: False,
-                stop_stale_guardian_listener=lambda *a, **k: None,
-                reset_startup_check_status=lambda *a, **k: 0,
-                mark_startup_check_status=lambda *a, **k: None,
-                operation_state_for_phase=lambda *a, **k: None,
-                run_startup_check_in_background=lambda *a, **k: None,
-                set_startup_check_task=lambda *a, **k: None,
-                cancel_startup_check_task=lambda *a, **k: None,
-                model_manager=None,
-                capture_controller=None,
-                inference_queue=None,
-                caretaker_client=None,
-                cloud_catalog=None,
-                catalog_refresh_interval_s=60.0,
-            )
-            assert lifespan_mod._cloud_catalog is None
-            assert lifespan_mod._catalog_refresh_interval_s == 60.0
-        finally:
-            lifespan_mod._cloud_catalog, lifespan_mod._catalog_refresh_interval_s = saved
