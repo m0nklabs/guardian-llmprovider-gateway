@@ -4,15 +4,16 @@ Verify that all priority models can load and generate a prompt.
 Uses the Guardian proxy API for model switching — no direct llama-server management.
 This prevents the 'double llama' VRAM conflict.
 """
-import time
-import requests
 import json
 import os
 import sys
-import yaml
+import time
 
-from _auth import build_auth_headers, resolve_api_key
 import _paths  # noqa: F401  (adds repo root to sys.path)
+import requests
+import yaml
+from _auth import build_auth_headers, resolve_api_key
+
 from app.paths import local_models_file
 
 # Configuration
@@ -116,7 +117,7 @@ def test_model(model_name: str) -> dict:
                 content = msg.get("content", "")
                 reasoning = msg.get("reasoning_content", "")
                 print(f"    [DEBUG] content len={len(content)}, reasoning len={len(reasoning)}")
-                print(f"    [DEBUG] content repr: {repr(content[:200])}")
+                print(f"    [DEBUG] content repr: {content[:200]!r}")
                 # For thinking models, content might be empty but reasoning_content has the thinking
                 actual_content = content.strip()
                 if not actual_content and reasoning:

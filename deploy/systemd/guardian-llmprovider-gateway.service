@@ -4,23 +4,22 @@ After=network.target llama-server.service caretaker-llamacpp.service
 
 [Service]
 Type=simple
-User=flip
-# F7 cut-over: production runs from /home/flip/guardian-llmprovider-gateway
-# (the legacy /home/flip/llama_cpp_guardian is frozen — see
-# docs/IMPLEMENTATION_PLAN.md §F7).  The venv here is a symlink to the legacy
-# interpreter (same Python 3.14 runtime); .env, keys and data/ were staged
-# 2026-08-26.
-WorkingDirectory=/home/flip/guardian-llmprovider-gateway
+User=@RUN_USER@
+# Template: rendered by scripts/install.sh (@INSTALL_DIR@, @RUN_USER@ are
+# substituted at install time). See docs/INSTALL.md for the product install
+# path. Ports are product defaults (see the nginx configs): public API 11434,
+# TLS loopback 11435, plain loopback 11436, dashboard 11437.
+WorkingDirectory=@INSTALL_DIR@
 Environment=OLLAMA_URL=http://127.0.0.1:11440
-ExecStart=/home/flip/guardian-llmprovider-gateway/venv/bin/python3.14 -m app.main
+ExecStart=@INSTALL_DIR@/venv/bin/python3.14 -m app.main
 Restart=always
 RestartSec=3
 # Aliased to the legacy unit name so clients and operator muscle memory keep
-# working after the cut-over. Enable only after the legacy unit is stopped,
-# disabled AND its unit file moved aside (or masked): `systemctl enable` must
-# create the alias symlink at /etc/systemd/system/llama-guardian.service and
-# fails with "File exists" while the legacy unit file still exists there —
-# two units may not own the same alias.
+# working after a migration. Enable only after any previous unit owning the
+# alias (llama-guardian.service) is stopped, disabled AND its unit file moved
+# aside (or masked): `systemctl enable` must create the alias symlink at
+# /etc/systemd/system/llama-guardian.service and fails with "File exists"
+# while another unit file still owns that alias.
 
 [Install]
 WantedBy=default.target

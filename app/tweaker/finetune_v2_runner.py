@@ -13,12 +13,12 @@ import json
 import math
 import time
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import Lock
-from typing import Protocol, Sequence, cast
+from typing import Protocol, cast
 
 import httpx
 import yaml
@@ -37,15 +37,6 @@ from app.tweaker.finetune_v2_contracts import (
     unique_explicit_ngls,
     upward_ngl_retry_actions,
 )
-from app.tweaker.finetune_v2_telemetry import (
-    free_vram_delta_pct,
-    next_split_from_vram_balance,
-    read_backend_gpu_vram_snapshot,
-    read_current_tensor_split_arg,
-    read_gpu_vram_snapshot,
-    should_skip_coarse_split_shift,
-    two_gpu_free_mib,
-)
 from app.tweaker.finetune_v2_support import (
     apply_runtime_search_values,
     build_smoke_messages,
@@ -62,7 +53,15 @@ from app.tweaker.finetune_v2_support import (
     runtime_mode_uses_vision,
     smaller_split_step,
 )
-
+from app.tweaker.finetune_v2_telemetry import (
+    free_vram_delta_pct,
+    next_split_from_vram_balance,
+    read_backend_gpu_vram_snapshot,
+    read_current_tensor_split_arg,
+    read_gpu_vram_snapshot,
+    should_skip_coarse_split_shift,
+    two_gpu_free_mib,
+)
 
 DEFAULT_V2_RESULTS_FILE = "data/model_finetune_v2_results.json"
 CRITICAL_FINE_SPLIT_HEADROOM_MIB = 100.0

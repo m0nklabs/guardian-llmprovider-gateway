@@ -3,6 +3,7 @@ import os
 
 import _paths  # noqa: F401  (adds repo root to sys.path)
 from _paths import DOCS_DIR
+
 from app.paths import local_models_file
 
 BENCHMARK_FILE = DOCS_DIR / 'benchmark_results.json'

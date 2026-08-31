@@ -39,16 +39,16 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 # Make `app` importable when run as `python scripts/keanu_redact.py`.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.capture.redactor import (  # noqa: E402
+from app.capture.redactor import (
+    redact_reasoning_content,
     redact_request_messages,
     redact_request_parameters,
     redact_response_content,
-    redact_reasoning_content,
     redact_tool_calls,
     redact_tool_results,
 )
@@ -69,7 +69,7 @@ def _transform_media_blocks(content: Any, mode: str) -> Any:
     """Apply the --images policy to media reference blocks in a content list."""
     if not isinstance(content, list):
         return content
-    out: List[Any] = []
+    out: list[Any] = []
     for block in content:
         if not isinstance(block, dict) or block.get("type") not in MEDIA_REF_TYPES:
             out.append(block)
@@ -86,7 +86,7 @@ def _transform_media_blocks(content: Any, mode: str) -> Any:
     return out
 
 
-def _redact_messages(messages: Any, policies: Dict[str, str], images_mode: str) -> Any:
+def _redact_messages(messages: Any, policies: dict[str, str], images_mode: str) -> Any:
     if not isinstance(messages, list):
         return messages
     transformed = []
@@ -97,7 +97,7 @@ def _redact_messages(messages: Any, policies: Dict[str, str], images_mode: str) 
     return redact_request_messages(transformed, policies)
 
 
-def _redact_event(event: Dict[str, Any], policies: Dict[str, str], images_mode: str) -> Dict[str, Any]:
+def _redact_event(event: dict[str, Any], policies: dict[str, str], images_mode: str) -> dict[str, Any]:
     """Return a redacted copy of one raw WAL event."""
     out = dict(event)
     et = out.get("event_type")
@@ -136,7 +136,7 @@ def _iter_input_events(path: Path) -> Any:
     """
     from app.capture.gzip_reader import iter_events
 
-    files: List[Path] = []
+    files: list[Path] = []
     if path.is_dir():
         files = sorted(path.glob("*.jsonl*"))
     elif path.exists():

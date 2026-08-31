@@ -5,9 +5,9 @@ Does not require full app context.
 """
 
 import argparse
-import sys
 import json
 import secrets
+import sys
 import time
 from pathlib import Path
 

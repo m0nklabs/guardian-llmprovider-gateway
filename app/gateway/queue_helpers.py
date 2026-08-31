@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any
 
 from fastapi import HTTPException, Request
 from starlette.status import HTTP_401_UNAUTHORIZED
@@ -49,7 +50,7 @@ class GuardianRequestCancelled(Exception):
 # ── Public functions ─────────────────────────────────────────────────
 
 
-def queue_headers(request_id: str, queue_wait_ms: float) -> Dict[str, str]:
+def queue_headers(request_id: str, queue_wait_ms: float) -> dict[str, str]:
     return {
         "X-Request-Id": request_id,
         "X-Queue-Wait-Ms": str(int(queue_wait_ms)),
@@ -68,7 +69,7 @@ def request_cancel_http_exception(request_id: str, reason: str) -> HTTPException
     )
 
 
-async def stop_background_task(task: Optional[asyncio.Task]) -> None:
+async def stop_background_task(task: asyncio.Task | None) -> None:
     """Cancel and await a background task without leaking cancellation noise."""
     if task is None:
         return
@@ -163,7 +164,7 @@ async def begin_queued_request(request: Request, client_id: str, model: str) -> 
 async def await_or_cancel_request(
     operation_task: asyncio.Task,
     request_id: str,
-    cleanup: Optional[Callable[[], Awaitable[None]]] = None,
+    cleanup: Callable[[], Awaitable[None]] | None = None,
 ) -> Any:
     """Wait for backend work to finish, but abort promptly if the tracked request is cancelled."""
     cancel_event = _inference_queue.get_cancel_event(request_id)

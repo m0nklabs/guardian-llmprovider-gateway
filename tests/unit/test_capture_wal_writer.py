@@ -19,7 +19,7 @@ from unittest.mock import patch
 import pytest
 
 from app.capture.config import CaptureConfig
-from app.capture.sink import CaptureSink, CaptureEvent
+from app.capture.sink import CaptureEvent, CaptureSink
 from app.capture.wal_writer import (
     ACTIVE_FILENAME,
     LEGACY_ACTIVE_FILENAME,

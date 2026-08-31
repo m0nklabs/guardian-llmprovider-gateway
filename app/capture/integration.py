@@ -24,20 +24,20 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from app.capture.config import CaptureConfig, load_capture_config
+from app.capture.media import extract_media_from_messages
+from app.capture.policy import PolicyResult, evaluate_capture_policy
 from app.capture.schema import (
     BuildContext,
-    build_request_received_event,
+    build_request_cancelled_event,
     build_request_completed_event,
     build_request_failed_event,
-    build_request_cancelled_event,
+    build_request_received_event,
     compute_client_ref,
 )
-from app.capture.policy import PolicyResult, evaluate_capture_policy
-from app.capture.media import extract_media_from_messages
-from app.capture.sink import CaptureSink, CaptureEvent
+from app.capture.sink import CaptureEvent, CaptureSink
 from app.capture.wal_writer import CaptureWALWriter
 
 logger = logging.getLogger("Guardian.Capture.Integration")
@@ -60,17 +60,17 @@ class CaptureController:
         self._sink: CaptureSink = CaptureSink(
             max_pending_events=self._config.max_pending_events,
         )
-        self._writer: Optional[CaptureWALWriter] = None
+        self._writer: CaptureWALWriter | None = None
         self._writer_started: bool = False
         # Per-request caller-origin registry (request_id → identity fields
         # captured from the configured inbound request headers).  Populated by
         # :meth:`maybe_capture_request_received` and consumed by the terminal
         # event builders so the identity is present on ALL events of a request
         # regardless of which call site built the BuildContext.
-        self._request_origin: Dict[str, Dict[str, str]] = {}
+        self._request_origin: dict[str, dict[str, str]] = {}
 
     @property
-    def _origin_registry(self) -> Dict[str, Dict[str, str]]:
+    def _origin_registry(self) -> dict[str, dict[str, str]]:
         """Lazily-created origin registry (tolerates __new__-constructed instances)."""
         registry = getattr(self, "_request_origin", None)
         if registry is None:
@@ -87,7 +87,7 @@ class CaptureController:
         return self._sink
 
     @property
-    def writer(self) -> Optional[CaptureWALWriter]:
+    def writer(self) -> CaptureWALWriter | None:
         return self._writer
 
     async def reload_config(self) -> None:
@@ -125,7 +125,7 @@ class CaptureController:
             writer_needs_rebuild,
         )
 
-    def initialize_writer(self, sink: Optional[CaptureSink] = None) -> None:
+    def initialize_writer(self, sink: CaptureSink | None = None) -> None:
         """Create the WAL writer (not started — call start_writer to begin)."""
         write_sink = sink or self._sink
         if self._config.is_active:
@@ -155,7 +155,7 @@ class CaptureController:
 
     # ── Event dispatch (all fail-open) ─────────────────────────────────
 
-    def _dispatch(self, event: Dict[str, Any]) -> None:
+    def _dispatch(self, event: dict[str, Any]) -> None:
         """Enqueue an event to the sink — never raises."""
         try:
             if not self._config.enabled:
@@ -171,9 +171,9 @@ class CaptureController:
         self,
         request_id: str,
         *,
-        caller_request_id: Optional[str],
-        app_title: Optional[str],
-        app_referer: Optional[str],
+        caller_request_id: str | None,
+        app_title: str | None,
+        app_referer: str | None,
     ) -> None:
         """Record the caller-origin identity for a captured request (bounded)."""
         identity = {
@@ -218,15 +218,15 @@ class CaptureController:
         endpoint: str,
         ingress_protocol: str,
         route_type: str,
-        requested_model: Optional[str],
-        client_fingerprint: Optional[str],
+        requested_model: str | None,
+        client_fingerprint: str | None,
         *,
-        resolved_model: Optional[str] = None,
+        resolved_model: str | None = None,
         grammar_present: bool = False,
         response_format_present: bool = False,
-        caller_request_id: Optional[str] = None,
-        app_title: Optional[str] = None,
-        app_referer: Optional[str] = None,
+        caller_request_id: str | None = None,
+        app_title: str | None = None,
+        app_referer: str | None = None,
     ) -> BuildContext:
         """Build a BuildContext from request metadata.
 
@@ -255,22 +255,22 @@ class CaptureController:
         self,
         request_id: str,
         *,
-        client_fingerprint: Optional[str],
+        client_fingerprint: str | None,
         endpoint: str,
         ingress_protocol: str,
         route_type: str,
-        requested_model: Optional[str],
-        resolved_model: Optional[str] = None,
-        request_messages: Optional[List[Dict[str, Any]]] = None,
-        request_parameters: Optional[Dict[str, Any]] = None,
-        queue_wait_ms: Optional[float] = None,
+        requested_model: str | None,
+        resolved_model: str | None = None,
+        request_messages: list[dict[str, Any]] | None = None,
+        request_parameters: dict[str, Any] | None = None,
+        queue_wait_ms: float | None = None,
         grammar_present: bool = False,
         response_format_present: bool = False,
-        caller_request_id: Optional[str] = None,
-        app_title: Optional[str] = None,
-        app_referer: Optional[str] = None,
+        caller_request_id: str | None = None,
+        app_title: str | None = None,
+        app_referer: str | None = None,
         sequence: int = 0,
-    ) -> Optional[PolicyResult]:
+    ) -> PolicyResult | None:
         """Evaluate policy and, if approved, dispatch a request_received event.
 
         Returns the PolicyResult so the caller can short-circuit further
@@ -346,29 +346,29 @@ class CaptureController:
         self,
         ctx: BuildContext,
         *,
-        policy_result: Optional[PolicyResult] = None,
-        client_fingerprint: Optional[str] = None,
-        response_content: Optional[str] = None,
-        tool_calls: Optional[List[Dict[str, Any]]] = None,
-        tool_results: Optional[List[Dict[str, Any]]] = None,
-        reasoning_content: Optional[str] = None,
-        finish_reason: Optional[str] = None,
-        native_finish_reason: Optional[str] = None,
-        prompt_tokens: Optional[int] = None,
-        completion_tokens: Optional[int] = None,
-        completion_tokens_details: Optional[Dict[str, Any]] = None,
-        native_tokens_reasoning: Optional[int] = None,
-        native_tokens_cached: Optional[int] = None,
-        cost: Optional[float] = None,
-        provider_name: Optional[str] = None,
-        queue_wait_ms: Optional[float] = None,
-        duration_ms: Optional[float] = None,
-        http_status: Optional[int] = None,
-        streamed: Optional[bool] = None,
-        streamed_ingress: Optional[bool] = None,
-        streamed_upstream: Optional[bool] = None,
-        incomplete: Optional[bool] = None,
-        attempts: Optional[int] = None,
+        policy_result: PolicyResult | None = None,
+        client_fingerprint: str | None = None,
+        response_content: str | None = None,
+        tool_calls: list[dict[str, Any]] | None = None,
+        tool_results: list[dict[str, Any]] | None = None,
+        reasoning_content: str | None = None,
+        finish_reason: str | None = None,
+        native_finish_reason: str | None = None,
+        prompt_tokens: int | None = None,
+        completion_tokens: int | None = None,
+        completion_tokens_details: dict[str, Any] | None = None,
+        native_tokens_reasoning: int | None = None,
+        native_tokens_cached: int | None = None,
+        cost: float | None = None,
+        provider_name: str | None = None,
+        queue_wait_ms: float | None = None,
+        duration_ms: float | None = None,
+        http_status: int | None = None,
+        streamed: bool | None = None,
+        streamed_ingress: bool | None = None,
+        streamed_upstream: bool | None = None,
+        incomplete: bool | None = None,
+        attempts: int | None = None,
         sequence: int = 1,
     ) -> None:
         """Dispatch a request_completed event (fail-open)."""
@@ -414,13 +414,13 @@ class CaptureController:
         self,
         ctx: BuildContext,
         *,
-        policy_result: Optional[PolicyResult] = None,
+        policy_result: PolicyResult | None = None,
         error_code: str,
-        http_status: Optional[int] = None,
-        sanitized_message: Optional[str] = None,
-        queue_wait_ms: Optional[float] = None,
-        duration_ms: Optional[float] = None,
-        attempts: Optional[int] = None,
+        http_status: int | None = None,
+        sanitized_message: str | None = None,
+        queue_wait_ms: float | None = None,
+        duration_ms: float | None = None,
+        attempts: int | None = None,
         sequence: int = 1,
     ) -> None:
         """Dispatch a request_failed event (fail-open)."""
@@ -449,11 +449,11 @@ class CaptureController:
         self,
         ctx: BuildContext,
         *,
-        policy_result: Optional[PolicyResult] = None,
+        policy_result: PolicyResult | None = None,
         cancel_reason: str,
-        queue_wait_ms: Optional[float] = None,
-        duration_ms: Optional[float] = None,
-        attempts: Optional[int] = None,
+        queue_wait_ms: float | None = None,
+        duration_ms: float | None = None,
+        attempts: int | None = None,
         sequence: int = 1,
     ) -> None:
         """Dispatch a request_cancelled event (fail-open)."""
@@ -485,7 +485,7 @@ def get_capture_controller() -> CaptureController:
     return capture_controller
 
 
-def get_capture_sink_snapshot() -> Dict[str, Any]:
+def get_capture_sink_snapshot() -> dict[str, Any]:
     """Return a metrics snapshot from the capture sink (for /metrics)."""
     try:
         controller = get_capture_controller()

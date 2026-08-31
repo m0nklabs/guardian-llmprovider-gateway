@@ -181,7 +181,7 @@ class TestGzipReaderRoundTripWithWriter:
     @pytest.mark.asyncio
     async def test_writer_clean_stop_then_read(self, tmp_path, monkeypatch):
         from app.capture.config import CaptureConfig
-        from app.capture.sink import CaptureSink, CaptureEvent
+        from app.capture.sink import CaptureEvent, CaptureSink
         from app.capture.wal_writer import ACTIVE_FILENAME, CaptureWALWriter
 
         cfg = CaptureConfig(
@@ -205,7 +205,7 @@ class TestGzipReaderRoundTripWithWriter:
     @pytest.mark.asyncio
     async def test_writer_rotate_then_read_completed(self, tmp_path):
         from app.capture.config import CaptureConfig
-        from app.capture.sink import CaptureSink, CaptureEvent
+        from app.capture.sink import CaptureEvent, CaptureSink
         from app.capture.wal_writer import CaptureWALWriter
 
         cfg = CaptureConfig(

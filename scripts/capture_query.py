@@ -17,10 +17,10 @@ import json
 import re
 import sys
 import zlib
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Iterator
 
 #: Default capture root, resolved relative to the current working directory.
 DEFAULT_ROOT = "data/capture"

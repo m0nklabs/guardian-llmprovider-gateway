@@ -11,13 +11,14 @@ Default posture: **disabled**.  The global ``enabled`` switch must be set to
 
 from __future__ import annotations
 
+import logging
 import os
 import uuid
-import yaml
-import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
+
+import yaml
 
 from app.paths import global_settings_file
 
@@ -34,7 +35,7 @@ DEFAULT_MAX_FILE_AGE_SECONDS = 3600  # 1 hour
 #: Inbound request headers consulted for caller correlation (C6).  Lowercase
 #: header names; the FIRST header present on the inbound request is stored as
 #: ``caller_request_id`` on every capture event of that request.
-DEFAULT_CORRELATION_HEADERS: List[str] = ["x-request-id"]
+DEFAULT_CORRELATION_HEADERS: list[str] = ["x-request-id"]
 
 #: Bounds for the correlation header configuration.
 MAX_CORRELATION_HEADERS = 8
@@ -86,13 +87,13 @@ class CaptureConfig:
 
     #: Explicit cloud models permitted for capture (e.g. ["openai/gpt-4o", "anthropic/claude-3.5-sonnet"]).
     #: Matched exactly, case-sensitive.
-    allowed_cloud_models: List[str] = field(default_factory=list)
+    allowed_cloud_models: list[str] = field(default_factory=list)
 
     #: Namespace prefixes that permit capture of any model under them
     #: (e.g. ["openai/", "anthropic/", "nvidia/"]).  Checked when
     #: ``cloud_allowlist_enabled`` is True and the model is not in
     #: ``allowed_cloud_models``.
-    cloud_model_prefixes: List[str] = field(default_factory=lambda: [
+    cloud_model_prefixes: list[str] = field(default_factory=lambda: [
         "openai/", "anthropic/", "google/", "meta-llama/", "deepseek/",
         "qwen/", "mistralai/", "z-ai/", "minimax/", "poolside/",
         "moonshotai/", "nvidia/",
@@ -103,7 +104,7 @@ class CaptureConfig:
     per_client_opt_in: bool = True
 
     #: List of allowed HMAC-SHA-256 client_ref values (for per-client opt-in).
-    allowed_client_refs: List[str] = field(default_factory=list)
+    allowed_client_refs: list[str] = field(default_factory=list)
 
     #: Policy for system prompt fields: "strip" | "capture"
     system_prompts: str = "strip"
@@ -160,7 +161,7 @@ class CaptureConfig:
     #: correlation.  The first header present on the request is captured as
     #: ``caller_request_id`` (capped at 256 chars) on all events of that
     #: request.  No header content beyond this list is ever captured.
-    correlation_headers: List[str] = field(
+    correlation_headers: list[str] = field(
         default_factory=lambda: list(DEFAULT_CORRELATION_HEADERS)
     )
 
@@ -266,7 +267,7 @@ class CaptureConfig:
             return self.cloud_capture
         return False
 
-    def should_capture_client(self, client_ref: Optional[str]) -> bool:
+    def should_capture_client(self, client_ref: str | None) -> bool:
         """Return True when the client is allowed to be captured.
 
         When ``per_client_opt_in`` is False (and global is enabled), all
@@ -291,7 +292,7 @@ class CaptureConfig:
         return False
 
 
-def _normalize_correlation_headers(raw: Any) -> List[str]:
+def _normalize_correlation_headers(raw: Any) -> list[str]:
     """Normalize the correlation_headers YAML value to lowercase header names.
 
     Non-string/blank entries are dropped silently (configuration tolerance —
@@ -312,7 +313,7 @@ def _normalize_correlation_headers(raw: Any) -> List[str]:
         # silently replaced by the default, making the echo impossible to
         # disable via configuration).
         return []
-    normalized: List[str] = []
+    normalized: list[str] = []
     for entry in raw:
         if not isinstance(entry, str):
             continue
@@ -322,7 +323,7 @@ def _normalize_correlation_headers(raw: Any) -> List[str]:
     return normalized or list(DEFAULT_CORRELATION_HEADERS)
 
 
-def load_capture_config(settings_path: Optional[Path] = None) -> CaptureConfig:
+def load_capture_config(settings_path: Path | None = None) -> CaptureConfig:
     """Load capture configuration from global.settings.yaml with env-var overrides.
 
     Returns a default (disabled) config if the section is absent or the file
@@ -331,7 +332,7 @@ def load_capture_config(settings_path: Optional[Path] = None) -> CaptureConfig:
     if settings_path is None:
         settings_path = global_settings_file()
 
-    capture_section: Dict[str, Any] = {}
+    capture_section: dict[str, Any] = {}
     try:
         if settings_path.exists():
             with open(settings_path, "r") as f:

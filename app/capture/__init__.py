@@ -14,58 +14,58 @@ Design invariants (never violated):
 """
 
 from app.capture.config import CaptureConfig, load_capture_config
+from app.capture.policy import PolicyResult, evaluate_capture_policy
+from app.capture.redactor import (
+    anthropic_messages_to_openai,
+    redact_image_blocks,
+    redact_reasoning_content,
+    redact_request_messages,
+    redact_request_parameters,
+    redact_response_content,
+    redact_tool_calls,
+    redact_tool_results,
+    scan_for_secrets,
+)
 from app.capture.schema import (
     SCHEMA_NAME,
     SCHEMA_VERSION,
-    compute_event_id,
-    compute_client_ref,
     BuildContext,
-    build_request_received_event,
+    build_request_cancelled_event,
     build_request_completed_event,
     build_request_failed_event,
-    build_request_cancelled_event,
+    build_request_received_event,
+    compute_client_ref,
+    compute_event_id,
 )
-from app.capture.policy import PolicyResult, evaluate_capture_policy
-from app.capture.redactor import (
-    redact_request_messages,
-    redact_response_content,
-    redact_request_parameters,
-    redact_reasoning_content,
-    redact_tool_results,
-    redact_tool_calls,
-    redact_image_blocks,
-    anthropic_messages_to_openai,
-    scan_for_secrets,
-)
+from app.capture.sink import CaptureEvent, CaptureSink
 from app.capture.stream_assembler import StreamResponseAssembler
-from app.capture.sink import CaptureSink, CaptureEvent
 from app.capture.wal_writer import CaptureWALWriter
 
 __all__ = [
     "SCHEMA_NAME",
     "SCHEMA_VERSION",
-    "CaptureConfig",
-    "load_capture_config",
-    "PolicyResult",
-    "evaluate_capture_policy",
-    "compute_event_id",
-    "compute_client_ref",
     "BuildContext",
-    "build_request_received_event",
+    "CaptureConfig",
+    "CaptureEvent",
+    "CaptureSink",
+    "CaptureWALWriter",
+    "PolicyResult",
+    "StreamResponseAssembler",
+    "anthropic_messages_to_openai",
+    "build_request_cancelled_event",
     "build_request_completed_event",
     "build_request_failed_event",
-    "build_request_cancelled_event",
-    "redact_request_messages",
-    "redact_response_content",
-    "redact_request_parameters",
-    "redact_reasoning_content",
-    "redact_tool_results",
-    "redact_tool_calls",
+    "build_request_received_event",
+    "compute_client_ref",
+    "compute_event_id",
+    "evaluate_capture_policy",
+    "load_capture_config",
     "redact_image_blocks",
-    "anthropic_messages_to_openai",
-    "StreamResponseAssembler",
-    "CaptureSink",
-    "CaptureEvent",
-    "CaptureWALWriter",
+    "redact_reasoning_content",
+    "redact_request_messages",
+    "redact_request_parameters",
+    "redact_response_content",
+    "redact_tool_calls",
+    "redact_tool_results",
     "scan_for_secrets",
 ]

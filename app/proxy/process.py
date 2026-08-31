@@ -10,15 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import logging
 import os
 import re
 import signal
 import subprocess
 import time
 from pathlib import Path
-from typing import Dict, Optional
-
-import logging
 
 logger = logging.getLogger("Guardian")
 
@@ -39,8 +37,8 @@ def init(*, model_manager, model_switch_lock, pid_file, proxy_port) -> None:
     _proxy_port = proxy_port
 
 
-_startup_check_task: Optional[asyncio.Task] = None
-_startup_check_status: Dict[str, Optional[object]] = {
+_startup_check_task: asyncio.Task | None = None
+_startup_check_status: dict[str, object | None] = {
     "state": "idle",
     "phase": "idle",
     "source": None,
@@ -58,7 +56,7 @@ def get_pid_file_path() -> Path:
     return Path(__file__).parent.parent.parent / _pid_file
 
 
-def describe_process(pid: int) -> Optional[str]:
+def describe_process(pid: int) -> str | None:
     try:
         result = subprocess.run(
             ["ps", "-p", str(pid), "-o", "args="],
@@ -73,7 +71,7 @@ def describe_process(pid: int) -> Optional[str]:
     return None
 
 
-def get_process_cgroup(pid: int) -> Optional[str]:
+def get_process_cgroup(pid: int) -> str | None:
     try:
         lines = Path(f"/proc/{pid}/cgroup").read_text().splitlines()
     except Exception:
@@ -86,7 +84,7 @@ def get_process_cgroup(pid: int) -> Optional[str]:
     return None
 
 
-def get_proxy_listener_info(port: int = _proxy_port) -> Optional[Dict[str, Optional[object]]]:
+def get_proxy_listener_info(port: int = _proxy_port) -> dict[str, object | None] | None:
     try:
         result = subprocess.run(
             ["ss", "-ltnp", f"( sport = :{port} )"],
@@ -125,9 +123,9 @@ def get_proxy_listener_info(port: int = _proxy_port) -> Optional[Dict[str, Optio
     return None
 
 
-def get_pid_file_status() -> Dict[str, Optional[object]]:
+def get_pid_file_status() -> dict[str, object | None]:
     pid_path = get_pid_file_path()
-    status: Dict[str, Optional[object]] = {
+    status: dict[str, object | None] = {
         "path": str(pid_path),
         "exists": pid_path.exists(),
         "pid": None,
@@ -170,7 +168,7 @@ def operation_state_for_phase(phase: str) -> str:
     return "running"
 
 
-def startup_state_is_in_progress(state: Optional[str]) -> bool:
+def startup_state_is_in_progress(state: str | None) -> bool:
     return state in {"pending", "running", "checking", "switching"}
 
 
@@ -178,9 +176,9 @@ def reset_startup_check_status(
     *,
     source: str,
     phase: str,
-    target_model: Optional[str],
-    requested_model: Optional[str] = None,
-    owner: Optional[str] = None,
+    target_model: str | None,
+    requested_model: str | None = None,
+    owner: str | None = None,
 ) -> int:
     generation = int(_startup_check_status.get("generation", 0)) + 1
     _startup_check_status.update(
@@ -203,15 +201,15 @@ def reset_startup_check_status(
 
 def mark_startup_check_status(
     state: str,
-    error: Optional[str] = None,
+    error: str | None = None,
     *,
-    generation: Optional[int] = None,
-    phase: Optional[str] = None,
-    source: Optional[str] = None,
-    owner: Optional[str] = None,
-    target_model: Optional[str] = None,
-    requested_model: Optional[str] = None,
-    effective_model: Optional[str] = None,
+    generation: int | None = None,
+    phase: str | None = None,
+    source: str | None = None,
+    owner: str | None = None,
+    target_model: str | None = None,
+    requested_model: str | None = None,
+    effective_model: str | None = None,
 ) -> None:
     if generation is not None and generation != _startup_check_status.get("generation"):
         return
@@ -242,7 +240,7 @@ def mark_startup_check_status(
     _startup_check_status["error"] = error
 
 
-def get_startup_check_status() -> Dict[str, Optional[object]]:
+def get_startup_check_status() -> dict[str, object | None]:
     snapshot = dict(_startup_check_status)
     snapshot["task_active"] = _startup_check_task is not None and not _startup_check_task.done()
     return snapshot
@@ -252,9 +250,9 @@ async def run_guardian_operation(
     *,
     source: str,
     phase: str,
-    target_model: Optional[str],
-    requested_model: Optional[str],
-    owner: Optional[str],
+    target_model: str | None,
+    requested_model: str | None,
+    owner: str | None,
     operation,
     generation: int,
 ):
@@ -311,7 +309,7 @@ async def run_guardian_operation(
     return result
 
 
-async def run_startup_check_in_background(generation: int, target_model: Optional[str]) -> None:
+async def run_startup_check_in_background(generation: int, target_model: str | None) -> None:
     try:
         async with _model_switch_lock:
             await run_guardian_operation(
@@ -329,7 +327,7 @@ async def run_startup_check_in_background(generation: int, target_model: Optiona
         logger.info("✅ Startup check completed in background")
 
 
-def is_guardian_uvicorn_listener(listener: Optional[Dict[str, Optional[object]]]) -> bool:
+def is_guardian_uvicorn_listener(listener: dict[str, object | None] | None) -> bool:
     if not listener:
         return False
     command = str(listener.get("command") or "")
@@ -343,7 +341,7 @@ def is_guardian_uvicorn_listener(listener: Optional[Dict[str, Optional[object]]]
 
 
 async def stop_stale_guardian_listener(
-    listener: Optional[Dict[str, Optional[object]]], timeout: float = 3.0
+    listener: dict[str, object | None] | None, timeout: float = 3.0
 ) -> bool:
     if not is_guardian_uvicorn_listener(listener):
         return False
@@ -377,7 +375,7 @@ async def stop_stale_guardian_listener(
 
 
 
-def set_startup_check_task(task: Optional[asyncio.Task]) -> None:
+def set_startup_check_task(task: asyncio.Task | None) -> None:
     """Bind the background startup-check task (used by lifespan)."""
     global _startup_check_task
     _startup_check_task = task

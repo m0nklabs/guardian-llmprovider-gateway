@@ -9,9 +9,9 @@ was therefore captured as a body-less record (0/0), which hid ~300-500k
 chars of upstream reasoning per runaway generation.
 """
 
+import json
 from types import SimpleNamespace
 
-import json
 import pytest
 
 from app.gateway import capture_dispatch

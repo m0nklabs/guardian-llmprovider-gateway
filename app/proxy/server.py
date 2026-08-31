@@ -1,34 +1,20 @@
 import asyncio
-from contextlib import asynccontextmanager
 import logging
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Any, Optional
 
 import httpx
-from fastapi import FastAPI, Request, HTTPException, Response, Depends
-from fastapi.responses import JSONResponse
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
-from app.paths import LLAMA_SLOTS_DIR
-from app.engine.manager import ModelManager, ModelLoadError
-from app.proxy.auth import get_request_auth_context, verify_api_key, generate_api_key, load_api_keys, _token_fingerprint
-from app.proxy.providers import CloudProvider, ProviderRegistry
-from app.proxy.cloud_catalog import CloudModelCatalog
-from app.proxy.failover import FailoverRegistry, ProviderHealthTracker, FAILURE_THRESHOLD, COOLDOWN_SECONDS, RATE_LIMIT_COOLDOWN_SECONDS
-from app.proxy.ratelimit import RateLimitConfig, RateLimitRetryManager
-from app.proxy.anthropic_bridge import (
-    translate_openai_error_to_anthropic,
-    translate_openai_response_to_anthropic,
-    translate_openai_stream_to_anthropic,
-)
-from app.proxy.queue import InferenceQueue
-from app.proxy.metrics import (
-    update_queue_metrics,
-    update_gpu_metrics,
-    update_system_metrics,
-    update_capture_metrics,
-    get_metrics_output,
-)
+# ── Cloud inference helpers (Phase 5 extraction) ────────────────────
+import app.cloud_inference as _cloud_inf
+
+# ── Configuration loading (Phase 5 extraction) ───────────────────────
+from app import config_loader as _config_loader
 
 # ── Capture subsystem (opt-in, fail-open, disabled by default) ───────
 from app.capture.integration import (
@@ -36,54 +22,40 @@ from app.capture.integration import (
     get_capture_controller,
     get_capture_sink_snapshot,
 )
-from app.capture.schema import BuildContext
 from app.capture.policy import PolicyResult
+from app.capture.schema import BuildContext
 from app.capture.stream_assembler import StreamResponseAssembler
-
-# ── Gateway helpers (Phase 5 extraction) ─────────────────────────────
-from app.gateway import context_metadata as _ctx_meta
-
-# ── F5 remote lifecycle execution (caretaker /ensure hotpath) ────────
-from app.gateway import caretaker_runtime as _caretaker_runtime
-
-# ── Cloud inference helpers (Phase 5 extraction) ────────────────────
-import app.cloud_inference as _cloud_inf
-
-# ── Cloud inference routing (Phase 5 extraction) ────────────────────
-from app.cloud_inference import routing as _cloud_routing
 
 # ── Cloud inference forwarding (Phase 5 extraction) ──────────────────
 from app.cloud_inference import forwarding as _cloud_forwarding
 
-# ── Local inference (Phase 5 extraction) ─────────────────────────────
-from app.local_inference import ollama as _local_ollama
-
-# ── Gateway capture dispatch (Phase 5 extraction) ────────────────────
-from app.gateway import capture_dispatch as _capture_dispatch
-
-# ── Gateway usage tracking (Phase 5 extraction) ──────────────────────
-from app.gateway import usage as _usage
-
-# ── Gateway normalization (Phase 5 extraction) ───────────────────────
-from app.gateway import normalization as _normalization
-
-# ── Gateway v1 routing (Phase 5 extraction) ─────────────────────────
-from app.gateway import routing as _gw_routing
-
-# ── Proxy process management (Phase 5 extraction) ───────────────────
-from app.proxy import process as _process
-
-# ── Local model helpers (Phase 5 extraction) ──────────────────────────
-from app.local_inference import models as _local_models
-
-# ── Model discovery (Phase 5 extraction) ─────────────────────────────
-from app.gateway import model_discovery as _model_discovery
+# ── Cloud inference routing (Phase 5 extraction) ────────────────────
+from app.cloud_inference import routing as _cloud_routing
+from app.engine.manager import ModelLoadError, ModelManager
 
 # ── Admin API (Phase 5 extraction) ────────────────────────────────────
 from app.gateway import admin_api as _admin_api
 
-# ── Proxy lifespan (Phase 5 extraction) ──────────────────────────────
-from app.proxy import lifespan as _lifespan
+# ── Gateway capture dispatch (Phase 5 extraction) ────────────────────
+from app.gateway import capture_dispatch as _capture_dispatch
+
+# ── F5 remote lifecycle execution (caretaker /ensure hotpath) ────────
+from app.gateway import caretaker_runtime as _caretaker_runtime
+
+# ── Gateway helpers (Phase 5 extraction) ─────────────────────────────
+from app.gateway import context_metadata as _ctx_meta
+
+# ── Model discovery (Phase 5 extraction) ─────────────────────────────
+from app.gateway import model_discovery as _model_discovery
+
+# ── Gateway normalization (Phase 5 extraction) ───────────────────────
+from app.gateway import normalization as _normalization
+
+# ── Gateway queue helpers (Phase 5 extraction) ──────────────────────
+from app.gateway import queue_helpers as _queue_helpers
+
+# ── Gateway v1 routing (Phase 5 extraction) ─────────────────────────
+from app.gateway import routing as _gw_routing
 
 # ── Session slots (Phase 5 extraction) ───────────────────────────────
 from app.gateway import sessions as _sessions
@@ -91,16 +63,60 @@ from app.gateway import sessions as _sessions
 # ── Gateway streaming helpers (Phase 5 extraction) ──────────────────
 from app.gateway import streaming as _streaming
 
-# ── Gateway queue helpers (Phase 5 extraction) ──────────────────────
-from app.gateway import queue_helpers as _queue_helpers
+# ── Gateway usage tracking (Phase 5 extraction) ──────────────────────
+from app.gateway import usage as _usage
+from app.gateway.caretaker_client import (
+    CaretakerError,
+    CaretakerUnavailable,
+    build_caretaker_client,
+)
 
-# ── Configuration loading (Phase 5 extraction) ───────────────────────
-from app import config_loader as _config_loader
+# ── Local model helpers (Phase 5 extraction) ──────────────────────────
+from app.local_inference import models as _local_models
 
-from app.gateway.caretaker_client import CaretakerError, CaretakerUnavailable, build_caretaker_client
+# ── Local inference (Phase 5 extraction) ─────────────────────────────
+from app.local_inference import ollama as _local_ollama
+from app.paths import LLAMA_SLOTS_DIR
+
+# ── Proxy lifespan (Phase 5 extraction) ──────────────────────────────
+from app.proxy import lifespan as _lifespan
+
+# ── Proxy process management (Phase 5 extraction) ───────────────────
+from app.proxy import process as _process
+from app.proxy.anthropic_bridge import (
+    translate_openai_error_to_anthropic,
+    translate_openai_response_to_anthropic,
+    translate_openai_stream_to_anthropic,
+)
+from app.proxy.auth import (
+    _token_fingerprint,
+    generate_api_key,
+    get_request_auth_context,
+    load_api_keys,
+    verify_api_key,
+)
+from app.proxy.cloud_catalog import CloudModelCatalog
+from app.proxy.failover import (
+    COOLDOWN_SECONDS,
+    FAILURE_THRESHOLD,
+    RATE_LIMIT_COOLDOWN_SECONDS,
+    FailoverRegistry,
+    ProviderHealthTracker,
+)
+from app.proxy.metrics import (
+    get_metrics_output,
+    update_capture_metrics,
+    update_gpu_metrics,
+    update_queue_metrics,
+    update_system_metrics,
+)
+from app.proxy.providers import CloudProvider, ProviderRegistry
+from app.proxy.queue import InferenceQueue
+from app.proxy.ratelimit import RateLimitConfig, RateLimitRetryManager
 
 # ── Proxy state container (Phase 5 extraction) ───────────────────────
 from app.proxy.state import State as _State
+
 
 def load_config() -> dict:
     """Load configuration from settings.yaml with sensible defaults (Phase 5: delegated)."""
@@ -146,7 +162,7 @@ def _load_vram_limit() -> int:
 SAFE_VRAM_LIMIT_MB = _load_vram_limit()
 
 
-def _load_stream_heartbeat_interval_s() -> Optional[float]:
+def _load_stream_heartbeat_interval_s() -> float | None:
     """Return the configured SSE heartbeat interval, or None when disabled (Phase 5: delegated)."""
     return _config_loader.load_stream_heartbeat_interval_s(CONFIG)
 
@@ -175,7 +191,7 @@ logger = logging.getLogger("Guardian")
 
 PID_FILE = str(CONFIG.get("proxy", {}).get("pid_file", "guardian.pid"))
 PROXY_PORT = int(CONFIG.get("proxy", {}).get("port", 11434))
-_VISION_PROBE_IMAGE_DATA_URL: Optional[str] = None
+_VISION_PROBE_IMAGE_DATA_URL: str | None = None
 
 
 def _get_pid_file_path() -> Path:
@@ -183,22 +199,22 @@ def _get_pid_file_path() -> Path:
     return _process.get_pid_file_path()
 
 
-def _describe_process(pid: int) -> Optional[str]:
+def _describe_process(pid: int) -> str | None:
     """Describe a process via ps (Phase 5: delegated)."""
     return _process.describe_process(pid)
 
 
-def _get_process_cgroup(pid: int) -> Optional[str]:
+def _get_process_cgroup(pid: int) -> str | None:
     """Return the cgroup slice for a pid (Phase 5: delegated)."""
     return _process.get_process_cgroup(pid)
 
 
-def _get_proxy_listener_info(port: int = PROXY_PORT) -> Optional[Dict[str, Optional[object]]]:
+def _get_proxy_listener_info(port: int = PROXY_PORT) -> dict[str, object | None] | None:
     """Inspect the process listening on the proxy port (Phase 5: delegated)."""
     return _process.get_proxy_listener_info(port=port)
 
 
-def _get_pid_file_status() -> Dict[str, Optional[object]]:
+def _get_pid_file_status() -> dict[str, object | None]:
     """Return pid file existence/alive status (Phase 5: delegated)."""
     return _process.get_pid_file_status()
 
@@ -208,13 +224,13 @@ async def _wait_for_proxy_listener_release(old_pid: int, timeout: float = 3.0) -
     return await _process.wait_for_proxy_listener_release(old_pid, timeout=timeout)
 
 
-def _is_guardian_uvicorn_listener(listener: Optional[Dict[str, Optional[object]]]) -> bool:
+def _is_guardian_uvicorn_listener(listener: dict[str, object | None] | None) -> bool:
     """Return whether a listener looks like this Guardian app (Phase 5: delegated)."""
     return _process.is_guardian_uvicorn_listener(listener)
 
 
 async def _stop_stale_guardian_listener(
-    listener: Optional[Dict[str, Optional[object]]], timeout: float = 3.0
+    listener: dict[str, object | None] | None, timeout: float = 3.0
 ) -> bool:
     """Terminate a stale Guardian listener before rebinding (Phase 5: delegated)."""
     return await _process.stop_stale_guardian_listener(listener, timeout=timeout)
@@ -225,7 +241,7 @@ def _operation_state_for_phase(phase: str) -> str:
     return _process.operation_state_for_phase(phase)
 
 
-def _startup_state_is_in_progress(state: Optional[str]) -> bool:
+def _startup_state_is_in_progress(state: str | None) -> bool:
     """Return whether a startup state is still in progress (Phase 5: delegated)."""
     return _process.startup_state_is_in_progress(state)
 
@@ -236,10 +252,10 @@ def _startup_state_is_in_progress(state: Optional[str]) -> bool:
 STREAM_TIMEOUT_EXTENSION_STEPS = _streaming.STREAM_TIMEOUT_EXTENSION_STEPS
 STREAM_LOOP_REPEAT_THRESHOLD = _streaming.STREAM_LOOP_REPEAT_THRESHOLD
 
-def _extract_assistant_message_text(message: Dict[str, object]) -> str:
+def _extract_assistant_message_text(message: dict[str, object]) -> str:
     return _streaming.extract_assistant_message_text(message)
 
-def _extract_assistant_delta_text(delta: Dict[str, object]) -> str:
+def _extract_assistant_delta_text(delta: dict[str, object]) -> str:
     return _streaming.extract_assistant_delta_text(delta)
 
 def _normalize_stream_progress_text(text: object) -> str:
@@ -253,7 +269,7 @@ StreamProgressWatchdog = _streaming.StreamProgressWatchdog
 def _build_stream_timeout(base_timeout_s: float) -> httpx.Timeout:
     return _streaming.build_stream_timeout(base_timeout_s)
 
-def _build_sse_keepalive_comment(request_id: Optional[str] = None) -> str:
+def _build_sse_keepalive_comment(request_id: str | None = None) -> str:
     return _streaming.build_sse_keepalive_comment(request_id)
 
 def _enrich_anthropic_sse_line(line: str, *, input_tokens: int = 0, cache_read_tokens: int = 0) -> tuple[str, int, int]:
@@ -266,12 +282,12 @@ async def _iter_sse_lines_with_watchdog(
     response: httpx.Response,
     watchdog: StreamProgressWatchdog,
     *,
-    request_id: Optional[str] = None,
-    route: Optional[str] = None,
-    client_id: Optional[str] = None,
-    model_name: Optional[str] = None,
-    heartbeat_interval_s: Optional[float] = None,
-    cancel_event: Optional[asyncio.Event] = None,
+    request_id: str | None = None,
+    route: str | None = None,
+    client_id: str | None = None,
+    model_name: str | None = None,
+    heartbeat_interval_s: float | None = None,
+    cancel_event: asyncio.Event | None = None,
 ) -> AsyncIterator[str]:
     async for line in _streaming.iter_sse_lines_with_watchdog(
         response,
@@ -292,9 +308,9 @@ def _reset_startup_check_status(
     *,
     source: str,
     phase: str,
-    target_model: Optional[str],
-    requested_model: Optional[str] = None,
-    owner: Optional[str] = None,
+    target_model: str | None,
+    requested_model: str | None = None,
+    owner: str | None = None,
 ) -> int:
     """Start a new startup-check generation (Phase 5: delegated)."""
     return _process.reset_startup_check_status(
@@ -308,15 +324,15 @@ def _reset_startup_check_status(
 
 def _mark_startup_check_status(
     state: str,
-    error: Optional[str] = None,
+    error: str | None = None,
     *,
-    generation: Optional[int] = None,
-    phase: Optional[str] = None,
-    source: Optional[str] = None,
-    owner: Optional[str] = None,
-    target_model: Optional[str] = None,
-    requested_model: Optional[str] = None,
-    effective_model: Optional[str] = None,
+    generation: int | None = None,
+    phase: str | None = None,
+    source: str | None = None,
+    owner: str | None = None,
+    target_model: str | None = None,
+    requested_model: str | None = None,
+    effective_model: str | None = None,
 ) -> None:
     """Update the startup-check state machine (Phase 5: delegated)."""
     _process.mark_startup_check_status(
@@ -332,7 +348,7 @@ def _mark_startup_check_status(
     )
 
 
-def _get_startup_check_status() -> Dict[str, Optional[object]]:
+def _get_startup_check_status() -> dict[str, object | None]:
     """Return a snapshot of the startup-check state (Phase 5: delegated)."""
     return _process.get_startup_check_status()
 
@@ -341,9 +357,9 @@ async def _run_guardian_operation(
     *,
     source: str,
     phase: str,
-    target_model: Optional[str],
-    requested_model: Optional[str],
-    owner: Optional[str],
+    target_model: str | None,
+    requested_model: str | None,
+    owner: str | None,
     operation,
     generation: int,
 ):
@@ -359,27 +375,27 @@ async def _run_guardian_operation(
     )
 
 
-async def _run_startup_check_in_background(generation: int, target_model: Optional[str]) -> None:
+async def _run_startup_check_in_background(generation: int, target_model: str | None) -> None:
     """Run the startup check under the switch lock (Phase 5: delegated)."""
     await _process.run_startup_check_in_background(generation, target_model)
 
 
-def _resolve_inference_model(raw_model: Optional[str], current_model: str) -> Optional[str]:
+def _resolve_inference_model(raw_model: str | None, current_model: str) -> str | None:
     """Resolve an inference model name (Phase 5: delegated)."""
     return _local_models.resolve_inference_model(raw_model, current_model)
 
 
-def _reject_unserved_inference_model(raw_model: Optional[str]) -> None:
+def _reject_unserved_inference_model(raw_model: str | None) -> None:
     """Raise a client-facing error for a model Guardian does not serve (Phase 5: delegated)."""
     _local_models.reject_unserved_inference_model(raw_model)
 
 
-def _resolve_or_reject_inference_model(raw_model: Optional[str], current_model: str) -> str:
+def _resolve_or_reject_inference_model(raw_model: str | None, current_model: str) -> str:
     """Resolve an inference model name and reject unknown or unserved values (Phase 5: delegated)."""
     return _local_models.resolve_or_reject_inference_model(raw_model, current_model)
 
 
-def _resolve_auto_reload_model(requested_model: Optional[str] = None) -> str:
+def _resolve_auto_reload_model(requested_model: str | None = None) -> str:
     """Resolve the model Guardian should load when the backend is absent (Phase 5: delegated)."""
     return _local_models.resolve_auto_reload_model(requested_model)
 
@@ -389,13 +405,13 @@ def _resolve_auto_reload_model(requested_model: Optional[str] = None) -> str:
 
 _GuardianRequestCancelled = _queue_helpers.GuardianRequestCancelled
 
-def _queue_headers(request_id: str, queue_wait_ms: float) -> Dict[str, str]:
+def _queue_headers(request_id: str, queue_wait_ms: float) -> dict[str, str]:
     return _queue_helpers.queue_headers(request_id, queue_wait_ms)
 
 def _request_cancel_http_exception(request_id: str, reason: str) -> HTTPException:
     return _queue_helpers.request_cancel_http_exception(request_id, reason)
 
-async def _stop_background_task(task: Optional[asyncio.Task]) -> None:
+async def _stop_background_task(task: asyncio.Task | None) -> None:
     await _queue_helpers.stop_background_task(task)
 
 async def _watch_request_disconnect(request: Request, request_id: str, client_id: str) -> None:
@@ -407,7 +423,7 @@ async def _begin_queued_request(request: Request, client_id: str, model: str) ->
 async def _await_or_cancel_request(
     operation_task: asyncio.Task,
     request_id: str,
-    cleanup: Optional[Callable[[], Awaitable[None]]] = None,
+    cleanup: Callable[[], Awaitable[None]] | None = None,
 ) -> Any:
     return await _queue_helpers.await_or_cancel_request(operation_task, request_id, cleanup)
 
@@ -430,7 +446,7 @@ def _request_outcome(request_id: str) -> str:
 # Phase 5: extracted to app/gateway/capture_dispatch.py.  Thin wrappers
 # preserve existing call sites in server.py.
 
-def _capture_client_fingerprint(request: Request, client_id: str) -> Optional[str]:
+def _capture_client_fingerprint(request: Request, client_id: str) -> str | None:
     return _capture_dispatch.capture_client_fingerprint(request, client_id)
 
 def _capture_ingress_protocol(path: str, endpoint: str) -> str:
@@ -447,11 +463,11 @@ def _dispatch_capture_request_received(
     endpoint: str,
     ingress_protocol: str,
     route_type: str,
-    requested_model: Optional[str],
-    resolved_model: Optional[str] = None,
-    request_messages: Optional[List[Dict[str, Any]]] = None,
-    request_parameters: Optional[Dict[str, Any]] = None,
-    queue_wait_ms: Optional[float] = None,
+    requested_model: str | None,
+    resolved_model: str | None = None,
+    request_messages: list[dict[str, Any]] | None = None,
+    request_parameters: dict[str, Any] | None = None,
+    queue_wait_ms: float | None = None,
 ) -> Optional["PolicyResult"]:
     return _capture_dispatch.dispatch_capture_request_received(
         request, client_id,
@@ -466,27 +482,27 @@ def _dispatch_capture_request_completed(
     ctx: BuildContext,
     *,
     policy_result: Optional["PolicyResult"] = None,
-    response_content: Optional[str] = None,
-    tool_calls: Optional[list] = None,
-    tool_results: Optional[list] = None,
-    reasoning_content: Optional[str] = None,
-    finish_reason: Optional[str] = None,
-    native_finish_reason: Optional[str] = None,
-    prompt_tokens: Optional[int] = None,
-    completion_tokens: Optional[int] = None,
-    completion_tokens_details: Optional[Dict[str, Any]] = None,
-    native_tokens_reasoning: Optional[int] = None,
-    native_tokens_cached: Optional[int] = None,
-    cost: Optional[float] = None,
-    provider_name: Optional[str] = None,
-    queue_wait_ms: Optional[float] = None,
-    duration_ms: Optional[float] = None,
-    http_status: Optional[int] = None,
-    streamed: Optional[bool] = None,
-    streamed_ingress: Optional[bool] = None,
-    streamed_upstream: Optional[bool] = None,
-    incomplete: Optional[bool] = None,
-    attempts: Optional[int] = None,
+    response_content: str | None = None,
+    tool_calls: list | None = None,
+    tool_results: list | None = None,
+    reasoning_content: str | None = None,
+    finish_reason: str | None = None,
+    native_finish_reason: str | None = None,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    completion_tokens_details: dict[str, Any] | None = None,
+    native_tokens_reasoning: int | None = None,
+    native_tokens_cached: int | None = None,
+    cost: float | None = None,
+    provider_name: str | None = None,
+    queue_wait_ms: float | None = None,
+    duration_ms: float | None = None,
+    http_status: int | None = None,
+    streamed: bool | None = None,
+    streamed_ingress: bool | None = None,
+    streamed_upstream: bool | None = None,
+    incomplete: bool | None = None,
+    attempts: int | None = None,
 ) -> None:
     _capture_dispatch.dispatch_capture_request_completed(
         ctx,
@@ -518,11 +534,11 @@ def _dispatch_capture_request_failed(
     ctx: BuildContext,
     *,
     error_code: str,
-    http_status: Optional[int] = None,
-    sanitized_message: Optional[str] = None,
-    queue_wait_ms: Optional[float] = None,
-    duration_ms: Optional[float] = None,
-    attempts: Optional[int] = None,
+    http_status: int | None = None,
+    sanitized_message: str | None = None,
+    queue_wait_ms: float | None = None,
+    duration_ms: float | None = None,
+    attempts: int | None = None,
     policy_result: Optional["PolicyResult"] = None,
 ) -> None:
     _capture_dispatch.dispatch_capture_request_failed(
@@ -539,9 +555,9 @@ def _dispatch_capture_request_cancelled(
     ctx: BuildContext,
     *,
     cancel_reason: str,
-    queue_wait_ms: Optional[float] = None,
-    duration_ms: Optional[float] = None,
-    attempts: Optional[int] = None,
+    queue_wait_ms: float | None = None,
+    duration_ms: float | None = None,
+    attempts: int | None = None,
     policy_result: Optional["PolicyResult"] = None,
 ) -> None:
     _capture_dispatch.dispatch_capture_request_cancelled(
@@ -557,10 +573,10 @@ def _dispatch_capture_stream_completed(
     request_id: str,
     client_id: str,
     model_name: str,
-    ctx: Optional[BuildContext],
+    ctx: BuildContext | None,
     policy_result: Optional["PolicyResult"],
-    assembler: Optional[StreamResponseAssembler],
-    usage_totals: Dict[str, Any],
+    assembler: StreamResponseAssembler | None,
+    usage_totals: dict[str, Any],
     path: str,
     status_code: int,
 ) -> None:
@@ -574,9 +590,9 @@ def _dispatch_capture_nonstream_completed(
     request_id: str,
     client_id: str,
     model_name: str,
-    ctx: Optional[BuildContext],
+    ctx: BuildContext | None,
     policy_result: Optional["PolicyResult"],
-    payload: Optional[Dict[str, Any]],
+    payload: dict[str, Any] | None,
     status_code: int,
     request_start_time: float,
 ) -> None:
@@ -617,7 +633,7 @@ def _openai_error_response(
     message: str,
     error_type: str,
     code: str,
-    headers: Optional[Dict[str, str]] = None,
+    headers: dict[str, str] | None = None,
 ) -> JSONResponse:
     """Build a standard OpenAI-style error response (Phase 5: delegated)."""
     return _normalization.openai_error_response(
@@ -629,7 +645,7 @@ def _openai_error_response(
     )
 
 
-async def _probe_multimodal_runtime(model_name: str) -> Dict[str, Any]:
+async def _probe_multimodal_runtime(model_name: str) -> dict[str, Any]:
     """Probe the loaded backend for vision capability (Phase 5: delegated)."""
     return await _normalization.probe_multimodal_runtime(model_name)
 
@@ -638,7 +654,7 @@ async def _preflight_multimodal_request(
     model_name: str,
     request_id: str,
     queue_wait_ms: float,
-) -> Optional[JSONResponse]:
+) -> JSONResponse | None:
     """Return an error response when the backend cannot serve image input (Phase 5: delegated)."""
     return await _normalization.preflight_multimodal_request(model_name, request_id, queue_wait_ms)
 
@@ -653,17 +669,17 @@ def _model_disables_thinking_by_default(model_name: str) -> bool:
     return _normalization.model_disables_thinking_by_default(model_name)
 
 
-def _request_explicitly_disables_thinking(payload: Dict[str, Any]) -> bool:
+def _request_explicitly_disables_thinking(payload: dict[str, Any]) -> bool:
     """Return whether the request body disables thinking explicitly (Phase 5: delegated)."""
     return _normalization.request_explicitly_disables_thinking(payload)
 
 
-def _apply_anthropic_thinking_to_llama_params(payload: Dict[str, Any]) -> bool:
+def _apply_anthropic_thinking_to_llama_params(payload: dict[str, Any]) -> bool:
     """Translate Anthropic thinking blocks to llama-server params (Phase 5: delegated)."""
     return _normalization.apply_anthropic_thinking_to_llama_params(payload)
 
 
-def _apply_request_reasoning_defaults(path: str, payload: Dict[str, Any], model_name: str) -> bool:
+def _apply_request_reasoning_defaults(path: str, payload: dict[str, Any], model_name: str) -> bool:
     """Apply model-specific reasoning defaults to the request body (Phase 5: delegated)."""
     return _normalization.apply_request_reasoning_defaults(path, payload, model_name)
 
@@ -684,7 +700,7 @@ def _map_multimodal_backend_error(
     body: bytes,
     request_id: str,
     queue_wait_ms: float,
-) -> Optional[JSONResponse]:
+) -> JSONResponse | None:
     """Map multimodal backend failures to OpenAI error responses (Phase 5: delegated)."""
     return _normalization.map_multimodal_backend_error(
         model_name, status_code, body, request_id, queue_wait_ms,
@@ -722,7 +738,7 @@ _ctx_meta.init(
 
 DEFAULT_CONTEXT_WINDOW = _ctx_meta.DEFAULT_CONTEXT_WINDOW
 BACKEND_CONTEXT_CACHE_SECONDS = 5.0
-_backend_context_cache: Dict[str, Tuple[float, int]] = {}
+_backend_context_cache: dict[str, tuple[float, int]] = {}
 _backend_context_lock = asyncio.Lock()
 _context_fallback_warnings: set[str] = set()
 
@@ -792,7 +808,7 @@ _normalization.init(
 )
 
 
-def _get_queue_owner_id(request: Request, client_id: Optional[str]) -> Optional[str]:
+def _get_queue_owner_id(request: Request, client_id: str | None) -> str | None:
     """Return the per-key queue ownership identity for the current request."""
     state_obj = getattr(request, "state", None)
     auth_context = getattr(state_obj, "auth_context", None)
@@ -805,7 +821,7 @@ def _get_queue_owner_id(request: Request, client_id: Optional[str]) -> Optional[
     return None
 
 
-def _get_cloud_key_fingerprint(request: Request, client_id: Optional[str]) -> str:
+def _get_cloud_key_fingerprint(request: Request, client_id: str | None) -> str:
     """Return the stable Guardian-key identity used for cloud rate limiting."""
     auth_context = get_request_auth_context(request) or {}
     fingerprint = auth_context.get("key_fingerprint")
@@ -855,17 +871,17 @@ def _should_track_api_usage(path: str) -> bool:
     return _usage.should_track_api_usage(path)
 
 
-def _get_usage_client_id(request: Request) -> Optional[str]:
+def _get_usage_client_id(request: Request) -> str | None:
     """Extract the authenticated client name attached by auth (Phase 5: delegated)."""
     return _usage.get_usage_client_id(request)
 
 
-def _get_usage_attribution(request: Request) -> Optional[Dict[str, Any]]:
+def _get_usage_attribution(request: Request) -> dict[str, Any] | None:
     """Return request attribution details collected during auth (Phase 5: delegated)."""
     return _usage.get_usage_attribution(request)
 
 
-def _get_live_usage_request_id(request: Request) -> Optional[str]:
+def _get_live_usage_request_id(request: Request) -> str | None:
     """Return the dashboard request id bound to the current FastAPI request (Phase 5: delegated)."""
     return _usage.get_live_usage_request_id(request)
 
@@ -878,13 +894,13 @@ def _start_live_request_usage(request: Request) -> None:
 def _update_live_request_usage(
     request: Request,
     *,
-    model: Optional[str] = None,
-    streamed: Optional[bool] = None,
-    queue_request_id: Optional[str] = None,
-    phase: Optional[str] = None,
-    queue_wait_ms: Optional[float] = None,
-    prompt_tokens: Optional[object] = None,
-    completion_tokens: Optional[object] = None,
+    model: str | None = None,
+    streamed: bool | None = None,
+    queue_request_id: str | None = None,
+    phase: str | None = None,
+    queue_wait_ms: float | None = None,
+    prompt_tokens: object | None = None,
+    completion_tokens: object | None = None,
     output_chars_delta: object = 0,
     response_bytes_delta: object = 0,
 ) -> None:
@@ -907,7 +923,7 @@ def _finish_live_request_usage(
     request: Request,
     *,
     status_code: int,
-    response_bytes: Optional[int] = None,
+    response_bytes: int | None = None,
 ) -> None:
     """Finalize the live dashboard request entry and fold it into history (Phase 5: delegated)."""
     _usage.finish_live_request_usage(request, status_code=status_code, response_bytes=response_bytes)
@@ -916,20 +932,20 @@ def _finish_live_request_usage(
 def _set_request_usage_metadata(
     request: Request,
     *,
-    model: Optional[str] = None,
-    streamed: Optional[bool] = None,
+    model: str | None = None,
+    streamed: bool | None = None,
 ) -> None:
     """Attach request metadata for dashboard usage snapshots (Phase 5: delegated)."""
     _usage.set_request_usage_metadata(request, model=model, streamed=streamed)
 
 
 def _record_request_token_usage(
-    client_id: Optional[str],
+    client_id: str | None,
     endpoint: str,
-    model: Optional[str],
+    model: str | None,
     *,
-    request: Optional[Request] = None,
-    attribution: Optional[Dict[str, Any]] = None,
+    request: Request | None = None,
+    attribution: dict[str, Any] | None = None,
     prompt_tokens: object = 0,
     completion_tokens: object = 0,
 ) -> None:
@@ -946,13 +962,13 @@ def _record_request_token_usage(
 
 
 def _record_usage_from_payload(
-    client_id: Optional[str],
+    client_id: str | None,
     endpoint: str,
-    model: Optional[str],
-    payload: Optional[Dict[str, Any]],
+    model: str | None,
+    payload: dict[str, Any] | None,
     *,
-    request: Optional[Request] = None,
-    attribution: Optional[Dict[str, Any]] = None,
+    request: Request | None = None,
+    attribution: dict[str, Any] | None = None,
 ) -> None:
     """Extract OpenAI-style usage fields from a JSON payload (Phase 5: delegated)."""
     _usage.record_usage_from_payload(
@@ -1120,20 +1136,20 @@ async def healthz():
 # Phase 5: extracted to app/gateway/context_metadata.py.  These thin
 # wrappers preserve the existing call sites in server.py.
 
-def _apply_context_metadata(model_entry: Dict[str, Any], context_window: int) -> Dict[str, Any]:
+def _apply_context_metadata(model_entry: dict[str, Any], context_window: int) -> dict[str, Any]:
     """Delegate to app.gateway.context_metadata.apply_context_metadata."""
     return _ctx_meta.apply_context_metadata(model_entry, context_window)
 
 
-async def _get_loaded_backend_context_window(canonical_name: str) -> Optional[int]:
+async def _get_loaded_backend_context_window(canonical_name: str) -> int | None:
     """Delegate to app.gateway.context_metadata.get_loaded_backend_context_window."""
     return await _ctx_meta.get_loaded_backend_context_window(canonical_name)
 
 
 async def _resolve_context_window(
     public_name: str,
-    canonical_name: Optional[str] = None,
-    cloud_attempts: Optional[List[Tuple[CloudProvider, str]]] = None,
+    canonical_name: str | None = None,
+    cloud_attempts: list[tuple[CloudProvider, str]] | None = None,
 ) -> int:
     """Delegate to app.gateway.context_metadata.resolve_context_window."""
     return await _ctx_meta.resolve_context_window(public_name, canonical_name, cloud_attempts)
@@ -1145,15 +1161,15 @@ def _warn_context_fallback(model_name: str) -> None:
 
 
 async def _enrich_model_context_metadata(
-    model_entry: Dict[str, Any],
-    canonical_name: Optional[str] = None,
-    cloud_attempts: Optional[List[Tuple[CloudProvider, str]]] = None,
-) -> Dict[str, Any]:
+    model_entry: dict[str, Any],
+    canonical_name: str | None = None,
+    cloud_attempts: list[tuple[CloudProvider, str]] | None = None,
+) -> dict[str, Any]:
     """Delegate to app.gateway.context_metadata.enrich_model_context_metadata."""
     return await _ctx_meta.enrich_model_context_metadata(model_entry, canonical_name, cloud_attempts)
 
 
-async def _build_model_metadata_entry(public_name: str, canonical_name: str, client_id: str) -> Dict[str, Any]:
+async def _build_model_metadata_entry(public_name: str, canonical_name: str, client_id: str) -> dict[str, Any]:
     """Delegate to app.gateway.context_metadata.build_model_metadata_entry."""
     return await _ctx_meta.build_model_metadata_entry(public_name, canonical_name, client_id)
 
@@ -1451,13 +1467,13 @@ _GOOGLE_MODEL_CATALOG_TIMEOUT_S = _cloud_inf._GOOGLE_MODEL_CATALOG_TIMEOUT_S
 def _normalize_google_model_id(model_id: str) -> str:
     return _cloud_inf.normalize_google_model_id(model_id)
 
-def _parse_google_model_catalog(payload: Any) -> List[str]:
+def _parse_google_model_catalog(payload: Any) -> list[str]:
     return _cloud_inf.parse_google_model_catalog(payload)
 
 def _provider_base_url(provider_name: str) -> str:
     return _cloud_inf.provider_base_url(provider_name)
 
-def _cloud_provider_for_request(model_name: str) -> Optional[CloudProvider]:
+def _cloud_provider_for_request(model_name: str) -> CloudProvider | None:
     return _cloud_inf.cloud_provider_for_request(model_name)
 
 def _is_cloud_or_guardian_route(model_name: str) -> bool:
@@ -1474,53 +1490,53 @@ def _is_retryable_cloud_error(status_code: int, error_body_text: str) -> bool:
 
 _HOP_BY_HOP_RESPONSE_HEADERS = _cloud_inf._HOP_BY_HOP_RESPONSE_HEADERS
 
-def _sanitize_proxied_response_headers(headers: Any) -> Dict[str, str]:
+def _sanitize_proxied_response_headers(headers: Any) -> dict[str, str]:
     return _cloud_inf.sanitize_proxied_response_headers(headers)
 
 def _guardian_debug_headers(
     provider: CloudProvider,
     upstream_model: str,
-    failover_group: Optional[str],
-) -> Dict[str, str]:
+    failover_group: str | None,
+) -> dict[str, str]:
     return _cloud_inf.guardian_debug_headers(provider, upstream_model, failover_group)
 
 
 # ── Cloud routing (delegated to app.cloud_inference.routing) ────────
 # Phase 5: extracted to app/cloud_inference/routing.py.
 
-def _resolve_cloud_attempts(model_name: str, request: Request, client_id: str, *, requires_vision: bool = False) -> Tuple[List[Tuple[CloudProvider, str]], Optional[str]]:
+def _resolve_cloud_attempts(model_name: str, request: Request, client_id: str, *, requires_vision: bool = False) -> tuple[list[tuple[CloudProvider, str]], str | None]:
     return _cloud_routing.resolve_cloud_attempts(model_name, request, client_id, requires_vision=requires_vision)
 
-def _resolve_cloud_vision_fallback(model_name: str) -> Optional[str]:
+def _resolve_cloud_vision_fallback(model_name: str) -> str | None:
     return _cloud_routing.resolve_cloud_vision_fallback(model_name)
 
 # OpenAI reasoning wrappers (delegated to app.cloud_inference)
 def _is_openai_reasoning_model(model_name: str) -> bool:
     return _cloud_inf.is_openai_reasoning_model(model_name)
 
-def _adapt_openai_reasoning_params(provider: CloudProvider, upstream_model: str, body: Dict[str, Any]) -> Dict[str, Any]:
+def _adapt_openai_reasoning_params(provider: CloudProvider, upstream_model: str, body: dict[str, Any]) -> dict[str, Any]:
     return _cloud_inf.adapt_openai_reasoning_params(provider, upstream_model, body)
 
-def _prepare_cloud_candidate_request(provider: CloudProvider, upstream_model: str, path: str, base_json_body: Dict[str, Any], client_user_id: Optional[str] = None) -> Tuple[str, Dict[str, Any], bytes, bool]:
+def _prepare_cloud_candidate_request(provider: CloudProvider, upstream_model: str, path: str, base_json_body: dict[str, Any], client_user_id: str | None = None) -> tuple[str, dict[str, Any], bytes, bool]:
     return _cloud_routing.prepare_cloud_candidate_request(provider, upstream_model, path, base_json_body, client_user_id)
 
-def _extract_cloud_response_content(payload: Optional[Dict[str, Any]]) -> Tuple[Optional[str], Optional[list]]:
+def _extract_cloud_response_content(payload: dict[str, Any] | None) -> tuple[str | None, list | None]:
     return _cloud_routing.extract_cloud_response_content(payload)
 
-def _setup_cloud_capture(request: Request, client_id: str, *, model_name: str, json_body: Dict[str, Any], path: str) -> Tuple[Optional[BuildContext], Optional["PolicyResult"], Optional[str], Optional[float]]:
+def _setup_cloud_capture(request: Request, client_id: str, *, model_name: str, json_body: dict[str, Any], path: str) -> tuple[BuildContext | None, Optional["PolicyResult"], str | None, float | None]:
     return _cloud_routing.setup_cloud_capture(request, client_id, model_name=model_name, json_body=json_body, path=path)
 async def _forward_to_cloud_provider(
     path: str,
     body: bytes,
-    json_body: Dict[str, Any],
+    json_body: dict[str, Any],
     model_name: str,
     request: Request,
     client_id: str,
     *,
-    capture_ctx: Optional[BuildContext] = None,
+    capture_ctx: BuildContext | None = None,
     capture_policy_result: Optional["PolicyResult"] = None,
-    cloud_request_id: Optional[str] = None,
-    cloud_capture_start_time: Optional[float] = None,
+    cloud_request_id: str | None = None,
+    cloud_capture_start_time: float | None = None,
 ) -> Response:
     """Forward an inference request to a cloud LLM provider.
 

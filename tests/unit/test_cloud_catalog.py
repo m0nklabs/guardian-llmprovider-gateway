@@ -19,7 +19,6 @@ from app.cloud_inference.routing import resolve_cloud_attempts
 from app.proxy.cloud_catalog import CloudModelCatalog
 from app.proxy.providers import ProviderRegistry
 
-
 SAMPLE_SETTINGS = """\
 providers:
   openrouter:

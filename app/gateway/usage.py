@@ -11,12 +11,16 @@ from __future__ import annotations
 import math
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any
 
 from fastapi import Request, Response
 from fastapi.responses import StreamingResponse
 
-from app.proxy.auth import build_request_auth_context, get_request_auth_context, set_request_auth_context
+from app.proxy.auth import (
+    build_request_auth_context,
+    get_request_auth_context,
+    set_request_auth_context,
+)
 
 logger = None  # reserved; no logging currently
 
@@ -81,7 +85,7 @@ def should_track_api_usage(path: str) -> bool:
     return path.startswith("/api/") or path.startswith("/v1/") or path.startswith("/admin/")
 
 
-def get_usage_client_id(request: Request) -> Optional[str]:
+def get_usage_client_id(request: Request) -> str | None:
     """Extract the authenticated client name attached by auth."""
     user = getattr(request.state, "user", None)
     if isinstance(user, dict):
@@ -96,7 +100,7 @@ def get_usage_client_id(request: Request) -> Optional[str]:
     return None
 
 
-def get_usage_attribution(request: Request) -> Optional[Dict[str, Any]]:
+def get_usage_attribution(request: Request) -> dict[str, Any] | None:
     """Return request attribution details collected during auth."""
     auth_context = get_request_auth_context(request)
     if isinstance(auth_context, dict):
@@ -104,7 +108,7 @@ def get_usage_attribution(request: Request) -> Optional[Dict[str, Any]]:
     return build_request_auth_context(request)
 
 
-def get_live_usage_request_id(request: Request) -> Optional[str]:
+def get_live_usage_request_id(request: Request) -> str | None:
     """Return the dashboard request id bound to the current FastAPI request."""
     state_obj = getattr(request, "state", None)
     if state_obj is None:
@@ -137,13 +141,13 @@ def start_live_request_usage(request: Request) -> None:
 def update_live_request_usage(
     request: Request,
     *,
-    model: Optional[str] = None,
-    streamed: Optional[bool] = None,
-    queue_request_id: Optional[str] = None,
-    phase: Optional[str] = None,
-    queue_wait_ms: Optional[float] = None,
-    prompt_tokens: Optional[object] = None,
-    completion_tokens: Optional[object] = None,
+    model: str | None = None,
+    streamed: bool | None = None,
+    queue_request_id: str | None = None,
+    phase: str | None = None,
+    queue_wait_ms: float | None = None,
+    prompt_tokens: object | None = None,
+    completion_tokens: object | None = None,
     output_chars_delta: object = 0,
     response_bytes_delta: object = 0,
 ) -> None:
@@ -169,7 +173,7 @@ def finish_live_request_usage(
     request: Request,
     *,
     status_code: int,
-    response_bytes: Optional[int] = None,
+    response_bytes: int | None = None,
 ) -> None:
     """Finalize the live dashboard request entry and fold it into history."""
     live_request_id = get_live_usage_request_id(request)
@@ -198,8 +202,8 @@ def finish_live_request_usage(
 def set_request_usage_metadata(
     request: Request,
     *,
-    model: Optional[str] = None,
-    streamed: Optional[bool] = None,
+    model: str | None = None,
+    streamed: bool | None = None,
 ) -> None:
     """Attach request metadata for dashboard usage snapshots."""
     if model is not None:
@@ -210,12 +214,12 @@ def set_request_usage_metadata(
 
 
 def record_request_token_usage(
-    client_id: Optional[str],
+    client_id: str | None,
     endpoint: str,
-    model: Optional[str],
+    model: str | None,
     *,
-    request: Optional[Request] = None,
-    attribution: Optional[Dict[str, Any]] = None,
+    request: Request | None = None,
+    attribution: dict[str, Any] | None = None,
     prompt_tokens: object = 0,
     completion_tokens: object = 0,
 ) -> None:
@@ -234,13 +238,13 @@ def record_request_token_usage(
 
 
 def record_usage_from_payload(
-    client_id: Optional[str],
+    client_id: str | None,
     endpoint: str,
-    model: Optional[str],
-    payload: Optional[Dict[str, Any]],
+    model: str | None,
+    payload: dict[str, Any] | None,
     *,
-    request: Optional[Request] = None,
-    attribution: Optional[Dict[str, Any]] = None,
+    request: Request | None = None,
+    attribution: dict[str, Any] | None = None,
 ) -> None:
     """Extract OpenAI-style usage fields from a JSON payload."""
     if not isinstance(payload, dict):

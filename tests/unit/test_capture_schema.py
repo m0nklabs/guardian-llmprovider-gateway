@@ -10,23 +10,22 @@ from datetime import datetime
 
 import pytest
 
-from app.capture.config import CaptureConfig, PROTOCOL_OPENAI, ROUTE_LOCAL
+from app.capture.config import PROTOCOL_OPENAI, ROUTE_LOCAL, CaptureConfig
 from app.capture.schema import (
-    CLIENT_REF_SECRET_ENV,
     CLIENT_REF_PREVIOUS_SECRETS_ENV,
+    CLIENT_REF_SECRET_ENV,
     RECORD_AUTH_SECRET_ENV,
     SCHEMA_NAME,
     SCHEMA_VERSION,
-    compute_event_id,
-    compute_client_ref,
-    compute_record_auth,
     BuildContext,
-    build_request_received_event,
+    build_request_cancelled_event,
     build_request_completed_event,
     build_request_failed_event,
-    build_request_cancelled_event,
+    build_request_received_event,
+    compute_client_ref,
+    compute_event_id,
+    compute_record_auth,
 )
-
 
 # ── Constants ──────────────────────────────────────────────────────────
 
@@ -195,8 +194,8 @@ class TestRequestReceivedEvent:
         # Redaction is done by the redactor module before event construction.
         # Here we pass already-redacted messages to verify the event builder
         # preserves the redacted form.
-        from app.capture.redactor import redact_request_messages
         from app.capture.policy import evaluate_capture_policy
+        from app.capture.redactor import redact_request_messages
 
         policy_result = evaluate_capture_policy(
             capture_config,
@@ -864,6 +863,7 @@ class TestCaptureDispatchExtractionC4C5C6:
     def test_nonstream_extracts_choice_level_finish_and_mirror(self, monkeypatch):
         import time as _time
         from types import SimpleNamespace
+
         from app.gateway import capture_dispatch
         from app.gateway.usage import coerce_usage_int
 
@@ -909,6 +909,7 @@ class TestCaptureDispatchExtractionC4C5C6:
     def test_nonstream_without_finish_reason_reports_none(self, monkeypatch):
         import time as _time
         from types import SimpleNamespace
+
         from app.gateway import capture_dispatch
 
         stub = _StubCaptureController()
@@ -925,8 +926,9 @@ class TestCaptureDispatchExtractionC4C5C6:
 
     def test_stream_dispatch_pulls_mirror_from_assembler(self, monkeypatch):
         from types import SimpleNamespace
-        from app.gateway import capture_dispatch
+
         from app.capture.stream_assembler import StreamResponseAssembler
+        from app.gateway import capture_dispatch
 
         stub = _StubCaptureController()
         monkeypatch.setattr(capture_dispatch, "get_capture_controller", lambda: stub)
@@ -958,6 +960,7 @@ class TestCaptureDispatchExtractionC4C5C6:
 
     def test_received_extracts_correlation_and_app_headers(self, monkeypatch):
         from types import SimpleNamespace
+
         from app.gateway import capture_dispatch
 
         stub = _StubCaptureController()
@@ -987,6 +990,7 @@ class TestCaptureDispatchExtractionC4C5C6:
         self, monkeypatch
     ):
         from types import SimpleNamespace
+
         from app.gateway import capture_dispatch
 
         stub = _StubCaptureController()
@@ -1004,6 +1008,7 @@ class TestCaptureDispatchExtractionC4C5C6:
 
     def test_received_absent_headers_yield_none(self, monkeypatch):
         from types import SimpleNamespace
+
         from app.gateway import capture_dispatch
 
         stub = _StubCaptureController()
@@ -1026,6 +1031,7 @@ class TestCaptureDispatchExtractionC4C5C6:
         opt-out — an explicit `correlation_headers: []` means NO caller
         header is echoed, even when the request carries X-Request-Id."""
         from types import SimpleNamespace
+
         from app.gateway import capture_dispatch
 
         stub = _StubCaptureController()

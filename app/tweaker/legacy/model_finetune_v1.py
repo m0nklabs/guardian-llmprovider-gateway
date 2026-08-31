@@ -16,10 +16,10 @@ import math
 import re
 import subprocess
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import httpx
 import yaml
@@ -36,7 +36,7 @@ DEFAULT_OPTIMIZATION_MODE = "balanced"
 VALID_OPTIMIZATION_MODES = {"speed", "context", "balanced"}
 
 
-def detect_oom_gpu(error: Optional[str]) -> Optional[int]:
+def detect_oom_gpu(error: str | None) -> int | None:
     """Infer which GPU hit OOM from a Guardian/llama.cpp error string."""
     if not error:
         return None
@@ -48,16 +48,16 @@ def detect_oom_gpu(error: Optional[str]) -> Optional[int]:
 
 
 def next_split_candidates_after_oom(
-    tensor_split: Optional[str],
+    tensor_split: str | None,
     *,
-    failed_gpu: Optional[int],
+    failed_gpu: int | None,
     step: float,
     split_min: float,
     split_max: float,
-) -> List[str]:
+) -> list[str]:
     """Shift the primary split away from the GPU that failed and return the next candidates."""
     current_primary = parse_two_gpu_split(tensor_split) or 0.5
-    directions: List[int]
+    directions: list[int]
     if failed_gpu == 1:
         directions = [1, -1]
     elif failed_gpu == 0:
@@ -65,7 +65,7 @@ def next_split_candidates_after_oom(
     else:
         directions = [1, -1] if current_primary >= 0.5 else [-1, 1]
 
-    candidates: List[str] = []
+    candidates: list[str] = []
     for direction in directions:
         candidate_primary = round(current_primary + (direction * step), 2)
         if not split_min <= candidate_primary <= split_max:
@@ -77,7 +77,7 @@ def next_split_candidates_after_oom(
     return candidates
 
 
-def read_gpu_vram_snapshot() -> Optional[Dict[str, Dict[str, float]]]:
+def read_gpu_vram_snapshot() -> dict[str, dict[str, float]] | None:
     """Read per-GPU used/free/total VRAM from nvidia-smi."""
     try:
         result = subprocess.run(
@@ -95,7 +95,7 @@ def read_gpu_vram_snapshot() -> Optional[Dict[str, Dict[str, float]]]:
     if result.returncode != 0:
         return None
 
-    snapshot: Dict[str, Dict[str, float]] = {}
+    snapshot: dict[str, dict[str, float]] = {}
     for line in result.stdout.strip().splitlines():
         parts = [part.strip() for part in line.split(",")]
         if len(parts) != 4:
@@ -117,7 +117,7 @@ def read_gpu_vram_snapshot() -> Optional[Dict[str, Dict[str, float]]]:
     return snapshot or None
 
 
-def free_vram_delta_pct(gpu_vram: Optional[Dict[str, Dict[str, float]]]) -> Optional[float]:
+def free_vram_delta_pct(gpu_vram: dict[str, dict[str, float]] | None) -> float | None:
     """Return the absolute free-VRAM percentage difference across the first two GPUs."""
     if not gpu_vram or len(gpu_vram) < 2:
         return None
@@ -130,13 +130,13 @@ def free_vram_delta_pct(gpu_vram: Optional[Dict[str, Dict[str, float]]]) -> Opti
 
 
 def next_split_from_vram_balance(
-    tensor_split: Optional[str],
+    tensor_split: str | None,
     *,
-    gpu_vram: Optional[Dict[str, Dict[str, float]]],
+    gpu_vram: dict[str, dict[str, float]] | None,
     step: float,
     split_min: float,
     split_max: float,
-) -> Optional[str]:
+) -> str | None:
     """Shift split toward the GPU with more free VRAM until free percentages converge."""
     if not gpu_vram or len(gpu_vram) < 2:
         return None
@@ -157,7 +157,7 @@ def next_split_from_vram_balance(
     return candidate_split
 
 
-def smaller_split_step(step: float) -> Optional[float]:
+def smaller_split_step(step: float) -> float | None:
     """Return the next smaller split step, down to a 1% minimum increment."""
     if step <= 0.01:
         return None
@@ -167,7 +167,7 @@ def smaller_split_step(step: float) -> Optional[float]:
     return max(0.01, halved)
 
 
-def target_gpu_free_mib_for_balance_shift(gpu_vram: Optional[Dict[str, Dict[str, float]]]) -> Optional[float]:
+def target_gpu_free_mib_for_balance_shift(gpu_vram: dict[str, dict[str, float]] | None) -> float | None:
     """Return free MiB on the GPU that would receive more load from the next rebalance step."""
     if not gpu_vram or len(gpu_vram) < 2:
         return None
@@ -186,11 +186,11 @@ def target_gpu_free_mib_for_balance_shift(gpu_vram: Optional[Dict[str, Dict[str,
     return float(free_mib) if free_mib is not None else None
 
 
-def two_gpu_free_mib(gpu_vram: Optional[Dict[str, Dict[str, float]]]) -> Optional[Tuple[float, float]]:
+def two_gpu_free_mib(gpu_vram: dict[str, dict[str, float]] | None) -> tuple[float, float] | None:
     """Return real MiB headroom for the first two GPUs when telemetry is in MiB scale."""
     if not gpu_vram or len(gpu_vram) < 2:
         return None
-    values: List[float] = []
+    values: list[float] = []
     for gpu_index in sorted(gpu_vram.keys(), key=int)[:2]:
         gpu_stats = gpu_vram[gpu_index]
         total_mib = gpu_stats.get("total")
@@ -202,7 +202,7 @@ def two_gpu_free_mib(gpu_vram: Optional[Dict[str, Dict[str, float]]]) -> Optiona
 
 
 def resolve_headroom_context_granularity(
-    gpu_vram: Optional[Dict[str, Dict[str, float]]],
+    gpu_vram: dict[str, dict[str, float]] | None,
     *,
     base_granularity: int,
 ) -> int:
@@ -217,7 +217,7 @@ def resolve_headroom_context_granularity(
     return base_granularity
 
 
-def should_limit_large_context_jumps(gpu_vram: Optional[Dict[str, Dict[str, float]]]) -> bool:
+def should_limit_large_context_jumps(gpu_vram: dict[str, dict[str, float]] | None) -> bool:
     """Return True when broad frontier jumps are unlikely to add signal at low VRAM headroom."""
     free_values = two_gpu_free_mib(gpu_vram)
     if free_values is None:
@@ -228,7 +228,7 @@ def should_limit_large_context_jumps(gpu_vram: Optional[Dict[str, Dict[str, floa
 
 
 def should_skip_coarse_split_shift(
-    gpu_vram: Optional[Dict[str, Dict[str, float]]],
+    gpu_vram: dict[str, dict[str, float]] | None,
     *,
     step: float,
     min_free_mib: float = DEFAULT_MIN_FREE_MIB_FOR_COARSE_SPLIT_SHIFT,
@@ -249,18 +249,18 @@ class ProbeResult:
     model: str
     context: int
     ngl: int
-    tensor_split: Optional[str]
+    tensor_split: str | None
     success: bool
     load_seconds: float
     smoke_seconds: float = 0.0
-    status_code: Optional[int] = None
-    error: Optional[str] = None
-    response_excerpt: Optional[str] = None
-    gpu_vram: Optional[Dict[str, Dict[str, float]]] = None
-    gpu_vram_phase: Optional[str] = None
-    free_vram_delta_pct: Optional[float] = None
-    model_signature: Optional[str] = None
-    smoke_signature: Optional[str] = None
+    status_code: int | None = None
+    error: str | None = None
+    response_excerpt: str | None = None
+    gpu_vram: dict[str, dict[str, float]] | None = None
+    gpu_vram_phase: str | None = None
+    free_vram_delta_pct: float | None = None
+    model_signature: str | None = None
+    smoke_signature: str | None = None
     cached: bool = False
 
     @property
@@ -274,27 +274,27 @@ class TuneResult:
     """Final recommendation from a finetune run."""
 
     model: str
-    original_context: Optional[int]
-    original_ngl: Optional[int]
-    original_tensor_split: Optional[str]
+    original_context: int | None
+    original_ngl: int | None
+    original_tensor_split: str | None
     runtime_mode: str
     search_min_context: int
     search_max_context: int
     recommended_context: int
     recommended_ngl: int
-    recommended_tensor_split: Optional[str]
-    benchmark_context_limit: Optional[int]
+    recommended_tensor_split: str | None
+    benchmark_context_limit: int | None
     optimization: str = DEFAULT_OPTIMIZATION_MODE
-    attempts: List[ProbeResult] = field(default_factory=list)
-    coarse_ngl_candidates: List[int] = field(default_factory=list)
-    refined_ngl_candidates: List[int] = field(default_factory=list)
-    coarse_candidates: List[Optional[str]] = field(default_factory=list)
-    refined_candidates: List[Optional[str]] = field(default_factory=list)
+    attempts: list[ProbeResult] = field(default_factory=list)
+    coarse_ngl_candidates: list[int] = field(default_factory=list)
+    refined_ngl_candidates: list[int] = field(default_factory=list)
+    coarse_candidates: list[str | None] = field(default_factory=list)
+    refined_candidates: list[str | None] = field(default_factory=list)
     applied: bool = False
-    model_signature: Optional[str] = None
-    smoke_signature: Optional[str] = None
+    model_signature: str | None = None
+    smoke_signature: str | None = None
 
-    def to_dict(self) -> Dict[str, object]:
+    def to_dict(self) -> dict[str, object]:
         """Serialize the result for JSON output."""
         return {
             "timestamp": datetime.now(UTC).isoformat(),
@@ -321,7 +321,7 @@ class TuneResult:
         }
 
 
-def build_smoke_messages(smoke_prompt: str, smoke_image_url: Optional[str] = None) -> List[Dict[str, object]]:
+def build_smoke_messages(smoke_prompt: str, smoke_image_url: str | None = None) -> list[dict[str, object]]:
     """Build the minimal post-load smoke-test message list."""
     if smoke_image_url:
         return [
@@ -336,7 +336,7 @@ def build_smoke_messages(smoke_prompt: str, smoke_image_url: Optional[str] = Non
     return [{"role": "user", "content": smoke_prompt}]
 
 
-def build_model_signature(model_name: str, model_config: Dict[str, object]) -> str:
+def build_model_signature(model_name: str, model_config: dict[str, object]) -> str:
     """Create a stable cache signature for a model independent of tuned values."""
     signature_config = {
         key: value
@@ -366,7 +366,7 @@ def build_model_signature(model_name: str, model_config: Dict[str, object]) -> s
 def build_smoke_signature(
     smoke_prompt: str,
     smoke_max_tokens: int,
-    smoke_image_url: Optional[str],
+    smoke_image_url: str | None,
     runtime_mode: str,
 ) -> str:
     """Create a stable cache signature for the current smoke probe shape.
@@ -401,7 +401,7 @@ def balance_metric(result: ProbeResult) -> float:
     return split_balance_distance(result.tensor_split)
 
 
-def normalized_ratio(value: int, ceiling: Optional[int]) -> float:
+def normalized_ratio(value: int, ceiling: int | None) -> float:
     """Normalize a non-negative integer against its search ceiling."""
     if ceiling is None or ceiling <= 0:
         return 0.0
@@ -411,8 +411,8 @@ def normalized_ratio(value: int, ceiling: Optional[int]) -> float:
 def balanced_tradeoff_score(
     candidate: ProbeResult,
     *,
-    max_context: Optional[int],
-    max_ngl: Optional[int],
+    max_context: int | None,
+    max_ngl: int | None,
 ) -> float:
     """Return a harmonic-mean tradeoff score for context and ngl equilibrium."""
     context_ratio = normalized_ratio(candidate.context, max_context)
@@ -424,12 +424,12 @@ def balanced_tradeoff_score(
 
 def resolve_optimization_defaults(
     *,
-    original_context: Optional[int],
-    benchmark_context_limit: Optional[int],
+    original_context: int | None,
+    benchmark_context_limit: int | None,
     granularity: int,
     auto_context_floor_ratio: float,
     optimization: str,
-) -> Tuple[int, int, int, int]:
+) -> tuple[int, int, int, int]:
     """Resolve automatic context and ngl search bounds for the requested optimization mode."""
     lower_bound, upper_bound = resolve_context_bounds(
         original_context=original_context,
@@ -447,7 +447,7 @@ def resolve_optimization_defaults(
     return lower_bound, upper_bound, 0, 99
 
 
-def resolve_runtime_mode(runtime_mode: str, smoke_image_url: Optional[str]) -> str:
+def resolve_runtime_mode(runtime_mode: str, smoke_image_url: str | None) -> str:
     """Resolve `auto` finetune mode to the effective text or vision runtime."""
     normalized = runtime_mode.strip().lower()
     if normalized == "auto":
@@ -462,13 +462,13 @@ def runtime_mode_uses_vision(runtime_mode: str) -> bool:
     return runtime_mode == "vision"
 
 
-def has_vision_runtime(model_config: Dict[str, object]) -> bool:
+def has_vision_runtime(model_config: dict[str, object]) -> bool:
     """Return whether the model has an mmproj-backed vision path."""
     mmproj = str(model_config.get("vision_mmproj") or model_config.get("mmproj") or "").strip()
     return bool(mmproj)
 
 
-def resolve_runtime_config_value(model_config: Dict[str, object], key: str, runtime_mode: str) -> object:
+def resolve_runtime_config_value(model_config: dict[str, object], key: str, runtime_mode: str) -> object:
     """Return the effective config value for the requested finetune runtime."""
     override_key = f"{runtime_mode}_{key}"
     override_value = model_config.get(override_key)
@@ -477,7 +477,7 @@ def resolve_runtime_config_value(model_config: Dict[str, object], key: str, runt
     return model_config.get(key)
 
 
-def resolve_runtime_total_layers(model_config: Dict[str, object], runtime_mode: str) -> Optional[int]:
+def resolve_runtime_total_layers(model_config: dict[str, object], runtime_mode: str) -> int | None:
     """Return the configured main-model layer ceiling for `ngl` search.
 
     llama.cpp handles multimodal projectors through the separate `mmproj_use_gpu`
@@ -495,13 +495,13 @@ def resolve_runtime_total_layers(model_config: Dict[str, object], runtime_mode: 
 
 
 def apply_runtime_search_values(
-    model_config: Dict[str, object],
+    model_config: dict[str, object],
     *,
     context: int,
     ngl: int,
-    tensor_split: Optional[str],
+    tensor_split: str | None,
     runtime_mode: str,
-) -> Dict[str, object]:
+) -> dict[str, object]:
     """Apply tuned fields to the correct text or vision config keys."""
     target = copy.deepcopy(model_config)
     if runtime_mode_uses_vision(runtime_mode) and has_vision_runtime(target):
@@ -535,24 +535,24 @@ def build_probe_cache_key(
     model_name: str,
     context: int,
     ngl: int,
-    tensor_split: Optional[str],
+    tensor_split: str | None,
     model_signature: str,
     smoke_signature: str,
-) -> Tuple[str, int, int, Optional[str], str, str]:
+) -> tuple[str, int, int, str | None, str, str]:
     """Build the durable cache key for one probe combination."""
     return (model_name, int(context), int(ngl), tensor_split, model_signature, smoke_signature)
 
 
 def index_cached_probes(
-    history: Sequence[Dict[str, object]],
+    history: Sequence[dict[str, object]],
     *,
     model_name: str,
     model_signature: str,
     smoke_signature: str,
-    runtime_mode: Optional[str] = None,
-) -> Dict[Tuple[str, int, int, Optional[str], str, str], ProbeResult]:
+    runtime_mode: str | None = None,
+) -> dict[tuple[str, int, int, str | None, str, str], ProbeResult]:
     """Index compatible historical probes from the finetune results file."""
-    indexed: Dict[Tuple[str, int, int, Optional[str], str, str], ProbeResult] = {}
+    indexed: dict[tuple[str, int, int, str | None, str, str], ProbeResult] = {}
 
     def merge_cached_probe(existing: ProbeResult, candidate: ProbeResult) -> ProbeResult:
         """Keep the most informative cached probe when history contains duplicates."""
@@ -630,7 +630,7 @@ def index_cached_probes(
     return indexed
 
 
-def build_ngl_candidates(anchor_ngl: Optional[int], step: int, min_ngl: int, max_ngl: int) -> List[int]:
+def build_ngl_candidates(anchor_ngl: int | None, step: int, min_ngl: int, max_ngl: int) -> list[int]:
     """Build ordered `ngl` candidates, favoring higher GPU offload first."""
     if step <= 0:
         raise ValueError("ngl step must be > 0")
@@ -649,7 +649,7 @@ def build_ngl_candidates(anchor_ngl: Optional[int], step: int, min_ngl: int, max
     return sorted(values, reverse=True)
 
 
-def split_balance_distance(tensor_split: Optional[str]) -> float:
+def split_balance_distance(tensor_split: str | None) -> float:
     """Return how far a split is from a perfectly balanced 50/50 split."""
     primary = parse_two_gpu_split(tensor_split)
     if primary is None:
@@ -659,14 +659,14 @@ def split_balance_distance(tensor_split: Optional[str]) -> float:
 
 def resolve_context_bounds(
     *,
-    original_context: Optional[int],
-    benchmark_context_limit: Optional[int],
-    min_context: Optional[int],
-    max_context: Optional[int],
+    original_context: int | None,
+    benchmark_context_limit: int | None,
+    min_context: int | None,
+    max_context: int | None,
     granularity: int,
     auto_context_range: bool,
     auto_context_floor_ratio: float,
-) -> Tuple[int, int]:
+) -> tuple[int, int]:
     """Resolve effective context bounds, optionally deriving them automatically."""
     if not 0 < auto_context_floor_ratio <= 1.0:
         raise ValueError("auto_context_floor_ratio must satisfy 0 < ratio <= 1")
@@ -702,7 +702,7 @@ def align_context_ceil(value: int, granularity: int) -> int:
     return max(granularity, math.ceil(value / granularity) * granularity)
 
 
-def parse_two_gpu_split(tensor_split: Optional[str]) -> Optional[float]:
+def parse_two_gpu_split(tensor_split: str | None) -> float | None:
     """Return the primary-GPU ratio from a two-GPU tensor split string."""
     if not tensor_split:
         return None
@@ -729,13 +729,13 @@ def format_two_gpu_split(primary_ratio: float, decimals: int = 2) -> str:
 
 
 def build_split_candidates(
-    anchor_split: Optional[str],
+    anchor_split: str | None,
     step: float,
     min_primary: float,
     max_primary: float,
     *,
     include_auto: bool = False,
-) -> List[Optional[str]]:
+) -> list[str | None]:
     """Build ordered two-GPU tensor split candidates, preferring balanced splits first."""
     if step <= 0:
         raise ValueError("step must be > 0")
@@ -760,7 +760,7 @@ def build_split_candidates(
             value,
         ),
     )
-    candidates: List[Optional[str]] = [format_two_gpu_split(value) for value in ordered]
+    candidates: list[str | None] = [format_two_gpu_split(value) for value in ordered]
     if include_auto:
         return [*candidates, None]
     return candidates
@@ -768,11 +768,11 @@ def build_split_candidates(
 
 def resolve_candidate_context_bounds(
     *,
-    best_context: Optional[int],
+    best_context: int | None,
     lower_bound: int,
     upper_bound: int,
     granularity: int,
-) -> Tuple[int, int]:
+) -> tuple[int, int]:
     """Return the only context range worth testing for a new combination."""
     if best_context is None:
         return lower_bound, upper_bound
@@ -788,13 +788,13 @@ def resolve_candidate_context_bounds(
 
 
 def choose_better_result(
-    current_best: Optional[ProbeResult],
-    candidate: Optional[ProbeResult],
+    current_best: ProbeResult | None,
+    candidate: ProbeResult | None,
     *,
     optimization: str = DEFAULT_OPTIMIZATION_MODE,
-    max_context: Optional[int] = None,
-    max_ngl: Optional[int] = None,
-) -> Optional[ProbeResult]:
+    max_context: int | None = None,
+    max_ngl: int | None = None,
+) -> ProbeResult | None:
     """Return the stronger successful result for the requested optimization mode."""
     if candidate is None or not candidate.success:
         return current_best
@@ -835,16 +835,16 @@ def binary_search_max_success(
     max_context: int,
     granularity: int,
     probe: Callable[[int], bool],
-    anchor_context: Optional[int] = None,
-) -> Tuple[Optional[int], List[int]]:
+    anchor_context: int | None = None,
+) -> tuple[int | None, list[int]]:
     """Find the highest successful context using bounded binary search."""
     low_bound = align_context_ceil(min_context, granularity)
     high_bound = align_context_floor(max_context, granularity)
     if low_bound > high_bound:
         raise ValueError("min_context must be <= max_context after alignment")
 
-    attempts: List[int] = []
-    cache: Dict[int, bool] = {}
+    attempts: list[int] = []
+    cache: dict[int, bool] = {}
 
     def cached_probe(context: int) -> bool:
         if context not in cache:
@@ -895,14 +895,14 @@ def binary_search_max_int_success(
     min_value: int,
     max_value: int,
     probe: Callable[[int], bool],
-    anchor_value: Optional[int] = None,
-) -> Tuple[Optional[int], List[int]]:
+    anchor_value: int | None = None,
+) -> tuple[int | None, list[int]]:
     """Find the highest successful integer using bounded binary search."""
     if min_value > max_value:
         raise ValueError("min_value must be <= max_value")
 
-    attempts: List[int] = []
-    cache: Dict[int, bool] = {}
+    attempts: list[int] = []
+    cache: dict[int, bool] = {}
 
     def cached_probe(value: int) -> bool:
         if value not in cache:
@@ -952,14 +952,14 @@ def split_candidates_for_distance(
     *,
     min_primary: float,
     max_primary: float,
-    anchor_split: Optional[str],
-) -> List[str]:
+    anchor_split: str | None,
+) -> list[str]:
     """Return split candidates at one balance distance, preferring the anchor side first."""
     anchor_primary = parse_two_gpu_split(anchor_split) or 0.55
     if distance <= 0:
         return [format_two_gpu_split(0.5)]
 
-    candidates: List[float] = []
+    candidates: list[float] = []
     upper = round(0.5 + distance, 2)
     lower = round(0.5 - distance, 2)
     if min_primary <= upper <= max_primary:
@@ -975,18 +975,18 @@ def split_candidates_for_distance(
     return [format_two_gpu_split(candidate) for candidate in candidates]
 
 
-def unique_attempt_ngls(attempts: Sequence[ProbeResult]) -> List[int]:
+def unique_attempt_ngls(attempts: Sequence[ProbeResult]) -> list[int]:
     """Return tested ngl values in first-seen order."""
-    ordered: List[int] = []
+    ordered: list[int] = []
     for attempt in attempts:
         if attempt.ngl not in ordered:
             ordered.append(attempt.ngl)
     return ordered
 
 
-def unique_attempt_splits(attempts: Sequence[ProbeResult]) -> List[Optional[str]]:
+def unique_attempt_splits(attempts: Sequence[ProbeResult]) -> list[str | None]:
     """Return tested tensor splits in first-seen order."""
-    ordered: List[Optional[str]] = []
+    ordered: list[str | None] = []
     for attempt in attempts:
         if attempt.tensor_split not in ordered:
             ordered.append(attempt.tensor_split)
@@ -1006,7 +1006,7 @@ def _format_yaml_scalar(value: object) -> str:
     return f'"{escaped}"'
 
 
-def render_model_block(model_name: str, model_config: Dict[str, object]) -> str:
+def render_model_block(model_name: str, model_config: dict[str, object]) -> str:
     """Render a single `models.yaml` model block while preserving key order."""
     lines = [f"  {model_name}:"]
     for key, value in model_config.items():
@@ -1017,8 +1017,8 @@ def render_model_block(model_name: str, model_config: Dict[str, object]) -> str:
 def replace_model_block(config_text: str, model_name: str, replacement_block: str) -> str:
     """Replace exactly one model block inside `models.yaml`."""
     lines = config_text.splitlines()
-    start: Optional[int] = None
-    end: Optional[int] = None
+    start: int | None = None
+    end: int | None = None
     header = f"  {model_name}:"
     for index, line in enumerate(lines):
         if line == header:
@@ -1049,7 +1049,7 @@ class GuardianModelFinetuner:
         results_file: str,
         smoke_prompt: str = DEFAULT_SMOKE_PROMPT,
         smoke_max_tokens: int = 8,
-        smoke_image_url: Optional[str] = None,
+        smoke_image_url: str | None = None,
         runtime_mode: str = "auto",
     ) -> None:
         self.guardian_url = guardian_url.rstrip("/")
@@ -1066,11 +1066,11 @@ class GuardianModelFinetuner:
         self.base_text = self.models_config_path.read_text()
         self.base_config = yaml.safe_load(self.base_text) or {}
         self.result_history = self._load_result_history()
-        self.probe_cache: Dict[Tuple[str, int, int, Optional[str], str, str], ProbeResult] = {}
-        self._attempt_log: List[ProbeResult] = []
-        self._attempt_keys_seen: set[Tuple[str, int, int, Optional[str], str, str]] = set()
-        self._active_model_signature: Optional[str] = None
-        self._active_result_index: Optional[int] = None
+        self.probe_cache: dict[tuple[str, int, int, str | None, str, str], ProbeResult] = {}
+        self._attempt_log: list[ProbeResult] = []
+        self._attempt_keys_seen: set[tuple[str, int, int, str | None, str, str]] = set()
+        self._active_model_signature: str | None = None
+        self._active_result_index: int | None = None
         self._active_smoke_signature = build_smoke_signature(
             self.smoke_prompt,
             self.smoke_max_tokens,
@@ -1106,10 +1106,10 @@ class GuardianModelFinetuner:
         granularity: int = 2048,
         auto_context_floor_ratio: float = 0.5,
         optimization: str = DEFAULT_OPTIMIZATION_MODE,
-        ngl_candidates: Optional[Sequence[int]] = None,
+        ngl_candidates: Sequence[int] | None = None,
         ngl_step: int = 16,
         ngl_refine_step: int = 8,
-        split_candidates: Optional[Sequence[Optional[str]]] = None,
+        split_candidates: Sequence[str | None] | None = None,
         coarse_step: float = 0.05,
         refine_step: float = 0.02,
         split_min: float = 0.30,
@@ -1274,14 +1274,14 @@ class GuardianModelFinetuner:
         self,
         *,
         model_name: str,
-        model_config: Dict[str, object],
+        model_config: dict[str, object],
         ngl: int,
-        tensor_split: Optional[str],
+        tensor_split: str | None,
         min_context: int,
         max_context: int,
         granularity: int,
-        anchor_context: Optional[int],
-    ) -> Optional[ProbeResult]:
+        anchor_context: int | None,
+    ) -> ProbeResult | None:
         """Binary-search the highest successful context for one `ngl`/split combination."""
         best_context, _ = binary_search_max_success(
             min_context=min_context,
@@ -1310,23 +1310,23 @@ class GuardianModelFinetuner:
         self,
         *,
         model_name: str,
-        model_config: Dict[str, object],
+        model_config: dict[str, object],
         lower_bound: int,
         upper_bound: int,
         granularity: int,
         upper_ngl: int,
         lower_ngl: int,
         ngl_step: int,
-        explicit_ngl_candidates: Optional[Sequence[int]],
-        explicit_split_candidates: Optional[Sequence[Optional[str]]],
-        original_ngl: Optional[int],
-        original_tensor_split: Optional[str],
+        explicit_ngl_candidates: Sequence[int] | None,
+        explicit_split_candidates: Sequence[str | None] | None,
+        original_ngl: int | None,
+        original_tensor_split: str | None,
         split_step: float,
         split_min: float,
         split_max: float,
         include_auto_split: bool,
         optimization: str,
-    ) -> Optional[ProbeResult]:
+    ) -> ProbeResult | None:
         """Evaluate explicit ngl/split candidates without auto bisection."""
         ngl_values = list(explicit_ngl_candidates or build_ngl_candidates(original_ngl, ngl_step, lower_ngl, upper_ngl))
         split_values = list(
@@ -1340,7 +1340,7 @@ class GuardianModelFinetuner:
             )
         )
 
-        best_result: Optional[ProbeResult] = None
+        best_result: ProbeResult | None = None
         for candidate in split_values:
             for ngl_candidate in ngl_values:
                 candidate_min_context, candidate_max_context = resolve_candidate_context_bounds(
@@ -1374,11 +1374,11 @@ class GuardianModelFinetuner:
         self,
         *,
         model_name: str,
-        model_config: Dict[str, object],
+        model_config: dict[str, object],
         lower_bound: int,
         upper_bound: int,
         granularity: int,
-        original_ngl: Optional[int],
+        original_ngl: int | None,
         lower_ngl: int,
         upper_ngl: int,
         ngl_refine_step: int,
@@ -1386,14 +1386,14 @@ class GuardianModelFinetuner:
         refine_step: float,
         split_min: float,
         split_max: float,
-        original_tensor_split: Optional[str],
+        original_tensor_split: str | None,
         optimization: str = DEFAULT_OPTIMIZATION_MODE,
-    ) -> Optional[ProbeResult]:
+    ) -> ProbeResult | None:
         """Run an optimization-aware search with balanced split calibration on every successful state."""
         calibration_context = min(align_context_ceil(DEFAULT_SPLIT_CALIBRATION_CONTEXT, granularity), upper_bound)
         seed_split = original_tensor_split or format_two_gpu_split(min(max(0.5, split_min), split_max))
         ngl_values = build_ngl_candidates(original_ngl, ngl_refine_step, lower_ngl, upper_ngl)
-        best_result: Optional[ProbeResult] = None
+        best_result: ProbeResult | None = None
         best_seed_split = seed_split
 
         for ngl_candidate in ngl_values:
@@ -1461,20 +1461,20 @@ class GuardianModelFinetuner:
         self,
         *,
         model_name: str,
-        model_config: Dict[str, object],
+        model_config: dict[str, object],
         context: int,
         ngl: int,
-        starting_split: Optional[str],
+        starting_split: str | None,
         step: float,
         balance_threshold_pct: float,
         split_min: float,
         split_max: float,
         retry_failed_splits: bool = True,
-    ) -> Optional[ProbeResult]:
+    ) -> ProbeResult | None:
         """Find a stable split for one context/ngl state and proactively rebalance it by VRAM."""
         current_split = starting_split or format_two_gpu_split(min(max(0.5, split_min), split_max))
         attempted_splits: set[str] = set()
-        best_success: Optional[ProbeResult] = None
+        best_success: ProbeResult | None = None
 
         while True:
             attempted_splits.add(current_split)
@@ -1516,7 +1516,7 @@ class GuardianModelFinetuner:
         self,
         *,
         model_name: str,
-        model_config: Dict[str, object],
+        model_config: dict[str, object],
         starting_result: ProbeResult,
         step: float,
         balance_threshold_pct: float,
@@ -1525,7 +1525,7 @@ class GuardianModelFinetuner:
     ) -> ProbeResult:
         """Keep nudging the split until free VRAM percentages converge or stop improving."""
         current_result = starting_result
-        attempted_splits: set[Optional[str]] = {current_result.tensor_split}
+        attempted_splits: set[str | None] = {current_result.tensor_split}
 
         while (
             current_result.success
@@ -1589,16 +1589,16 @@ class GuardianModelFinetuner:
         self,
         *,
         model_name: str,
-        model_config: Dict[str, object],
+        model_config: dict[str, object],
         context: int,
         ngl: int,
-        starting_split: Optional[str],
+        starting_split: str | None,
         coarse_step: float,
         balance_threshold_pct: float,
         split_min: float,
         split_max: float,
         retry_failed_splits: bool = True,
-    ) -> Optional[ProbeResult]:
+    ) -> ProbeResult | None:
         """Calibrate the baseline split first, then proactively rebalance it by free VRAM."""
         return self._stabilize_split_for_state(
             model_name=model_name,
@@ -1617,7 +1617,7 @@ class GuardianModelFinetuner:
         self,
         *,
         model_name: str,
-        model_config: Dict[str, object],
+        model_config: dict[str, object],
         context: int,
         tensor_split: str,
         min_ngl: int,
@@ -1626,7 +1626,7 @@ class GuardianModelFinetuner:
         refine_step: float,
         split_min: float,
         split_max: float,
-    ) -> Optional[ProbeResult]:
+    ) -> ProbeResult | None:
         """Lower ngl stepwise on the safe baseline and rebalance split after every ngl change."""
         current_ngl = max_ngl
         current_split = tensor_split
@@ -1659,7 +1659,7 @@ class GuardianModelFinetuner:
         self,
         *,
         model_name: str,
-        model_config: Dict[str, object],
+        model_config: dict[str, object],
         min_context: int,
         max_context: int,
         granularity: int,
@@ -1668,11 +1668,11 @@ class GuardianModelFinetuner:
         refine_step: float,
         split_min: float,
         split_max: float,
-    ) -> Optional[ProbeResult]:
+    ) -> ProbeResult | None:
         """At every new context, restabilize the split first and then apply context bisection."""
-        context_results: Dict[int, Optional[ProbeResult]] = {}
+        context_results: dict[int, ProbeResult | None] = {}
 
-        def evaluate_context(context: int) -> Optional[ProbeResult]:
+        def evaluate_context(context: int) -> ProbeResult | None:
             if context not in context_results:
                 context_results[context] = self._stabilize_split_for_state(
                     model_name=model_name,
@@ -1703,7 +1703,7 @@ class GuardianModelFinetuner:
         self,
         *,
         model_name: str,
-        model_config: Dict[str, object],
+        model_config: dict[str, object],
         min_context: int,
         max_context: int,
         granularity: int,
@@ -1712,9 +1712,9 @@ class GuardianModelFinetuner:
         refine_step: float,
         split_min: float,
         split_max: float,
-    ) -> Optional[ProbeResult]:
+    ) -> ProbeResult | None:
         """Binary-search context on the current split, then rebalance once at the winning frontier."""
-        probed_results: Dict[int, ProbeResult] = {}
+        probed_results: dict[int, ProbeResult] = {}
 
         def probe(context: int) -> bool:
             result = self._probe_candidate(
@@ -1759,9 +1759,9 @@ class GuardianModelFinetuner:
         self,
         *,
         model_name: str,
-        model_config: Dict[str, object],
+        model_config: dict[str, object],
         best_success: ProbeResult,
-        frontier_failure: Optional[ProbeResult],
+        frontier_failure: ProbeResult | None,
         max_context: int,
         granularity: int,
         refine_step: float,
@@ -1811,7 +1811,7 @@ class GuardianModelFinetuner:
         if not frontier_probe.success:
             return baseline
 
-        local_results: Dict[int, ProbeResult] = {frontier_probe.context: frontier_probe}
+        local_results: dict[int, ProbeResult] = {frontier_probe.context: frontier_probe}
         local_split = frontier_probe.tensor_split or frontier_split
         headroom_source = frontier_probe.gpu_vram or baseline.gpu_vram or frontier_failure.gpu_vram
         local_granularity = resolve_headroom_context_granularity(
@@ -1864,16 +1864,16 @@ class GuardianModelFinetuner:
         self,
         *,
         model_name: str,
-        model_config: Dict[str, object],
+        model_config: dict[str, object],
         context: int,
         ngl: int,
         split_min: float,
         split_max: float,
-        starting_split: Optional[str],
+        starting_split: str | None,
         include_auto_split: bool,
-    ) -> Optional[ProbeResult]:
+    ) -> ProbeResult | None:
         """Probe the current split first, then rebalance it before changing other dimensions again."""
-        best_result: Optional[ProbeResult] = None
+        best_result: ProbeResult | None = None
         if starting_split is not None:
             seed_result = self._probe_candidate(
                 model_name=model_name,
@@ -1923,13 +1923,13 @@ class GuardianModelFinetuner:
         self,
         *,
         model_name: str,
-        model_config: Dict[str, object],
+        model_config: dict[str, object],
         context: int,
         ngl: int,
         successful_result: ProbeResult,
         split_min: float,
         split_max: float,
-    ) -> Optional[ProbeResult]:
+    ) -> ProbeResult | None:
         """Move a known-good split one halving step toward 50/50."""
         current_primary = parse_two_gpu_split(successful_result.tensor_split)
         target_primary = min(max(0.5, split_min), split_max)
@@ -1953,13 +1953,13 @@ class GuardianModelFinetuner:
         self,
         *,
         model_name: str,
-        model_config: Dict[str, object],
+        model_config: dict[str, object],
         context: int,
         ngl: int,
         split_min: float,
         split_max: float,
-        anchor_split: Optional[str],
-    ) -> Optional[ProbeResult]:
+        anchor_split: str | None,
+    ) -> ProbeResult | None:
         """Use halving search to find the closest-to-balanced explicit split for fixed context/ngl."""
         max_distance = max(0.5 - split_min, split_max - 0.5)
         precision = 0.01
@@ -1979,7 +1979,7 @@ class GuardianModelFinetuner:
 
         low = 0.0
         high = max_distance
-        best_result: Optional[ProbeResult] = None
+        best_result: ProbeResult | None = None
         while high - low > precision:
             mid = round((low + high) / 2, 4)
             candidate_result = self._evaluate_split_distance_for_values(
@@ -2014,16 +2014,16 @@ class GuardianModelFinetuner:
         self,
         *,
         model_name: str,
-        model_config: Dict[str, object],
+        model_config: dict[str, object],
         context: int,
         ngl: int,
         distance: float,
         split_min: float,
         split_max: float,
-        anchor_split: Optional[str],
-    ) -> Optional[ProbeResult]:
+        anchor_split: str | None,
+    ) -> ProbeResult | None:
         """Evaluate one balance distance and stop on the first successful side."""
-        best_result: Optional[ProbeResult] = None
+        best_result: ProbeResult | None = None
         for candidate in split_candidates_for_distance(
             distance,
             min_primary=split_min,
@@ -2046,10 +2046,10 @@ class GuardianModelFinetuner:
         self,
         *,
         model_name: str,
-        model_config: Dict[str, object],
+        model_config: dict[str, object],
         context: int,
         ngl: int,
-        tensor_split: Optional[str],
+        tensor_split: str | None,
     ) -> ProbeResult:
         """Apply one temporary model config and probe it through Guardian."""
         if self._active_model_signature is None:
@@ -2214,7 +2214,7 @@ class GuardianModelFinetuner:
 
     def _request_with_retry(self, method: str, url: str, **kwargs: object) -> httpx.Response:
         """Retry transient Guardian transport failures a small number of times."""
-        last_error: Optional[httpx.RequestError] = None
+        last_error: httpx.RequestError | None = None
         for attempt in range(3):
             try:
                 return self.client.request(method, url, **kwargs)
@@ -2230,7 +2230,7 @@ class GuardianModelFinetuner:
     def _apply_recommendation(
         self,
         model_name: str,
-        model_config: Dict[str, object],
+        model_config: dict[str, object],
         best_result: ProbeResult,
     ) -> None:
         """Persist the winning config to models.yaml and reload it through Guardian."""
@@ -2279,7 +2279,7 @@ class GuardianModelFinetuner:
             self.result_history[self._active_result_index] = entry
         self._persist_result_history()
 
-    def _load_result_history(self) -> List[Dict[str, object]]:
+    def _load_result_history(self) -> list[dict[str, object]]:
         """Load previous finetune runs from the durable results file."""
         if not self.results_file.exists():
             return []
@@ -2304,7 +2304,7 @@ class GuardianModelFinetuner:
 
     def _record_attempt(
         self,
-        cache_key: Tuple[str, int, int, Optional[str], str, str],
+        cache_key: tuple[str, int, int, str | None, str, str],
         probe_result: ProbeResult,
     ) -> None:
         """Record one probe in the current run exactly once."""
@@ -2360,7 +2360,7 @@ class GuardianModelFinetuner:
         self.results_file.parent.mkdir(parents=True, exist_ok=True)
         self._atomic_write(self.results_file, json.dumps(self.result_history, indent=2))
 
-    def _get_current_model(self) -> Optional[str]:
+    def _get_current_model(self) -> str | None:
         """Return the currently loaded canonical Guardian model, if any."""
         try:
             response = self.client.get(f"{self.guardian_url}/api/status")
@@ -2373,7 +2373,7 @@ class GuardianModelFinetuner:
         return None
 
     @staticmethod
-    def _normalize_tensor_split(tensor_split: Optional[object]) -> Optional[str]:
+    def _normalize_tensor_split(tensor_split: object | None) -> str | None:
         """Normalize optional tensor split strings to a stable CLI format."""
         if tensor_split is None:
             return None
@@ -2384,7 +2384,7 @@ class GuardianModelFinetuner:
         return format_two_gpu_split(ratio)
 
     @staticmethod
-    def _normalize_ngl(ngl: Optional[object]) -> Optional[int]:
+    def _normalize_ngl(ngl: object | None) -> int | None:
         """Normalize optional `ngl` values to integers."""
         if ngl is None:
             return None

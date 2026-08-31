@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import httpx
 
@@ -30,7 +30,7 @@ BACKEND_CONTEXT_CACHE_SECONDS = 5.0
 
 # ── Module-level state ───────────────────────────────────────────────
 
-_backend_context_cache: Dict[str, Tuple[float, int]] = {}
+_backend_context_cache: dict[str, tuple[float, int]] = {}
 _backend_context_lock = asyncio.Lock()
 _context_fallback_warnings: set[str] = set()
 
@@ -56,7 +56,7 @@ def init(model_manager, provider_registry, failover_registry, *, llama_server_ur
 # ── Public functions ─────────────────────────────────────────────────
 
 
-def apply_context_metadata(model_entry: Dict[str, Any], context_window: int) -> Dict[str, Any]:
+def apply_context_metadata(model_entry: dict[str, Any], context_window: int) -> dict[str, Any]:
     """Add stable context aliases used by OpenAI, llama.cpp, and LiteLLM clients."""
     model_entry["context"] = context_window
     model_entry["context_length"] = context_window
@@ -75,7 +75,7 @@ def apply_context_metadata(model_entry: Dict[str, Any], context_window: int) -> 
     return model_entry
 
 
-async def get_loaded_backend_context_window(canonical_name: str) -> Optional[int]:
+async def get_loaded_backend_context_window(canonical_name: str) -> int | None:
     """Read llama.cpp's actual configured context for the currently loaded model."""
     try:
         current_model = await _model_manager.get_current_model()
@@ -112,8 +112,8 @@ async def get_loaded_backend_context_window(canonical_name: str) -> Optional[int
 
 async def resolve_context_window(
     public_name: str,
-    canonical_name: Optional[str] = None,
-    cloud_attempts: Optional[List[Tuple[CloudProvider, str]]] = None,
+    canonical_name: str | None = None,
+    cloud_attempts: list[tuple[CloudProvider, str]] | None = None,
 ) -> int:
     """Resolve a positive context size for every locally served or cloud-routed model."""
     override = _provider_registry.get_context_override(public_name)
@@ -131,7 +131,7 @@ async def resolve_context_window(
             return configured_context
     else:
         if cloud_attempts is not None:
-            attempt_contexts: List[int] = []
+            attempt_contexts: list[int] = []
             for provider, upstream_model in cloud_attempts:
                 candidate_context = _cloud_context_override(upstream_model, provider.name)
                 if candidate_context is None:
@@ -149,7 +149,7 @@ async def resolve_context_window(
         if _is_failover_address(public_name):
             group = _failover_registry.get_group(public_name.partition("/")[2])
             if group is not None:
-                candidate_contexts: List[int] = []
+                candidate_contexts: list[int] = []
                 for candidate in getattr(group, "candidates", ()):
                     candidate_context = _cloud_context_override(
                         candidate.model, candidate.provider
@@ -178,7 +178,7 @@ def _is_failover_address(model_name: str) -> bool:
     return bool(sep and first == "failover")
 
 
-def _cloud_context_override(upstream_model: str, provider_name: str) -> Optional[int]:
+def _cloud_context_override(upstream_model: str, provider_name: str) -> int | None:
     """Return a cloud_models.yaml context-window override, or None.
 
     Checks the full ``{provider}/{brand}/{model}`` address first, then the
@@ -209,10 +209,10 @@ def warn_context_fallback(model_name: str) -> None:
 
 
 async def enrich_model_context_metadata(
-    model_entry: Dict[str, Any],
-    canonical_name: Optional[str] = None,
-    cloud_attempts: Optional[List[Tuple[CloudProvider, str]]] = None,
-) -> Dict[str, Any]:
+    model_entry: dict[str, Any],
+    canonical_name: str | None = None,
+    cloud_attempts: list[tuple[CloudProvider, str]] | None = None,
+) -> dict[str, Any]:
     """Attach context metadata without changing the entry's existing shape."""
     context_window = await resolve_context_window(
         model_entry["id"],
@@ -222,8 +222,8 @@ async def enrich_model_context_metadata(
     return apply_context_metadata(model_entry, context_window)
 
 
-async def build_model_metadata_entry(public_name: str, canonical_name: str, client_id: str) -> Dict[str, Any]:
-    model_entry: Dict[str, Any] = {
+async def build_model_metadata_entry(public_name: str, canonical_name: str, client_id: str) -> dict[str, Any]:
+    model_entry: dict[str, Any] = {
         "id": public_name,
         "object": "model",
         "created": int(time.time()),
