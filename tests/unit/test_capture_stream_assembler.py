@@ -204,6 +204,23 @@ class TestStreamAssemblerUsageMirror:
         assert result["cost"] == 0.0025
         assert result["provider_name"] == "DeepSeek"
 
+    def test_non_finite_usage_omitted_not_infinite(self):
+        """1e999-style upstream numbers parse to inf: the rich mirror must
+        omit them instead of raising OverflowError inside add_sse_line or
+        serializing bare Infinity/NaN into the JSONL record."""
+        asm = StreamResponseAssembler()
+        asm.add_sse_line(
+            'data: {"provider":"DeepSeek","usage":{"prompt_tokens":1e999,'
+            '"completion_tokens":1e999,"native_tokens_reasoning":1e999,'
+            '"native_tokens_cached":1e999,"cost":1e999}}'
+        )
+        result = asm.assemble()
+        assert result["native_tokens_reasoning"] is None
+        assert result["native_tokens_cached"] is None
+        assert result["cost"] is None
+        line = json.dumps(result, separators=(",", ":"))
+        assert "Infinity" not in line and "NaN" not in line
+
     def test_mirror_fields_absent_when_provider_omits_them(self):
         asm = StreamResponseAssembler()
         asm.add_sse_line('data: {"usage":{"prompt_tokens":1,"completion_tokens":1}}')

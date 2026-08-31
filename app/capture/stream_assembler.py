@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("Guardian.Capture.StreamAssembler")
@@ -202,10 +203,13 @@ class StreamResponseAssembler:
         """Extract token usage and rich usage fields from OpenAI/Anthropic usage objects."""
         pt = usage.get("prompt_tokens") or usage.get("input_tokens")
         ct = usage.get("completion_tokens") or usage.get("output_tokens")
-        if isinstance(pt, (int, float)):
+        # math.isfinite: upstream JSON like 1e999 parses to inf and would
+        # raise OverflowError/ValueError on int() (broken stream) or
+        # serialize as bare Infinity/NaN (strict JSONL consumers break).
+        if isinstance(pt, (int, float)) and math.isfinite(pt):
             if self._prompt_tokens is None or int(pt) > self._prompt_tokens:
                 self._prompt_tokens = int(pt)
-        if isinstance(ct, (int, float)):
+        if isinstance(ct, (int, float)) and math.isfinite(ct):
             if self._completion_tokens is None or int(ct) > self._completion_tokens:
                 self._completion_tokens = int(ct)
         # ── Rich usage mirror (C5) ──────────────────────────────────────
@@ -216,14 +220,17 @@ class StreamResponseAssembler:
             self._completion_tokens_details = details
         # OpenRouter native token counters.
         ntr = usage.get("native_tokens_reasoning")
-        if isinstance(ntr, (int, float)) and not isinstance(ntr, bool):
+        if (isinstance(ntr, (int, float)) and not isinstance(ntr, bool)
+                and math.isfinite(ntr)):
             self._native_tokens_reasoning = int(ntr)
         ntc = usage.get("native_tokens_cached")
-        if isinstance(ntc, (int, float)) and not isinstance(ntc, bool):
+        if (isinstance(ntc, (int, float)) and not isinstance(ntc, bool)
+                and math.isfinite(ntc)):
             self._native_tokens_cached = int(ntc)
         # OpenRouter reported cost for the request.
         cost = usage.get("cost")
-        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+        if (isinstance(cost, (int, float)) and not isinstance(cost, bool)
+                and math.isfinite(cost)):
             self._cost = float(cost)
 
     @property
