@@ -60,15 +60,18 @@ def _capped_header_value(request: Request, header_name: str) -> Optional[str]:
 def _caller_request_id(request: Request, config: Any) -> Optional[str]:
     """First match (in config order) among the configured correlation headers.
 
-    Only headers listed in ``config.correlation_headers`` are ever read; a
-    missing/unusable config falls back to the default correlation list.
+    Only headers listed in ``config.correlation_headers`` are ever read.  The
+    config value is authoritative at this layer: an explicitly empty list is
+    the operator opt-out established by the config loader and must disable
+    the echo here too — the default is restored only when the config object
+    itself is unusable (review finding: ``if not headers`` defeated the
+    opt-out by silently restoring the default).
     """
-    headers = None
     try:
         headers = config.correlation_headers
     except Exception:
-        headers = None
-    if not headers:
+        headers = DEFAULT_CORRELATION_HEADERS
+    if headers is None:
         headers = DEFAULT_CORRELATION_HEADERS
     for header_name in headers:
         value = _capped_header_value(request, str(header_name))

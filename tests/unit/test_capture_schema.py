@@ -5,6 +5,7 @@ import hmac
 import json
 import os
 import re
+from dataclasses import replace
 from datetime import datetime
 
 import pytest
@@ -1019,3 +1020,24 @@ class TestCaptureDispatchExtractionC4C5C6:
         assert stub.received_kwargs["caller_request_id"] is None
         assert stub.received_kwargs["app_title"] is None
         assert stub.received_kwargs["app_referer"] is None
+
+    def test_received_empty_correlation_headers_disable_echo(self, monkeypatch):
+        """Review fix: the dispatch layer must honour the config-layer
+        opt-out — an explicit `correlation_headers: []` means NO caller
+        header is echoed, even when the request carries X-Request-Id."""
+        from types import SimpleNamespace
+        from app.gateway import capture_dispatch
+
+        stub = _StubCaptureController()
+        stub.config = replace(stub.config, correlation_headers=[])
+        monkeypatch.setattr(capture_dispatch, "get_capture_controller", lambda: stub)
+        request = SimpleNamespace(headers={"x-request-id": "should-not-echo"})
+        capture_dispatch.dispatch_capture_request_received(
+            request, "cli",
+            request_id="req-dispatch-7",
+            endpoint="/v1/chat/completions",
+            ingress_protocol=PROTOCOL_OPENAI,
+            route_type=ROUTE_LOCAL,
+            requested_model="llama3.2-3b",
+        )
+        assert stub.received_kwargs["caller_request_id"] is None
