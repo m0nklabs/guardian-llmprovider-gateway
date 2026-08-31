@@ -19,16 +19,16 @@ if _ENV_FILE.exists():
     _ENV_FILE.chmod(0o600)
 load_dotenv(_ENV_FILE)
 
-from app.proxy.auth import (  # noqa: E402  (intentional late import: requires .env loaded first)
+from app.proxy.auth import (
     _token_fingerprint,
     generate_api_key,
     load_api_keys,
     verify_api_key,
 )
-from app.proxy.server import (  # noqa: E402  (intentional late import: requires .env loaded first)
+from app.proxy.server import (
     app as proxy_app,
 )
-from app.proxy.server import (  # noqa: E402  (intentional late import: requires .env loaded first)
+from app.proxy.server import (
     cloud_catalog,
     cloud_rate_limiter,
     get_gpu_metrics,
@@ -36,10 +36,12 @@ from app.proxy.server import (  # noqa: E402  (intentional late import: requires
     inference_queue,
     provider_registry,
 )
-from app.proxy.server import (  # noqa: E402  (intentional late import: requires .env loaded first)
+from app.proxy.server import (
     state as proxy_state,
 )
-from app.scheduler.manager import SchedulerManager  # noqa: E402  (intentional late import: requires .env loaded first)
+from app.scheduler.manager import (
+    SchedulerManager,
+)
 
 # Configure logging
 _LOG_FILE = pathlib.Path("guardian.log")
