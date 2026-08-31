@@ -31,6 +31,15 @@ DEFAULT_MAX_PENDING_EVENTS = 10_000
 DEFAULT_MAX_FILE_BYTES = 256 * 1024 * 1024  # 256 MB
 DEFAULT_MAX_FILE_AGE_SECONDS = 3600  # 1 hour
 
+#: Inbound request headers consulted for caller correlation (C6).  Lowercase
+#: header names; the FIRST header present on the inbound request is stored as
+#: ``caller_request_id`` on every capture event of that request.
+DEFAULT_CORRELATION_HEADERS: List[str] = ["x-request-id"]
+
+#: Bounds for the correlation header configuration.
+MAX_CORRELATION_HEADERS = 8
+MAX_HEADER_NAME_LEN = 128
+
 # Excluded endpoints — never captured regardless of policy.
 EXCLUDED_PATH_PREFIXES: tuple[str, ...] = (
     "/healthz",
@@ -147,6 +156,14 @@ class CaptureConfig:
     #: Guardian instance identifier (stable across restarts when persisted).
     instance_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
+    #: Inbound request headers (lowercase names) consulted for caller
+    #: correlation.  The first header present on the request is captured as
+    #: ``caller_request_id`` (capped at 256 chars) on all events of that
+    #: request.  No header content beyond this list is ever captured.
+    correlation_headers: List[str] = field(
+        default_factory=lambda: list(DEFAULT_CORRELATION_HEADERS)
+    )
+
     #: The client_ref secret is NOT stored here; it is read from the environment
     #: at runtime by :func:`compute_client_ref`.
 
@@ -205,6 +222,31 @@ class CaptureConfig:
                 f"capture.directory_mode={oct(self.directory_mode)} must not grant world access"
             )
 
+        # Correlation headers: lowercase non-empty names, bounded count/length
+        if not isinstance(self.correlation_headers, list) or any(
+            not isinstance(h, str) for h in self.correlation_headers
+        ):
+            raise ValueError(
+                "capture.correlation_headers must be a list of header-name strings"
+            )
+        if len(self.correlation_headers) > MAX_CORRELATION_HEADERS:
+            raise ValueError(
+                f"capture.correlation_headers allows at most "
+                f"{MAX_CORRELATION_HEADERS} headers"
+            )
+        for header in self.correlation_headers:
+            stripped = header.strip()
+            if not stripped or stripped != header or header != header.lower():
+                raise ValueError(
+                    f"capture.correlation_headers entries must be non-empty, "
+                    f"stripped, lowercase header names (got {header!r})"
+                )
+            if len(header) > MAX_HEADER_NAME_LEN:
+                raise ValueError(
+                    f"capture.correlation_headers entry too long "
+                    f"(>{MAX_HEADER_NAME_LEN} chars): {header!r}"
+                )
+
         # Per-client opt-in implies allowed refs exist
         if self.per_client_opt_in and not self.enabled:
             logger.debug("per_client_opt_in is moot because capture is disabled")
@@ -247,6 +289,37 @@ class CaptureConfig:
             if normalized.startswith(prefix):
                 return True
         return False
+
+
+def _normalize_correlation_headers(raw: Any) -> List[str]:
+    """Normalize the correlation_headers YAML value to lowercase header names.
+
+    Non-string/blank entries are dropped silently (configuration tolerance —
+    a broken entry must not disable capture).  Behaviour:
+
+    - value is not a list at all → default headers;
+    - **explicit empty list → empty result** (a deliberate operator opt-out:
+      "echo no caller headers" is a supported configuration, not a
+      misconfiguration — the default must NOT be silently restored here);
+    - non-empty list whose entries are all invalid → default headers.
+
+    CaptureConfig._validate still guards the final shape.
+    """
+    if not isinstance(raw, list):
+        return list(DEFAULT_CORRELATION_HEADERS)
+    if not raw:
+        # Explicit operator opt-out (review finding: an empty list was
+        # silently replaced by the default, making the echo impossible to
+        # disable via configuration).
+        return []
+    normalized: List[str] = []
+    for entry in raw:
+        if not isinstance(entry, str):
+            continue
+        name = entry.strip().lower()
+        if name and name not in normalized:
+            normalized.append(name)
+    return normalized or list(DEFAULT_CORRELATION_HEADERS)
 
 
 def load_capture_config(settings_path: Optional[Path] = None) -> CaptureConfig:
@@ -311,6 +384,9 @@ def load_capture_config(settings_path: Optional[Path] = None) -> CaptureConfig:
         capture_root=str(_get("capture_root", DEFAULT_CAPTURE_ROOT)),
         policy_version=str(_get("policy_version", DEFAULT_POLICY_VERSION)),
         instance_id=str(_get("instance_id", str(uuid.uuid4()))),
+        correlation_headers=_normalize_correlation_headers(
+            _get("correlation_headers", list(DEFAULT_CORRELATION_HEADERS))
+        ),
     )
 
     logger.info(

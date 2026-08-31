@@ -501,10 +501,11 @@ key can trigger it. Response lists what was reloaded and what could not be.
 | `GET` | `/api/capture/status` | No | Capture subsystem status, config summary, writer metrics, disk usage |
 | `POST` | `/api/capture/rotate` | No | Force rotation of the active WAL file |
 
-The capture subsystem stores **raw request/response events** in a gzip WAL under
-`data/capture/` (`guardian_capture_current.jsonl.gz` active; rotated files
-`guardian_capture_<timestamp>_<seq>.jsonl.gz` are already gzip-compressed and
-get a `.sha256` sidecar). Since the 2026-08-26 raw-capture redesign the only
+The capture subsystem stores **raw request/response events** in a JSONL WAL under
+`data/capture/` (the active file `guardian_capture_current.jsonl` is plain JSONL so
+`tail -f`/`jq` streaming works and readers never hit a truncated gzip member
+mid-write; on rotation it is gzip-compressed to
+`guardian_capture_<timestamp>_<seq>.jsonl.gz`, which gets a `.sha256` sidecar). Since the 2026-08-26 raw-capture redesign the only
 in-pipeline transformation is **media extraction**: inline image payloads are
 written as separate files under `data/capture/media/` and replaced in the event
 by a reference block (base64 never lands in the WAL). Redaction/dataset work is

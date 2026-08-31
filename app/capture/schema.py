@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -32,7 +33,62 @@ SCHEMA_NAME = "guardian_capture_v1"
 
 #: Semantic version within the v1 contract.  Minor/patch bumps for additive
 #: field changes; a major change requires renaming schema_name (e.g. v2).
-SCHEMA_VERSION = "1.0.0"
+#: 1.1.0 (2026-08-30): additive capture-feedback fields — started_at_utc /
+#: completed_at_utc, always-present finish_reason + native_finish_reason,
+#: rich upstream usage mirror (completion_tokens_details, native token
+#: counts, cost, provider_name), caller correlation identity
+#: (caller_request_id / app_title / app_referer) and explicit streamed legs.
+SCHEMA_VERSION = "1.1.0"
+
+#: Maximum length for caller-supplied identity strings stored on events
+#: (caller_request_id, app_title, app_referer).
+CALLER_IDENTITY_MAX_LEN = 256
+
+
+def _coerce_int(value: Any) -> Optional[int]:
+    """Best-effort int coercion; returns None when the value is not coercible.
+
+    Defensive against upstream providers emitting token counters as floats
+    or strings: a non-coercible value yields None (field omitted) instead of
+    raising and silently dropping the whole event.  Non-finite floats
+    (``inf``/``nan`` — Python parses JSON ``1e999`` as ``inf``) also yield
+    None: ``int(inf)`` raises OverflowError and an infinite counter is not a
+    real value (review finding).
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        pass
+    try:
+        return int(float(value))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    """Best-effort float coercion; returns None when not coercible.
+
+    Non-finite results (``inf``/``nan``) yield None: ``json.dumps`` would
+    emit bare ``Infinity``/``NaN`` which strict JSON parsers (e.g. jq)
+    cannot read (review finding).
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(result):
+        return None
+    return result
 
 #: Delimiter used in event_id computation — must not appear in any component.
 EVENT_ID_DELIMITER = "|"
@@ -249,6 +305,15 @@ class BuildContext:
     # Identity
     client_fingerprint: Optional[str] = None
 
+    # Caller-supplied correlation identity (from configured inbound request
+    # headers; absent when the client did not send any of them).  Stamped by
+    # the capture controller from a bounded per-request registry, so it is
+    # present on every event of the request regardless of which call site
+    # built the BuildContext.
+    caller_request_id: Optional[str] = None
+    app_title: Optional[str] = None
+    app_referer: Optional[str] = None
+
     # Optional resolved metadata (set as request progresses)
     resolved_model: Optional[str] = None
     upstream_model: Optional[str] = None
@@ -257,6 +322,12 @@ class BuildContext:
     attempts: Optional[int] = None
 
     # Timing
+    # started_at_utc: wall-clock UTC when capture began tracking this request
+    # (≈ the request_received moment).  Auto-stamped at BuildContext
+    # construction when not provided explicitly, so every terminal event can
+    # reference the request start even though the monotonic lifecycle
+    # timestamps below are not serializable.
+    started_at_utc: Optional[str] = None
     request_received_ts: Optional[float] = None  # monotonic
     request_completed_ts: Optional[float] = None  # monotonic
 
@@ -288,12 +359,34 @@ class BuildContext:
     grammar_present: bool = False
     response_format_present: bool = False
 
+    def __post_init__(self) -> None:
+        # Auto-stamp the wall-clock request start.  BuildContext is created
+        # at the point capture starts tracking a request (immediately after
+        # the request_received dispatch on every route), so construction time
+        # is the best available proxy for "when the request entered capture".
+        if self.started_at_utc is None:
+            self.started_at_utc = _utc_now_iso()
+
     def to_config(self) -> CaptureConfig:
         """Reconstruct a minimal CaptureConfig from known context."""
         return CaptureConfig(
             instance_id=self.instance_id,
             policy_version=self.capture_policy_version,
         )
+
+
+def _apply_request_origin(event: Dict[str, Any], ctx: BuildContext) -> None:
+    """Copy caller-supplied correlation identity from the context onto an event.
+
+    Fields stay absent when the caller did not provide them — nothing is
+    fabricated.  Values are already length-capped by the dispatch layer.
+    """
+    if ctx.caller_request_id:
+        event["caller_request_id"] = ctx.caller_request_id
+    if ctx.app_title:
+        event["app_title"] = ctx.app_title
+    if ctx.app_referer:
+        event["app_referer"] = ctx.app_referer
 
 
 def build_request_received_event(
@@ -324,6 +417,10 @@ def build_request_received_event(
     event["failover_group"] = ctx.failover_group
     event["grammar_present"] = bool(ctx.grammar_present)
     event["response_format_present"] = bool(ctx.response_format_present)
+    # Wall-clock request start — on request_received it equals timestamp_utc
+    # (the event is built when the request enters capture).
+    event["started_at_utc"] = event["timestamp_utc"]
+    _apply_request_origin(event, ctx)
     if request_messages is not None:
         event["request_messages"] = _serialize_for_output(request_messages)
     if request_parameters is not None:
@@ -342,12 +439,20 @@ def build_request_completed_event(
     tool_results: Optional[List[Dict[str, Any]]] = None,
     reasoning_content: Optional[str] = None,
     finish_reason: Optional[str] = None,
+    native_finish_reason: Optional[str] = None,
     prompt_tokens: Optional[int] = None,
     completion_tokens: Optional[int] = None,
+    completion_tokens_details: Optional[Dict[str, Any]] = None,
+    native_tokens_reasoning: Optional[int] = None,
+    native_tokens_cached: Optional[int] = None,
+    cost: Optional[float] = None,
+    provider_name: Optional[str] = None,
     queue_wait_ms: Optional[float] = None,
     duration_ms: Optional[float] = None,
     http_status: Optional[int] = None,
     streamed: Optional[bool] = None,
+    streamed_ingress: Optional[bool] = None,
+    streamed_upstream: Optional[bool] = None,
     incomplete: Optional[bool] = None,
     attempts: Optional[int] = None,
     sequence: int = 1,
@@ -368,6 +473,14 @@ def build_request_completed_event(
     event["upstream_model"] = ctx.upstream_model
     event["provider"] = ctx.provider
     event["failover_group"] = ctx.failover_group
+    # Wall-clock lifecycle timestamps: started_at_utc references the request
+    # start (from the context); completed_at_utc equals timestamp_utc (this
+    # event is built at completion time).  Both are additive in 1.1.0;
+    # timestamp_utc is kept for backward compatibility.
+    if ctx.started_at_utc:
+        event["started_at_utc"] = ctx.started_at_utc
+    event["completed_at_utc"] = event["timestamp_utc"]
+    _apply_request_origin(event, ctx)
     if response_content is not None:
         event["response_content"] = _serialize_for_output(response_content)
     if tool_calls is not None:
@@ -376,19 +489,47 @@ def build_request_completed_event(
         event["tool_results"] = _serialize_for_output(tool_results)
     if reasoning_content is not None:
         event["reasoning_content"] = _serialize_for_output(reasoning_content)
+    # finish_reason is ALWAYS present on request_completed (null when the
+    # upstream did not report one) so consumers can distinguish
+    # length-vs-stop truncation from "field not captured".
     if finish_reason is not None:
         event["finish_reason"] = _serialize_for_output(finish_reason)
+    else:
+        event["finish_reason"] = None
+    if native_finish_reason is not None:
+        event["native_finish_reason"] = _serialize_for_output(native_finish_reason)
     event["http_status"] = http_status if http_status is not None else ctx.http_status
 
-    # Token usage
-    pt = prompt_tokens if prompt_tokens is not None else ctx.prompt_tokens
-    ct = completion_tokens if completion_tokens is not None else ctx.completion_tokens
+    # Token usage — int-coerced defensively; a non-coercible value omits the
+    # field instead of dropping the whole event.
+    pt_raw = prompt_tokens if prompt_tokens is not None else ctx.prompt_tokens
+    ct_raw = completion_tokens if completion_tokens is not None else ctx.completion_tokens
+    pt = _coerce_int(pt_raw)
+    ct = _coerce_int(ct_raw)
     if pt is not None:
-        event["prompt_tokens"] = int(pt)
+        event["prompt_tokens"] = pt
     if ct is not None:
-        event["completion_tokens"] = int(ct)
+        event["completion_tokens"] = ct
     if pt is not None and ct is not None:
-        event["total_tokens"] = int(pt) + int(ct)
+        event["total_tokens"] = pt + ct
+
+    # Rich upstream usage mirror (additive 1.1.0) — stored as reported by the
+    # upstream provider; fields stay absent when the provider did not supply
+    # them.  completion_tokens_details keeps the OpenAI/OpenRouter shape
+    # (contains reasoning_tokens) as-is.
+    if isinstance(completion_tokens_details, dict) and completion_tokens_details:
+        event["completion_tokens_details"] = _serialize_for_output(completion_tokens_details)
+    ntr = _coerce_int(native_tokens_reasoning)
+    if ntr is not None:
+        event["native_tokens_reasoning"] = ntr
+    ntc = _coerce_int(native_tokens_cached)
+    if ntc is not None:
+        event["native_tokens_cached"] = ntc
+    cost_val = _coerce_float(cost)
+    if cost_val is not None:
+        event["cost"] = cost_val
+    if isinstance(provider_name, str) and provider_name:
+        event["provider_name"] = provider_name
 
     if queue_wait_ms is not None:
         event["queue_wait_ms"] = float(queue_wait_ms)
@@ -396,16 +537,22 @@ def build_request_completed_event(
         event["duration_ms"] = float(duration_ms)
     if streamed is not None:
         event["streamed"] = bool(streamed)
+    elif streamed_ingress is not None:
+        # Compat definition: "streamed" is the ingress leg.
+        event["streamed"] = bool(streamed_ingress)
     else:
         event["streamed"] = ctx.streamed
+    if streamed_ingress is not None:
+        event["streamed_ingress"] = bool(streamed_ingress)
+    if streamed_upstream is not None:
+        event["streamed_upstream"] = bool(streamed_upstream)
     if incomplete is not None:
         event["incomplete"] = bool(incomplete)
     elif ctx.incomplete:
         event["incomplete"] = True
-    if attempts is not None:
-        event["attempts"] = int(attempts)
-    elif ctx.attempts is not None:
-        event["attempts"] = int(ctx.attempts)
+    attempts_val = _coerce_int(attempts if attempts is not None else ctx.attempts)
+    if attempts_val is not None:
+        event["attempts"] = attempts_val
     return event
 
 
@@ -438,6 +585,10 @@ def build_request_failed_event(
     event["provider"] = ctx.provider
     event["failover_group"] = ctx.failover_group
     event["error_code"] = str(error_code)
+    if ctx.started_at_utc:
+        event["started_at_utc"] = ctx.started_at_utc
+    event["completed_at_utc"] = event["timestamp_utc"]
+    _apply_request_origin(event, ctx)
     if http_status is not None:
         event["http_status"] = int(http_status)
     if sanitized_message is not None:
@@ -446,10 +597,9 @@ def build_request_failed_event(
         event["queue_wait_ms"] = float(queue_wait_ms)
     if duration_ms is not None:
         event["duration_ms"] = float(duration_ms)
-    if attempts is not None:
-        event["attempts"] = int(attempts)
-    elif ctx.attempts is not None:
-        event["attempts"] = int(ctx.attempts)
+    attempts_val = _coerce_int(attempts if attempts is not None else ctx.attempts)
+    if attempts_val is not None:
+        event["attempts"] = attempts_val
     return event
 
 
@@ -480,12 +630,15 @@ def build_request_cancelled_event(
     event["provider"] = ctx.provider
     event["failover_group"] = ctx.failover_group
     event["cancel_reason"] = _serialize_for_output(cancel_reason)
+    if ctx.started_at_utc:
+        event["started_at_utc"] = ctx.started_at_utc
+    event["completed_at_utc"] = event["timestamp_utc"]
+    _apply_request_origin(event, ctx)
     if queue_wait_ms is not None:
         event["queue_wait_ms"] = float(queue_wait_ms)
     if duration_ms is not None:
         event["duration_ms"] = float(duration_ms)
-    if attempts is not None:
-        event["attempts"] = int(attempts)
-    elif ctx.attempts is not None:
-        event["attempts"] = int(ctx.attempts)
+    attempts_val = _coerce_int(attempts if attempts is not None else ctx.attempts)
+    if attempts_val is not None:
+        event["attempts"] = attempts_val
     return event
