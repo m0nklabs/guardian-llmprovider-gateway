@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import re
 import shlex
 import subprocess
@@ -328,7 +329,11 @@ class ModelManager:
             expected_config = self.models.get(self.current_model, {})
             expected_gguf = expected_config.get("path", "")
 
-            if actual_gguf == expected_gguf:
+            # Path.resolve(): the models dir may be reached via symlink
+            # (/home/flip/models vs a mountpoint), and the adoption gate leans
+            # on this comparison — a false mismatch here would force-switch a
+            # healthy shared backend.
+            if Path(actual_gguf).resolve() == Path(expected_gguf).resolve():
                 logger.info(f"✅ Backend model verified: {self.current_model} ({Path(actual_gguf).name})")
                 self._model_verified = True
                 self._last_verification_at = datetime.now(UTC).isoformat()
@@ -371,10 +376,37 @@ class ModelManager:
         except Exception:
             return None
 
+    def _backend_has_mmproj(self) -> bool | None:
+        """Detect --mmproj in the running llama-server commandline.
+
+        Returns None when no llama-server process can be inspected (the caller
+        falls back to the args-file heuristic); True/False reflect the LIVE
+        process, which is authoritative in shared-backend topologies where the
+        args state file may be stale or absent.
+        """
+        try:
+            result = subprocess.run(
+                ["pgrep", "-a", "llama-server"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode != 0:
+                return None
+            return "--mmproj" in result.stdout
+        except Exception:
+            return None
+
     def _identify_model_by_path(self, gguf_path: str) -> str | None:
-        """Reverse-lookup: find model name by its .gguf path."""
+        """Reverse-lookup: find model name by its .gguf path.
+
+        Compared with Path.resolve() so symlinked model directories match
+        (see verify_backend_model)."""
+        try:
+            live = Path(gguf_path).resolve()
+        except OSError:
+            return None
         for name, cfg in self.models.items():
-            if cfg.get("path") == gguf_path:
+            configured = cfg.get("path")
+            if configured and Path(configured).resolve() == live:
                 return name
         return None
 
@@ -414,6 +446,7 @@ class ModelManager:
         # DIFFERENT known model, a startup must never swap the shared
         # production model because of stale bookkeeping (cut-over safety).
         adopt_allowed = (not startup_drift) or (actual_name != target)
+        adopt_only = os.environ.get("GUARDIAN_STARTUP_ADOPT_ONLY", "").strip().lower() in ("1", "true", "yes")
         if not self._pinned_model and actual_name in self.models and adopt_allowed:
             if startup_drift:
                 logger.warning(
@@ -429,10 +462,38 @@ class ModelManager:
                     actual_name,
                 )
             self.current_model = actual_name
-            self.current_vision_enabled = self.current_runtime_uses_mmproj(actual_name)
+            # Derive the vision flag from the LIVE process when possible: the
+            # args state file may be stale or absent in shared-backend
+            # topologies, and stamping the wrong flag triggers an avoidable
+            # reload on the first image request.
+            live_mmproj = self._backend_has_mmproj()
+            if live_mmproj is not None:
+                self.current_vision_enabled = live_mmproj
+            else:
+                self.current_vision_enabled = self.current_runtime_uses_mmproj(actual_name)
             if await self.verify_backend_model():
                 logger.info(f"✅ Startup adopted live backend '{actual_name}'")
+                # Seed the persisted signature with what is ACTUALLY live:
+                # without it every restart re-detects the stale target, and a
+                # missing signature reads as config drift (forced-reload trap).
+                launch_sig = self._compute_launch_signature(
+                    actual_name, enable_vision=self.current_vision_enabled
+                )
+                if launch_sig is not None:
+                    self._write_persisted_signature(launch_sig)
                 return
+
+        if adopt_only and not self._pinned_model:
+            # Cut-over kill-switch: startup may adopt or abstain, but never
+            # force-switch the shared backend. An unknown live model or a pin
+            # less target fall-through must not be able to reload production.
+            logger.critical(
+                "🛑 GUARDIAN_STARTUP_ADOPT_ONLY is set: refusing to force-switch "
+                "the backend (actual='%s', target='%s'). Leaving state as-is; "
+                "requests route through the normal hotpath.",
+                actual_name, target,
+            )
+            return
 
         self.current_model = MISMATCH_MODEL_NAME  # Force switch_model to not skip
 
