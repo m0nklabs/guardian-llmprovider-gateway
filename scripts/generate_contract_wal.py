@@ -28,15 +28,24 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-from app.capture.config import CaptureConfig
-from app.capture.gzip_reader import iter_records
+from app.capture.config import (
+    CaptureConfig,
+)
+from app.capture.gzip_reader import (
+    iter_records,
+)
 from app.capture.schema import (
     BuildContext,
     build_request_completed_event,
     build_request_received_event,
 )
-from app.capture.sink import CaptureEvent, CaptureSink
-from app.capture.wal_writer import CaptureWALWriter
+from app.capture.sink import (
+    CaptureEvent,
+    CaptureSink,
+)
+from app.capture.wal_writer import (
+    CaptureWALWriter,
+)
 
 #: A realistic multi-turn conversation (>= 3 pairs, assistant replies >= 12
 #: words) so the Keanu pipeline accepts the staged record (chatml.MIN_PAIRS

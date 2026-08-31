@@ -73,3 +73,6 @@ data/cloud_catalog_cache.json.lock
 
 # Terminal Paste Image folder
 /.cp-images
+
+# installer render output (machine-local)
+deploy-rendered/

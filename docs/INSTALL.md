@@ -80,10 +80,14 @@ provider file. See `docs/CONFIG_SCHEMA.md` and `docs/LLM_ROUTER.md`.
 Remote-first backend lifecycle (ensure/unload) lives in the separate
 `caretaker-llamacpp` repository (`deploy/systemd/` there). Set `CARETAKER_KEY`
 in `.env` to the daemon's auth token; without it the gateway falls back to
-local backend management. **Startup behaviour:** with the daemon reachable,
-the gateway adopts the daemon's loaded state; without it, a startup adopts a
-live known backend instead of force-switching it (cut-over safety,
-`engine/manager.py`).
+local backend management. **Startup behaviour:** the daemon is consulted by
+the request hotpath (remote-first `ensure`); at STARTUP the gateway verifies
+the backend locally and adopts a live known backend instead of force-switching
+it (cut-over safety, `engine/manager.py`) — the daemon is not required for
+that guard. The systemd unit ships `GUARDIAN_STARTUP_ADOPT_ONLY=1` for the
+migration window: startup may adopt or abstain but never force-switch the
+backend (remove the env once the deployment is settled; the request hotpath
+converges the state either way).
 
 ## Manual install (no installer)
 

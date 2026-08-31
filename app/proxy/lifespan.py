@@ -222,7 +222,7 @@ async def run_lifespan(app):
 
     # Start TTL-gated cloud-catalog refresher (self-heals a cold/stale cache;
     # None when the catalog was not injected — e.g. in unit tests).
-    catalog_task: Optional[asyncio.Task] = None
+    catalog_task: asyncio.Task | None = None
     if _cloud_catalog is not None:
         catalog_task = asyncio.create_task(_catalog_refresh_loop())
 

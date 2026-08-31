@@ -11,6 +11,11 @@ User=@RUN_USER@
 # TLS loopback 11435, plain loopback 11436, dashboard 11437.
 WorkingDirectory=@INSTALL_DIR@
 Environment=OLLAMA_URL=http://127.0.0.1:11440
+# Migration-window guard: at startup the gateway may ADOPT a live backend or
+# abstain, but must never force-switch it (shared llama-server, cut-over
+# safety). Remove once the deployment is settled and startup switching is
+# deliberately wanted again.
+Environment=GUARDIAN_STARTUP_ADOPT_ONLY=1
 ExecStart=@INSTALL_DIR@/venv/bin/python3.14 -m app.main
 Restart=always
 RestartSec=3
