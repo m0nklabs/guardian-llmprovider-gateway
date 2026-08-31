@@ -6,10 +6,9 @@ locked down by deterministic tests before the live rewrite is wired in.
 
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable, Iterable, Mapping, Sequence
-
 
 # Requirement thresholds: below 750 MiB starts the limited follow-up budget,
 # while below 500 MiB on both GPUs is the final VRAM convergence target.

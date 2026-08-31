@@ -1,16 +1,17 @@
 """Unit tests for app.proxy.anthropic_bridge — Anthropic ↔ OpenAI translation."""
 
 import json
+
 import pytest
 
 from app.proxy.anthropic_bridge import (
+    _convert_content_blocks_to_openai,
+    _format_sse_event,
     provider_needs_anthropic_translation,
     translate_anthropic_request_to_openai,
     translate_openai_error_to_anthropic,
     translate_openai_response_to_anthropic,
     translate_openai_stream_to_anthropic,
-    _format_sse_event,
-    _convert_content_blocks_to_openai,
 )
 
 

@@ -242,8 +242,8 @@ class TestStatusContract:
         monkeypatch.setattr(gctl, "_api_request", fake_api_request)
         monkeypatch.setattr(gctl, "_capture_retention_summary", lambda: {"retention_days": 7})
 
-        import io
         import contextlib
+        import io
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             gctl.cmd_status(argparse.Namespace(json=True))

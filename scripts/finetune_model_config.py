@@ -10,17 +10,17 @@ from __future__ import annotations
 
 import argparse
 import json
-from typing import Optional, Sequence
-
-import yaml
+from collections.abc import Sequence
 
 import _paths  # noqa: F401  (adds repo root to sys.path)
+import yaml
 from _paths import DATA_DIR
+
 from app.paths import guardian_apikeys_file, local_models_file
 from app.tweaker.legacy.model_finetune_v1 import GuardianModelFinetuner
 
 
-def resolve_api_key(explicit_key: Optional[str]) -> str:
+def resolve_api_key(explicit_key: str | None) -> str:
     """Resolve the Guardian API key from CLI or the key store."""
     if explicit_key:
         return explicit_key
@@ -32,7 +32,7 @@ def resolve_api_key(explicit_key: Optional[str]) -> str:
     raise SystemExit("No Guardian API key found. Use --api-key or populate the Guardian key file.")
 
 
-def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse finetune CLI arguments."""
     parser = argparse.ArgumentParser(
         description="Tune a Guardian model for speed, context, or a balanced context/ngl equilibrium."

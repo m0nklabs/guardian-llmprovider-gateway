@@ -38,7 +38,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import httpx
 import yaml
@@ -53,7 +53,7 @@ logger = logging.getLogger("Guardian.CloudCatalog")
 DEFAULT_TTL_SECONDS = 3600.0
 
 #: Default ``{brand}`` used when a provider's upstream model ids are bare.
-DEFAULT_BRAND_BY_PROVIDER: Dict[str, str] = {
+DEFAULT_BRAND_BY_PROVIDER: dict[str, str] = {
     "openai": "openai",
     "google": "google",
     "nvidia": "nvidia",
@@ -67,8 +67,8 @@ class CloudModelCatalog:
         self,
         provider_registry: ProviderRegistry,
         ttl_seconds: float = DEFAULT_TTL_SECONDS,
-        cache_file: Optional[Path] = None,
-        overrides_file: Optional[Path] = None,
+        cache_file: Path | None = None,
+        overrides_file: Path | None = None,
     ) -> None:
         self._registry = provider_registry
         self._ttl_seconds = float(ttl_seconds)
@@ -80,8 +80,8 @@ class CloudModelCatalog:
         self._overrides_file = overrides_file
 
         # provider name -> {"fetched_at": float, "models": {normalized_id: upstream_id}}
-        self._catalogs: Dict[str, Dict[str, Any]] = {}
-        self._overrides: Dict[str, Dict[str, Any]] = {}
+        self._catalogs: dict[str, dict[str, Any]] = {}
+        self._overrides: dict[str, dict[str, Any]] = {}
 
         self._load_overrides()
         self._load_disk_cache()
@@ -102,7 +102,7 @@ class CloudModelCatalog:
         (the old ``models.cloud.overrides.yaml`` shape).
         """
         if not self._explicit_overrides_file:
-            merged: Dict[str, Any] = {}
+            merged: dict[str, Any] = {}
             try:
                 for name, doc in provider_settings_documents().items():
                     if not isinstance(doc, dict):
@@ -168,7 +168,7 @@ class CloudModelCatalog:
             logger.debug("Cloud catalog disk cache not restored: %s", e)
 
     @staticmethod
-    def _provider_endpoint_key(provider: Optional["CloudProvider"]) -> str:
+    def _provider_endpoint_key(provider: CloudProvider | None) -> str:
         """Stable key identifying which catalog endpoint a provider points at."""
         if provider is None:
             return ""
@@ -239,7 +239,7 @@ class CloudModelCatalog:
         return f"{brand}/{raw_id}"
 
     @staticmethod
-    def _extract_reasoning(entry: Dict[str, Any]) -> Dict[str, Any]:
+    def _extract_reasoning(entry: dict[str, Any]) -> dict[str, Any]:
         """Extract reasoning-effort metadata from one catalog entry.
 
         OpenRouter (and providers that mirror its catalog shape) advertise per
@@ -261,7 +261,7 @@ class CloudModelCatalog:
         efforts = [s for s in supported if isinstance(s, str) and s]
         if not efforts:
             return {}
-        result: Dict[str, Any] = {"supported_efforts": efforts}
+        result: dict[str, Any] = {"supported_efforts": efforts}
         if isinstance(raw.get("default_effort"), str) and raw.get("default_effort"):
             result["default_effort"] = raw["default_effort"]
         if isinstance(raw.get("mandatory"), bool):
@@ -293,7 +293,7 @@ class CloudModelCatalog:
             return False
         return bool(data.get("auth_error"))
 
-    async def refresh_provider(self, provider: CloudProvider) -> Dict[str, str]:
+    async def refresh_provider(self, provider: CloudProvider) -> dict[str, str]:
         """Fetch and normalize one provider's catalog.
 
         Returns ``{normalized_id: upstream_id}``.  On failure the previously
@@ -326,8 +326,8 @@ class CloudModelCatalog:
             return dict(self._catalogs.get(provider.name, {}).get("models", {}))
 
         brand = self._default_brand(provider)
-        normalized: Dict[str, str] = {}
-        reasoning_by_model: Dict[str, Dict[str, Any]] = {}
+        normalized: dict[str, str] = {}
+        reasoning_by_model: dict[str, dict[str, Any]] = {}
         entries = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(entries, list):
             self._set_auth_error(provider.name, False)
@@ -398,7 +398,7 @@ class CloudModelCatalog:
 
     # ── Queries ───────────────────────────────────────────────────────
 
-    def get_models_for_provider(self, provider_name: str) -> Dict[str, str]:
+    def get_models_for_provider(self, provider_name: str) -> dict[str, str]:
         """Return ``{normalized_id: upstream_id}`` for a provider (cached view).
 
         When the provider declares a ``catalog_allowlist`` (e.g. NVIDIA's free
@@ -416,7 +416,7 @@ class CloudModelCatalog:
             models = {k: v for k, v in models.items() if k in allowlist}
         return models
 
-    def get_model_reasoning(self, provider_name: str, normalized_id: str) -> Dict[str, Any]:
+    def get_model_reasoning(self, provider_name: str, normalized_id: str) -> dict[str, Any]:
         """Return reasoning-effort metadata for a ``{brand}/{model}`` id.
 
         Returns an empty dict when the provider does not advertise reasoning
@@ -438,7 +438,7 @@ class CloudModelCatalog:
         raw = reasoning.get(normalized_id) if isinstance(reasoning, dict) else None
         return dict(raw) if isinstance(raw, dict) else {}
 
-    def get_model_overrides(self, normalized_id: str, provider_name: str = "") -> Dict[str, Any]:
+    def get_model_overrides(self, normalized_id: str, provider_name: str = "") -> dict[str, Any]:
         """Return per-model overrides layered from cloud_models.yaml.
 
         Keys may be the full ``{provider}/{brand}/{model}``, ``{brand}/{model}``,
@@ -446,13 +446,13 @@ class CloudModelCatalog:
         """
         return dict(self._overrides.get(normalized_id, {}) or {})
 
-    def get_override(self, key: str) -> Optional[Dict[str, Any]]:
+    def get_override(self, key: str) -> dict[str, Any] | None:
         raw = self._overrides.get(key)
         if isinstance(raw, dict):
             return dict(raw)
         return None
 
-    def addresses(self, provider_name: str) -> List[str]:
+    def addresses(self, provider_name: str) -> list[str]:
         """Return the full ``{provider}/{brand}/{model}`` addresses for a provider."""
         provider = provider_name
         return [
@@ -465,8 +465,8 @@ class CloudModelCatalog:
     def resolve_cloud_target(
         self,
         model_name: str,
-        fallback: Optional[CloudProvider] = None,
-    ) -> Optional[Tuple[str, str]]:
+        fallback: CloudProvider | None = None,
+    ) -> tuple[str, str] | None:
         """Resolve a cloud model address to ``(provider_name, upstream_model)``.
 
         Accepts either the full ``{provider}/{brand}/{model}`` address (the

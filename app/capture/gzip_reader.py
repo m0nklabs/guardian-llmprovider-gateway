@@ -34,8 +34,9 @@ from __future__ import annotations
 
 import copy
 import zlib
+from collections.abc import Iterator
 from pathlib import Path
-from typing import BinaryIO, Iterator, Union
+from typing import BinaryIO, Union
 
 _CHUNK = 65536
 _GZIP_MAGIC = b"\x1f\x8b"

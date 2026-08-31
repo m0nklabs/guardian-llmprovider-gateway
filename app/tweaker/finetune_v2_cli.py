@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Optional, Sequence
 
 import yaml
 
@@ -18,7 +18,7 @@ from app.tweaker.finetune_v2_runner import (
 )
 
 
-def resolve_api_key(explicit_key: Optional[str]) -> str:
+def resolve_api_key(explicit_key: str | None) -> str:
     """Resolve the Guardian bearer token from CLI input or the key store."""
     if explicit_key:
         return explicit_key
@@ -66,7 +66,7 @@ def _print_catalog(models_config: str | Path, *, limit: int = 40) -> None:
             print(f"  ... {len(aliases) - limit} more")
 
 
-def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     """Parse finetune v2 CLI arguments."""
     parser = argparse.ArgumentParser(
         description="Run Guardian finetune v2 against live /admin/load runtime overrides.",
@@ -119,7 +119,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument("--json", action="store_true", help="Print the final result as JSON")
     args = parser.parse_args(argv)
-    setattr(args, "_parser", parser)
+    args._parser = parser
     return args
 
 
@@ -155,7 +155,7 @@ def _print_result(result) -> None:
     print(f"Results file: {result.results_file}")
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     """Run the finetune v2 CLI."""
     args = parse_args(argv)
     parser = args._parser

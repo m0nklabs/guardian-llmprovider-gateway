@@ -10,12 +10,11 @@ from unittest.mock import AsyncMock, Mock, patch
 import httpx
 import pytest
 
-from app.proxy.usage import ApiUsageTracker
-
-from app.proxy.failover import FailoverCandidate, FailoverGroup, FailoverRegistry
-from app.proxy import server
-from app.gateway import streaming as _streaming
 from app.gateway import queue_helpers as _queue_helpers
+from app.gateway import streaming as _streaming
+from app.proxy import server
+from app.proxy.failover import FailoverCandidate, FailoverGroup, FailoverRegistry
+from app.proxy.usage import ApiUsageTracker
 
 
 def _metadata_request(key_fingerprint: str = "test-key") -> SimpleNamespace:
@@ -1672,7 +1671,9 @@ async def test_admin_load_passes_kv_type_runtime_override():
 
 # ── Cloud LLM router tests ─────────────────────────────────────────────
 
-from app.proxy.providers import CloudProvider  # noqa: E402  (deferred import: cloud-router tests only)
+from app.proxy.providers import (
+    CloudProvider,
+)
 
 
 @pytest.mark.asyncio
@@ -2603,6 +2604,7 @@ def test_admin_api_handler_signatures_match_wrappers():
     argument lists crashed at runtime (e.g. get_server_status 500).
     """
     import inspect
+
     from app.gateway import admin_api as mod
     # (handler, wrapper call arity, expected params)
     expectations = {

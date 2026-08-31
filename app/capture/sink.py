@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any
 
 logger = logging.getLogger("Guardian.Capture.Sink")
 
@@ -29,7 +29,7 @@ class CaptureEvent:
     schema_version, event_id, etc. as built by the schema module).
     """
 
-    data: Dict[str, Any]
+    data: dict[str, Any]
     priority: int = 0  # 0 = normal event; higher = more important
 
     def serialize(self) -> str:
@@ -46,7 +46,7 @@ class SinkMetrics:
     events_dropped_total: int = 0
     queue_depth: int = 0
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "guardian_capture_events_total": self.events_total,
             "guardian_capture_events_dropped_total": self.events_dropped_total,
@@ -66,7 +66,7 @@ class CaptureSink:
         max_pending_events: int = 10_000,
     ) -> None:
         self._max_pending = max(max_pending_events, 1)
-        self._queue: "asyncio.Queue[Optional[CaptureEvent]]" = asyncio.Queue(
+        self._queue: asyncio.Queue[CaptureEvent | None] = asyncio.Queue(
             maxsize=self._max_pending
         )
         self._metrics = SinkMetrics()
@@ -152,7 +152,7 @@ class CaptureSink:
         """
         return self.try_put(event)
 
-    async def get(self) -> Optional[CaptureEvent]:
+    async def get(self) -> CaptureEvent | None:
         """Retrieve the next event from the queue.
 
         Returns None when the sink is closed and drained.
@@ -198,7 +198,7 @@ class CaptureSink:
         except asyncio.QueueFull:
             pass
 
-    def snapshot(self) -> Dict[str, Any]:
+    def snapshot(self) -> dict[str, Any]:
         """Return a metrics snapshot for Prometheus/gauges."""
         self._metrics.queue_depth = self._queue.qsize()
         return {

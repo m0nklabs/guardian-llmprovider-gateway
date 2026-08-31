@@ -1,8 +1,8 @@
 """Unit tests for intelligent per-key cloud 429 handling."""
 
 import asyncio
-from email.utils import formatdate
 import time
+from email.utils import formatdate
 
 import httpx
 import pytest

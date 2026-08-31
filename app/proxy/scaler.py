@@ -10,7 +10,7 @@ Configurable via ``config/settings.yaml`` under the ``scaler`` key.
 
 import copy
 import logging
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 import yaml
 
@@ -22,7 +22,7 @@ logger = logging.getLogger("Scaler")
 # Defaults — used when settings.yaml has no scaler section
 # ---------------------------------------------------------------------------
 
-_DEFAULT_CONFIG: Dict[str, Any] = {
+_DEFAULT_CONFIG: dict[str, Any] = {
     "enabled": True,
     "log_decisions": True,
     "profiles": {
@@ -67,7 +67,7 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
 }
 
 
-def _load_scaler_config() -> Dict[str, Any]:
+def _load_scaler_config() -> dict[str, Any]:
     """Load scaler config from global.settings.yaml, merged with defaults."""
     config = copy.deepcopy(_DEFAULT_CONFIG)
     try:
@@ -114,11 +114,11 @@ class DynamicScaler:
     # Public API
     # ------------------------------------------------------------------
 
-    def get_config(self) -> Dict[str, Any]:
+    def get_config(self) -> dict[str, Any]:
         """Return a deep copy of the current scaler config."""
         return copy.deepcopy(self.config)
 
-    def update_config(self, patch: Dict[str, Any], *, persist: bool = True) -> Dict[str, Any]:
+    def update_config(self, patch: dict[str, Any], *, persist: bool = True) -> dict[str, Any]:
         """Merge *patch* into the current config and optionally persist.
 
         Supports partial updates at any depth::
@@ -149,7 +149,7 @@ class DynamicScaler:
         logger.info(f"🔧 Scaler config updated via API (persist={persist})")
         return copy.deepcopy(self.config)
 
-    def reset_config(self, *, persist: bool = True) -> Dict[str, Any]:
+    def reset_config(self, *, persist: bool = True) -> dict[str, Any]:
         """Reset scaler config to built-in defaults."""
         self.config = copy.deepcopy(_DEFAULT_CONFIG)
         if persist:
@@ -191,11 +191,11 @@ class DynamicScaler:
 
     def scale_request(
         self,
-        body: Dict[str, Any],
+        body: dict[str, Any],
         waiting_count: int = 0,
         active_count: int = 0,
         client_id: str = "",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Analyze and optionally enrich *body* with scaling parameters.
 
         Parameters
@@ -268,8 +268,8 @@ class DynamicScaler:
     # ------------------------------------------------------------------
 
     def _classify_complexity(
-        self, messages: List[Dict[str, Any]]
-    ) -> Tuple[str, Dict[str, Any]]:
+        self, messages: list[dict[str, Any]]
+    ) -> tuple[str, dict[str, Any]]:
         """Classify prompt complexity into a profile name.
 
         Returns ``(profile_name, complexity_metrics)``.
@@ -325,7 +325,7 @@ class DynamicScaler:
         base_thinking: int,
         base_max_tokens: int,
         waiting_count: int,
-    ) -> Tuple[int, int]:
+    ) -> tuple[int, int]:
         """Reduce budgets proportionally to queue pressure.
 
         Returns ``(adjusted_thinking, adjusted_max_tokens)``.

@@ -14,9 +14,10 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import AsyncIterator
 from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from typing import Any
 
 import httpx
 
@@ -24,7 +25,7 @@ logger = logging.getLogger("Guardian")
 
 # ── Constants ───────────────────────────────────────────────────────
 
-STREAM_TIMEOUT_EXTENSION_STEPS: List[Tuple[int, float]] = [
+STREAM_TIMEOUT_EXTENSION_STEPS: list[tuple[int, float]] = [
     (5, 1.5),
     (10, 2.0),
     (20, 3.0),
@@ -52,7 +53,7 @@ def init(inference_queue, guardian_request_cancelled_exc, heartbeat_interval_s: 
 # ── Text extraction ─────────────────────────────────────────────────
 
 
-def extract_assistant_message_text(message: Dict[str, object]) -> str:
+def extract_assistant_message_text(message: dict[str, object]) -> str:
     """Extract text from an OpenAI-format assistant message."""
     content = str(message.get("content") or "")
     if content:
@@ -60,7 +61,7 @@ def extract_assistant_message_text(message: Dict[str, object]) -> str:
     return str(message.get("reasoning_content") or "")
 
 
-def extract_assistant_delta_text(delta: Dict[str, object]) -> str:
+def extract_assistant_delta_text(delta: dict[str, object]) -> str:
     """Extract incremental text from an SSE delta object."""
     content = str(delta.get("content") or "")
     if content:
@@ -143,7 +144,7 @@ def build_stream_timeout(base_timeout_s: float) -> httpx.Timeout:
     return httpx.Timeout(connect=10.0, read=None, write=base_timeout_s, pool=base_timeout_s)
 
 
-def build_sse_keepalive_comment(request_id: Optional[str] = None) -> str:
+def build_sse_keepalive_comment(request_id: str | None = None) -> str:
     """Emit a lightweight SSE comment to keep downstream clients from idling out."""
     suffix = f" request_id={request_id}" if request_id else ""
     return f": guardian-keepalive{suffix}"
@@ -252,7 +253,7 @@ def enrich_anthropic_response(payload: dict) -> dict:
 
 async def _pump_sse_lines(
     iterator: AsyncIterator[str],
-    queue: "asyncio.Queue[tuple[str, Optional[Any]]]",
+    queue: asyncio.Queue[tuple[str, Any | None]],
 ) -> None:
     """Read upstream SSE lines without cancelling the underlying iterator during keepalive gaps."""
     try:
@@ -271,15 +272,15 @@ async def iter_sse_lines_with_watchdog(
     response: httpx.Response,
     watchdog: StreamProgressWatchdog,
     *,
-    request_id: Optional[str] = None,
-    route: Optional[str] = None,
-    client_id: Optional[str] = None,
-    model_name: Optional[str] = None,
-    heartbeat_interval_s: Optional[float] = None,
-    cancel_event: Optional[asyncio.Event] = None,
+    request_id: str | None = None,
+    route: str | None = None,
+    client_id: str | None = None,
+    model_name: str | None = None,
+    heartbeat_interval_s: float | None = None,
+    cancel_event: asyncio.Event | None = None,
 ) -> AsyncIterator[str]:
     """Yield SSE lines while enforcing a dynamic stall timeout and optional downstream keepalives."""
-    queue: "asyncio.Queue[tuple[str, Optional[Any]]]" = asyncio.Queue()
+    queue: asyncio.Queue[tuple[str, Any | None]] = asyncio.Queue()
     pump_task = asyncio.create_task(_pump_sse_lines(response.aiter_lines(), queue))
     last_data_at = time.monotonic()
 
@@ -292,7 +293,7 @@ async def iter_sse_lines_with_watchdog(
                     reason = (snapshot or {}).get("cancel_reason") or reason
                 raise _GuardianRequestCancelled(request_id or "unknown", reason)
 
-            timeout_exc: Optional[asyncio.TimeoutError] = None
+            timeout_exc: asyncio.TimeoutError | None = None
             elapsed_without_data_s = time.monotonic() - last_data_at
             remaining_timeout_s = watchdog.current_timeout_s - elapsed_without_data_s
             if remaining_timeout_s <= 0:

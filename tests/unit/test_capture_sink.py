@@ -1,9 +1,10 @@
 """Unit tests for the capture sink (bounded async queue)."""
 
 import asyncio
+
 import pytest
 
-from app.capture.sink import CaptureSink, CaptureEvent
+from app.capture.sink import CaptureEvent, CaptureSink
 
 
 @pytest.fixture
@@ -158,8 +159,9 @@ class TestSinkEventLoopRebind:
     def test_writer_loop_does_not_spin_on_persistent_errors(self, event):
         """The WAL writer loop must back off and stop, never busy-spin."""
         import time
-        from app.capture.wal_writer import CaptureWALWriter
+
         from app.capture.config import CaptureConfig
+        from app.capture.wal_writer import CaptureWALWriter
 
         sink = CaptureSink(max_pending_events=10)
 

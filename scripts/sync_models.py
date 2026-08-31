@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-import os
-import yaml
-from pathlib import Path
 import logging
+import os
+from pathlib import Path
 
 import _paths  # noqa: F401  (adds repo root to sys.path)
+import yaml
 from _paths import MODELS_DIR as DEFAULT_MODELS_DIR
+
 from app.paths import local_models_file
 
 # Configure logging

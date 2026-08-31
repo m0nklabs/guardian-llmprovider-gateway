@@ -12,7 +12,7 @@ import asyncio
 import logging
 import subprocess
 from collections import defaultdict
-from typing import Any, Dict, Optional
+from typing import Any
 
 from fastapi import HTTPException
 
@@ -24,7 +24,7 @@ logger = logging.getLogger("Guardian")
 # ── Injected (set once at startup by init()) ─────────────────────────
 _model_manager = None
 _provider_registry = None
-_config: Dict[str, Any] = {}
+_config: dict[str, Any] = {}
 _safe_vram_limit_mb = 0
 _model_switch_lock = None
 _reset_startup_check_status = None
@@ -36,7 +36,7 @@ def init(
     *,
     model_manager,
     provider_registry,
-    config: Dict[str, Any],
+    config: dict[str, Any],
     safe_vram_limit_mb: int,
     model_switch_lock,
     reset_startup_check_status,
@@ -56,7 +56,7 @@ def init(
     _ModelLoadError = model_load_error_cls
 
 
-def resolve_inference_model(raw_model: Optional[str], current_model: str) -> Optional[str]:
+def resolve_inference_model(raw_model: str | None, current_model: str) -> str | None:
     if not raw_model:
         return raw_model
     if raw_model == "auto":
@@ -70,7 +70,7 @@ def resolve_inference_model(raw_model: Optional[str], current_model: str) -> Opt
         return raw_model
 
 
-def reject_unserved_inference_model(raw_model: Optional[str]) -> None:
+def reject_unserved_inference_model(raw_model: str | None) -> None:
     """Raise a client-facing error for a model Guardian does not serve."""
     requested_model = str(raw_model or "").strip() or "(missing)"
     raise HTTPException(
@@ -85,7 +85,7 @@ def reject_unserved_inference_model(raw_model: Optional[str]) -> None:
     )
 
 
-def resolve_or_reject_inference_model(raw_model: Optional[str], current_model: str) -> str:
+def resolve_or_reject_inference_model(raw_model: str | None, current_model: str) -> str:
     """Resolve an inference model name and reject unknown or unserved values.
 
     Cloud-provider models (OpenRouter, NVIDIA, …) are accepted as-is so they
@@ -108,7 +108,7 @@ def resolve_or_reject_inference_model(raw_model: Optional[str], current_model: s
     reject_unserved_inference_model(raw_model)
 
 
-def resolve_auto_reload_model(requested_model: Optional[str] = None) -> str:
+def resolve_auto_reload_model(requested_model: str | None = None) -> str:
     """Resolve the model Guardian should load when the backend is absent."""
     return _model_manager.resolve_reload_target(requested_model)
 

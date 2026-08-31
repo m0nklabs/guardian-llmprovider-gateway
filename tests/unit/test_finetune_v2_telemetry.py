@@ -4,7 +4,6 @@ from types import SimpleNamespace
 
 from app.tweaker import finetune_v2_telemetry as telemetry
 
-
 GPU_IDENTITIES = """\
 1, GPU-B, 00000000:01:00.0, 12288
 0, GPU-A, 00000000:02:00.0, 16384

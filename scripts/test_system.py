@@ -1,6 +1,5 @@
 
 import requests
-
 from _auth import build_auth_headers, resolve_api_key
 
 API_KEY = resolve_api_key()

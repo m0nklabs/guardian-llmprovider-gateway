@@ -14,17 +14,17 @@ import json
 import logging
 import time
 from contextlib import suppress
-from typing import Any, Dict, Optional
+from typing import Any
 
 import httpx
 from fastapi import HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from app.engine.manager import ModelLoadError
-from app.gateway import caretaker_runtime as _caretaker_runtime
 from app.capture.config import PROTOCOL_OLLAMA, ROUTE_LOCAL
 from app.capture.schema import BuildContext
 from app.capture.stream_assembler import StreamResponseAssembler
+from app.engine.manager import ModelLoadError
+from app.gateway import caretaker_runtime as _caretaker_runtime
 from app.gateway.streaming import StreamProgressWatchdog
 
 logger = logging.getLogger("Guardian")
@@ -71,7 +71,7 @@ _capture_controller = None
 _grammar_enabled = True
 
 
-def _apply_ollama_format_mapping(body: Dict[str, Any], openai_body: Dict[str, Any]) -> None:
+def _apply_ollama_format_mapping(body: dict[str, Any], openai_body: dict[str, Any]) -> None:
     """Map Ollama ``options.format`` to llama-server structured-output fields.
 
     Ollama clients send structured output constraints via ``options.format``:
@@ -267,7 +267,7 @@ async def chat_ollama(request: Request, client_id: str):
         request_parameters={k: v for k, v in body.items() if k != "messages"},
         queue_wait_ms=_inference_queue.get_queue_wait_ms(request_id),
     )
-    _capture_ctx: Optional[BuildContext] = None
+    _capture_ctx: BuildContext | None = None
     if _capture_policy_result is not None and _capture_policy_result.should_capture:
         _capture_ctx = BuildContext(
             request_id=request_id,
@@ -407,7 +407,7 @@ async def chat_ollama(request: Request, client_id: str):
 
         if stream:
             usage_totals = {"prompt_tokens": 0, "completion_tokens": 0}
-            _ollama_capture_assembler: Optional[StreamResponseAssembler] = None
+            _ollama_capture_assembler: StreamResponseAssembler | None = None
             if _capture_ctx is not None and _capture_policy_result is not None and _capture_policy_result.should_capture:
                 _ollama_capture_assembler = StreamResponseAssembler()
 
@@ -653,7 +653,7 @@ async def generate_ollama(request: Request, client_id: str):
         request_parameters={k: v for k, v in body.items() if k != "messages"},
         queue_wait_ms=_inference_queue.get_queue_wait_ms(request_id),
     )
-    _capture_ctx: Optional[BuildContext] = None
+    _capture_ctx: BuildContext | None = None
     if _capture_policy_result is not None and _capture_policy_result.should_capture:
         _capture_ctx = BuildContext(
             request_id=request_id,
@@ -785,7 +785,7 @@ async def generate_ollama(request: Request, client_id: str):
 
         if stream:
             usage_totals = {"prompt_tokens": 0, "completion_tokens": 0}
-            _ollama_capture_assembler: Optional[StreamResponseAssembler] = None
+            _ollama_capture_assembler: StreamResponseAssembler | None = None
             if _capture_ctx is not None and _capture_policy_result is not None and _capture_policy_result.should_capture:
                 _ollama_capture_assembler = StreamResponseAssembler()
 

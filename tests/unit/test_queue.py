@@ -7,7 +7,6 @@ import pytest
 
 from app.proxy.queue import InferenceQueue, QueueEntry
 
-
 # ── QueueEntry ─────────────────────────────────────────────────────────
 
 
@@ -384,8 +383,7 @@ class TestRaceGuard:
             nonlocal peak
             rid = await q.acquire(f"client{i}", "m", owner_id=f"owner{i}")
             async with guard:
-                if q.active_count > peak:
-                    peak = q.active_count
+                peak = max(peak, q.active_count)
             await asyncio.sleep(0.01)
             q.finish(rid, outcome="completed")
             return rid
@@ -409,8 +407,7 @@ class TestRaceGuard:
             nonlocal peak
             rid = await q.acquire(f"client{i}", "m", owner_id=f"owner{i}")
             async with guard:
-                if q.active_count > peak:
-                    peak = q.active_count
+                peak = max(peak, q.active_count)
             await asyncio.sleep(0.01)
             q.finish(rid, outcome="completed")
             return rid

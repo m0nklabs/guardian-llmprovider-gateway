@@ -15,9 +15,9 @@ These tests pin the behaviours the split must preserve:
    ``context_overrides`` from the cloud providers' ``models:`` blocks.
 """
 
-import yaml
 from pathlib import Path
 
+import yaml
 
 from app import config_loader
 from app.proxy.providers import ProviderRegistry
@@ -154,7 +154,7 @@ def test_provider_registry_excludes_local_provider(monkeypatch, tmp_path: Path):
 
 def test_path_aliases_resolve_schema_names(monkeypatch, tmp_path: Path):
     """Legacy constants resolve to the canonical new names (backward compat)."""
-    import app.paths as paths
+    from app import paths
 
     for name in (
         "global.settings.yaml",
@@ -186,7 +186,7 @@ def test_path_aliases_resolve_schema_names(monkeypatch, tmp_path: Path):
 
 def test_provider_names_and_local_marker(monkeypatch, tmp_path: Path):
     """provider_names() scans providers/*.settings.yaml; *-local is the local marker."""
-    import app.paths as paths
+    from app import paths
 
     providers_dir = tmp_path / "providers"
     providers_dir.mkdir()

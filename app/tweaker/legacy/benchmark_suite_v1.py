@@ -1,9 +1,9 @@
-import json
-import os
-import time
 import asyncio
+import json
 import logging
+import os
 import subprocess
+import time
 from datetime import datetime
 
 import httpx
@@ -33,6 +33,7 @@ class BenchmarkSuite:
         """Load model names from the local model registry instead of hardcoding."""
         try:
             import yaml
+
             from app.paths import local_models_file
             config_file = str(local_models_file())
             if os.path.exists(config_file):
@@ -56,8 +57,7 @@ class BenchmarkSuite:
             for r in state.get("completed", []):
                 if r.get("success") and r.get("config", {}).get("model") == model:
                     r_tps = r.get("metrics", {}).get("tps", 0)
-                    if r_tps > max_tps:
-                        max_tps = r_tps
+                    max_tps = max(max_tps, r_tps)
             self.best_tps_cache[model] = max_tps
 
         if tps > self.best_tps_cache[model]:

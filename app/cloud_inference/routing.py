@@ -12,7 +12,7 @@ import json
 import logging
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from fastapi import HTTPException, Request
 
@@ -22,8 +22,8 @@ from app.proxy.providers import CloudProvider, ProviderRegistry
 logger = logging.getLogger("Guardian")
 
 # ── Injected ─────────────────────────────────────────────────────────
-_provider_registry: Optional[ProviderRegistry] = None
-_cloud_catalog: Optional[CloudModelCatalog] = None
+_provider_registry: ProviderRegistry | None = None
+_cloud_catalog: CloudModelCatalog | None = None
 _failover_registry = None
 _failover_health = None
 _get_request_auth_context = None
@@ -85,7 +85,7 @@ def resolve_cloud_attempts(
     client_id: str,
     *,
     requires_vision: bool = False,
-) -> Tuple[List[Tuple[CloudProvider, str]], Optional[str]]:
+) -> tuple[list[tuple[CloudProvider, str]], str | None]:
     """Resolve the ordered list of (provider, upstream_model) attempts.
 
     Returns (attempts, failover_group_name). Raises HTTPException on failure.
@@ -118,7 +118,7 @@ def resolve_cloud_attempts(
                 },
             )
         ordered = _failover_health.order_candidates(group.candidates)
-        attempts: List[Tuple[CloudProvider, str]] = []
+        attempts: list[tuple[CloudProvider, str]] = []
         for candidate in ordered:
             if requires_vision and "image" not in candidate.modalities:
                 continue
@@ -159,7 +159,7 @@ def resolve_cloud_attempts(
     return [(provider, ProviderRegistry.canonical_model_id(model_name))], None
 
 
-def resolve_cloud_vision_fallback(model_name: str) -> Optional[str]:
+def resolve_cloud_vision_fallback(model_name: str) -> str | None:
     """Return a local vision fallback for a text-only cloud model."""
     first, sep, rest = model_name.partition("/")
     if sep and first == "failover":
@@ -183,9 +183,9 @@ def prepare_cloud_candidate_request(
     provider: CloudProvider,
     upstream_model: str,
     path: str,
-    base_json_body: Dict[str, Any],
-    client_user_id: Optional[str] = None,
-) -> Tuple[str, Dict[str, Any], bytes, bool]:
+    base_json_body: dict[str, Any],
+    client_user_id: str | None = None,
+) -> tuple[str, dict[str, Any], bytes, bool]:
     """Build the request body/path for one failover candidate.
 
     Returns (effective_path, json_body, body_bytes, needs_translation).
@@ -242,8 +242,8 @@ def prepare_cloud_candidate_request(
 
 
 def extract_cloud_reasoning_content(
-    payload: Optional[Dict[str, Any]],
-) -> Optional[str]:
+    payload: dict[str, Any] | None,
+) -> str | None:
     """Extract reasoning text from a non-streaming cloud response message.
 
     OpenAI sends ``message.reasoning_content``; some OpenRouter-proxied
@@ -267,8 +267,8 @@ def extract_cloud_reasoning_content(
 
 
 def extract_cloud_finish_reason(
-    payload: Optional[Dict[str, Any]],
-) -> Optional[str]:
+    payload: dict[str, Any] | None,
+) -> str | None:
     """Extract the finish/stop reason from a non-streaming cloud response.
 
     OpenAI chat completions put ``finish_reason`` on ``choices[0]`` (not on
@@ -296,8 +296,8 @@ def extract_cloud_finish_reason(
 
 
 def extract_cloud_response_content(
-    payload: Optional[Dict[str, Any]],
-) -> Tuple[Optional[str], Optional[list]]:
+    payload: dict[str, Any] | None,
+) -> tuple[str | None, list | None]:
     """Extract text content and tool_calls from a non-streaming cloud response.
 
     ``content`` is the model's actual content only (may be None). Reasoning is
@@ -308,7 +308,7 @@ def extract_cloud_response_content(
         return None, None
 
     content_parts: list[str] = []
-    tool_calls: Optional[list] = None
+    tool_calls: list | None = None
 
     choices = payload.get("choices")
     if isinstance(choices, list) and choices:
@@ -358,18 +358,18 @@ def setup_cloud_capture(
     client_id: str,
     *,
     model_name: str,
-    json_body: Dict[str, Any],
+    json_body: dict[str, Any],
     path: str,
-) -> Tuple[Optional[Any], Optional[Any], Optional[str], Optional[float]]:
+) -> tuple[Any | None, Any | None, str | None, float | None]:
     """Set up capture context for a cloud route.
 
     Returns (ctx, policy_result, request_id, start_time).
     All values may be None when capture is disabled or evaluation fails.
     """
+    from app.capture.config import PROTOCOL_ANTHROPIC, PROTOCOL_OLLAMA, PROTOCOL_OPENAI
     from app.capture.integration import get_capture_controller
-    from app.capture.schema import BuildContext
-    from app.capture.config import PROTOCOL_OPENAI, PROTOCOL_ANTHROPIC, PROTOCOL_OLLAMA
     from app.capture.redactor import anthropic_messages_to_openai
+    from app.capture.schema import BuildContext
 
     try:
         controller = get_capture_controller()

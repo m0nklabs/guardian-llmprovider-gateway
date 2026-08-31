@@ -1,9 +1,11 @@
 """Unit tests for DynamicScaler — adaptive reasoning budget & max_tokens."""
 
 import copy
-import pytest
 from unittest.mock import patch
-from app.proxy.scaler import DynamicScaler, _DEFAULT_CONFIG
+
+import pytest
+
+from app.proxy.scaler import _DEFAULT_CONFIG, DynamicScaler
 
 
 @pytest.fixture

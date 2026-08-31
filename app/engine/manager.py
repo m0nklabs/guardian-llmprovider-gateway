@@ -4,16 +4,17 @@ import hashlib
 import json
 import logging
 import math
-import subprocess
-import yaml
-import time
 import re
 import shlex
-import httpx
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+import subprocess
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import httpx
+import yaml
 
 from app.local_inference.model_registry import (
     MISMATCH_MODEL_NAME,
@@ -41,10 +42,10 @@ class CrashRecord:
     timestamp: str
     model: str
     error_message: str
-    exit_code: Optional[int] = None
-    config_snapshot: Optional[Dict] = None
+    exit_code: int | None = None
+    config_snapshot: dict | None = None
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         return {
             "timestamp": self.timestamp,
             "model": self.model,
@@ -56,13 +57,13 @@ class CrashRecord:
 
 class ModelLoadError(Exception):
     """Raised when llama-server fails to load a model."""
-    def __init__(self, message: str, crash_record: Optional[CrashRecord] = None):
+    def __init__(self, message: str, crash_record: CrashRecord | None = None):
         super().__init__(message)
         self.crash_record = crash_record
 
 
 class ModelManager:
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(self, config_path: str | None = None):
         if config_path is None:
             config_path = str(local_models_file())
         self.config_path = Path(config_path)
@@ -74,20 +75,20 @@ class ModelManager:
         # resolve_reload_target / get_public_model_map) re-sync these mirrors via
         # _sync_registry_mirror() so a hot config edit never leaves them stale.
         self.models = self.registry.models
-        self._vision_capabilities: Dict[str, VisionCapability] = self.registry._vision_capabilities
-        self.server_process: Optional[int] = None # Systemd manages main process, but we might control it via systemctl
+        self._vision_capabilities: dict[str, VisionCapability] = self.registry._vision_capabilities
+        self.server_process: int | None = None # Systemd manages main process, but we might control it via systemctl
         self.server_url = "http://127.0.0.1:11440"
-        self.crash_history: List[CrashRecord] = []
-        self.last_crash: Optional[CrashRecord] = None
+        self.crash_history: list[CrashRecord] = []
+        self.last_crash: CrashRecord | None = None
 
         # === SECURITY: Model pinning & switch protection ===
-        self._pinned_model: Optional[str] = self._load_pinned_model()
-        self._switch_allowlist: Set[str] = self._load_switch_allowlist()
+        self._pinned_model: str | None = self._load_pinned_model()
+        self._switch_allowlist: set[str] = self._load_switch_allowlist()
         self._model_verified = False  # True after startup verification passes
-        self._last_verification_at: Optional[str] = None
-        self._last_successful_verification_at: Optional[str] = None
-        self._last_verified_model: Optional[str] = None
-        self._last_backend_model: Optional[str] = None
+        self._last_verification_at: str | None = None
+        self._last_successful_verification_at: str | None = None
+        self._last_verified_model: str | None = None
+        self._last_backend_model: str | None = None
         self.current_vision_enabled = False
 
         # Initial model: use pinned model if set, otherwise fallback
@@ -126,55 +127,55 @@ class ModelManager:
         finally:
             self._sync_registry_mirror()
 
-    def resolve_reload_target(self, requested_model: Optional[str] = None) -> str:
+    def resolve_reload_target(self, requested_model: str | None = None) -> str:
         try:
             return self.registry.resolve_reload_target(requested_model)
         finally:
             self._sync_registry_mirror()
 
-    def get_preferred_tool_model(self, model_name: Optional[str] = None) -> Optional[str]:
+    def get_preferred_tool_model(self, model_name: str | None = None) -> str | None:
         return self.registry.get_preferred_tool_model(model_name)
 
-    def get_preferred_reasoning_model(self, model_name: Optional[str] = None) -> Optional[str]:
+    def get_preferred_reasoning_model(self, model_name: str | None = None) -> str | None:
         return self.registry.get_preferred_reasoning_model(model_name)
 
-    def get_advertised_context_window(self, model_name: str) -> Optional[int]:
+    def get_advertised_context_window(self, model_name: str) -> int | None:
         return self.registry.get_advertised_context_window(model_name)
 
-    def get_runtime_context_window(self, model_name: str) -> Optional[int]:
+    def get_runtime_context_window(self, model_name: str) -> int | None:
         return self.registry.get_runtime_context_window(model_name)
 
-    def get_benchmark_context_limit(self, model_name: str) -> Optional[int]:
+    def get_benchmark_context_limit(self, model_name: str) -> int | None:
         return self.registry.get_benchmark_context_limit(model_name)
 
-    def get_public_model_map(self) -> Dict[str, str]:
+    def get_public_model_map(self) -> dict[str, str]:
         try:
             return self.registry.get_public_model_map()
         finally:
             self._sync_registry_mirror()
 
-    def get_vision_capability(self, model_name: str) -> Dict[str, Any]:
+    def get_vision_capability(self, model_name: str) -> dict[str, Any]:
         return self.registry.get_vision_capability(model_name)
 
     def reset_vision_validation(self, model_name: str) -> None:
         self.registry.reset_vision_validation(model_name)
 
-    def mark_vision_validation(self, model_name: str, status: str, error: Optional[str] = None) -> None:
+    def mark_vision_validation(self, model_name: str, status: str, error: str | None = None) -> None:
         self.registry.mark_vision_validation(model_name, status, error)
 
-    def current_runtime_uses_mmproj(self, model_name: Optional[str] = None) -> bool:
+    def current_runtime_uses_mmproj(self, model_name: str | None = None) -> bool:
         return self.registry.current_runtime_uses_mmproj(model_name)
 
-    def current_launch_context(self) -> Optional[int]:
+    def current_launch_context(self) -> int | None:
         return self.registry.current_launch_context()
 
     def build_runtime_config(
         self,
         model_name: str,
         *,
-        enable_vision: Optional[bool] = None,
-        context_hint: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        enable_vision: bool | None = None,
+        context_hint: int | None = None,
+    ) -> dict[str, Any]:
         return self.registry.build_runtime_config(
             model_name, enable_vision=enable_vision, context_hint=context_hint
         )
@@ -183,30 +184,30 @@ class ModelManager:
         self,
         model_name: str,
         *,
-        runtime_config: Optional[Dict[str, Any]] = None,
-        vision_enabled: Optional[bool] = None,
-    ) -> Dict[str, Any]:
+        runtime_config: dict[str, Any] | None = None,
+        vision_enabled: bool | None = None,
+    ) -> dict[str, Any]:
         return self.registry._build_crash_config_snapshot(
             model_name, runtime_config=runtime_config, vision_enabled=vision_enabled
         )
 
-    def _resolve_runtime_vision_flag(self, model_name: str, enable_vision: Optional[bool]) -> bool:
+    def _resolve_runtime_vision_flag(self, model_name: str, enable_vision: bool | None) -> bool:
         return self.registry._resolve_runtime_vision_flag(model_name, enable_vision)
 
-    def _resolve_runtime_value(self, config: Dict[str, Any], key: str, *, enable_vision: bool) -> Any:
+    def _resolve_runtime_value(self, config: dict[str, Any], key: str, *, enable_vision: bool) -> Any:
         return self.registry._resolve_runtime_value(config, key, enable_vision=enable_vision)
 
     def _sync_vision_capabilities(self) -> None:
         self.registry._sync_vision_capabilities()
         self._vision_capabilities = self.registry._vision_capabilities
 
-    def _uses_reasoning(self, config: Dict) -> bool:
+    def _uses_reasoning(self, config: dict) -> bool:
         return self.registry._uses_reasoning(config)
 
-    def _reasoning_budget(self, config: Dict) -> Optional[int]:
+    def _reasoning_budget(self, config: dict) -> int | None:
         return self.registry._reasoning_budget(config)
 
-    def _load_aliases(self) -> Dict[str, str]:
+    def _load_aliases(self) -> dict[str, str]:
         return self.registry._load_aliases()
 
     def _refresh_model_registry(self) -> None:
@@ -217,7 +218,7 @@ class ModelManager:
         self._vision_capabilities = self.registry._vision_capabilities
 
     # --- Pinned model config (persisted in models.yaml under 'guardian:') ---
-    def _load_pinned_model(self) -> Optional[str]:
+    def _load_pinned_model(self) -> str | None:
         """Load pinned_model from models.yaml guardian section."""
         try:
             with open(self.config_path, "r") as f:
@@ -229,7 +230,7 @@ class ModelManager:
         except Exception:
             return None
 
-    def _load_switch_allowlist(self) -> Set[str]:
+    def _load_switch_allowlist(self) -> set[str]:
         """Load set of client names allowed to trigger model switches."""
         try:
             with open(self.config_path, "r") as f:
@@ -242,7 +243,7 @@ class ModelManager:
             return set()
 
     @property
-    def pinned_model(self) -> Optional[str]:
+    def pinned_model(self) -> str | None:
         return self._pinned_model
 
     def _detect_initial_model(self) -> str:
@@ -351,7 +352,7 @@ class ModelManager:
             self._last_verification_at = datetime.now(UTC).isoformat()
             return False
 
-    def _get_backend_model_path(self) -> Optional[str]:
+    def _get_backend_model_path(self) -> str | None:
         """Extract the .gguf model path from the running llama-server process."""
         try:
             result = subprocess.run(
@@ -370,7 +371,7 @@ class ModelManager:
         except Exception:
             return None
 
-    def _identify_model_by_path(self, gguf_path: str) -> Optional[str]:
+    def _identify_model_by_path(self, gguf_path: str) -> str | None:
         """Reverse-lookup: find model name by its .gguf path."""
         for name, cfg in self.models.items():
             if cfg.get("path") == gguf_path:
@@ -490,8 +491,8 @@ class ModelManager:
         model_name: str,
         client_id: str = "_system",
         force: bool = False,
-        enable_vision: Optional[bool] = None,
-        context_hint: Optional[int] = None,
+        enable_vision: bool | None = None,
+        context_hint: int | None = None,
     ):
         # Re-read models.yaml so config edits take effect without Guardian restart
         self._refresh_model_registry()
@@ -605,7 +606,7 @@ class ModelManager:
              logger.info(f"No auto-save found for {model_name}, starting fresh.")
 
     @property
-    def idle_unload_minutes(self) -> Optional[float]:
+    def idle_unload_minutes(self) -> float | None:
         """Return idle_unload_minutes from guardian config, or None if disabled."""
         try:
             with open(self.config_path, 'r') as f:
@@ -852,10 +853,10 @@ class ModelManager:
 
     async def load(
         self,
-        model_name: Optional[str] = None,
-        enable_vision: Optional[bool] = None,
-        runtime_overrides: Optional[Dict[str, Any]] = None,
-        context_hint: Optional[int] = None,
+        model_name: str | None = None,
+        enable_vision: bool | None = None,
+        runtime_overrides: dict[str, Any] | None = None,
+        context_hint: int | None = None,
     ) -> None:
         """Reload llama-server with current (or specified) model."""
         # Re-read models.yaml so config edits take effect without Guardian restart
@@ -1054,7 +1055,7 @@ class ModelManager:
             else:
                 raise Exception("Restore failed")
 
-    def _build_args_string(self, config: Dict[str, Any]) -> tuple[str, dict[str, str]]:
+    def _build_args_string(self, config: dict[str, Any]) -> tuple[str, dict[str, str]]:
         """Build the llama-server CLI args string + env vars from a runtime config.
         MUST be byte-identical to what _write_server_args writes to current_model.args
         and current_model.env. Single source of truth for both launch and signature.
@@ -1160,7 +1161,7 @@ class ModelManager:
             env_dict["CUDA_VISIBLE_DEVICES"] = cuda_visible_devices
         return args_content, env_dict
 
-    def _write_server_args(self, config: Dict):
+    def _write_server_args(self, config: dict):
         """Build llama-server CLI arguments from model config and write to args file.
 
         Supported config keys (from models.yaml):
@@ -1190,9 +1191,9 @@ class ModelManager:
         self,
         model_name: str,
         *,
-        enable_vision: Optional[bool],
-        context_hint: Optional[int] = None,
-    ) -> Optional[dict]:
+        enable_vision: bool | None,
+        context_hint: int | None = None,
+    ) -> dict | None:
         """Compute the launch signature for a model+vision-mode from CURRENT models.yaml.
         Returns None if the model is unknown. Uses build_runtime_config (so vision/text
         overrides and the client context hint resolve correctly)."""
@@ -1209,7 +1210,7 @@ class ModelManager:
             "env_sha256": hashlib.sha256(json.dumps(env_dict, sort_keys=True).encode("utf-8")).hexdigest(),
         }
 
-    def _read_persisted_signature(self) -> Optional[dict]:
+    def _read_persisted_signature(self) -> dict | None:
         try:
             text = CURRENT_MODEL_SIG_FILE.read_text()
             return json.loads(text)
@@ -1226,8 +1227,8 @@ class ModelManager:
         self,
         model_name: str,
         *,
-        enable_vision: Optional[bool],
-        context_hint: Optional[int] = None,
+        enable_vision: bool | None,
+        context_hint: int | None = None,
     ) -> bool:
         """True if the model must be reloaded to apply current models.yaml settings.
         Drift = persisted sig missing, OR model/vision differ, OR args/env hash differ.
@@ -1330,7 +1331,7 @@ class ModelManager:
         except Exception:
             return False
 
-    async def _detect_crash(self, model_name: str, config_snapshot: Optional[Dict[str, Any]] = None) -> CrashRecord:
+    async def _detect_crash(self, model_name: str, config_snapshot: dict[str, Any] | None = None) -> CrashRecord:
         """Extract error details from journalctl and record the crash."""
         error_msg = await self._get_crash_error()
         config_snap = copy.deepcopy(config_snapshot) if config_snapshot is not None else self.models.get(model_name, {}).copy()
@@ -1378,7 +1379,7 @@ class ModelManager:
             return f"Failed to read crash logs: {e}"
 
     @staticmethod
-    def _extract_crash_error_from_lines(lines: List[str]) -> str:
+    def _extract_crash_error_from_lines(lines: list[str]) -> str:
         """Summarize the most relevant llama-server crash lines from recent logs."""
         error_keywords = [
             "cudamalloc failed",
@@ -1399,7 +1400,7 @@ class ModelManager:
             "exiting due to",
         ]
 
-        error_lines: List[str] = []
+        error_lines: list[str] = []
         for raw_line in lines:
             line = raw_line.strip()
             if not line:
@@ -1413,7 +1414,7 @@ class ModelManager:
             return " | ".join(error_lines[-6:])
         return "Unknown error (no recognizable error pattern in logs)"
 
-    async def _get_service_exit_code(self) -> Optional[int]:
+    async def _get_service_exit_code(self) -> int | None:
         """Get the exit code of the last llama-server run."""
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -1428,7 +1429,7 @@ class ModelManager:
         except Exception:
             return None
 
-    def get_crash_history(self) -> List[Dict]:
+    def get_crash_history(self) -> list[dict]:
         """Return crash history as a list of dicts (for API responses)."""
         return [c.to_dict() for c in self.crash_history]
 

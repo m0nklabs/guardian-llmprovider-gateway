@@ -7,16 +7,16 @@ All metrics are prefixed with 'guardian_' for easy Grafana dashboard filtering.
 import logging
 import time
 from contextlib import contextmanager
-from typing import Any, Dict, Optional
+from typing import Any
 
 from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    REGISTRY,
     Counter,
     Gauge,
     Histogram,
     Info,
     generate_latest,
-    CONTENT_TYPE_LATEST,
-    REGISTRY,
 )
 
 logger = logging.getLogger("guardian-metrics")
@@ -164,7 +164,7 @@ CAPTURE_FILES_RETIRED = Counter(
 )
 
 
-def update_capture_metrics(snap: Optional[Dict[str, Any]] = None) -> None:
+def update_capture_metrics(snap: dict[str, Any] | None = None) -> None:
     """Sync capture subsystem gauges from the sink/writer snapshot."""
     if snap is None:
         return

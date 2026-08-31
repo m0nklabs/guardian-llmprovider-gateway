@@ -20,7 +20,6 @@ from app.proxy.providers import (
     _expand_env,
 )
 
-
 # ── Fixtures ───────────────────────────────────────────────────────────
 
 
