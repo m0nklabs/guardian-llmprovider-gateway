@@ -2,15 +2,13 @@
 
 import json
 from pathlib import Path
-from typing import Dict
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 import yaml
-import httpx
 
 from tests.conftest import SAMPLE_MODELS_YAML, SAMPLE_SETTINGS_YAML
-
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
@@ -1544,7 +1542,7 @@ models:
 
 
 class TestSpeculativeDecodingNoDraft:
-    def _args(self, mgr, extra: Dict = None) -> str:
+    def _args(self, mgr, extra: dict = None) -> str:
         config = {
             "path": "/models/spec.gguf",
             "context": 8192,

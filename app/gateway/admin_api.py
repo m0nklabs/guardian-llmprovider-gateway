@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import Any, Dict
+from typing import Any
 
 import httpx
 from fastapi import HTTPException, Request
@@ -27,7 +27,7 @@ _inference_queue = None
 _state = None
 _llama_server_url = None
 _proxy_port = None
-_PROVIDER_BASE_URLS: Dict[str, str] = {}
+_PROVIDER_BASE_URLS: dict[str, str] = {}
 _get_cloud_key_fingerprint = None
 _get_request_auth_context = None
 _get_queue_owner_id = None

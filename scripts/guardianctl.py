@@ -32,7 +32,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from _paths import DATA_DIR, REPO_ROOT
 
@@ -110,7 +110,7 @@ def _fmt_age(seconds: int) -> str:
     return f"{hours // 24}d"
 
 
-def _capture_retention_summary(cfg: Optional[Any] = None) -> dict:
+def _capture_retention_summary(cfg: Any | None = None) -> dict:
     """Retention config + actual on-disk capture state (no API needed).
 
     Retention is enforced inside the WAL writer, so it is invisible in the
@@ -361,7 +361,7 @@ def cmd_test_event(args: argparse.Namespace) -> None:
     """Emit a synthetic test event to verify the capture pipeline."""
     from app.capture.config import load_capture_config
     from app.capture.schema import BuildContext, build_request_received_event
-    from app.capture.sink import CaptureSink, CaptureEvent
+    from app.capture.sink import CaptureEvent, CaptureSink
     from app.capture.wal_writer import CaptureWALWriter
 
     cfg = load_capture_config()

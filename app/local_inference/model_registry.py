@@ -19,11 +19,12 @@ state and honors test monkeypatching of
 import copy
 import logging
 import re
-import yaml
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
+
+import yaml
 
 from app.paths import local_models_file
 
@@ -36,14 +37,14 @@ MISMATCH_MODEL_NAME = "__MISMATCH__"
 class VisionCapability:
     """Runtime multimodal capability state for a configured model."""
     configured: bool
-    mmproj: Optional[str]
+    mmproj: str | None
     mmproj_exists: bool
     status: str
-    signature: Tuple[str, str]
-    last_checked_at: Optional[str] = None
-    last_error: Optional[str] = None
+    signature: tuple[str, str]
+    last_checked_at: str | None = None
+    last_error: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "configured": self.configured,
             "mmproj": self.mmproj,
@@ -65,17 +66,17 @@ class ModelRegistry:
     launch-args path) through the bound owner set by :meth:`bind_runtime_state`.
     """
 
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(self, config_path: str | None = None):
         if config_path is None:
             config_path = str(local_models_file())
         self.config_path = Path(config_path)
         # Runtime state mirror (the authoritative values live on the bound
         # lifecycle owner; these provide a sane standalone default).
-        self._current_model: Optional[str] = None
+        self._current_model: str | None = None
         self._current_vision_enabled: bool = False
-        self._owner: Optional[Any] = None
+        self._owner: Any | None = None
         self.models = self._load_config()
-        self._vision_capabilities: Dict[str, VisionCapability] = {}
+        self._vision_capabilities: dict[str, VisionCapability] = {}
         self._sync_vision_capabilities()
 
     def bind_runtime_state(self, owner: Any) -> None:
@@ -87,7 +88,7 @@ class ModelRegistry:
 
     # -- runtime state accessors (read the authoritative bound owner) --------
     @property
-    def _current_model_value(self) -> Optional[str]:
+    def _current_model_value(self) -> str | None:
         if self._owner is not None:
             return self._owner.current_model
         return self._current_model
@@ -107,7 +108,7 @@ class ModelRegistry:
 
     # ------------------------------------------------------------------------
 
-    def _load_config(self) -> Dict:
+    def _load_config(self) -> dict:
         if not self.config_path.exists():
             logger.warning(f"Config not found at {self.config_path}")
             return {}
@@ -119,7 +120,7 @@ class ModelRegistry:
         self.models = self._load_config()
         self._sync_vision_capabilities()
 
-    def _load_aliases(self) -> Dict[str, str]:
+    def _load_aliases(self) -> dict[str, str]:
         """Load model aliases from models.yaml aliases section."""
         try:
             with open(self.config_path, "r") as f:
@@ -164,11 +165,11 @@ class ModelRegistry:
 
         raise ValueError(f"Model '{name}' not found in configuration (no alias match)")
 
-    def resolve_reload_target(self, requested_model: Optional[str] = None) -> str:
+    def resolve_reload_target(self, requested_model: str | None = None) -> str:
         """Return a configured model that is safe to use for backend reloads."""
         self._refresh_model_registry()
 
-        candidates: List[Optional[str]] = []
+        candidates: list[str | None] = []
         if self._owner is not None and self._owner._pinned_model:
             candidates.append(self._owner._pinned_model)
         if requested_model and requested_model not in {"auto", MISMATCH_MODEL_NAME}:
@@ -194,13 +195,13 @@ class ModelRegistry:
 
         raise ValueError("No configured model is available for backend reload")
 
-    def _uses_reasoning(self, config: Dict) -> bool:
+    def _uses_reasoning(self, config: dict) -> bool:
         extra_args = str(config.get("extra_args", ""))
         if "--reasoning off" in extra_args:
             return False
         return "--reasoning on" in extra_args or self._reasoning_budget(config) is not None
 
-    def _reasoning_budget(self, config: Dict) -> Optional[int]:
+    def _reasoning_budget(self, config: dict) -> int | None:
         extra_args = str(config.get("extra_args", ""))
         match = re.search(r"--reasoning-budget(?:=|\s+)(-?\d+)", extra_args)
         if not match:
@@ -210,12 +211,12 @@ class ModelRegistry:
         except ValueError:
             return None
 
-    def _resolve_vision_mmproj(self, config: Dict[str, Any]) -> Optional[str]:
+    def _resolve_vision_mmproj(self, config: dict[str, Any]) -> str | None:
         """Return the mmproj path used for vision runtime, if any."""
         mmproj = str(config.get("vision_mmproj") or config.get("mmproj") or "").strip()
         return mmproj or None
 
-    def _resolve_runtime_value(self, config: Dict[str, Any], key: str, *, enable_vision: bool) -> Any:
+    def _resolve_runtime_value(self, config: dict[str, Any], key: str, *, enable_vision: bool) -> Any:
         """Return the effective runtime value for text or vision mode."""
         override_key = f"vision_{key}" if enable_vision else f"text_{key}"
         override_value = config.get(override_key)
@@ -223,7 +224,7 @@ class ModelRegistry:
             return override_value
         return config.get(key)
 
-    def _resolve_runtime_vision_flag(self, model_name: str, enable_vision: Optional[bool]) -> bool:
+    def _resolve_runtime_vision_flag(self, model_name: str, enable_vision: bool | None) -> bool:
         """Resolve whether a load/switch should start the model with mmproj."""
         config = self.models.get(model_name, {})
         if not self._resolve_vision_mmproj(config):
@@ -238,9 +239,9 @@ class ModelRegistry:
         self,
         model_name: str,
         *,
-        enable_vision: Optional[bool] = None,
-        context_hint: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        enable_vision: bool | None = None,
+        context_hint: int | None = None,
+    ) -> dict[str, Any]:
         """Build the effective runtime config for text or vision mode."""
         if model_name not in self.models:
             raise ValueError(f"Model {model_name} not found in configuration")
@@ -278,9 +279,9 @@ class ModelRegistry:
         self,
         model_name: str,
         *,
-        runtime_config: Optional[Dict[str, Any]] = None,
-        vision_enabled: Optional[bool] = None,
-    ) -> Dict[str, Any]:
+        runtime_config: dict[str, Any] | None = None,
+        vision_enabled: bool | None = None,
+    ) -> dict[str, Any]:
         """Capture both the configured profile and the resolved runtime shape for crash reports."""
         snapshot = copy.deepcopy(self.models.get(model_name, {}))
         if vision_enabled is not None:
@@ -289,7 +290,7 @@ class ModelRegistry:
             snapshot["effective_runtime_config"] = copy.deepcopy(runtime_config)
         return snapshot
 
-    def current_runtime_uses_mmproj(self, model_name: Optional[str] = None) -> bool:
+    def current_runtime_uses_mmproj(self, model_name: str | None = None) -> bool:
         """Return whether the current backend args include the model's mmproj path."""
         target = model_name or self._current_model_value
         config = self.models.get(target, {})
@@ -305,7 +306,7 @@ class ModelRegistry:
 
         return any(candidate and candidate in args for candidate in mmproj_candidates)
 
-    def current_launch_context(self) -> Optional[int]:
+    def current_launch_context(self) -> int | None:
         """Return the context window (-c) the currently running backend was launched
         with, or None if the args file is unreadable/unparsable. Convenience accessor
         for the client context-hint feature (lets clients discover the active ctx)."""
@@ -318,7 +319,7 @@ class ModelRegistry:
             return None
         return int(match.group(1))
 
-    def _is_tool_friendly_config(self, config: Dict) -> bool:
+    def _is_tool_friendly_config(self, config: dict) -> bool:
         extra_args = str(config.get("extra_args", ""))
         profile_role = str(config.get("profile_role", "")).strip().lower()
         return (
@@ -328,14 +329,14 @@ class ModelRegistry:
             or not self._uses_reasoning(config)
         )
 
-    def _matching_model_candidates(self, model_name: str) -> List[str]:
+    def _matching_model_candidates(self, model_name: str) -> list[str]:
         config = self.models.get(model_name, {})
         if not config:
             return []
 
         path = config.get("path")
         mmproj = self._resolve_vision_mmproj(config)
-        candidates: List[str] = []
+        candidates: list[str] = []
         for candidate_name, candidate_cfg in self.models.items():
             if candidate_name == model_name:
                 continue
@@ -346,7 +347,7 @@ class ModelRegistry:
             candidates.append(candidate_name)
         return candidates
 
-    def _sort_preferred_candidates(self, model_names: List[str]) -> List[str]:
+    def _sort_preferred_candidates(self, model_names: list[str]) -> list[str]:
         def sort_key(name: str):
             cfg = self.models.get(name, {})
             context = self.get_runtime_context_window(name) or 0
@@ -363,7 +364,7 @@ class ModelRegistry:
 
         return sorted(model_names, key=sort_key)
 
-    def get_preferred_tool_model(self, model_name: Optional[str] = None) -> Optional[str]:
+    def get_preferred_tool_model(self, model_name: str | None = None) -> str | None:
         """Return a tool-friendly sibling profile for a model family when available."""
         target = model_name or self._current_model_value
         config = self.models.get(target)
@@ -380,7 +381,7 @@ class ModelRegistry:
             return target
         return self._sort_preferred_candidates(candidates)[0]
 
-    def get_preferred_reasoning_model(self, model_name: Optional[str] = None) -> Optional[str]:
+    def get_preferred_reasoning_model(self, model_name: str | None = None) -> str | None:
         """Return the deepest reasoning-capable sibling profile for a model family."""
         target = model_name or self._current_model_value
         config = self.models.get(target)
@@ -409,7 +410,7 @@ class ModelRegistry:
 
         return sorted(candidates, key=sort_key)[0]
 
-    def get_advertised_context_window(self, model_name: str) -> Optional[int]:
+    def get_advertised_context_window(self, model_name: str) -> int | None:
         """Return a conservative context window to advertise to clients.
 
         Use the active runtime profile size only, then reserve a small headroom
@@ -432,7 +433,7 @@ class ModelRegistry:
         headroom = max(1024, min(4096, runtime_context // 32))
         return max(1024, runtime_context - headroom)
 
-    def get_runtime_context_window(self, model_name: str) -> Optional[int]:
+    def get_runtime_context_window(self, model_name: str) -> int | None:
         """Return the active runtime profile context for a model, if set."""
         config = self.models.get(model_name, {})
         vision_enabled = model_name == self._current_model_value and self._current_vision_enabled_value
@@ -447,7 +448,7 @@ class ModelRegistry:
             return configured_context
         return None
 
-    def get_benchmark_context_limit(self, model_name: str) -> Optional[int]:
+    def get_benchmark_context_limit(self, model_name: str) -> int | None:
         """Return the non-runtime benchmark ceiling from models.yaml.
 
         This mirrors the config's benchmark_context_limit semantics: the paper
@@ -460,7 +461,7 @@ class ModelRegistry:
             return benchmark_context_limit
         return None
 
-    def get_public_model_map(self) -> Dict[str, str]:
+    def get_public_model_map(self) -> dict[str, str]:
         """Return public model IDs mapped to their canonical model names.
 
         Include both canonical model names and valid aliases so OpenAI-compatible
@@ -468,7 +469,7 @@ class ModelRegistry:
         for inference requests.
         """
         self._refresh_model_registry()
-        public_models: Dict[str, str] = {name: name for name in self.models}
+        public_models: dict[str, str] = {name: name for name in self.models}
 
         for alias, target in self._load_aliases().items():
             if alias in public_models:
@@ -480,7 +481,7 @@ class ModelRegistry:
 
         return public_models
 
-    def _vision_signature(self, config: Dict) -> Tuple[str, str]:
+    def _vision_signature(self, config: dict) -> tuple[str, str]:
         return (
             str(config.get("path", "")).strip(),
             str(self._resolve_vision_mmproj(config) or "").strip(),
@@ -489,7 +490,7 @@ class ModelRegistry:
     def _sync_vision_capabilities(self) -> None:
         """Refresh cached multimodal capability state from the current config."""
         previous = getattr(self, "_vision_capabilities", {})
-        refreshed: Dict[str, VisionCapability] = {}
+        refreshed: dict[str, VisionCapability] = {}
 
         for model_name, config in self.models.items():
             mmproj = self._resolve_vision_mmproj(config)
@@ -540,7 +541,7 @@ class ModelRegistry:
 
         self._vision_capabilities = refreshed
 
-    def get_vision_capability(self, model_name: str) -> Dict[str, Any]:
+    def get_vision_capability(self, model_name: str) -> dict[str, Any]:
         """Return multimodal capability metadata for a configured model."""
         capability = self._vision_capabilities.get(model_name)
         if capability is None:
@@ -572,7 +573,7 @@ class ModelRegistry:
         capability.last_error = None
         capability.last_checked_at = None
 
-    def mark_vision_validation(self, model_name: str, status: str, error: Optional[str] = None) -> None:
+    def mark_vision_validation(self, model_name: str, status: str, error: str | None = None) -> None:
         """Persist the latest observed runtime multimodal state for a model."""
         capability = self._vision_capabilities.get(model_name)
         if capability is None:

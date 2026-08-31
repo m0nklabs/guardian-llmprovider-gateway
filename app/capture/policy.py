@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, List, Optional
 
 from app.capture.config import CaptureConfig
 
@@ -45,7 +44,7 @@ class PolicyResult:
     policy_version: str = ""
 
     #: The resolved capture fields policy (redactor guidance).
-    field_policies: Optional[Dict[str, str]] = None
+    field_policies: dict[str, str] | None = None
 
     @property
     def is_capture(self) -> bool:
@@ -53,8 +52,8 @@ class PolicyResult:
 
 
 def _matches_allowed_clients(
-    client_ref: Optional[str],
-    allowed_refs: List[str],
+    client_ref: str | None,
+    allowed_refs: list[str],
 ) -> bool:
     """Constant-time comparison of client_ref against the allowlist."""
     if not client_ref:
@@ -73,9 +72,9 @@ def _const_time_eq(a: str, b: str) -> bool:
 
 
 def _matches_cloud_model(
-    model_name: Optional[str],
-    allowed_models: List[str],
-    allowed_prefixes: List[str],
+    model_name: str | None,
+    allowed_models: list[str],
+    allowed_prefixes: list[str],
 ) -> bool:
     """Check if a cloud model name matches the capture allowlist.
 
@@ -100,8 +99,8 @@ def evaluate_capture_policy(
     route_type: str,
     endpoint: str,
     ingress_protocol: str,
-    requested_model: Optional[str],
-    client_ref: Optional[str],
+    requested_model: str | None,
+    client_ref: str | None,
 ) -> PolicyResult:
     """Evaluate the capture policy for a single request.
 

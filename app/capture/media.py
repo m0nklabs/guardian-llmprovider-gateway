@@ -33,7 +33,7 @@ import hashlib
 import logging
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 from app.capture.redactor import _try_extract_image_dimensions
 
@@ -62,7 +62,7 @@ def _write_media_file(
     idx: int,
     raw: bytes,
     mime_type: str,
-) -> Tuple[str, str]:
+) -> tuple[str, str]:
     """Write one media payload; returns (relative_path, sha256)."""
     ext = _extension_for(mime_type)
     filename = f"{request_id}_{idx}{ext}"
@@ -76,10 +76,10 @@ def _write_media_file(
 
 def _image_metadata_for(
     raw: bytes, mime_type: str
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Build the metadata dict (dimensions best-effort)."""
     dims = _try_extract_image_dimensions(raw, mime_type)
-    meta: Dict[str, Any] = {"mime_type": mime_type, "size_bytes": len(raw)}
+    meta: dict[str, Any] = {"mime_type": mime_type, "size_bytes": len(raw)}
     if dims:
         meta["width"] = dims[0]
         meta["height"] = dims[1]
@@ -87,11 +87,11 @@ def _image_metadata_for(
 
 
 def _handle_openai_image_url(
-    block: Dict[str, Any],
+    block: dict[str, Any],
     media_root: Path,
     request_id: str,
     idx: int,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Extract an OpenAI ``image_url`` block's data-URL payload."""
     image_url = block.get("image_url")
     if not isinstance(image_url, dict):
@@ -127,11 +127,11 @@ def _handle_openai_image_url(
 
 
 def _handle_anthropic_image(
-    block: Dict[str, Any],
+    block: dict[str, Any],
     media_root: Path,
     request_id: str,
     idx: int,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Extract an Anthropic ``image`` block's base64 ``source.data`` payload."""
     source = block.get("source")
     if not isinstance(source, dict):
@@ -177,14 +177,14 @@ def extract_media_from_messages(
     if not isinstance(messages, list):
         return messages
     media_root = Path(capture_root) / MEDIA_SUBDIR
-    result: List[Dict[str, Any]] = []
+    result: list[dict[str, Any]] = []
     for msg in messages:
         if not isinstance(msg, dict):
             result.append(msg)
             continue
         content = msg.get("content")
         if isinstance(content, list):
-            new_blocks: List[Any] = []
+            new_blocks: list[Any] = []
             for idx, block in enumerate(content):
                 if not isinstance(block, dict):
                     new_blocks.append(block)

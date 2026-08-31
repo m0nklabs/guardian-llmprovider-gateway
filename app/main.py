@@ -5,29 +5,41 @@ import os
 import pathlib
 import sys
 import time
-from fastapi import FastAPI, Depends, Request
-from fastapi import HTTPException
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+
 import uvicorn
 
 # Load .env file early — before any module that reads environment variables
 from dotenv import load_dotenv
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+
 _ENV_FILE = pathlib.Path(__file__).parent.parent / ".env"
 if _ENV_FILE.exists():
     _ENV_FILE.chmod(0o600)
 load_dotenv(_ENV_FILE)
 
-from app.proxy.server import (  # noqa: E402  (intentional late import: requires .env loaded first)
+from app.proxy.auth import (
+    _token_fingerprint,
+    generate_api_key,
+    load_api_keys,
+    verify_api_key,
+)
+from app.proxy.server import (
     app as proxy_app,
-    state as proxy_state,
+)
+from app.proxy.server import (
+    cloud_catalog,
+    cloud_rate_limiter,
     get_gpu_metrics,
     get_model_size,
     inference_queue,
+    provider_registry,
 )
-from app.proxy.auth import load_api_keys, generate_api_key, _token_fingerprint, verify_api_key  # noqa: E402
-from app.proxy.server import provider_registry, cloud_catalog, cloud_rate_limiter  # noqa: E402
-from app.scheduler.manager import SchedulerManager  # noqa: E402
+from app.proxy.server import (
+    state as proxy_state,
+)
+from app.scheduler.manager import SchedulerManager
 
 # Configure logging
 _LOG_FILE = pathlib.Path("guardian.log")

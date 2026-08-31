@@ -68,9 +68,10 @@ from __future__ import annotations
 
 import asyncio
 import json
-import uuid
 import logging
-from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+import uuid
+from collections.abc import AsyncIterator
+from typing import Any
 
 logger = logging.getLogger("Guardian.AnthropicBridge")
 
@@ -83,7 +84,7 @@ PING_INTERVAL_SECONDS = 15.0
 # ── Request translation: Anthropic → OpenAI ───────────────────────────
 
 
-def translate_anthropic_request_to_openai(anthropic_body: Dict[str, Any]) -> Dict[str, Any]:
+def translate_anthropic_request_to_openai(anthropic_body: dict[str, Any]) -> dict[str, Any]:
     """Convert an Anthropic Messages API request body to OpenAI format.
 
     Handles:
@@ -95,13 +96,13 @@ def translate_anthropic_request_to_openai(anthropic_body: Dict[str, Any]) -> Dic
     - ``stream`` passthrough
     - ``model`` passthrough (already rewritten by caller)
     """
-    openai_body: Dict[str, Any] = {}
+    openai_body: dict[str, Any] = {}
 
     # Model name (already rewritten to upstream model by caller)
     openai_body["model"] = anthropic_body.get("model", "")
 
     # System prompt: Anthropic puts it at top level, OpenAI uses a message
-    messages: List[Dict[str, Any]] = []
+    messages: list[dict[str, Any]] = []
     system = anthropic_body.get("system")
     if system:
         # system can be a string or a list of content blocks
@@ -170,8 +171,8 @@ def translate_anthropic_request_to_openai(anthropic_body: Dict[str, Any]) -> Dic
 
 
 def _convert_content_blocks_to_openai(
-    blocks: List[Any], role: str
-) -> List[Dict[str, Any]]:
+    blocks: list[Any], role: str
+) -> list[dict[str, Any]]:
     """Convert Anthropic content blocks to OpenAI message format.
 
     Anthropic content blocks:
@@ -187,11 +188,11 @@ def _convert_content_blocks_to_openai(
     - Tool result: ``{"role": "tool", "tool_call_id": "...", "content": "..."}``
     """
     # Separate text blocks, image blocks, tool_use, and tool_result
-    text_parts: List[str] = []
-    image_parts: List[Dict[str, Any]] = []
-    tool_calls: List[Dict[str, Any]] = []
-    _tool_results: List[Dict[str, Any]] = []  # intentionally unused: tool results are built inline below
-    result_messages: List[Dict[str, Any]] = []
+    text_parts: list[str] = []
+    image_parts: list[dict[str, Any]] = []
+    tool_calls: list[dict[str, Any]] = []
+    _tool_results: list[dict[str, Any]] = []  # intentionally unused: tool results are built inline below
+    result_messages: list[dict[str, Any]] = []
 
     for block in blocks:
         if not isinstance(block, dict):
@@ -264,7 +265,7 @@ def _convert_content_blocks_to_openai(
             elif not isinstance(tool_content, str):
                 tool_content = json.dumps(tool_content)
 
-            tool_msg: Dict[str, Any] = {
+            tool_msg: dict[str, Any] = {
                 "role": "tool",
                 "tool_call_id": block.get("tool_use_id", ""),
                 "content": tool_content,
@@ -274,7 +275,7 @@ def _convert_content_blocks_to_openai(
             result_messages.append(tool_msg)
 
     # Build the primary message (text + images + tool_calls)
-    primary: Dict[str, Any] = {"role": role}
+    primary: dict[str, Any] = {"role": role}
 
     if image_parts:
         # OpenAI multimodal: content is a list of text + image_url parts
@@ -301,7 +302,7 @@ def _convert_content_blocks_to_openai(
         return [primary]
 
 
-def _convert_anthropic_tools_to_openai(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _convert_anthropic_tools_to_openai(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert Anthropic tool definitions to OpenAI function format."""
     openai_tools = []
     for tool in tools:
@@ -357,11 +358,11 @@ def _convert_tool_choice(tool_choice: Any) -> Any:
 
 
 def translate_openai_response_to_anthropic(
-    openai_response: Dict[str, Any],
+    openai_response: dict[str, Any],
     model_name: str,
     *,
-    request_stop_sequences: Optional[List[str]] = None,
-) -> Dict[str, Any]:
+    request_stop_sequences: list[str] | None = None,
+) -> dict[str, Any]:
     """Convert an OpenAI chat completion response to Anthropic Messages format.
 
     Handles:
@@ -376,7 +377,7 @@ def translate_openai_response_to_anthropic(
     message = choice.get("message", {})
 
     # Build content blocks
-    content_blocks: List[Dict[str, Any]] = []
+    content_blocks: list[dict[str, Any]] = []
 
     # Thinking / reasoning content (some providers return reasoning_content or reasoning)
     reasoning = message.get("reasoning_content") or message.get("reasoning")
@@ -424,7 +425,7 @@ def translate_openai_response_to_anthropic(
     # try to determine which one was matched. OpenAI doesn't report this
     # explicitly, so we check if the response text ends with one of the
     # requested stop sequences.
-    stop_sequence_value: Optional[str] = None
+    stop_sequence_value: str | None = None
     if finish_reason == "stop" and request_stop_sequences:
         response_text = text or ""
         for seq in request_stop_sequences:
@@ -462,7 +463,7 @@ def translate_openai_response_to_anthropic(
 async def _iter_with_pings(
     openai_sse_lines: AsyncIterator[str],
     interval: float = PING_INTERVAL_SECONDS,
-) -> AsyncIterator[Tuple[str, Optional[str]]]:
+) -> AsyncIterator[tuple[str, str | None]]:
     """Wrap an upstream SSE iterator, yielding ping heartbeats when idle.
 
     Returns tuples of ``("line", str)`` for upstream lines and
@@ -506,7 +507,7 @@ async def translate_openai_stream_to_anthropic(
     model_name: str,
     *,
     request_id: str = "",
-    request_stop_sequences: Optional[List[str]] = None,
+    request_stop_sequences: list[str] | None = None,
     _ping_interval: float = PING_INTERVAL_SECONDS,
 ) -> AsyncIterator[str]:
     """Translate an OpenAI streaming SSE response to Anthropic SSE events.
@@ -553,13 +554,13 @@ async def translate_openai_stream_to_anthropic(
     # - Close all blocks at the end.
 
     # State: which block indices are currently open, and what type
-    open_blocks: Dict[int, str] = {}  # {index: "thinking" | "text" | "tool_use"}
+    open_blocks: dict[int, str] = {}  # {index: "thinking" | "text" | "tool_use"}
     next_block_index = 0
     # Map OpenAI tool_call.index → our content block index
-    tool_call_index_map: Dict[int, int] = {}
+    tool_call_index_map: dict[int, int] = {}
     # Track thinking and text block indices (assigned lazily on first delta)
-    thinking_block_idx: Optional[int] = None
-    text_block_idx: Optional[int] = None
+    thinking_block_idx: int | None = None
+    text_block_idx: int | None = None
     # Accumulate all text deltas for stop_sequence detection at the end
     accumulated_text = ""
 
@@ -781,7 +782,7 @@ async def translate_openai_stream_to_anthropic(
     # try to detect which one by checking accumulated text against request
     # stop_sequences. This is best-effort since OpenAI doesn't report which
     # stop sequence was matched.
-    stop_sequence_value: Optional[str] = None
+    stop_sequence_value: str | None = None
     if stop_reason == "end_turn" and request_stop_sequences:
         for seq in request_stop_sequences:
             if seq and accumulated_text.endswith(seq):
@@ -806,7 +807,7 @@ async def translate_openai_stream_to_anthropic(
     })
 
 
-def _format_sse_event(event_type: str, data: Dict[str, Any]) -> str:
+def _format_sse_event(event_type: str, data: dict[str, Any]) -> str:
     """Format a single SSE event string."""
     return f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
 
@@ -837,7 +838,7 @@ def provider_needs_anthropic_translation(provider_name: str, path: str) -> bool:
 def translate_openai_error_to_anthropic(
     status_code: int,
     error_body: Any,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Convert an OpenAI-format error response to Anthropic error format.
 
     Anthropic error format::

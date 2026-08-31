@@ -22,7 +22,7 @@ import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from app.capture.config import CaptureConfig
 
@@ -45,7 +45,7 @@ SCHEMA_VERSION = "1.1.0"
 CALLER_IDENTITY_MAX_LEN = 256
 
 
-def _coerce_int(value: Any) -> Optional[int]:
+def _coerce_int(value: Any) -> int | None:
     """Best-effort int coercion; returns None when the value is not coercible.
 
     Defensive against upstream providers emitting token counters as floats
@@ -73,7 +73,7 @@ def _coerce_int(value: Any) -> Optional[int]:
         return None
 
 
-def _coerce_float(value: Any) -> Optional[float]:
+def _coerce_float(value: Any) -> float | None:
     """Best-effort float coercion; returns None when not coercible.
 
     Non-finite results (``inf``/``nan``) yield None: ``json.dumps`` would
@@ -135,10 +135,10 @@ def compute_event_id(
 
 
 def compute_client_ref(
-    key_fingerprint: Optional[str],
+    key_fingerprint: str | None,
     *,
-    allowed_refs: Optional[List[str]] = None,
-) -> Optional[str]:
+    allowed_refs: list[str] | None = None,
+) -> str | None:
     """Compute a privacy-safe HMAC-SHA-256 client identifier.
 
     Uses ``GUARDIAN_CAPTURE_CLIENT_REF_SECRET`` from the environment as the
@@ -165,7 +165,7 @@ def compute_client_ref(
     previous_raw = os.environ.get(CLIENT_REF_PREVIOUS_SECRETS_ENV, "")
 
     # Build ordered list of secrets to try (current first, then legacy).
-    secrets: List[str] = []
+    secrets: list[str] = []
     if current:
         secrets.append(current)
     if previous_raw:
@@ -205,7 +205,7 @@ def compute_client_ref(
     ).hexdigest()
 
 
-def compute_record_auth(record_line: str) -> Optional[Dict[str, str]]:
+def compute_record_auth(record_line: str) -> dict[str, str] | None:
     """Compute per-record HMAC for a WAL JSONL line.
 
     Returns a dict ``{"alg": "hmac-sha256", "key_id": "<16-char hex prefix>",
@@ -242,20 +242,20 @@ def _build_base_event(
     event_type: str,
     sequence: int,
     *,
-    client_fingerprint: Optional[str] = None,
+    client_fingerprint: str | None = None,
     endpoint: str,
     ingress_protocol: str,
     route_type: str,
-    requested_model: Optional[str] = None,
-    resolved_model: Optional[str] = None,
-) -> Dict[str, Any]:
+    requested_model: str | None = None,
+    resolved_model: str | None = None,
+) -> dict[str, Any]:
     """Build the common base fields present on every capture event."""
     client_ref = compute_client_ref(
         client_fingerprint,
         allowed_refs=config.allowed_client_refs if config.per_client_opt_in else None,
     ) if client_fingerprint else None
 
-    event: Dict[str, Any] = {
+    event: dict[str, Any] = {
         # Core schema identity
         "schema_name": SCHEMA_NAME,
         "schema_version": SCHEMA_VERSION,
@@ -298,28 +298,28 @@ class BuildContext:
     endpoint: str
     ingress_protocol: str
     route_type: str
-    requested_model: Optional[str]
+    requested_model: str | None
     capture_policy_version: str
     instance_id: str
 
     # Identity
-    client_fingerprint: Optional[str] = None
+    client_fingerprint: str | None = None
 
     # Caller-supplied correlation identity (from configured inbound request
     # headers; absent when the client did not send any of them).  Stamped by
     # the capture controller from a bounded per-request registry, so it is
     # present on every event of the request regardless of which call site
     # built the BuildContext.
-    caller_request_id: Optional[str] = None
-    app_title: Optional[str] = None
-    app_referer: Optional[str] = None
+    caller_request_id: str | None = None
+    app_title: str | None = None
+    app_referer: str | None = None
 
     # Optional resolved metadata (set as request progresses)
-    resolved_model: Optional[str] = None
-    upstream_model: Optional[str] = None
-    provider: Optional[str] = None
-    failover_group: Optional[str] = None
-    attempts: Optional[int] = None
+    resolved_model: str | None = None
+    upstream_model: str | None = None
+    provider: str | None = None
+    failover_group: str | None = None
+    attempts: int | None = None
 
     # Timing
     # started_at_utc: wall-clock UTC when capture began tracking this request
@@ -327,33 +327,33 @@ class BuildContext:
     # construction when not provided explicitly, so every terminal event can
     # reference the request start even though the monotonic lifecycle
     # timestamps below are not serializable.
-    started_at_utc: Optional[str] = None
-    request_received_ts: Optional[float] = None  # monotonic
-    request_completed_ts: Optional[float] = None  # monotonic
+    started_at_utc: str | None = None
+    request_received_ts: float | None = None  # monotonic
+    request_completed_ts: float | None = None  # monotonic
 
     # Token usage
-    prompt_tokens: Optional[int] = None
-    completion_tokens: Optional[int] = None
-    total_tokens: Optional[int] = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
 
     # Streaming metadata
     streamed: bool = False
     incomplete: bool = False
 
     # HTTP metadata
-    http_status: Optional[int] = None
+    http_status: int | None = None
 
     # Error metadata
-    error_code: Optional[str] = None
+    error_code: str | None = None
 
     # Content (already redacted)
-    request_messages: Optional[List[Dict[str, Any]]] = None
-    request_parameters: Optional[Dict[str, Any]] = None
-    response_content: Optional[str] = None
-    tool_calls: Optional[List[Dict[str, Any]]] = None
-    tool_results: Optional[List[Dict[str, Any]]] = None
-    reasoning_content: Optional[str] = None
-    finish_reason: Optional[str] = None
+    request_messages: list[dict[str, Any]] | None = None
+    request_parameters: dict[str, Any] | None = None
+    response_content: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+    tool_results: list[dict[str, Any]] | None = None
+    reasoning_content: str | None = None
+    finish_reason: str | None = None
 
     # Grammar-Constrained Decoding presence flags (content is never stored)
     grammar_present: bool = False
@@ -375,7 +375,7 @@ class BuildContext:
         )
 
 
-def _apply_request_origin(event: Dict[str, Any], ctx: BuildContext) -> None:
+def _apply_request_origin(event: dict[str, Any], ctx: BuildContext) -> None:
     """Copy caller-supplied correlation identity from the context onto an event.
 
     Fields stay absent when the caller did not provide them — nothing is
@@ -393,11 +393,11 @@ def build_request_received_event(
     config: CaptureConfig,
     ctx: BuildContext,
     *,
-    request_messages: Optional[List[Dict[str, Any]]] = None,
-    request_parameters: Optional[Dict[str, Any]] = None,
-    queue_wait_ms: Optional[float] = None,
+    request_messages: list[dict[str, Any]] | None = None,
+    request_parameters: dict[str, Any] | None = None,
+    queue_wait_ms: float | None = None,
     sequence: int = 0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Build a ``request_received`` event — emitted after auth + normalization."""
     event = _build_base_event(
         config=config,
@@ -434,29 +434,29 @@ def build_request_completed_event(
     config: CaptureConfig,
     ctx: BuildContext,
     *,
-    response_content: Optional[str] = None,
-    tool_calls: Optional[List[Dict[str, Any]]] = None,
-    tool_results: Optional[List[Dict[str, Any]]] = None,
-    reasoning_content: Optional[str] = None,
-    finish_reason: Optional[str] = None,
-    native_finish_reason: Optional[str] = None,
-    prompt_tokens: Optional[int] = None,
-    completion_tokens: Optional[int] = None,
-    completion_tokens_details: Optional[Dict[str, Any]] = None,
-    native_tokens_reasoning: Optional[int] = None,
-    native_tokens_cached: Optional[int] = None,
-    cost: Optional[float] = None,
-    provider_name: Optional[str] = None,
-    queue_wait_ms: Optional[float] = None,
-    duration_ms: Optional[float] = None,
-    http_status: Optional[int] = None,
-    streamed: Optional[bool] = None,
-    streamed_ingress: Optional[bool] = None,
-    streamed_upstream: Optional[bool] = None,
-    incomplete: Optional[bool] = None,
-    attempts: Optional[int] = None,
+    response_content: str | None = None,
+    tool_calls: list[dict[str, Any]] | None = None,
+    tool_results: list[dict[str, Any]] | None = None,
+    reasoning_content: str | None = None,
+    finish_reason: str | None = None,
+    native_finish_reason: str | None = None,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    completion_tokens_details: dict[str, Any] | None = None,
+    native_tokens_reasoning: int | None = None,
+    native_tokens_cached: int | None = None,
+    cost: float | None = None,
+    provider_name: str | None = None,
+    queue_wait_ms: float | None = None,
+    duration_ms: float | None = None,
+    http_status: int | None = None,
+    streamed: bool | None = None,
+    streamed_ingress: bool | None = None,
+    streamed_upstream: bool | None = None,
+    incomplete: bool | None = None,
+    attempts: int | None = None,
     sequence: int = 1,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Build a ``request_completed`` event — emitted after successful response."""
     event = _build_base_event(
         config=config,
@@ -561,13 +561,13 @@ def build_request_failed_event(
     ctx: BuildContext,
     *,
     error_code: str,
-    http_status: Optional[int] = None,
-    sanitized_message: Optional[str] = None,
-    queue_wait_ms: Optional[float] = None,
-    duration_ms: Optional[float] = None,
-    attempts: Optional[int] = None,
+    http_status: int | None = None,
+    sanitized_message: str | None = None,
+    queue_wait_ms: float | None = None,
+    duration_ms: float | None = None,
+    attempts: int | None = None,
     sequence: int = 1,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Build a ``request_failed`` event — emitted on sanitized errors."""
     event = _build_base_event(
         config=config,
@@ -608,11 +608,11 @@ def build_request_cancelled_event(
     ctx: BuildContext,
     *,
     cancel_reason: str,
-    queue_wait_ms: Optional[float] = None,
-    duration_ms: Optional[float] = None,
-    attempts: Optional[int] = None,
+    queue_wait_ms: float | None = None,
+    duration_ms: float | None = None,
+    attempts: int | None = None,
     sequence: int = 1,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Build a ``request_cancelled`` event — emitted on client disconnect/timeout."""
     event = _build_base_event(
         config=config,

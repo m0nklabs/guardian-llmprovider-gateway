@@ -15,17 +15,17 @@ import logging
 import math
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any
 
 import httpx
 from fastapi import HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
-from app.proxy.providers import ProviderRegistry
-from app.capture.schema import BuildContext
 from app.capture.policy import PolicyResult
+from app.capture.schema import BuildContext
 from app.capture.stream_assembler import StreamResponseAssembler
 from app.gateway.streaming import StreamProgressWatchdog
+from app.proxy.providers import ProviderRegistry
 
 logger = logging.getLogger("Guardian")
 
@@ -153,7 +153,7 @@ def init(
     _grammar_cloud_strict_mode = grammar_cloud_strict_mode
 
 
-def _derive_response_format_from_grammar(grammar: Any, json_schema: Any) -> Optional[Dict[str, Any]]:
+def _derive_response_format_from_grammar(grammar: Any, json_schema: Any) -> dict[str, Any] | None:
     """Convert a JSON-targeting grammar/schema to OpenAI-native response_format.
 
     Returns ``None`` when the payload cannot be converted (a real GBNF
@@ -171,7 +171,7 @@ def _derive_response_format_from_grammar(grammar: Any, json_schema: Any) -> Opti
     return None
 
 
-def _strip_cloud_grammar(body: Dict[str, Any], *, allow_json_convert: bool) -> Dict[str, Any]:
+def _strip_cloud_grammar(body: dict[str, Any], *, allow_json_convert: bool) -> dict[str, Any]:
     """Strip GBNF/llama-server-specific grammar fields from a cloud-bound body.
 
     Cloud providers do not accept GBNF grammar strings or llama-server's
@@ -191,7 +191,7 @@ def _strip_cloud_grammar(body: Dict[str, Any], *, allow_json_convert: bool) -> D
     return stripped
 
 
-def _extract_cloud_native_finish_reason(payload: Any) -> Optional[str]:
+def _extract_cloud_native_finish_reason(payload: Any) -> str | None:
     """Extract the provider-reported native stop reason from a response.
 
     OpenRouter reports ``choices[0].native_finish_reason`` alongside the
@@ -214,14 +214,14 @@ def _extract_cloud_native_finish_reason(payload: Any) -> Optional[str]:
     return None
 
 
-def _extract_cloud_usage_mirror(payload: Any) -> Dict[str, Any]:
+def _extract_cloud_usage_mirror(payload: Any) -> dict[str, Any]:
     """Mirror rich upstream usage fields from a non-streaming response.
 
     Returns a dict with any of ``completion_tokens_details``,
     ``native_tokens_reasoning``, ``native_tokens_cached``, ``cost`` and
     ``provider_name`` — only the keys the upstream actually reported.
     """
-    mirror: Dict[str, Any] = {}
+    mirror: dict[str, Any] = {}
     if not isinstance(payload, dict):
         return mirror
     usage = payload.get("usage")
@@ -250,15 +250,15 @@ def _extract_cloud_usage_mirror(payload: Any) -> Dict[str, Any]:
 async def forward_to_cloud_provider(
     path: str,
     body: bytes,
-    json_body: Dict[str, Any],
+    json_body: dict[str, Any],
     model_name: str,
     request: Request,
     client_id: str,
     *,
-    capture_ctx: Optional[BuildContext] = None,
-    capture_policy_result: Optional["PolicyResult"] = None,
-    cloud_request_id: Optional[str] = None,
-    cloud_capture_start_time: Optional[float] = None,
+    capture_ctx: BuildContext | None = None,
+    capture_policy_result: PolicyResult | None = None,
+    cloud_request_id: str | None = None,
+    cloud_capture_start_time: float | None = None,
 ) -> Response:
     """Forward an inference request to a cloud LLM provider.
 
@@ -318,7 +318,7 @@ async def forward_to_cloud_provider(
     is_stream = bool(json_body.get("stream", False))
     _set_request_usage_metadata(request, model=model_name, streamed=is_stream)
     _start_live_request_usage(request)
-    stream_http_client: Optional[httpx.AsyncClient] = None
+    stream_http_client: httpx.AsyncClient | None = None
 
     # Track cloud capture metadata
     _cloud_capture_attempts = 0
@@ -365,7 +365,7 @@ async def forward_to_cloud_provider(
         )
 
         if is_stream:
-            stream_client: Optional[httpx.AsyncClient] = None
+            stream_client: httpx.AsyncClient | None = None
 
             async def send_stream_request() -> httpx.Response:
                 nonlocal stream_client
@@ -734,7 +734,7 @@ async def forward_to_cloud_provider(
     # Every assembler call is fail-open: capture must never break the stream
     # (this path returned HTTP 500 on 2026-08-26 when the assembler was called
     # with a wrong API — pinned by scripts/pre_restart_check.py call-site check).
-    _cloud_assembler: Optional[StreamResponseAssembler] = None
+    _cloud_assembler: StreamResponseAssembler | None = None
     if capture_ctx is not None:
         _cloud_assembler = StreamResponseAssembler()
 
@@ -862,7 +862,7 @@ async def forward_to_cloud_provider(
                     # decides incompleteness when the assembler is unavailable.
                     _cloud_stream_finish = None
                     _cloud_stream_incomplete = resp.status_code != 200
-                    _cloud_stream_mirror: Dict[str, Any] = {}
+                    _cloud_stream_mirror: dict[str, Any] = {}
                     if _cloud_assembler is not None:
                         try:
                             _cloud_assembled = _cloud_assembler.assemble()

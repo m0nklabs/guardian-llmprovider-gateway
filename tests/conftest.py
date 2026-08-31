@@ -1,14 +1,13 @@
 """Shared fixtures for Guardian tests."""
 
 import json
-import pytest
 from pathlib import Path
-from typing import Dict
 
+import pytest
 
 # ── Test data ──────────────────────────────────────────────────────────
 
-SAMPLE_API_KEYS: Dict[str, dict] = {
+SAMPLE_API_KEYS: dict[str, dict] = {
     "flip_aabbccdd11223344aabbccdd11223344": {
         "name": "test-user",
         "created_at": 1700000000.0,

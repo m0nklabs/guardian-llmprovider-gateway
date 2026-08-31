@@ -10,21 +10,20 @@ enter raw capture data."
 
 import gzip
 import json
-from typing import Any, Dict, List
+from typing import Any
 
 import pytest
 
 from app.capture.config import CaptureConfig
 from app.capture.redactor import (
-    redact_request_messages,
-    redact_response_content,
-    redact_request_parameters,
     redact_reasoning_content,
-    redact_tool_results,
+    redact_request_messages,
+    redact_request_parameters,
+    redact_response_content,
     redact_tool_calls,
+    redact_tool_results,
     scan_for_secrets,
 )
-
 
 # ── Known secret values used as canaries ────────────────────────────────
 
@@ -263,13 +262,13 @@ class TestCanaryInWrittenFiles:
 
     def _build_and_redact_event(
         self,
-        field_policies: Dict[str, str],
-        secret_laden_messages: List[Dict[str, Any]],
+        field_policies: dict[str, str],
+        secret_laden_messages: list[dict[str, Any]],
         response_content: str,
-        tool_calls: List[Dict[str, Any]],
-        tool_results: List[Dict[str, Any]],
+        tool_calls: list[dict[str, Any]],
+        tool_results: list[dict[str, Any]],
         reasoning: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Build a capture event with redacted content."""
         redacted_messages = redact_request_messages(secret_laden_messages, field_policies)
         redacted_response = redact_response_content(response_content, "auto")

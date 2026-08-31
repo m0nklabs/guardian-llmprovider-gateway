@@ -1,12 +1,12 @@
 """Tests for app.main dashboard stats API."""
 
-from collections import defaultdict
 import logging
+from collections import defaultdict
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
-from fastapi import FastAPI
 import pytest
+from fastapi import FastAPI
 
 from app import main
 from app.proxy.usage import ApiUsageTracker

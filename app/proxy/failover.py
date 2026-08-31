@@ -44,7 +44,6 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
-from typing import Dict, List, Optional, Tuple
 
 import yaml
 
@@ -83,7 +82,7 @@ class FailoverCandidate:
 
     provider: str
     model: str
-    modalities: Tuple[str, ...] = ("text",)
+    modalities: tuple[str, ...] = ("text",)
 
 
 @dataclass(frozen=True)
@@ -97,8 +96,8 @@ class FailoverGroup:
     """
 
     name: str
-    candidates: List[FailoverCandidate] = field(default_factory=list)
-    image_fallback_model: Optional[str] = None
+    candidates: list[FailoverCandidate] = field(default_factory=list)
+    image_fallback_model: str | None = None
 
     def has_image_capable_candidate(self) -> bool:
         """Return True if any candidate declares image input support."""
@@ -124,15 +123,15 @@ class ProviderHealthTracker:
         self._cooldown_seconds = cooldown_seconds
         self._rate_limit_cooldown_seconds = rate_limit_cooldown_seconds
         self._lock = Lock()
-        self._consecutive_failures: Dict[Tuple[str, str], int] = {}
-        self._tripped_until: Dict[Tuple[str, str], float] = {}
-        self._rate_limited_until: Dict[Tuple[str, str], float] = {}
+        self._consecutive_failures: dict[tuple[str, str], int] = {}
+        self._tripped_until: dict[tuple[str, str], float] = {}
+        self._rate_limited_until: dict[tuple[str, str], float] = {}
 
     def reconfigure(
         self,
-        failure_threshold: Optional[int] = None,
-        cooldown_seconds: Optional[float] = None,
-        rate_limit_cooldown_seconds: Optional[float] = None,
+        failure_threshold: int | None = None,
+        cooldown_seconds: float | None = None,
+        rate_limit_cooldown_seconds: float | None = None,
     ) -> None:
         """Update health-tracker thresholds in place (config reload, no restart).
 
@@ -239,7 +238,7 @@ class ProviderHealthTracker:
         with self._lock:
             self._rate_limited_until.pop(key, None)
 
-    def order_candidates(self, candidates: List[FailoverCandidate]) -> List[FailoverCandidate]:
+    def order_candidates(self, candidates: list[FailoverCandidate]) -> list[FailoverCandidate]:
         """Return *candidates* healthy-first, then rate-limited, then tripped.
 
         Healthy candidates are tried first (in configured priority order).
@@ -247,9 +246,9 @@ class ProviderHealthTracker:
         normally but included so the failover loop can use them if they're
         the only option.  Tripped candidates (circuit breaker) come last.
         """
-        healthy: List[FailoverCandidate] = []
-        rate_limited: List[FailoverCandidate] = []
-        tripped: List[FailoverCandidate] = []
+        healthy: list[FailoverCandidate] = []
+        rate_limited: list[FailoverCandidate] = []
+        tripped: list[FailoverCandidate] = []
         for c in candidates:
             if self.is_tripped(c.provider, c.model):
                 tripped.append(c)
@@ -274,7 +273,7 @@ class FailoverRegistry:
 
     def __init__(self, path: Path = FAILOVER_CONFIG_FILE) -> None:
         self._path = path
-        self._groups: Dict[str, FailoverGroup] = {}
+        self._groups: dict[str, FailoverGroup] = {}
         self.reload()
 
     def _load_raw_groups(self) -> dict:
@@ -314,7 +313,7 @@ class FailoverRegistry:
             raw_candidates = raw_group.get("candidates")
             if not isinstance(raw_candidates, list):
                 continue
-            candidates: List[FailoverCandidate] = []
+            candidates: list[FailoverCandidate] = []
             for c in raw_candidates:
                 if not isinstance(c, dict) or not c.get("provider") or not c.get("model"):
                     continue
@@ -351,11 +350,11 @@ class FailoverRegistry:
                 ", ".join(sorted(self._groups.keys())),
             )
 
-    def get_group(self, name: str) -> Optional[FailoverGroup]:
+    def get_group(self, name: str) -> FailoverGroup | None:
         """Return the :class:`FailoverGroup` named *name*, or ``None``."""
         return self._groups.get(name)
 
-    def get_image_fallback_for_model(self, model_name: str) -> Optional[str]:
+    def get_image_fallback_for_model(self, model_name: str) -> str | None:
         """Return the local image fallback configured for an upstream model."""
         for group in self._groups.values():
             for candidate in group.candidates:

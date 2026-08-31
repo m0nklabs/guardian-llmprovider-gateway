@@ -22,7 +22,6 @@ from app.tweaker.finetune_v2_contracts import (
     upward_ngl_retry_actions,
 )
 
-
 FIXTURE_PATH = Path(__file__).parents[1] / "fixtures" / "finetune_v2_probe_fixtures.json"
 OVER_LIMIT_NGL_FOR_CLAMPING_TEST = 99
 

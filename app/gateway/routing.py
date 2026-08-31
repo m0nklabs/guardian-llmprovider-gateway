@@ -11,25 +11,23 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from contextlib import suppress
-from typing import Optional
 
 import httpx
 from fastapi import HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
-from app.engine.manager import ModelLoadError
-from app.gateway import caretaker_runtime as _caretaker_runtime
 from app.capture.config import PROTOCOL_ANTHROPIC, PROTOCOL_OPENAI, ROUTE_LOCAL
+from app.capture.policy import PolicyResult
 from app.capture.redactor import anthropic_messages_to_openai
 from app.capture.schema import BuildContext, _utc_now_iso
-from app.capture.policy import PolicyResult
 from app.capture.stream_assembler import StreamResponseAssembler
+from app.engine.manager import ModelLoadError
+from app.gateway import caretaker_runtime as _caretaker_runtime
 from app.gateway.streaming import StreamProgressWatchdog
 from app.proxy.anthropic_bridge import _format_sse_event
-
-import logging
 
 logger = logging.getLogger("Guardian")
 
@@ -286,12 +284,11 @@ async def route_v1_post(path: str, request: Request, client_id: str):
     ctx_hint = request.headers.get("x-guardian-context")
     if not ctx_hint:
         ctx_hint = json_body.get("guardian_context")
-    ctx_hint_int: Optional[int] = None
+    ctx_hint_int: int | None = None
     if ctx_hint:
         try:
             ctx_hint_int = int(str(ctx_hint).strip())
-            if ctx_hint_int < 4096:
-                ctx_hint_int = 4096  # floor
+            ctx_hint_int = max(ctx_hint_int, 4096)  # floor
         except (ValueError, TypeError):
             ctx_hint_int = None  # invalid hint → ignore
 
@@ -400,8 +397,8 @@ async def route_v1_post(path: str, request: Request, client_id: str):
     # admission so cancelled/terminal events can reference the true request
     # start even when the request waited in the queue.
     _capture_started_wall = _utc_now_iso()
-    _capture_policy_result: Optional["PolicyResult"] = None
-    _capture_ctx: Optional[BuildContext] = None
+    _capture_policy_result: PolicyResult | None = None
+    _capture_ctx: BuildContext | None = None
 
     try:
         request_id, disconnect_task = await _begin_queued_request(request, client_id, requested_model)
@@ -807,7 +804,7 @@ async def route_v1_post(path: str, request: Request, client_id: str):
             usage_totals = {"prompt_tokens": 0, "completion_tokens": 0}
 
             # ── Capture: per-request stream assembler (fail-open) ──────
-            _local_capture_assembler: Optional[StreamResponseAssembler] = None
+            _local_capture_assembler: StreamResponseAssembler | None = None
             if _capture_ctx is not None and _capture_policy_result is not None and _capture_policy_result.should_capture:
                 _local_capture_assembler = StreamResponseAssembler()
 

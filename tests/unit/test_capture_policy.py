@@ -2,9 +2,8 @@
 
 import pytest
 
-from app.capture.config import CaptureConfig, PROTOCOL_OPENAI, ROUTE_LOCAL, ROUTE_CLOUD
-from app.capture.policy import evaluate_capture_policy, PolicyResult
-
+from app.capture.config import PROTOCOL_OPENAI, ROUTE_CLOUD, ROUTE_LOCAL, CaptureConfig
+from app.capture.policy import PolicyResult, evaluate_capture_policy
 
 TEST_SECRET = "test-secret"
 TEST_FINGERPRINT = "abc123"
@@ -14,8 +13,8 @@ def _make_client_ref() -> str:
     """Compute client_ref — must be called after env var is set."""
     import os
     secret = os.environ.get("GUARDIAN_CAPTURE_CLIENT_REF_SECRET", "")
-    import hmac
     import hashlib
+    import hmac
     return hmac.new(
         secret.encode("utf-8"),
         TEST_FINGERPRINT.encode("utf-8"),

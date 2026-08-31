@@ -17,15 +17,15 @@ import json
 import logging
 import math
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from fastapi import Request
 
 from app.capture.config import (
-    PROTOCOL_OPENAI,
+    DEFAULT_CORRELATION_HEADERS,
     PROTOCOL_ANTHROPIC,
     PROTOCOL_OLLAMA,
-    DEFAULT_CORRELATION_HEADERS,
+    PROTOCOL_OPENAI,
 )
 from app.capture.integration import get_capture_controller
 from app.capture.schema import BuildContext
@@ -44,7 +44,7 @@ APP_TITLE_HEADER = "x-title"
 APP_REFERER_HEADER = "http-referer"
 
 
-def _capped_header_value(request: Request, header_name: str) -> Optional[str]:
+def _capped_header_value(request: Request, header_name: str) -> str | None:
     """Return a stripped, length-capped inbound header value (or None)."""
     try:
         raw = request.headers.get(header_name)
@@ -58,7 +58,7 @@ def _capped_header_value(request: Request, header_name: str) -> Optional[str]:
     return value[:CALLER_IDENTITY_MAX_LEN]
 
 
-def _caller_request_id(request: Request, config: Any) -> Optional[str]:
+def _caller_request_id(request: Request, config: Any) -> str | None:
     """First match (in config order) among the configured correlation headers.
 
     Only headers listed in ``config.correlation_headers`` are ever read.  The
@@ -98,7 +98,7 @@ def init(get_request_auth_context, coerce_usage_int) -> None:
 # ── Client fingerprint ──────────────────────────────────────────────
 
 
-def capture_client_fingerprint(request: Request, client_id: str) -> Optional[str]:
+def capture_client_fingerprint(request: Request, client_id: str) -> str | None:
     """Extract the key fingerprint from the request's auth context for capture."""
     try:
         auth_context = _get_request_auth_context(request) or {}
@@ -143,12 +143,12 @@ def dispatch_capture_request_received(
     endpoint: str,
     ingress_protocol: str,
     route_type: str,
-    requested_model: Optional[str],
-    resolved_model: Optional[str] = None,
-    request_messages: Optional[List[Dict[str, Any]]] = None,
-    request_parameters: Optional[Dict[str, Any]] = None,
-    queue_wait_ms: Optional[float] = None,
-) -> Optional[Any]:
+    requested_model: str | None,
+    resolved_model: str | None = None,
+    request_messages: list[dict[str, Any]] | None = None,
+    request_parameters: dict[str, Any] | None = None,
+    queue_wait_ms: float | None = None,
+) -> Any | None:
     """Dispatch a request_received capture event (fail-open).
 
     Returns the PolicyResult so the caller can skip completed-event capture
@@ -202,28 +202,28 @@ def dispatch_capture_request_received(
 def dispatch_capture_request_completed(
     ctx: BuildContext,
     *,
-    policy_result: Optional[Any] = None,
-    response_content: Optional[str] = None,
-    tool_calls: Optional[list] = None,
-    tool_results: Optional[list] = None,
-    reasoning_content: Optional[str] = None,
-    finish_reason: Optional[str] = None,
-    native_finish_reason: Optional[str] = None,
-    prompt_tokens: Optional[int] = None,
-    completion_tokens: Optional[int] = None,
-    completion_tokens_details: Optional[Dict[str, Any]] = None,
-    native_tokens_reasoning: Optional[int] = None,
-    native_tokens_cached: Optional[int] = None,
-    cost: Optional[float] = None,
-    provider_name: Optional[str] = None,
-    queue_wait_ms: Optional[float] = None,
-    duration_ms: Optional[float] = None,
-    http_status: Optional[int] = None,
-    streamed: Optional[bool] = None,
-    streamed_ingress: Optional[bool] = None,
-    streamed_upstream: Optional[bool] = None,
-    incomplete: Optional[bool] = None,
-    attempts: Optional[int] = None,
+    policy_result: Any | None = None,
+    response_content: str | None = None,
+    tool_calls: list | None = None,
+    tool_results: list | None = None,
+    reasoning_content: str | None = None,
+    finish_reason: str | None = None,
+    native_finish_reason: str | None = None,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
+    completion_tokens_details: dict[str, Any] | None = None,
+    native_tokens_reasoning: int | None = None,
+    native_tokens_cached: int | None = None,
+    cost: float | None = None,
+    provider_name: str | None = None,
+    queue_wait_ms: float | None = None,
+    duration_ms: float | None = None,
+    http_status: int | None = None,
+    streamed: bool | None = None,
+    streamed_ingress: bool | None = None,
+    streamed_upstream: bool | None = None,
+    incomplete: bool | None = None,
+    attempts: int | None = None,
 ) -> None:
     """Dispatch a request_completed capture event (fail-open)."""
     try:
@@ -261,12 +261,12 @@ def dispatch_capture_request_failed(
     ctx: BuildContext,
     *,
     error_code: str,
-    http_status: Optional[int] = None,
-    sanitized_message: Optional[str] = None,
-    queue_wait_ms: Optional[float] = None,
-    duration_ms: Optional[float] = None,
-    attempts: Optional[int] = None,
-    policy_result: Optional[Any] = None,
+    http_status: int | None = None,
+    sanitized_message: str | None = None,
+    queue_wait_ms: float | None = None,
+    duration_ms: float | None = None,
+    attempts: int | None = None,
+    policy_result: Any | None = None,
 ) -> None:
     """Dispatch a request_failed capture event (fail-open)."""
     try:
@@ -288,10 +288,10 @@ def dispatch_capture_request_cancelled(
     ctx: BuildContext,
     *,
     cancel_reason: str,
-    queue_wait_ms: Optional[float] = None,
-    duration_ms: Optional[float] = None,
-    attempts: Optional[int] = None,
-    policy_result: Optional[Any] = None,
+    queue_wait_ms: float | None = None,
+    duration_ms: float | None = None,
+    attempts: int | None = None,
+    policy_result: Any | None = None,
 ) -> None:
     """Dispatch a request_cancelled capture event (fail-open)."""
     try:
@@ -312,10 +312,10 @@ def dispatch_capture_stream_completed(
     request_id: str,
     client_id: str,
     model_name: str,
-    ctx: Optional[BuildContext],
-    policy_result: Optional[Any],
-    assembler: Optional[StreamResponseAssembler],
-    usage_totals: Dict[str, Any],
+    ctx: BuildContext | None,
+    policy_result: Any | None,
+    assembler: StreamResponseAssembler | None,
+    usage_totals: dict[str, Any],
     path: str,
     status_code: int,
 ) -> None:
@@ -356,9 +356,9 @@ def dispatch_capture_nonstream_completed(
     request_id: str,
     client_id: str,
     model_name: str,
-    ctx: Optional[BuildContext],
-    policy_result: Optional[Any],
-    payload: Optional[Dict[str, Any]],
+    ctx: BuildContext | None,
+    policy_result: Any | None,
+    payload: dict[str, Any] | None,
     status_code: int,
     request_start_time: float,
 ) -> None:

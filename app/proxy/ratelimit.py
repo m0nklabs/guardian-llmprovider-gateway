@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
-from dataclasses import dataclass
-from email.utils import parsedate_to_datetime
 import inspect
 import json
 import logging
@@ -13,8 +10,12 @@ import math
 import random
 import re
 import time
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from email.utils import parsedate_to_datetime
 from threading import Lock
-from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Optional, Tuple
+from typing import Any
 
 logger = logging.getLogger("Guardian.RateLimit")
 
@@ -32,7 +33,7 @@ class RateLimitConfig:
     respect_retry_after: bool = True
 
     @classmethod
-    def from_mapping(cls, raw: object) -> "RateLimitConfig":
+    def from_mapping(cls, raw: object) -> RateLimitConfig:
         """Build a bounded configuration from YAML data."""
         values = raw if isinstance(raw, dict) else {}
 
@@ -63,7 +64,7 @@ class RateLimitConfig:
             respect_retry_after=bool(values.get("respect_retry_after", cls.respect_retry_after)),
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Return the effective policy without implementation details."""
         return {
             "enabled": self.enabled,
@@ -95,13 +96,13 @@ class _RateLimitState:
     retry_exhausted: int = 0
     consecutive_429s: int = 0
     total_wait_seconds: float = 0.0
-    last_429_at: Optional[float] = None
-    last_retry_after_seconds: Optional[float] = None
-    last_wait_seconds: Optional[float] = None
-    last_reset_at: Optional[float] = None
-    remaining: Optional[int] = None
-    limit: Optional[int] = None
-    last_error_message: Optional[str] = None
+    last_429_at: float | None = None
+    last_retry_after_seconds: float | None = None
+    last_wait_seconds: float | None = None
+    last_reset_at: float | None = None
+    remaining: int | None = None
+    limit: int | None = None
+    last_error_message: str | None = None
     cooldown_until: float = 0.0
     active_requests: int = 0
     waiting_requests: int = 0
@@ -112,7 +113,7 @@ class RateLimitRetryManager:
 
     def __init__(
         self,
-        config: Optional[RateLimitConfig] = None,
+        config: RateLimitConfig | None = None,
         *,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         monotonic: Callable[[], float] = time.monotonic,
@@ -124,8 +125,8 @@ class RateLimitRetryManager:
         self._monotonic = monotonic
         self._wall_time = wall_time
         self._random_value = random_value
-        self._states: Dict[Tuple[str, str], _RateLimitState] = {}
-        self._locks: Dict[Tuple[str, str], asyncio.Lock] = {}
+        self._states: dict[tuple[str, str], _RateLimitState] = {}
+        self._locks: dict[tuple[str, str], asyncio.Lock] = {}
         self._state_lock = Lock()
 
     def _state_for(self, key_fingerprint: str, provider: str) -> _RateLimitState:
@@ -139,7 +140,7 @@ class RateLimitRetryManager:
             return self._locks.setdefault(identity, asyncio.Lock())
 
     @staticmethod
-    def _header(response: Any, *names: str) -> Optional[str]:
+    def _header(response: Any, *names: str) -> str | None:
         headers = getattr(response, "headers", {})
         for name in names:
             value = headers.get(name)
@@ -148,14 +149,14 @@ class RateLimitRetryManager:
         return None
 
     @staticmethod
-    def _parse_numeric(value: object) -> Optional[float]:
+    def _parse_numeric(value: object) -> float | None:
         try:
             parsed = float(str(value).strip())
         except (TypeError, ValueError):
             return None
         return parsed if math.isfinite(parsed) else None
 
-    def _parse_delay_value(self, value: object, now: Optional[float] = None) -> Optional[float]:
+    def _parse_delay_value(self, value: object, now: float | None = None) -> float | None:
         numeric = self._parse_numeric(value)
         if numeric is not None:
             if numeric > 1_000_000_000:
@@ -168,7 +169,7 @@ class RateLimitRetryManager:
         return max(retry_at - (self._wall_time() if now is None else now), 0.0)
 
     @staticmethod
-    def _body_value(payload: object, wanted: set[str]) -> Optional[object]:
+    def _body_value(payload: object, wanted: set[str]) -> object | None:
         if isinstance(payload, dict):
             for key, value in payload.items():
                 normalized = str(key).lower().replace("-", "_")
@@ -185,7 +186,7 @@ class RateLimitRetryManager:
         return None
 
     @classmethod
-    def _body_retry_after(cls, body_text: str) -> Optional[float]:
+    def _body_retry_after(cls, body_text: str) -> float | None:
         if not body_text:
             return None
         try:
@@ -196,7 +197,7 @@ class RateLimitRetryManager:
         return cls._parse_numeric(value)
 
     @classmethod
-    def _body_message(cls, body_text: str) -> Optional[str]:
+    def _body_message(cls, body_text: str) -> str | None:
         if not body_text:
             return None
         try:
@@ -214,7 +215,7 @@ class RateLimitRetryManager:
             return message[:240]
         return None
 
-    def parse_retry_after(self, response: Any, body_text: str = "") -> Optional[float]:
+    def parse_retry_after(self, response: Any, body_text: str = "") -> float | None:
         """Read Retry-After or provider reset hints, capped to the hold budget."""
         value = self._header(response, "retry-after")
         if value is not None:
@@ -238,7 +239,7 @@ class RateLimitRetryManager:
             delay *= 1.0 + spread
         return max(min(delay, self.config.max_backoff_seconds), 0.0)
 
-    def _provider_hint(self, response: Any) -> Tuple[Optional[int], Optional[int], Optional[float]]:
+    def _provider_hint(self, response: Any) -> tuple[int | None, int | None, float | None]:
         limit = self._parse_numeric(self._header(response, "x-ratelimit-limit", "ratelimit-limit"))
         remaining = self._parse_numeric(
             self._header(response, "x-ratelimit-remaining", "ratelimit-remaining")
@@ -350,7 +351,7 @@ class RateLimitRetryManager:
         provider: str,
         attempt: Callable[[], Awaitable[Any]],
         *,
-        on_429: Optional[Callable[[Any], Awaitable[str]]] = None,
+        on_429: Callable[[Any], Awaitable[str]] | None = None,
         retry_429: bool = True,
     ) -> Any:
         """Hold one request open while retrying upstream 429 responses."""
@@ -388,7 +389,7 @@ class RateLimitRetryManager:
                 with self._state_lock:
                     state.cooldown_until = 0.0
 
-    def get_summary(self) -> Dict[str, Any]:
+    def get_summary(self) -> dict[str, Any]:
         """Return aggregate counters without exposing per-key activity."""
         with self._state_lock:
             states = list(self._states.values())
@@ -407,7 +408,7 @@ class RateLimitRetryManager:
             **totals,
         }
 
-    def _provider_snapshot(self, state: _RateLimitState) -> Dict[str, Any]:
+    def _provider_snapshot(self, state: _RateLimitState) -> dict[str, Any]:
         cooldown = max(state.cooldown_until - self._monotonic(), 0.0)
         return {
             "total_429s": state.total_429s,
@@ -428,7 +429,7 @@ class RateLimitRetryManager:
             "waiting_requests": state.waiting_requests,
         }
 
-    def get_stats(self, key_fingerprint: Optional[str] = None) -> Dict[str, Any]:
+    def get_stats(self, key_fingerprint: str | None = None) -> dict[str, Any]:
         """Return current safe counters, provider hints, and effective policy."""
         with self._state_lock:
             selected = {
@@ -436,10 +437,10 @@ class RateLimitRetryManager:
                 for (key, provider), state in self._states.items()
                 if key_fingerprint is None or key == key_fingerprint
             }
-        keys: Dict[str, Dict[str, Any]] = {}
+        keys: dict[str, dict[str, Any]] = {}
         for (key, provider), provider_stats in selected.items():
             keys.setdefault(key, {"providers": {}})["providers"][provider] = provider_stats
-        result: Dict[str, Any] = {
+        result: dict[str, Any] = {
             "generated_at": self._wall_time(),
             "config": self.config.to_dict(),
             "keys": keys,

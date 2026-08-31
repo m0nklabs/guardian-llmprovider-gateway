@@ -3,13 +3,11 @@
 import logging
 from pathlib import Path
 from stat import S_IMODE
-from unittest.mock import MagicMock, patch
 from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
-
-
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
@@ -274,6 +272,7 @@ class TestVerifyApiKey:
     @pytest.mark.asyncio
     async def test_missing_credentials_finalize_usage_with_attribution(self, api_keys_file: Path, tmp_path: Path):
         from fastapi import HTTPException
+
         from app.proxy.usage import ApiUsageTracker
 
         auth, orig = _load_auth_with_path(api_keys_file)
