@@ -658,6 +658,95 @@ models:
         mock_switch.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_startup_adopt_only_refuses_forced_switch(self, tmp_path: Path, monkeypatch):
+        """Cut-over kill-switch: GUARDIAN_STARTUP_ADOPT_ONLY=1 forbids the
+        forced-switch fall-through (unknown live model / pin-less target) —
+        startup may adopt or abstain, never reload the shared backend."""
+        monkeypatch.setenv("GUARDIAN_STARTUP_ADOPT_ONLY", "1")
+        mgr = _make_manager(tmp_path)
+        mgr.current_model = "GLM-4.7-Flash"
+
+        with (
+            patch.object(mgr, "verify_backend_model", new_callable=AsyncMock, return_value=False),
+            patch.object(mgr, "_get_backend_model_path", return_value="/models/Unknown-Foreign.gguf"),
+            patch.object(mgr, "switch_model", new_callable=AsyncMock) as mock_switch,
+        ):
+            await mgr.startup_check()
+
+        mock_switch.assert_not_called()
+        assert mgr.current_model == "GLM-4.7-Flash"
+
+    @pytest.mark.asyncio
+    async def test_startup_adoption_seeds_persisted_signature(self, tmp_path: Path, monkeypatch):
+        """Adoption must persist a signature naming the ADOPTED model: without
+        it every restart re-detects the stale target and a missing signature
+        reads as config drift (forced-reload trap on the shared backend)."""
+        monkeypatch.delenv("GUARDIAN_STARTUP_ADOPT_ONLY", raising=False)
+        kv_yaml = """
+models:
+    GLM-4.7-Flash:
+        path: /models/GLM-4.7-Flash.gguf
+        context: 8192
+        ngl: 99
+        kv_type: turbo4
+    Qwen3-30B-A3B:
+        path: /models/Qwen3-30B.gguf
+        context: 4096
+        ngl: 99
+        kv_type: turbo4
+"""
+        mgr = _make_manager(tmp_path, models_yaml=kv_yaml)
+        mgr.current_model = "GLM-4.7-Flash"
+        mgr.config_path.write_text(kv_yaml.replace("kv_type: turbo4", "kv_type: q8_0"))
+
+        with (
+            patch.object(mgr, "verify_backend_model", new_callable=AsyncMock, return_value=True),
+            patch.object(mgr, "_get_backend_model_path", return_value="/models/Qwen3-30B.gguf"),
+            patch.object(mgr, "_backend_has_mmproj", return_value=False),
+            patch.object(mgr, "_write_persisted_signature") as mock_write,
+            patch.object(mgr, "switch_model", new_callable=AsyncMock) as mock_switch,
+        ):
+            await mgr.startup_check()
+
+        assert mgr.current_model == "Qwen3-30B-A3B"
+        mock_switch.assert_not_called()
+        mock_write.assert_called_once()
+        assert mock_write.call_args.args[0]["model"] == "Qwen3-30B-A3B"
+
+    @pytest.mark.asyncio
+    async def test_startup_adoption_derives_vision_from_live_cmdline(self, tmp_path: Path, monkeypatch):
+        """The vision flag comes from the LIVE process (--mmproj), not the
+        stale args file: a text-only args state must not downgrade a
+        mmproj-running backend (avoidable reload on the first image request)."""
+        monkeypatch.delenv("GUARDIAN_STARTUP_ADOPT_ONLY", raising=False)
+        kv_yaml = """
+models:
+    GLM-4.7-Flash:
+        path: /models/GLM-4.7-Flash.gguf
+        context: 8192
+        ngl: 99
+        kv_type: turbo4
+    Qwen3-30B-A3B:
+        path: /models/Qwen3-30B.gguf
+        context: 4096
+        ngl: 99
+        kv_type: turbo4
+"""
+        mgr = _make_manager(tmp_path, models_yaml=kv_yaml)
+        mgr.current_model = "GLM-4.7-Flash"
+        mgr.config_path.write_text(kv_yaml.replace("kv_type: turbo4", "kv_type: q8_0"))
+
+        with (
+            patch.object(mgr, "verify_backend_model", new_callable=AsyncMock, return_value=True),
+            patch.object(mgr, "_get_backend_model_path", return_value="/models/Qwen3-30B.gguf"),
+            patch.object(mgr, "_backend_has_mmproj", return_value=True),
+            patch.object(mgr, "switch_model", new_callable=AsyncMock),
+        ):
+            await mgr.startup_check()
+
+        assert mgr.current_vision_enabled is True
+
+    @pytest.mark.asyncio
     async def test_no_switch_when_backend_already_verified(self, tmp_path: Path):
         mgr = _make_manager(tmp_path)
         with (
@@ -667,6 +756,31 @@ models:
             await mgr.startup_check()
 
         mock_switch.assert_not_called()
+
+
+# ── path normalization (adoption gate) ────────────────────────────────
+
+
+class TestPathNormalization:
+    def test_identify_model_by_path_resolves_symlinks(self, tmp_path: Path):
+        """A symlinked models directory must match: the adoption gate leans on
+        this reverse-lookup, and a false UNKNOWN would force-switch a healthy
+        shared backend."""
+        real_dir = tmp_path / "models-real"
+        real_dir.mkdir()
+        gguf = real_dir / "Qwen3-30B.gguf"
+        gguf.write_bytes(b"x")
+        yaml_str = f"""
+models:
+    Qwen3-30B-A3B:
+        path: {gguf}
+        ctx: 4096
+"""
+        mgr = _make_manager(tmp_path, models_yaml=yaml_str)
+        link_dir = tmp_path / "models-link"
+        link_dir.symlink_to(real_dir)
+
+        assert mgr._identify_model_by_path(str(link_dir / "Qwen3-30B.gguf")) == "Qwen3-30B-A3B"
 
 
 # ── switch_model security ─────────────────────────────────────────────

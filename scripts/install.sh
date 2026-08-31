@@ -78,9 +78,21 @@ fi
 # NOT the LAN interface, and this value feeds the certificate SAN and the
 # nginx dashboard perimeter. --lan-ip overrides detection entirely.
 if [ -z "$LAN_IP" ]; then
-    LAN_IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}')"
-    [ -z "$LAN_IP" ] && LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    # || true guards each probe: under set -euo pipefail a failed command
+    # substitution in an assignment aborts the script before the fallbacks run.
+    LAN_IP="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}' || true)"
+    [ -z "$LAN_IP" ] && LAN_IP="$(hostname -I 2>/dev/null | awk '{print $1}' || true)"
     LAN_IP="${LAN_IP:-127.0.0.1}"
+fi
+# An existing TLS pair IS the deployment's identity: when the detected LAN IP
+# does not match a certificate already in $TLS_DIR but exactly one other
+# guardian-*.crt exists, adopt that IP instead (multi-interface hosts detect
+# bridge/VPN addresses; the review caught this on the production host).
+_existing_certs="$(ls "$TLS_DIR"/guardian-*.crt 2>/dev/null || true)"
+if [ -n "$_existing_certs" ] && [ ! -f "$TLS_DIR/guardian-${LAN_IP}.crt" ] && [ "$(echo "$_existing_certs" | wc -l)" -eq 1 ]; then
+    _cert_ip="$(basename "$_existing_certs" | sed 's/^guardian-//; s/\.crt$//')"
+    warn "detected LAN IP ${LAN_IP} has no certificate, but ${_cert_ip} does — using the existing cert identity (override with --lan-ip)"
+    LAN_IP="$_cert_ip"
 fi
 TLS_CERTFILE="$TLS_DIR/guardian-${LAN_IP}.crt"
 TLS_KEYFILE="$TLS_DIR/guardian-${LAN_IP}.key"
@@ -89,6 +101,7 @@ echo "python: $PYTHON_BIN ($PY_MAJOR.$PY_MINOR) | lan ip: $LAN_IP | user: $RUN_U
 
 # ── Render deploy files ──────────────────────────────────────────────────
 log "Rendering deploy files → $RENDER_DIR"
+RENDER_UI_PORT="${GUARDIAN_UI_PORT:-11437}"
 render() { # render SRC DST
     sed -e "s|@INSTALL_DIR@|$REPO|g" \
         -e "s|@RUN_USER@|$RUN_USER|g" \
@@ -97,6 +110,7 @@ render() { # render SRC DST
         -e "s|@TLS_TRUSTED_CERT@|$TLS_CERTFILE|g" \
         -e "s|@LAN_IP@|$LAN_IP|g" \
         -e "s|@LAN_SUBNET@|$LAN_SUBNET|g" \
+        -e "s|@UI_PORT@|$RENDER_UI_PORT|g" \
         "$1" > "$2"
 }
 render "$REPO/deploy/systemd/guardian-llmprovider-gateway.service" \
@@ -110,7 +124,14 @@ render "$REPO/deploy/nginx/guardian-llmprovider-gateway-loopback-http.conf" \
        "$RENDER_DIR/guardian-llmprovider-gateway-loopback-http.conf"
 render "$REPO/deploy/nginx/guardian-llmprovider-gateway-dashboard.conf" \
        "$RENDER_DIR/guardian-llmprovider-gateway-dashboard.conf"
-grep -h '@[A-Z_]*@' "$RENDER_DIR" -r && { echo "unresolved placeholders — aborting" >&2; exit 1; } || true
+_unresolved="$(grep -h '@[A-Z_]*@' -r "$RENDER_DIR" || true)"
+_grep_rc=$?
+if [ "$_grep_rc" -ge 2 ]; then
+    echo "grep failed while checking rendered files (rc=$_grep_rc)" >&2; exit 1
+fi
+if [ -n "$_unresolved" ]; then
+    echo "unresolved placeholders in rendered files — aborting" >&2; exit 1
+fi
 if [ "$PRINT_ONLY" -eq 1 ]; then
     log "Print-only: rendered to $RENDER_DIR — no venv, config, TLS or system changes performed"
     exit 0
@@ -136,10 +157,16 @@ VENV_PY="$REPO/venv/bin/python3.14"
 [ -x "$VENV_PY" ] || VENV_PY="$REPO/venv/bin/python"
 
 # ── Config bootstrap (.env + operator key) ───────────────────────────────
+if [ "$SKIP_VENV" -eq 1 ] && [ ! -x "$REPO/venv/bin/python" ]; then
+    echo "--skip-venv requires an existing venv (none at $REPO/venv) — aborting before partial bootstrap" >&2
+    exit 1
+fi
 log "Config bootstrap"
 if [ ! -f "$REPO/.env" ]; then
-    cp "$REPO/.env.example" "$REPO/.env"
-    warn ".env created from template — fill in the provider API keys before starting"
+    # umask 077: the operator fills provider API keys into this file; it must
+    # never be world-readable, even before the app hardens it on first start.
+    ( umask 077; cp "$REPO/.env.example" "$REPO/.env" )
+    warn ".env created from template (0600) — fill in the provider API keys before starting"
 else
     echo ".env present — leaving it untouched"
 fi
@@ -196,7 +223,12 @@ install_nginx() {
         sudo mkdir -p /etc/nginx/stream-conf.d
         sudo install -m 644 "$RENDER_DIR/guardian-llmprovider-gateway-protocol-mux.conf" \
             /etc/nginx/stream-conf.d/guardian-llmprovider-gateway-protocol-mux.conf
-        sudo nginx -t && echo "nginx configs installed (reload with: sudo systemctl reload nginx)"
+        if sudo nginx -t; then
+            echo "nginx configs installed (reload with: sudo systemctl reload nginx)"
+        else
+            warn "nginx -t FAILED after installing the configs — fix or remove them before reloading nginx"
+            exit 1
+        fi
     else
         warn "no passwordless sudo — copy the rendered configs from $RENDER_DIR manually"
         warn "the protocol mux is a stream{} block: it belongs in /etc/nginx/stream-conf.d/ (loaded from a top-level stream { include ...; })"
