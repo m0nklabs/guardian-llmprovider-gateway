@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import time
 from typing import Any, Dict, List, Optional
 
@@ -387,14 +388,21 @@ def dispatch_capture_nonstream_completed(
             details = usage.get("completion_tokens_details")
             if isinstance(details, dict) and details:
                 completion_tokens_details = details
+            # math.isfinite: 1e999-style upstream numbers parse to inf;
+            # int(inf) raises OverflowError which the outer fail-open except
+            # would turn into a silently DROPPED completed event, and
+            # float(inf) would serialize as bare Infinity.
             ntr = usage.get("native_tokens_reasoning")
-            if isinstance(ntr, (int, float)) and not isinstance(ntr, bool):
+            if (isinstance(ntr, (int, float)) and not isinstance(ntr, bool)
+                    and math.isfinite(ntr)):
                 native_tokens_reasoning = int(ntr)
             ntc = usage.get("native_tokens_cached")
-            if isinstance(ntc, (int, float)) and not isinstance(ntc, bool):
+            if (isinstance(ntc, (int, float)) and not isinstance(ntc, bool)
+                    and math.isfinite(ntc)):
                 native_tokens_cached = int(ntc)
             cost_val = usage.get("cost")
-            if isinstance(cost_val, (int, float)) and not isinstance(cost_val, bool):
+            if (isinstance(cost_val, (int, float)) and not isinstance(cost_val, bool)
+                    and math.isfinite(cost_val)):
                 cost = float(cost_val)
 
         if isinstance(payload, dict):

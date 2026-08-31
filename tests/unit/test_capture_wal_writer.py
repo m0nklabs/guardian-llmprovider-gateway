@@ -515,6 +515,25 @@ class TestWALWriterRetention:
         assert state.exists(), "state file must never be pruned by retention"
         await writer.stop()
 
+    def test_retention_never_touches_legacy_active_file(self, config, sink, tmp_capture_root):
+        """Compound-failure scenario: the startup migration of the legacy
+        active WAL failed (fail-open), so guardian_capture_current.jsonl.gz
+        is still in the capture root when retention runs. It matches the
+        completed-file glob but holds un-rotated records — retention must
+        prune real completed files while never touching it."""
+        legacy = tmp_capture_root / LEGACY_ACTIVE_FILENAME
+        legacy.write_bytes(b'{"schema_name":"guardian_capture_v1","seq":0}\n')
+        completed = tmp_capture_root / "guardian_capture_20260830T000000Z.jsonl.gz"
+        completed.write_bytes(b"stale-completed-content")
+
+        # No start(): the startup sweep (which migrates the legacy active
+        # file) is exactly the step that failed in this scenario.
+        writer = CaptureWALWriter(sink, replace(config, retention_days=0))
+        writer._enforce_retention()
+
+        assert legacy.exists(), "legacy active file must never be pruned by retention"
+        assert not completed.exists(), "real completed files must still be pruned"
+
     @pytest.mark.asyncio
     async def test_retention_removes_leftover_plain_completed_files(self, config, sink, tmp_capture_root):
         """Leftover plain completed .jsonl files are retention candidates too."""

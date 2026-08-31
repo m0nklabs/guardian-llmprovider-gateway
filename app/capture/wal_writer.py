@@ -593,7 +593,11 @@ class CaptureWALWriter:
             total_size = 0
             for entry in root.iterdir():
                 name = entry.name
-                if name in (ACTIVE_FILENAME, STATE_FILENAME):
+                if name in (ACTIVE_FILENAME, LEGACY_ACTIVE_FILENAME, STATE_FILENAME):
+                    # The legacy active file matches the completed-file
+                    # pattern below; if the startup migration failed
+                    # (fail-open), it still holds un-rotated records and
+                    # must never be swept.
                     continue
                 if not entry.is_file():
                     continue

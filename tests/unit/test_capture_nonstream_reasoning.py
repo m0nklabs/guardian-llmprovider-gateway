@@ -11,6 +11,7 @@ chars of upstream reasoning per runaway generation.
 
 from types import SimpleNamespace
 
+import json
 import pytest
 
 from app.gateway import capture_dispatch
@@ -85,6 +86,36 @@ class TestDispatchCaptureNonstreamCompleted:
         assert event["response_content"] is None
         assert event["incomplete"] is False
         assert event["streamed"] is False
+
+    def test_non_finite_usage_omitted_event_survives(self, monkeypatch):
+        """A malformed usage object (1e999 -> inf) must not drop the whole
+        request_completed event (the outer fail-open except would swallow
+        the OverflowError); the non-finite mirror fields are omitted."""
+        controller = _patch_controller(monkeypatch)
+        payload = {
+            "choices": [
+                {"finish_reason": "stop", "message": {"content": "OK"}},
+            ],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "native_tokens_reasoning": 1e999,
+                "native_tokens_cached": 1e999,
+                "cost": 1e999,
+            },
+        }
+        capture_dispatch.dispatch_capture_nonstream_completed(
+            _request(), "req-inf-1", "client", "model",
+            _ctx(), _policy(), payload, 200, 0.0,
+        )
+        assert len(controller.completed) == 1
+        event = controller.completed[0]
+        assert event["response_content"] == "OK"
+        assert not event.get("native_tokens_reasoning")
+        assert not event.get("native_tokens_cached")
+        assert not event.get("cost")
+        line = json.dumps(event, separators=(",", ":"), default=str)
+        assert "Infinity" not in line and "NaN" not in line
 
     def test_reasoning_content_key_captured_without_duplication(self, monkeypatch):
         controller = _patch_controller(monkeypatch)
