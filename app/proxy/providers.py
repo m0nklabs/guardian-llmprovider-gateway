@@ -73,6 +73,27 @@ def _expand_env(value: str) -> str:
     return _ENV_VAR_PATTERN.sub(_replace, value)
 
 
+def _normalize_bool_marker(value):
+    """Normalize a YAML boolean marker (``local`` / ``managed``).
+
+    Quoted booleans (``"false"``/``"true"``, as editors/templates emit) are
+    truthy strings in Python — without normalization a quoted ``managed:
+    "false"`` would silently defeat the F6 ``local: false`` override.
+    Recognized tokens map to True/False; unknown/empty strings and None mean
+    "no marker" (the name-suffix fallback keeps deciding).
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("1", "true", "yes", "on"):
+            return True
+        if normalized in ("0", "false", "no", "off"):
+            return False
+        return None
+    return bool(value)
+
+
 @dataclass
 class CloudProvider:
     """A single upstream cloud LLM provider."""
@@ -204,11 +225,22 @@ class ProviderRegistry:
             # Managed: Guardian owns the lifecycle. A local provider is
             # recognised by `local: true` and/or the `-local` name suffix
             # (F2), and/or an explicit `managed: true` (F3 generalisation).
-            managed = bool(
-                cfg.get("managed")
-                or cfg.get("local")
-                or is_local_provider_name(provider_name)
-            )
+            # An EXPLICIT document marker (`local: false`) overrides the
+            # name-based fallback: F6's `14700k-local` carries the -local
+            # suffix from the plan naming but is a REMOTE LAN host managed
+            # by its own caretaker — a passive LAN provider, never owned by
+            # this gateway's lifecycle.  Quoted booleans ("false"/"true",
+            # as YAML editors/templates emit) are normalized first — a
+            # truthy string must not silently defeat the override.
+            explicit_local = _normalize_bool_marker(cfg.get("local"))
+            explicit_managed = _normalize_bool_marker(cfg.get("managed"))
+            if explicit_local is not None:
+                managed = bool(explicit_local) or bool(explicit_managed)
+            else:
+                managed = bool(
+                    explicit_managed
+                    or is_local_provider_name(provider_name)
+                )
 
             provider = CloudProvider(
                 name=provider_name,

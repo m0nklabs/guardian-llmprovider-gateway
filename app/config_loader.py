@@ -78,6 +78,39 @@ def _merge_providers() -> Dict[str, Any]:
     return provider_settings_documents()
 
 
+# Caretaker-runtime poll windows (F5 follow-up).  Defaults mirror the values
+# that were hardcoded in the caretaker runtime pre-config; every accessor
+# reads the LIVE CONFIG dict, so a POST /api/config/reload changes the
+# effective windows without a restart.
+_CARETAKER_DEFAULTS = {
+    "adopt_poll_seconds": 120,
+    "rebind_poll_attempts": 15,
+    "rebind_poll_interval_seconds": 1.0,
+    "client_timeout_seconds": 5.0,
+}
+# Safety bounds: a too-short adopt window would 503 legitimate cold loads
+# (the in-flight /ensure is the only controller); an unbounded one holds the
+# model-switch lock forever.  A client timeout of 0 disables the daemon path
+# entirely in practice, so the floor keeps the remote-first design alive.
+_CARETAKER_BOUNDS = {
+    "adopt_poll_seconds": (1.0, 600.0),
+    "rebind_poll_attempts": (0, 60),
+    "rebind_poll_interval_seconds": (0.1, 30.0),
+    # 30 s ceiling: /ensure answers within seconds when the daemon is alive
+    # (long cold loads are covered by the adoption poll, not by the client
+    # timeout), and a higher ceiling would let a single in-bounds value
+    # silence the re-bind recovery path entirely via the budget cap below.
+    "client_timeout_seconds": (0.5, 30.0),
+}
+# Combined re-bind budget: the WHOLE ensure_backend runs under the caller's
+# model-switch lock — the two initial /ensure probes (up to 2× client_timeout)
+# plus every re-bind iteration (interval + a full /ensure round-trip).  The
+# budget caps the re-bind phase at 120 s (per-attempt divisor), so the
+# in-bounds worst-case lock-hold is 2×30 + 120 = 180 s; with the defaults
+# (15 × (1.0 + 5.0) s = 90 s, probes 10 s) it is ~100 s.
+_REBIND_BUDGET_S = 120.0
+
+
 def load_config() -> dict:
     """Load configuration from the config-schema files with sensible defaults.
 
@@ -93,6 +126,7 @@ def load_config() -> dict:
             "stream_close_timeout_seconds": 5,
         },
         "cloud_retry": RateLimitConfig().to_dict(),
+        "caretaker": dict(_CARETAKER_DEFAULTS),
         "grammar": {
             "enabled": True,
             "cloud_auto_convert_json": False,
@@ -180,6 +214,46 @@ def load_stream_close_timeout_s(config: Optional[Dict[str, Any]] = None) -> floa
     except (TypeError, ValueError):
         timeout = 5.0
     return max(timeout, 0.5)
+
+
+def load_caretaker_runtime_config(config: Optional[Dict[str, Any]] = None) -> dict:
+    """Return the caretaker-runtime poll windows (typed + bounded).
+
+    Reads the ``caretaker`` section of global.settings.yaml; unknown/invalid
+    values fall back to the default, and out-of-bounds values are clamped to
+    the safety bounds (fail-safe: a config typo cannot disable the daemon
+    path or hold the switch lock forever).
+    """
+    cfg = config if config is not None else CONFIG
+    section = cfg.get("caretaker", {})
+    if not isinstance(section, dict):
+        section = {}
+    result: Dict[str, Any] = {}
+    for key, default in _CARETAKER_DEFAULTS.items():
+        try:
+            value = float(section.get(key, default))
+        except (TypeError, ValueError):
+            value = float(default)
+        lo, hi = _CARETAKER_BOUNDS[key]
+        result[key] = max(lo, min(hi, value))
+    # attempts is a count: back to int after the shared float coercion.
+    result["rebind_poll_attempts"] = int(result["rebind_poll_attempts"])
+    # Combined budget: the re-bind poll runs inside ensure_backend while the
+    # model-switch lock is held.  Each iteration costs interval + a full
+    # /ensure round-trip (up to client_timeout_seconds when the daemon accepts
+    # TCP but stops responding — exactly the hung/restarting scenario this
+    # poll exists for), so the budget cap divides by the PER-ATTEMPT cost.
+    # With the 30 s client_timeout ceiling the divisor stays ≤ 60 s, so the
+    # cap can never reach 0 — the re-bind recovery path always keeps ≥ 2
+    # attempts.  The budget bounds the re-bind phase only; the two initial
+    # probes add up to 2×client_timeout on top (see the bounds comment).
+    interval = result["rebind_poll_interval_seconds"]
+    per_attempt = interval + result["client_timeout_seconds"]
+    if per_attempt > 0:
+        cap = int(_REBIND_BUDGET_S / per_attempt)
+        if result["rebind_poll_attempts"] > cap:
+            result["rebind_poll_attempts"] = cap
+    return result
 
 
 def load_queue_config(config: Optional[Dict[str, Any]] = None) -> dict:

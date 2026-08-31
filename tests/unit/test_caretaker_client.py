@@ -504,3 +504,55 @@ def test_build_falls_back_to_first_local(monkeypatch: pytest.MonkeyPatch) -> Non
     import asyncio
 
     asyncio.run(client.close())
+
+async def test_client_timeout_hot_reloadable_from_config(monkeypatch):
+    """Per-request daemon timeouts come from the live ``caretaker`` config
+    section (F5 follow-up): the /ensure call uses the configured timeout, not
+    only the constructor default — POST /api/config/reload retunes it."""
+    import httpx
+
+    from app.config_loader import CONFIG, load_caretaker_runtime_config
+
+    monkeypatch.setitem(
+        CONFIG,
+        "caretaker",
+        dict(load_caretaker_runtime_config(), client_timeout_seconds=9.0),
+    )
+    captured: dict = {}
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        captured["url"] = str(req.url)
+        return _ok({"ok": True, "loaded_model": "m", "needs_reload": False})
+
+    # Constructor timeout distinct from every other value in this test, so
+    # the constructor-fallback assertion below cannot pass "for the wrong
+    # reason" (the config built-in default is 5.0, the patched value 9.0).
+    client = _make_client(handler, timeout=3.0)
+    called_with: dict = {}
+
+    real_post = client._client.post
+
+    async def _spy_post(url: str, **kwargs):
+        called_with["timeout"] = kwargs.get("timeout")
+        return await real_post(url, **kwargs)
+
+    client._client.post = _spy_post
+    result = await client.ensure("m")
+    assert result["ok"] is True
+    assert called_with["timeout"] == httpx.Timeout(9.0)
+    # Fallback 1: section removed -> the accessor returns the built-in
+    # default (5.0), NOT the constructor timeout — proves the config default
+    # path works while the section exists but is empty.
+    monkeypatch.delitem(CONFIG, "caretaker", raising=False)
+    assert client._request_timeout() == httpx.Timeout(5.0)
+    # Fallback 2: accessor unavailable (import/load failure) -> the
+    # constructor timeout (3.0) applies — the except-branch is exercised for
+    # real, not bypassed by a defaults return.
+    import app.config_loader as config_loader
+
+    def _raise() -> dict:
+        raise RuntimeError("config unavailable")
+
+    monkeypatch.setattr(config_loader, "load_caretaker_runtime_config", _raise)
+    assert client._request_timeout() == httpx.Timeout(3.0)
+    await client.close()
