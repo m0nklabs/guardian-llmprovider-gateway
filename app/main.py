@@ -39,7 +39,9 @@ from app.proxy.server import (
 from app.proxy.server import (
     state as proxy_state,
 )
-from app.scheduler.manager import SchedulerManager
+from app.scheduler.manager import (
+    SchedulerManager,
+)
 
 # Configure logging
 _LOG_FILE = pathlib.Path("guardian.log")
