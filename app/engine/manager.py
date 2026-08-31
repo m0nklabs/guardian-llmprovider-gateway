@@ -406,12 +406,27 @@ class ModelManager:
             f"🔄 Startup mismatch: forcing switch from actual '{actual_name}' to target '{target}'"
         )
 
-        if not self._pinned_model and actual_name in self.models and not startup_drift:
-            logger.warning(
-                "🔄 Startup mismatch has a known live backend and no model pin; "
-                "adopting '%s' instead of replacing it with stale args state",
-                actual_name,
-            )
+        # Adopt a known live backend unless an explicit pin demands the target.
+        # With args-state drift this is restricted to the cross-model case: when
+        # the backend serves the target model itself, a forced reload still
+        # applies the new settings (same-model drift); when it serves a
+        # DIFFERENT known model, a startup must never swap the shared
+        # production model because of stale bookkeeping (cut-over safety).
+        adopt_allowed = (not startup_drift) or (actual_name != target)
+        if not self._pinned_model and actual_name in self.models and adopt_allowed:
+            if startup_drift:
+                logger.warning(
+                    "🔄 Args state drifted but the live backend serves a different "
+                    "known model '%s' — adopting it; new settings are NOT applied "
+                    "at startup (use an explicit reload to apply them)",
+                    actual_name,
+                )
+            else:
+                logger.warning(
+                    "🔄 Startup mismatch has a known live backend and no model pin; "
+                    "adopting '%s' instead of replacing it with stale args state",
+                    actual_name,
+                )
             self.current_model = actual_name
             self.current_vision_enabled = self.current_runtime_uses_mmproj(actual_name)
             if await self.verify_backend_model():
