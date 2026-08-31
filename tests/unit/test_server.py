@@ -1671,7 +1671,7 @@ async def test_admin_load_passes_kv_type_runtime_override():
 
 # ── Cloud LLM router tests ─────────────────────────────────────────────
 
-from app.proxy.providers import (  # noqa: E402  (test-module import order is intentional)
+from app.proxy.providers import (
     CloudProvider,
 )
 
