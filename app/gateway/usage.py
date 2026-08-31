@@ -8,6 +8,7 @@ dependency is the server ``State`` object (its ``api_usage`` tracker).
 
 from __future__ import annotations
 
+import math
 import time
 import uuid
 from typing import Any, Dict, Optional
@@ -35,10 +36,17 @@ def _api_usage():
 
 
 def coerce_usage_int(value: object) -> int:
-    """Convert token usage values to non-negative integers."""
+    """Convert token usage values to non-negative integers.
+
+    Non-finite floats (``inf``/``nan`` — Python parses JSON ``1e999`` as
+    ``inf``) yield 0: ``int(inf)`` raises OverflowError and an infinite
+    counter is not a real value (review finding, capture PR #17).
+    """
     try:
+        if isinstance(value, float) and not math.isfinite(value):
+            return 0
         return max(int(value), 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 

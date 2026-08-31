@@ -1,36 +1,43 @@
 """Append-only JSONL writer with rotation, retention, and integrity checksums.
 
 The writer runs as a single background task that consumes from the
-:class:`CaptureSink` queue and appends complete JSON lines to the active
-gzip-compressed JSONL file.  When the file reaches ``max_file_bytes`` or
-``max_file_age_seconds``, it is atomically closed (gzip trailer finished),
-and rotated.  Each completed file gets a SHA-256 checksum stored alongside
-it so Keanu can validate integrity.
+:class:`CaptureSink` queue and appends complete JSON lines (plain UTF-8, one
+record per line) to the ACTIVE file.  When the file reaches
+``max_file_bytes`` or ``max_file_age_seconds``, it is closed, renamed to its
+completed name, and gzip-compressed atomically.  Each completed file gets a
+SHA-256 checksum stored alongside it so Keanu can validate integrity.
 
-Compression (since 2026-08-26): the ACTIVE file is written as a gzip stream
-with ``Z_SYNC_FLUSH`` after every record, so the on-disk log is compressed
-at all times — not only after rotation.  After a process restart the writer
-appends a second gzip member to an existing active file (multi-member gzip
-is valid and readable by Python's ``gzip`` module).  Rotation thresholds
-count *uncompressed* bytes so rotation cadence stays data-driven.
+Compression (since 2026-08-30, feedback C3): the ACTIVE file is PLAIN
+``.jsonl`` so consumers can stream it line-by-line with standard tools
+(``tail -f``, ``jq``, plain ``open()``) while the writer is mid-stream — the
+previous stream-gzip active file raised ``EOFError`` for any reader that did
+not special-case the missing gzip trailer.  Gzip compression happens ON
+ROTATION: the closed plain file is renamed to its ``.jsonl.gz`` completed
+name and compressed via a temp file + ``os.replace`` (atomic), so the final
+artifact stays a clean single-member gzip for downstream gzip readers.
+Legacy active files written by the previous stream-gzip writer are renamed
+to a completed-style name at startup and never appended to.
 
 Key invariants:
 - One writer only (no concurrent file access).
 - All writes are anchored beneath the capture root (no symlink traversal).
-- All capture files are gzipped; the active file is read by Keanu only
-  after rotation (or directly via ``gzip``, multi-member aware).
-- Rotation and retention are enforced atomically.
+- The active file is plain UTF-8 JSONL (readable mid-write); completed
+  files are single-member gzip (``.jsonl.gz``) readable by ``gzip`` or the
+  crash-tolerant reader (which also reads plain files transparently).
+- Rotation and retention are enforced atomically; a ``.sha256`` sidecar is
+  never orphaned from its data file.
 """
 
 from __future__ import annotations
 
 import asyncio
+import gzip
 import hashlib
 import json
 import logging
 import os
+import shutil
 import time
-import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -41,9 +48,21 @@ from app.capture.schema import compute_record_auth
 
 logger = logging.getLogger("Guardian.Capture.WAL")
 
-ACTIVE_FILENAME = "guardian_capture_current.jsonl.gz"
+ACTIVE_FILENAME = "guardian_capture_current.jsonl"
+LEGACY_ACTIVE_FILENAME = "guardian_capture_current.jsonl.gz"
 STATE_FILENAME = ".capture_state.json"
 COMPLETED_PATTERN = "guardian_capture_{timestamp}_{seq}.jsonl.gz"
+
+_GZIP_MAGIC = b"\x1f\x8b"
+
+
+def _is_gzip_file(path: Path) -> bool:
+    """True when the file starts with the gzip magic bytes."""
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(2) == _GZIP_MAGIC
+    except OSError:
+        return False
 
 
 @dataclass
@@ -85,9 +104,8 @@ class CaptureWALWriter:
         self._rotation_seq = 0
         self._active_file: Optional[Path] = None
         self._active_fd = None  # raw file descriptor for append-only writes
-        self._active_file_size = 0  # UNCOMPRESSED bytes written this session
-        self._active_file_start = 0.0  # monotonic time of file creation
-        self._gzip_compressor: Optional[Any] = None  # zlib compressobj (gzip)
+        self._active_file_size = 0  # plain byte count used for rotation thresholds
+        self._active_file_start = 0.0  # monotonic time of file (re)open
 
         # State file (persisted across restarts)
         self._state_path = Path(config.capture_root) / STATE_FILENAME
@@ -118,8 +136,14 @@ class CaptureWALWriter:
             self._metrics.write_failures += 1
             return
 
-        # Load persisted state
+        # Load persisted state, then run the idempotent startup sweep
+        # (temp cleanup, leftover compression, legacy active migration)
+        # before any event can be written.
         self._load_state()
+        try:
+            self._sweep_startup()
+        except Exception as exc:  # defensive: the sweep must never block startup
+            logger.warning("Capture startup sweep failed (continuing): %s", exc)
 
         self._stopping = False
         self._sink.register_consumer()
@@ -173,7 +197,194 @@ class CaptureWALWriter:
         except OSError:
             pass
 
+    # ── Startup sweep (migration + crash hardening) ────────────────────
+
+    def _next_completed_path(self, timestamp: int) -> Tuple[Path, int]:
+        """Return a free completed-file path and its sequence number.
+
+        Bumps the sequence until the name is not already taken (guards
+        against collisions after a state reset or a same-second rotation).
+        """
+        seq = self._state.get("rotation_seq", 0) + 1
+        candidate: Optional[Path] = None
+        for _ in range(1000):
+            path = self._capture_root / COMPLETED_PATTERN.format(timestamp=timestamp, seq=seq)
+            if not path.exists():
+                candidate = path
+                break
+            seq += 1
+        if candidate is None:  # pragma: no cover — 1000 collisions is pathological
+            candidate = self._capture_root / COMPLETED_PATTERN.format(
+                timestamp=timestamp, seq=f"{seq}-{os.getpid()}")
+        return candidate, seq
+
+    def _compress_atomically(self, src_path: Path, dst_path: Path) -> None:
+        """Gzip-compress ``src_path`` into ``dst_path`` atomically.
+
+        The gzip data is written to ``<dst_path>.tmp`` in the same directory
+        and then ``os.replace``d over ``dst_path``.  The source file is NOT
+        removed; callers decide whether to unlink it.  Raises OSError on
+        failure (after cleaning up the temp file).
+        """
+        tmp_path = dst_path.with_name(dst_path.name + ".tmp")
+        try:
+            with open(src_path, "rb") as src, open(tmp_path, "wb") as dst:
+                # filename="" keeps the gzip header free of the temp name;
+                # mtime=0 keeps the output deterministic.
+                with gzip.GzipFile(filename="", mode="wb", fileobj=dst,
+                                   compresslevel=6, mtime=0) as gz:
+                    shutil.copyfileobj(src, gz, length=1024 * 1024)
+                dst.flush()
+                os.fsync(dst.fileno())
+            os.replace(str(tmp_path), str(dst_path))
+        finally:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+
+    def _write_sidecar(self, data_path: Path) -> str:
+        """Write the ``.sha256`` sidecar for ``data_path`` and return the hash."""
+        checksum = self._compute_file_checksum(data_path)
+        checksum_path = data_path.with_suffix(".sha256")
+        with open(checksum_path, "w") as f:
+            f.write(f"{checksum}  {data_path.name}\n")
+        os.chmod(str(checksum_path), self._config.file_mode)
+        return checksum
+
+    def _sweep_startup(self) -> None:
+        """Idempotent startup hardening (migration + crash recovery).
+
+        (a) Delete stale ``*.tmp`` leftovers in the capture root (a previous
+            crash during an atomic write/compress can leave them).
+        (b) Compress leftover plain completed files: a
+            ``guardian_capture_{ts}_{seq}.jsonl`` without its ``.gz``, or a
+            crash mid-rotation that left plain bytes under a ``.jsonl.gz``
+            name (renamed but not yet compressed).
+        (c) Migrate a LEGACY active file ``guardian_capture_current.jsonl.gz``
+            (written by the previous stream-gzip writer): rename it as-is to
+            a completed-style name (timestamp from its mtime, next
+            rotation_seq from state).  It is no longer the active file and
+            is never appended to.
+
+        Every step is best-effort: failures are logged and counted, never
+        raised (fail-open).
+        """
+        root = self._capture_root
+        if not root.is_dir():
+            return
+
+        # (a) stale temp files
+        try:
+            for entry in root.glob("*.tmp"):
+                try:
+                    entry.unlink()
+                    logger.info("Startup sweep: removed stale temp file %s", entry.name)
+                except OSError as exc:
+                    logger.warning("Startup sweep: could not remove temp file %s: %s", entry.name, exc)
+        except OSError as exc:
+            logger.warning("Startup sweep: failed to list capture root for temp cleanup: %s", exc)
+
+        # (b) leftover plain completed files
+        try:
+            leftovers = sorted(root.glob("guardian_capture_*.jsonl*"))
+        except OSError as exc:
+            logger.warning("Startup sweep: failed to list capture root: %s", exc)
+            leftovers = []
+        for entry in leftovers:
+            name = entry.name
+            if name in (ACTIVE_FILENAME, LEGACY_ACTIVE_FILENAME):
+                continue
+            if name.endswith(".sha256") or name.endswith(".tmp"):
+                continue
+            if not entry.is_file():
+                continue
+            if _is_gzip_file(entry):
+                continue  # already a valid gzip artifact
+            try:
+                if name.endswith(".gz"):
+                    # Plain bytes under a .gz name: rotation crashed between
+                    # rename and compression — compress in place.
+                    target = entry
+                    source = None
+                else:
+                    # Plain completed file without its .gz.
+                    target = entry.with_suffix(".jsonl.gz")
+                    source = entry
+                self._compress_atomically(entry, target)
+                if source is not None:
+                    source.unlink(missing_ok=True)
+                self._write_sidecar(target)
+                os.chmod(str(target), self._config.file_mode)
+                self._metrics.files_rotated += 1
+                logger.info("Startup sweep: compressed leftover plain capture file -> %s", target.name)
+            except OSError as exc:
+                logger.warning("Startup sweep: could not compress leftover %s: %s", entry.name, exc)
+
+        # (c) legacy gzip active file — rename as-is, never append
+        legacy = root / LEGACY_ACTIVE_FILENAME
+        if legacy.is_file():
+            try:
+                if _is_gzip_file(legacy):
+                    mtime = int(legacy.stat().st_mtime)
+                    target, seq = self._next_completed_path(mtime)
+                    self._rotation_seq = seq
+                    self._state["rotation_seq"] = seq
+                    os.replace(str(legacy), str(target))
+                    self._write_sidecar(target)
+                    os.chmod(str(target), self._config.file_mode)
+                    self._metrics.files_rotated += 1
+                    self._save_state()
+                    logger.info(
+                        "Startup sweep: renamed legacy gzip active file -> %s (never appended to)",
+                        target.name)
+                else:
+                    # Even older plain active leftover: archive it as gzip.
+                    mtime = int(legacy.stat().st_mtime)
+                    target, seq = self._next_completed_path(mtime)
+                    self._rotation_seq = seq
+                    self._state["rotation_seq"] = seq
+                    self._compress_atomically(legacy, target)
+                    legacy.unlink(missing_ok=True)
+                    self._write_sidecar(target)
+                    os.chmod(str(target), self._config.file_mode)
+                    self._metrics.files_rotated += 1
+                    self._save_state()
+                    logger.info(
+                        "Startup sweep: compressed legacy plain active file -> %s (never appended to)",
+                        target.name)
+            except OSError as exc:
+                logger.warning("Startup sweep: could not migrate legacy active file: %s", exc)
+
     # ── File management ────────────────────────────────────────────────
+
+    def _terminate_partial_line(self, active_path: Path) -> None:
+        """Ensure an existing active file ends with a newline before appending.
+
+        A crash mid-write can leave a partial record without its trailing
+        newline.  Appending after it would join the partial record and the
+        next record into one corrupt line.  Terminating the partial line
+        isolates it: the reader drops the incomplete record and every
+        subsequent record stays parseable.  (This replaces the gzip-member
+        isolation of the previous stream-gzip format.)
+        """
+        try:
+            size = active_path.stat().st_size
+            if size == 0:
+                return
+            with open(active_path, "rb") as fh:
+                fh.seek(-1, os.SEEK_END)
+                last = fh.read(1)
+            if last != b"\n":
+                with open(active_path, "ab") as fh:
+                    fh.write(b"\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                logger.warning("Terminated partial trailing record in %s (crash recovery)",
+                               active_path.name)
+        except OSError:
+            pass  # fail-open: worst case one appended record joins a partial line
 
     def _open_active_file(self) -> None:
         """Open (or reopen) the active JSONL file for append-only writes."""
@@ -192,9 +403,12 @@ class CaptureWALWriter:
             pass
 
         try:
+            # Isolate any partial trailing record left by a crash BEFORE
+            # appending (plain text has no gzip-member boundaries to rely on).
+            if active_path.exists():
+                self._terminate_partial_line(active_path)
             # Open with O_APPEND for atomic appends; create if needed.
-            # Binary mode: writes are gzip-compressed records (Z_SYNC_FLUSH
-            # per record), so the active file is compressed at all times.
+            # Binary mode: records are plain UTF-8 JSON lines.
             fd = os.open(
                 str(active_path),
                 os.O_WRONLY | os.O_CREAT | os.O_APPEND,
@@ -203,38 +417,24 @@ class CaptureWALWriter:
             os.chmod(str(active_path), self._config.file_mode)
             self._active_fd = os.fdopen(fd, "ab")
             self._active_file = active_path
-            # Uncompressed byte count resets per session; a pre-existing file
-            # (restart) gets a fresh gzip member, which is valid multi-member
-            # gzip. Rotation thresholds stay data-driven per session.
-            self._active_file_size = 0
+            # Rotation thresholds count the plain file's byte size directly;
+            # seed from the on-disk size so a restarted writer rotates on the
+            # real file size, not just this session's appended bytes.
+            try:
+                self._active_file_size = active_path.stat().st_size
+            except OSError:
+                self._active_file_size = 0
             self._active_file_start = time.monotonic()
-            # New compressor → new gzip member when appending to an existing
-            # file; 16+zlib.MAX_WBITS = gzip wrapper, level 6 default.
-            self._gzip_compressor = zlib.compressobj(6, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
-            logger.debug("Opened active capture file: %s (session bytes=0)", active_path)
+            logger.debug("Opened active capture file: %s (size=%d)", active_path, self._active_file_size)
         except OSError as exc:
             logger.error("Failed to open active capture file %s: %s", active_path, exc)
             self._metrics.write_failures += 1
             self._active_fd = None
             self._active_file = None
 
-    def _finish_gzip_stream(self) -> None:
-        """Write the gzip trailer (Z_FINISH) and drop the compressor."""
-        if self._gzip_compressor is None or self._active_fd is None:
-            self._gzip_compressor = None
-            return
-        try:
-            tail = self._gzip_compressor.flush(zlib.Z_FINISH)
-            if tail:
-                self._active_fd.write(tail)
-        except Exception:
-            pass
-        self._gzip_compressor = None
-
     def _close_active_file(self) -> None:
-        """Finish the gzip stream and close the active file without rotating."""
+        """Close the active file without rotating."""
         if self._active_fd is not None:
-            self._finish_gzip_stream()
             try:
                 self._active_fd.close()
             except Exception:
@@ -270,8 +470,48 @@ class CaptureWALWriter:
             return True
         return False
 
+    def _recover_failed_rotation(self, active_path: Path, completed_path: Path) -> None:
+        """Best-effort recovery after a failed rotation (fail-open, no data loss).
+
+        - remove any leftover temp file;
+        - if the data was renamed but not yet compressed (still plain under
+          the ``.gz`` name), move it back to the active slot so the next
+          rotation attempt can retry;
+        - if compression already succeeded (gzip bytes present), keep the
+          completed file and regenerate its sidecar best-effort.
+        """
+        tmp_path = completed_path.with_name(completed_path.name + ".tmp")
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+        if not completed_path.exists():
+            return
+        if not _is_gzip_file(completed_path):
+            if not active_path.exists():
+                try:
+                    os.replace(str(completed_path), str(active_path))
+                    logger.warning("Rotation failed — data restored to %s for retry", active_path.name)
+                except OSError:
+                    logger.error("Rotation failed and data could not be restored to %s", active_path.name)
+            return
+
+        # Compression succeeded; only the sidecar/chmod stage failed.
+        try:
+            self._write_sidecar(completed_path)
+            os.chmod(str(completed_path), self._config.file_mode)
+            self._metrics.files_rotated += 1
+            self._metrics.files_written += 1
+            self._save_state()
+            logger.warning("Rotation failed mid-flight — completed file kept: %s", completed_path.name)
+        except OSError as exc:
+            logger.error("Rotation failed and sidecar regeneration failed for %s: %s",
+                         completed_path.name, exc)
+
     def _rotate_file(self) -> Optional[str]:
-        """Atomically finish, checksum, and rename the active gzip file.
+        """Close the active plain file, rename it to its completed name, and
+        gzip-compress it atomically.
 
         Returns the path of the rotated (gzipped) file, or ``None`` if there
         was nothing to rotate.
@@ -284,27 +524,25 @@ class CaptureWALWriter:
         self._close_active_file()
 
         timestamp = int(time.time())
-        self._rotation_seq = self._state.get("rotation_seq", 0) + 1
-        self._state["rotation_seq"] = self._rotation_seq
-
-        completed_name = COMPLETED_PATTERN.format(timestamp=timestamp, seq=self._rotation_seq)
-        completed_path = self._capture_root / completed_name
+        completed_path, seq = self._next_completed_path(timestamp)
+        self._rotation_seq = seq
+        self._state["rotation_seq"] = seq
 
         try:
-            # Rename the active (already gzipped, trailer finished) file to its
-            # completed name (atomic on same filesystem).
+            # 1. Rename the closed plain active file to its completed name
+            #    (atomic on the same filesystem).  At this instant the file
+            #    under the .gz name is still plain; step 2 replaces it with
+            #    gzip bytes before anything else consumes it.
             os.replace(str(active_path), str(completed_path))
 
-            # Compute checksum over the gzipped file
-            checksum = self._compute_file_checksum(completed_path)
+            # 2. Gzip-compress atomically: compress to a temp file in the
+            #    same directory, then os.replace over the final .gz name.
+            self._compress_atomically(completed_path, completed_path)
 
-            # Write checksum sidecar
-            checksum_path = completed_path.with_suffix(".sha256")
-            with open(checksum_path, "w") as f:
-                f.write(f"{checksum}  {completed_path.name}\n")
+            # 3. Checksum over the final .gz bytes + sidecar.
+            checksum = self._write_sidecar(completed_path)
 
             os.chmod(str(completed_path), self._config.file_mode)
-            os.chmod(str(checksum_path), self._config.file_mode)
 
             self._metrics.files_rotated += 1
             self._metrics.files_written += 1
@@ -318,8 +556,7 @@ class CaptureWALWriter:
         except OSError as exc:
             logger.error("Failed to rotate capture file: %s", exc)
             self._metrics.write_failures += 1
-            # Try to clean up partial files
-            completed_path.unlink(missing_ok=True)
+            self._recover_failed_rotation(active_path, completed_path)
             return None
 
     def _compute_file_checksum(self, path: Path) -> str:
@@ -336,7 +573,10 @@ class CaptureWALWriter:
         """Remove completed capture files older than retention_days.
 
         ``retention_days=0`` means remove all completed files immediately.
-        ``retention_days < 0`` disables retention entirely.
+        ``retention_days < 0`` disables retention entirely.  A ``.sha256``
+        sidecar is always removed together with its data file (never
+        orphaned); a sidecar whose data file is already gone is pruned on
+        its own mtime.  The active file and the state file are never touched.
         """
         if self._config.retention_days < 0:
             return
@@ -346,45 +586,80 @@ class CaptureWALWriter:
         cut_bytes = self._config.max_capture_bytes
 
         try:
-            files: List[Tuple[Path, float, int]] = []
+            # Collect removable units: (paths_to_unlink, mtime, total_size).
+            # A data file carries its sidecar (removed together).
+            units: List[Tuple[List[Path], float, int]] = []
+            seen_sidecars: set = set()
             total_size = 0
             for entry in root.iterdir():
-                if entry.name == ACTIVE_FILENAME or entry.name == STATE_FILENAME:
+                name = entry.name
+                if name in (ACTIVE_FILENAME, LEGACY_ACTIVE_FILENAME, STATE_FILENAME):
+                    # The legacy active file matches the completed-file
+                    # pattern below; if the startup migration failed
+                    # (fail-open), it still holds un-rotated records and
+                    # must never be swept.
                     continue
                 if not entry.is_file():
                     continue
-                if entry.name.startswith("guardian_capture_"):
+                if not name.startswith("guardian_capture_"):
+                    continue
+                if name.endswith(".tmp") or name.endswith(".sha256"):
+                    continue
+                stat = entry.stat()
+                sidecar = entry.with_suffix(".sha256")
+                paths = [entry]
+                size = stat.st_size
+                if sidecar.is_file():
+                    paths.append(sidecar)
+                    size += sidecar.stat().st_size
+                    seen_sidecars.add(sidecar.name)
+                units.append((paths, stat.st_mtime, size))
+                total_size += size
+
+            # Orphan sidecars (data file already gone) — prune by their own mtime.
+            for entry in root.iterdir():
+                name = entry.name
+                if (name.startswith("guardian_capture_") and name.endswith(".sha256")
+                        and name not in seen_sidecars and entry.is_file()):
                     stat = entry.stat()
-                    files.append((entry, stat.st_mtime, stat.st_size))
+                    units.append(([entry], stat.st_mtime, stat.st_size))
                     total_size += stat.st_size
 
             # Sort by modification time (oldest first)
-            files.sort(key=lambda x: x[1])
+            units.sort(key=lambda u: u[1])
 
-            # Remove old files first
-            for path, mtime, size in files:
-                if mtime < cutoff:
+            def _remove(paths: List[Path]) -> None:
+                for path in paths:
                     try:
                         path.unlink()
                         self._metrics.files_retired += 1
-                        total_size -= size
-                        logger.debug("Retention: removed old file %s", path.name)
+                        logger.debug("Retention: removed %s", path.name)
                     except OSError:
                         pass
+
+            # Remove old files first (data + sidecar together).  Entries
+            # removed here are dropped from `units` so the byte-quota loop
+            # below cannot pop stale entries and subtract their size twice
+            # (which deflated the quota accounting and could leave real
+            # files over the quota until the next sweep — review finding).
+            survivors: List[Tuple[List[Path], float, int]] = []
+            for unit in units:
+                paths, mtime, size = unit
+                if mtime < cutoff:
+                    _remove(paths)
+                    total_size -= size
+                else:
+                    survivors.append(unit)
+            units = survivors
 
             # If still over the byte limit, remove oldest until under quota.
             # max_capture_bytes < 0 = unlimited budget (matches infinite
             # retention, operator decision 2026-08-26).
             if cut_bytes >= 0:
-                while total_size > cut_bytes and files:
-                    path, mtime, size = files.pop(0)
-                    try:
-                        path.unlink()
-                        self._metrics.files_retired += 1
-                        total_size -= size
-                        logger.debug("Retention: removed for byte quota %s", path.name)
-                    except OSError:
-                        pass
+                while total_size > cut_bytes and units:
+                    paths, mtime, size = units.pop(0)
+                    _remove(paths)
+                    total_size -= size
 
         except OSError as exc:
             logger.warning("Retention enforcement error: %s", exc)
@@ -400,30 +675,23 @@ class CaptureWALWriter:
 
         try:
             # Serialize the event first, then add per-record HMAC if configured.
-            import json as _json
             event_dict = dict(event.data)  # shallow copy
-            line_no_auth = _json.dumps(event_dict, separators=(",", ":"), sort_keys=False, default=str)
+            line_no_auth = json.dumps(event_dict, separators=(",", ":"), sort_keys=False, default=str)
             record_auth = compute_record_auth(line_no_auth)
             if record_auth is not None:
                 event_dict["record_auth"] = record_auth
-                line = _json.dumps(event_dict, separators=(",", ":"), sort_keys=False, default=str)
+                line = json.dumps(event_dict, separators=(",", ":"), sort_keys=False, default=str)
             else:
                 line = line_no_auth
-            line += "\n"
-            line_bytes = line.encode("utf-8")
+            line_bytes = (line + "\n").encode("utf-8")
 
-            # Gzip-compress the record with a sync flush so every record is
-            # independently decodable even while the file is still active.
-            if self._gzip_compressor is None:
-                self._gzip_compressor = zlib.compressobj(6, zlib.DEFLATED, 16 + zlib.MAX_WBITS)
-            data = (
-                self._gzip_compressor.compress(line_bytes)
-                + self._gzip_compressor.flush(zlib.Z_SYNC_FLUSH)
-            )
-            self._active_fd.write(data)
+            # Plain UTF-8 append: one complete JSON record per line.  The
+            # active file stays readable line-by-line (tail -f, jq, plain
+            # open) while the writer is mid-stream (feedback C3).
+            self._active_fd.write(line_bytes)
             self._active_fd.flush()
             os.fsync(self._active_fd.fileno())
-            # Rotation thresholds count UNCOMPRESSED bytes (data-driven).
+            # Rotation thresholds count the plain file's bytes directly.
             self._active_file_size += len(line_bytes)
             self._metrics.bytes_written += len(line_bytes)
             self._metrics.files_written = max(self._metrics.files_written, 1)
@@ -509,6 +777,10 @@ class CaptureWALWriter:
         except OSError:
             pass
 
+        active_format = None
+        if self._active_file is not None:
+            active_format = "legacy_gzip" if self._active_file.suffix == ".gz" else "plain"
+
         sink_metrics = self._sink.metrics
         return {
             "writer_metrics": {
@@ -521,5 +793,6 @@ class CaptureWALWriter:
             "sink_metrics": sink_metrics.to_dict(),
             "capture_disk_bytes": disk_bytes,
             "capture_active_file": str(self._active_file) if self._active_file else None,
+            "capture_active_file_format": active_format,
             "capture_queue_depth": self._sink.queue_depth,
         }

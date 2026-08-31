@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("Guardian.Capture.StreamAssembler")
@@ -32,8 +33,19 @@ class StreamResponseAssembler:
         self._reasoning_parts: List[str] = []
         self._tool_calls: List[Dict[str, Any]] = []
         self._finish_reason: Optional[str] = None
+        # Provider-reported raw stop reason (OpenRouter ``native_finish_reason``
+        # on the choice; llama.cpp/OpenAI-compatible backends simply omit it).
+        self._native_finish_reason: Optional[str] = None
         self._prompt_tokens: Optional[int] = None
         self._completion_tokens: Optional[int] = None
+        # Rich upstream usage mirror (C5) — kept as reported by the provider.
+        self._completion_tokens_details: Optional[Dict[str, Any]] = None
+        self._native_tokens_reasoning: Optional[int] = None
+        self._native_tokens_cached: Optional[int] = None
+        self._cost: Optional[float] = None
+        # Provider-reported serving provider slug (OpenRouter top-level
+        # ``provider`` string on stream chunks).
+        self._provider_name: Optional[str] = None
         self._has_content: bool = False
         self._line_count: int = 0
         self._error: Optional[str] = None
@@ -68,6 +80,12 @@ class StreamResponseAssembler:
         if not isinstance(data, dict):
             return
 
+        # Provider-reported serving provider slug (OpenRouter includes a
+        # top-level ``provider`` string on its chunks; latest wins).
+        provider_name = data.get("provider")
+        if isinstance(provider_name, str) and provider_name:
+            self._provider_name = provider_name
+
         # ── OpenAI chat/completions delta ──────────────────────────────
         choices = data.get("choices")
         if isinstance(choices, list) and choices:
@@ -96,6 +114,10 @@ class StreamResponseAssembler:
                 finish_reason = choice.get("finish_reason")
                 if isinstance(finish_reason, str) and finish_reason:
                     self._finish_reason = finish_reason
+                # Provider-reported native stop reason (OpenRouter shape)
+                native_finish_reason = choice.get("native_finish_reason")
+                if isinstance(native_finish_reason, str) and native_finish_reason:
+                    self._native_finish_reason = native_finish_reason
 
                 # Non-delta message (final chunk in some providers)
                 message = choice.get("message")
@@ -178,15 +200,38 @@ class StreamResponseAssembler:
                     existing_fn["arguments"] = existing_fn.get("arguments", "") + fn_delta["arguments"]
 
     def _extract_usage(self, usage: Dict[str, Any]) -> None:
-        """Extract token usage from OpenAI or Anthropic usage objects."""
+        """Extract token usage and rich usage fields from OpenAI/Anthropic usage objects."""
         pt = usage.get("prompt_tokens") or usage.get("input_tokens")
         ct = usage.get("completion_tokens") or usage.get("output_tokens")
-        if isinstance(pt, (int, float)):
+        # math.isfinite: upstream JSON like 1e999 parses to inf and would
+        # raise OverflowError/ValueError on int() (broken stream) or
+        # serialize as bare Infinity/NaN (strict JSONL consumers break).
+        if isinstance(pt, (int, float)) and math.isfinite(pt):
             if self._prompt_tokens is None or int(pt) > self._prompt_tokens:
                 self._prompt_tokens = int(pt)
-        if isinstance(ct, (int, float)):
+        if isinstance(ct, (int, float)) and math.isfinite(ct):
             if self._completion_tokens is None or int(ct) > self._completion_tokens:
                 self._completion_tokens = int(ct)
+        # ── Rich usage mirror (C5) ──────────────────────────────────────
+        # OpenAI/OpenRouter ``completion_tokens_details`` (contains
+        # reasoning_tokens) — stored as-is, latest non-empty wins.
+        details = usage.get("completion_tokens_details")
+        if isinstance(details, dict) and details:
+            self._completion_tokens_details = details
+        # OpenRouter native token counters.
+        ntr = usage.get("native_tokens_reasoning")
+        if (isinstance(ntr, (int, float)) and not isinstance(ntr, bool)
+                and math.isfinite(ntr)):
+            self._native_tokens_reasoning = int(ntr)
+        ntc = usage.get("native_tokens_cached")
+        if (isinstance(ntc, (int, float)) and not isinstance(ntc, bool)
+                and math.isfinite(ntc)):
+            self._native_tokens_cached = int(ntc)
+        # OpenRouter reported cost for the request.
+        cost = usage.get("cost")
+        if (isinstance(cost, (int, float)) and not isinstance(cost, bool)
+                and math.isfinite(cost)):
+            self._cost = float(cost)
 
     @property
     def content(self) -> str:
@@ -207,6 +252,33 @@ class StreamResponseAssembler:
     @property
     def finish_reason(self) -> Optional[str]:
         return self._finish_reason
+
+    @property
+    def native_finish_reason(self) -> Optional[str]:
+        """Provider-reported raw stop reason (None when not reported)."""
+        return self._native_finish_reason
+
+    @property
+    def completion_tokens_details(self) -> Optional[Dict[str, Any]]:
+        """Upstream usage.completion_tokens_details dict, as reported."""
+        return self._completion_tokens_details
+
+    @property
+    def native_tokens_reasoning(self) -> Optional[int]:
+        return self._native_tokens_reasoning
+
+    @property
+    def native_tokens_cached(self) -> Optional[int]:
+        return self._native_tokens_cached
+
+    @property
+    def cost(self) -> Optional[float]:
+        return self._cost
+
+    @property
+    def provider_name(self) -> Optional[str]:
+        """Provider-reported serving provider slug (None when not reported)."""
+        return self._provider_name
 
     @property
     def prompt_tokens(self) -> Optional[int]:
@@ -237,6 +309,12 @@ class StreamResponseAssembler:
         result: Dict[str, Any] = {
             "content": self.content,
             "finish_reason": self._finish_reason,
+            "native_finish_reason": self._native_finish_reason,
+            "completion_tokens_details": self._completion_tokens_details,
+            "native_tokens_reasoning": self._native_tokens_reasoning,
+            "native_tokens_cached": self._native_tokens_cached,
+            "cost": self._cost,
+            "provider_name": self._provider_name,
             "tool_calls": self._tool_calls if self._tool_calls else None,
             "reasoning_content": "".join(self._reasoning_parts) if self._reasoning_parts else None,
             "prompt_tokens": self._prompt_tokens,

@@ -162,3 +162,78 @@ class TestStreamAssemblerEdgeCases:
         result = asm.assemble()
         assert result["prompt_tokens"] == 15
         assert result["completion_tokens"] == 7
+
+
+class TestStreamAssemblerUsageMirror:
+    """Rich upstream usage mirror collected from the final usage chunk (C5)."""
+
+    def test_extracts_native_finish_reason_openrouter_shape(self):
+        asm = StreamResponseAssembler()
+        asm.add_sse_line(
+            'data: {"choices":[{"delta":{},"finish_reason":"stop",'
+            '"native_finish_reason":"length"}]}'
+        )
+        result = asm.assemble()
+        assert result["finish_reason"] == "stop"
+        assert result["native_finish_reason"] == "length"
+
+    def test_native_finish_reason_absent_for_plain_openai(self):
+        # llama.cpp / plain OpenAI-compatible backends never send it.
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}')
+        result = asm.assemble()
+        assert result["native_finish_reason"] is None
+
+    def test_extracts_completion_tokens_details(self):
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"usage":{"prompt_tokens":9,"completion_tokens":4,'
+                         '"completion_tokens_details":{"reasoning_tokens":3}}}')
+        result = asm.assemble()
+        assert result["completion_tokens_details"] == {"reasoning_tokens": 3}
+
+    def test_extracts_openrouter_native_token_counts_and_cost(self):
+        asm = StreamResponseAssembler()
+        asm.add_sse_line(
+            'data: {"provider":"DeepSeek","usage":{"prompt_tokens":100,'
+            '"completion_tokens":20,"native_tokens_reasoning":7,'
+            '"native_tokens_cached":11,"cost":0.0025}}'
+        )
+        result = asm.assemble()
+        assert result["native_tokens_reasoning"] == 7
+        assert result["native_tokens_cached"] == 11
+        assert result["cost"] == 0.0025
+        assert result["provider_name"] == "DeepSeek"
+
+    def test_non_finite_usage_omitted_not_infinite(self):
+        """1e999-style upstream numbers parse to inf: the rich mirror must
+        omit them instead of raising OverflowError inside add_sse_line or
+        serializing bare Infinity/NaN into the JSONL record."""
+        asm = StreamResponseAssembler()
+        asm.add_sse_line(
+            'data: {"provider":"DeepSeek","usage":{"prompt_tokens":1e999,'
+            '"completion_tokens":1e999,"native_tokens_reasoning":1e999,'
+            '"native_tokens_cached":1e999,"cost":1e999}}'
+        )
+        result = asm.assemble()
+        assert result["native_tokens_reasoning"] is None
+        assert result["native_tokens_cached"] is None
+        assert result["cost"] is None
+        line = json.dumps(result, separators=(",", ":"))
+        assert "Infinity" not in line and "NaN" not in line
+
+    def test_mirror_fields_absent_when_provider_omits_them(self):
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"usage":{"prompt_tokens":1,"completion_tokens":1}}')
+        result = asm.assemble()
+        assert result["completion_tokens_details"] is None
+        assert result["native_tokens_reasoning"] is None
+        assert result["native_tokens_cached"] is None
+        assert result["cost"] is None
+        assert result["provider_name"] is None
+
+    def test_latest_provider_name_wins(self):
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"provider":"A","choices":[{"delta":{"content":"x"}}]}')
+        asm.add_sse_line('data: {"provider":"B","choices":[{"delta":{},"finish_reason":"stop"}]}')
+        result = asm.assemble()
+        assert result["provider_name"] == "B"

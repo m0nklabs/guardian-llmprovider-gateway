@@ -23,7 +23,7 @@ from app.engine.manager import ModelLoadError
 from app.gateway import caretaker_runtime as _caretaker_runtime
 from app.capture.config import PROTOCOL_ANTHROPIC, PROTOCOL_OPENAI, ROUTE_LOCAL
 from app.capture.redactor import anthropic_messages_to_openai
-from app.capture.schema import BuildContext
+from app.capture.schema import BuildContext, _utc_now_iso
 from app.capture.policy import PolicyResult
 from app.capture.stream_assembler import StreamResponseAssembler
 from app.gateway.streaming import StreamProgressWatchdog
@@ -396,6 +396,10 @@ async def route_v1_post(path: str, request: Request, client_id: str):
     # has_image_inputs already computed above
 
     request_start_time = time.monotonic()
+    # Wall-clock request start for capture (C1): captured BEFORE queue
+    # admission so cancelled/terminal events can reference the true request
+    # start even when the request waited in the queue.
+    _capture_started_wall = _utc_now_iso()
     _capture_policy_result: Optional["PolicyResult"] = None
     _capture_ctx: Optional[BuildContext] = None
 
@@ -413,6 +417,7 @@ async def route_v1_post(path: str, request: Request, client_id: str):
             capture_policy_version=_capture_controller.config.policy_version,
             instance_id=_capture_controller.config.instance_id,
             client_fingerprint=_capture_client_fingerprint(request, client_id),
+            started_at_utc=_capture_started_wall,
         )
         _dispatch_capture_request_cancelled(
             _capture_ctx, cancel_reason=exc.reason,
@@ -470,6 +475,7 @@ async def route_v1_post(path: str, request: Request, client_id: str):
             capture_policy_version=_capture_controller.config.policy_version,
             instance_id=_capture_controller.config.instance_id,
             client_fingerprint=_capture_client_fp,
+            started_at_utc=_capture_started_wall,
         )
 
     _release_in_finally = True
