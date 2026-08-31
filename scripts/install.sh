@@ -91,8 +91,12 @@ fi
 _existing_certs="$(ls "$TLS_DIR"/guardian-*.crt 2>/dev/null || true)"
 if [ -n "$_existing_certs" ] && [ ! -f "$TLS_DIR/guardian-${LAN_IP}.crt" ] && [ "$(echo "$_existing_certs" | wc -l)" -eq 1 ]; then
     _cert_ip="$(basename "$_existing_certs" | sed 's/^guardian-//; s/\.crt$//')"
-    warn "detected LAN IP ${LAN_IP} has no certificate, but ${_cert_ip} does — using the existing cert identity (override with --lan-ip)"
-    LAN_IP="$_cert_ip"
+    if [[ "$_cert_ip" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        warn "detected LAN IP ${LAN_IP} has no certificate, but ${_cert_ip} does — using the existing cert identity (override with --lan-ip)"
+        LAN_IP="$_cert_ip"
+    else
+        warn "existing certificate filename does not parse as an IP/hostname — ignoring it"
+    fi
 fi
 TLS_CERTFILE="$TLS_DIR/guardian-${LAN_IP}.crt"
 TLS_KEYFILE="$TLS_DIR/guardian-${LAN_IP}.key"
@@ -258,11 +262,11 @@ cat <<EOF
   1. Verify the detected LAN IP ($LAN_IP — override with --lan-ip when this host has
      bridges/tunnels/VPN interfaces): it feeds the cert SAN and the nginx allowlist.
   2. Fill in $REPO/.env (provider API keys, CARETAKER_KEY if you run the caretaker daemon).
-  2. Trust $TLS_CERTFILE on every LAN client that should connect without a custom CA.
-  3. Start Guardian:
+  3. Trust $TLS_CERTFILE on every LAN client that should connect without a custom CA.
+  4. Start Guardian:
        systemd : sudo systemctl enable --now guardian-llmprovider-gateway.service
        manual  : cd $REPO && venv/bin/python -m app.main
-  4. Smoke test: curl -k https://127.0.0.1:11434/v1/models -H "Authorization: Bearer <key>"
-  5. Optional: install and start the caretaker daemon (separate repo:
+  5. Smoke test: curl -k https://127.0.0.1:11434/v1/models -H "Authorization: Bearer <key>"
+  6. Optional: install and start the caretaker daemon (separate repo:
      caretaker-llamacpp, deploy/systemd/) for remote-first backend lifecycle.
 EOF

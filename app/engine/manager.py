@@ -376,14 +376,9 @@ class ModelManager:
         except Exception:
             return None
 
-    def _backend_has_mmproj(self) -> bool | None:
-        """Detect --mmproj in the running llama-server commandline.
-
-        Returns None when no llama-server process can be inspected (the caller
-        falls back to the args-file heuristic); True/False reflect the LIVE
-        process, which is authoritative in shared-backend topologies where the
-        args state file may be stale or absent.
-        """
+    def _backend_cmdline(self) -> str | None:
+        """Return the commandline of the first llama-server process that carries
+        a ``-m <model.gguf>`` argument (None when none runs)."""
         try:
             result = subprocess.run(
                 ["pgrep", "-a", "llama-server"],
@@ -391,9 +386,26 @@ class ModelManager:
             )
             if result.returncode != 0:
                 return None
-            return "--mmproj" in result.stdout
+            for line in result.stdout.strip().splitlines():
+                if re.search(r"-m\s+(\S+\.gguf)", line):
+                    return line
+            return None
         except Exception:
             return None
+
+    def _backend_has_mmproj(self) -> bool | None:
+        """Detect --mmproj on the SAME process line the model path comes from.
+
+        Returns None when no llama-server process can be inspected (the caller
+        falls back to the args-file heuristic); True/False reflect the LIVE
+        process, which is authoritative in shared-backend topologies where the
+        args state file may be stale or absent. Scoped to the matched process
+        so a second, unrelated llama-server cannot flip the flag.
+        """
+        line = self._backend_cmdline()
+        if line is None:
+            return None
+        return "--mmproj" in line
 
     def _identify_model_by_path(self, gguf_path: str) -> str | None:
         """Reverse-lookup: find model name by its .gguf path.
@@ -487,7 +499,7 @@ class ModelManager:
             # Cut-over kill-switch: startup may adopt or abstain, but never
             # force-switch the shared backend. An unknown live model or a pin
             # less target fall-through must not be able to reload production.
-            logger.critical(
+            logger.warning(
                 "🛑 GUARDIAN_STARTUP_ADOPT_ONLY is set: refusing to force-switch "
                 "the backend (actual='%s', target='%s'). Leaving state as-is; "
                 "requests route through the normal hotpath.",
