@@ -12,6 +12,10 @@ benchmark:
     - thu
     - fri
 proxy:
+  # TTL-gated cloud-catalog refresh loop (seconds; floor 10). The loop calls
+  # ensure_fresh per provider, which is a no-op while each cached catalog is
+  # still fresh — zero network traffic on a healthy deployment.
+  catalog_refresh_interval_seconds: 60
   port: 11434
   target: http://localhost:11440
   pid_file: guardian.pid

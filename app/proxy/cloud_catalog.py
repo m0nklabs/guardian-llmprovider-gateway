@@ -378,6 +378,17 @@ class CloudModelCatalog:
             except Exception as e:
                 logger.warning("☁️  Catalog refresh for '%s' failed: %s", provider.name, e)
 
+    async def ensure_all_fresh(self) -> None:
+        """TTL-gated counterpart of refresh_all: refresh only stale providers.
+
+        Safe to call on a schedule — each provider's :meth:`ensure_fresh`
+        checks its own staleness first, so a healthy deployment costs zero
+        network traffic while a cold cache (fresh install, disk wipe) or an
+        expired TTL self-heals without operator action.
+        """
+        for provider in self._registry.get_enabled_providers():
+            await self.ensure_fresh(provider.name)
+
     def is_stale(self, provider_name: str) -> bool:
         data = self._catalogs.get(provider_name)
         if data is None:
