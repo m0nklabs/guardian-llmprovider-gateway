@@ -111,10 +111,13 @@
 - **Pre-restart gate:** py_compile/pyflakes/signatures OK; pytest 1290/3 groen (de gate's eigen pytest-loop werd vastgelopen door live-11434-interferentie onder load — zie test-isolatie-punt hieronder).
 - **Restant voor de cut-over (operator):** (1) caretaker-daemon: `/etc/caretaker/caretaker.env` met `CARETAKER_KEY` + een beoordeelde `models.local.settings.yaml` (draft ligt in het caretaker-repo, afgeleid uit de gateway-registry); zonder daemon is v2 veilig door de adopt-fix. (2) De cut-over zelf: stop v1 → legacy unit disable + wegzetten → `sudo systemctl enable --now guardian-llmprovider-gateway.service` → smoke via nginx. (3) Eén keer `POST /api/cloud/catalog/refresh` na de start (anders 43 i.p.v. ~274 modellen).
 
-## Open punten
 ## Open punten (actueel — alles wat hier niet staat is afgerond; details in `docs/ARCHIVED_HANDOFFS.md`)
 
 > Restructurering 2026-08-30 — AGENTS.md geslimd 57.979 → ~32 kB (25 kB-doel niet haalbaar zonder Critical rules te schenden; vloer ~26–27 kB), verplaatste voltekst → `docs/AGENT_CONTEXT_ARCHIVE.md`.
+- **Test-isolatie-bug (nieuw):** ten minste één test in `tests/` opent een live-verbinding naar `127.0.0.1:11434` (productie!) — de pre-restart-gate's pytest hing daar onder load op. Culprit-bepaling + fix (mock of port-guard) is een opvolg-issue.
+- **CI ruff lint rood repo-breed (nieuw):** de org-workflow installeert ruff unpinned; de 0.16-release introduceerde 1994 overtredingen (0.15.0 = groen op identieke inhoud). De autofix-bot bracht het terug naar 341 (alleen unsafe-fixes resterend). Opvolg: ruff pinnen in `m0nklabs/github-action-runners/python-ci.yml` (of `[tool.ruff]`-selectie in de repo) + de resterende 341 in een aparte PR.
+- **PR #18 (G2, andere agent):** operator-oordeel — harde `max_call_seconds`-cap is niet de juiste oplossing voor runaway-generaties; analyse + herstelvoorstel (disconnect-propagation behouden, cap default-uit, streaming-teardown-test als échte pin) staat als comment op de PR. Verbetering of vervolg-PR door die agent (of mij) — één schrijver per area.
+- **ensure_fresh dead code:** niets triggert de TTL-refresh van de cloud-catalogus (v1 én v2); de refresh-endpoint vult de cache wél zelf (dir+file). Voorstel: wiring in `/v1/models` of startup (kleine PR, let op overlap met de G2-branch).
 
 - **Bekende test-fout (pre-existing, bewust gedeferred):** `test_cloud_attempts_resolve_google_full_address` faalt al weken op ongewijzigde HEAD (google cold-start-assertie, niet gerelateerd aan enig werk) — gemeld in meerdere gearchiveerde handoffs, niet aangeraakt.
 - **NVIDIA context-metadata gap (FUTURE work):** NVIDIA-modellen krijgen de 131072-fallback; per-model `context_window`-overrides voor actief gebruikte modellen zijn nog niet ingevuld (operator: "first find what's usable, THEN max context").
