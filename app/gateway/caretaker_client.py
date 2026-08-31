@@ -167,6 +167,24 @@ class CaretakerClient:
             headers["Authorization"] = f"Bearer {self._api_key}"
         return headers
 
+    def _request_timeout(self) -> httpx.Timeout:
+        """Per-request timeout from config (hot-reloadable).
+
+        The AsyncClient keeps the construction-time timeout as its default;
+        every control-API call overrides it with the live ``caretaker.
+        client_timeout_seconds`` so POST /api/config/reload retunes the
+        daemon-timeout windows (e.g. slower hosts, F6) without a restart.
+        Falls back to the constructor timeout when config is unavailable.
+        """
+        try:
+            from app.config_loader import load_caretaker_runtime_config
+
+            return httpx.Timeout(
+                float(load_caretaker_runtime_config()["client_timeout_seconds"])
+            )
+        except Exception:  # noqa: BLE001 — defensive: config must not break calls
+            return httpx.Timeout(self._timeout)
+
     async def ensure(
         self,
         model: str,
@@ -190,6 +208,7 @@ class CaretakerClient:
                 f"{self._management_url}/ensure",
                 json=payload,
                 headers=self._headers(),
+                timeout=self._request_timeout(),
             )
         except httpx.HTTPError as exc:
             logger.error("Caretaker /ensure transport error: %s", exc)
@@ -241,6 +260,7 @@ class CaretakerClient:
             resp = await self._client.post(
                 f"{self._management_url}/unload",
                 headers=self._headers(),
+                timeout=self._request_timeout(),
             )
         except httpx.HTTPError as exc:
             logger.error("Caretaker /unload transport error: %s", exc)
@@ -272,6 +292,7 @@ class CaretakerClient:
             resp = await self._client.get(
                 f"{self._management_url}/status",
                 headers=self._headers(),
+                timeout=self._request_timeout(),
             )
         except httpx.HTTPError as exc:
             logger.error("Caretaker /status transport error: %s", exc)
