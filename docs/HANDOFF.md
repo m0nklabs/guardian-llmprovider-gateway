@@ -102,7 +102,17 @@
 - **Klaargezet (deze sessie):** `venv`-symlink → legacy-venv + gekopieerde `.env`/`config/guardian.keys.yaml`/`data/`.
 - **Overige details** (volledige sessiekopie-methode naar de nieuwe workspace, docs-referentie-fix `5e02c78`) → `docs/AGENT_CONTEXT_ARCHIVE.md` §5.
 
-### Open punten (actueel — alles wat hier niet staat is afgerond; details in `docs/ARCHIVED_HANDOFFS.md`)
+### V2 productie-klaar (2026-08-31 avond, PR #19 gemerged `83cb6c7`)
+
+- **Productie-checkout = main @ `83cb6c7`** met: startup-adopt-fix (geen forced switch van een live backend bij cross-model args-drift — het e2e-incident is hiermee gedicht), `GUARDIAN_UI_PORT`-override, en de **installer** (`scripts/install.sh`, idempotent, gedoogvoerd).
+- **Legacy-afhankelijkheid weg:** de `venv`-symlink naar `/home/flip/llama_cpp_guardian/venv` is vervangen door een echte venv (Python 3.14.3, exacte pins uit `requirements.txt`); suite 1290 passed / 3 skipped op de nieuwe venv.
+- **TLS:** v1's vertrouwde cert-pair gekopieerd naar `/home/flip/.config/guardian-llmprovider-gateway/tls/` via `install.sh --tls-cert/--tls-key` (LAN-clients behouden trust; geen her-trust nodig).
+- **Systemd:** unit + TLS-drop-in gerenderd en geïnstalleerd (`/etc/systemd/system/guardian-llmprovider-gateway.service` + `.service.d/20-tls.conf`), `daemon-reload` gedaan, **nog NIET enabled** — de alias-conflict-regel blijft: pas enable ná stop+disable+wegzetten van de legacy unit.
+- **Pre-restart gate:** py_compile/pyflakes/signatures OK; pytest 1290/3 groen (de gate's eigen pytest-loop werd vastgelopen door live-11434-interferentie onder load — zie test-isolatie-punt hieronder).
+- **Restant voor de cut-over (operator):** (1) caretaker-daemon: `/etc/caretaker/caretaker.env` met `CARETAKER_KEY` + een beoordeelde `models.local.settings.yaml` (draft ligt in het caretaker-repo, afgeleid uit de gateway-registry); zonder daemon is v2 veilig door de adopt-fix. (2) De cut-over zelf: stop v1 → legacy unit disable + wegzetten → `sudo systemctl enable --now guardian-llmprovider-gateway.service` → smoke via nginx. (3) Eén keer `POST /api/cloud/catalog/refresh` na de start (anders 43 i.p.v. ~274 modellen).
+
+## Open punten
+## Open punten (actueel — alles wat hier niet staat is afgerond; details in `docs/ARCHIVED_HANDOFFS.md`)
 
 > Restructurering 2026-08-30 — AGENTS.md geslimd 57.979 → ~32 kB (25 kB-doel niet haalbaar zonder Critical rules te schenden; vloer ~26–27 kB), verplaatste voltekst → `docs/AGENT_CONTEXT_ARCHIVE.md`.
 
