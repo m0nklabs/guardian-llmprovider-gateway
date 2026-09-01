@@ -102,7 +102,16 @@
 - **Klaargezet (deze sessie):** `venv`-symlink → legacy-venv + gekopieerde `.env`/`config/guardian.keys.yaml`/`data/`.
 - **Overige details** (volledige sessiekopie-methode naar de nieuwe workspace, docs-referentie-fix `5e02c78`) → `docs/AGENT_CONTEXT_ARCHIVE.md` §5.
 
-### V2 productie-klaar (2026-08-31 avond, PR #19 gemerged `83cb6c7`)
+### F7 CUT-OFT UITGEVOERD (2026-08-31 ~10:43, operator-go)
+
+- v1 gestopt + disabled + unit weggezet naar `llama-guardian.service.legacy-f7`; v2 enabled (boot-persistent) en actief. De alias `llama-guardian.service` wijst nu via de alias-symlink naar v2 — client-naam en spiergeheugen intact.
+- **De adopt-guard bewees zichzelf bij de eerste boot:** stale args-drift + live backend serving `gemma-4-E4B-it-uncensored` → *"adopting it; new settings are NOT applied"* — nul backend-reload, precies het vanochtend-incident onschadelijk gemaakt.
+- Smoke via nginx :11434: /v1/models 272 (43 lokaal + 229 cloud — catalogus zelf-gevuld door de PR #20-loop), /api/tags 22, chat round-trip "banana", streaming 12 SSE-chunks, /v1/messages bridge OK, dashboard 200.
+- Capture: 2,4 GB v1-data gesynchroniseerd vóór de start; de migratie-sweep renamde de legacy gzip-active ("never appended to") en het nieuwe plain-active WAL groeit live.
+- Rollback-recept staat hierboven (unit terugzetten + legacy herstarten).
+- **Open na de cut-over:** `GUARDIAN_STARTUP_ADOPT_ONLY=1` in de unit mag weg zodra de deployment settled is (startup-switching bewust weer toestaan); N-1 vision-drift-asymmetrie oplossen; PR #18-vervolg; ensure_fresh-wiring is gedekt door PR #20.
+
+## V2 productie-klaar (2026-08-31 avond, PR #19 gemerged `83cb6c7`)
 
 - **Productie-checkout = main @ `83cb6c7`** met: startup-adopt-fix (geen forced switch van een live backend bij cross-model args-drift — het e2e-incident is hiermee gedicht), `GUARDIAN_UI_PORT`-override, en de **installer** (`scripts/install.sh`, idempotent, gedoogvoerd).
 - **Legacy-afhankelijkheid weg:** de `venv`-symlink naar `/home/flip/llama_cpp_guardian/venv` is vervangen door een echte venv (Python 3.14.3, exacte pins uit `requirements.txt`); suite 1290 passed / 3 skipped op de nieuwe venv.
