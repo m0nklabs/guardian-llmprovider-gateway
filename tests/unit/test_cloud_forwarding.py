@@ -1,10 +1,12 @@
 """Regression tests for cloud forwarding edge cases."""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
 import pytest
+from fastapi import HTTPException
 
 from app.cloud_inference import forwarding
 from app.cloud_inference.routing import (
@@ -320,3 +322,187 @@ def test_usage_mirror_skips_non_finite_values():
     assert "native_tokens_reasoning" not in mirror
     assert "native_tokens_cached" not in mirror
     assert "cost" not in mirror
+
+
+class _HangingRateLimiter:
+    """Rate limiter whose operation never completes unless cancelled (G2 abort path)."""
+
+    config = SimpleNamespace(enabled=False)
+
+    def __init__(self) -> None:
+        self.cancelled = False
+
+    async def execute_with_retry(self, fingerprint, provider_name, operation, **kwargs):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        raise AssertionError("hanging operation completed unexpectedly")
+
+
+class _PollCountingRequest:
+    """Fake FastAPI request: is_disconnected() turns True after N polls."""
+
+    def __init__(self, disconnect_after_polls: int) -> None:
+        self._remaining = disconnect_after_polls
+        self.polls = 0
+
+    async def is_disconnected(self) -> bool:
+        self.polls += 1
+        if self._remaining > 0:
+            self._remaining -= 1
+            return False
+        return True
+
+
+@pytest.mark.asyncio
+async def test_non_stream_client_disconnect_aborts_upstream(monkeypatch):
+    """G2 (2026-09-02): a downstream abort during a non-stream cloud call must
+    cancel the upstream request instead of letting it run to completion as an
+    orphan — the capture records request_cancelled(client_disconnect) and the
+    endpoint reports the canonical 499 request_cancelled contract."""
+    provider = SimpleNamespace(
+        name="openrouter",
+        base_url="https://provider.example/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+        extra_headers={},
+    )
+    capture_completed = []
+    capture_cancelled = []
+    finish_usage = []
+    limiter = _HangingRateLimiter()
+    http_client = _patch_nonstream_common(
+        monkeypatch, capture_completed, provider, _FakeNonStreamClient(httpx.Response(200, json={}))
+    )
+    monkeypatch.setattr(forwarding, "cloud_rate_limiter", limiter)
+    monkeypatch.setattr(
+        forwarding,
+        "_dispatch_capture_request_cancelled",
+        lambda *args, **kwargs: capture_cancelled.append(kwargs),
+    )
+    monkeypatch.setattr(
+        forwarding,
+        "_finish_live_request_usage",
+        lambda *args, **kwargs: finish_usage.append(kwargs),
+    )
+
+    request_body = {
+        "model": "openrouter/provider/model",
+        "messages": [{"role": "user", "content": "Long generation"}],
+        "stream": False,
+    }
+    with patch.object(forwarding.httpx, "AsyncClient", return_value=http_client):
+        with pytest.raises(HTTPException) as excinfo:
+            await forwarding.forward_to_cloud_provider(
+                "chat/completions",
+                b"{}",
+                request_body,
+                "openrouter/provider/model",
+                _PollCountingRequest(disconnect_after_polls=1),
+                "dsh",
+                capture_ctx=object(),
+                capture_policy_result=object(),
+                cloud_capture_start_time=0.0,
+            )
+
+    assert excinfo.value.status_code == 499
+    assert excinfo.value.detail["error"] == "request_cancelled"
+    assert limiter.cancelled is True, "the upstream call must be aborted on client disconnect"
+    assert len(capture_cancelled) == 1
+    assert capture_cancelled[0]["cancel_reason"] == "client_disconnect"
+    assert any(kw.get("status_code") == 499 for kw in finish_usage)
+
+
+@pytest.mark.asyncio
+async def test_non_stream_completes_normally_when_client_stays_connected(monkeypatch):
+    """G2 companion pin: with the client connected the disconnect watcher must
+    not alter the normal non-stream flow (response returned, capture completed)."""
+    provider = SimpleNamespace(
+        name="openrouter",
+        base_url="https://provider.example/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+        extra_headers={},
+    )
+    payload = {"choices": [{"finish_reason": "stop", "message": {"content": "OK"}}], "usage": {}}
+    capture_completed = []
+    capture_cancelled = []
+    http_client = _patch_nonstream_common(
+        monkeypatch, capture_completed, provider, _FakeNonStreamClient(httpx.Response(200, json=payload))
+    )
+    monkeypatch.setattr(
+        forwarding,
+        "_dispatch_capture_request_cancelled",
+        lambda *args, **kwargs: capture_cancelled.append(kwargs),
+    )
+
+    request_body = {
+        "model": "openrouter/provider/model",
+        "messages": [{"role": "user", "content": "Say OK"}],
+        "stream": False,
+    }
+    with patch.object(forwarding.httpx, "AsyncClient", return_value=http_client):
+        response = await forwarding.forward_to_cloud_provider(
+            "chat/completions",
+            b"{}",
+            request_body,
+            "openrouter/provider/model",
+            _PollCountingRequest(disconnect_after_polls=10**9),
+            "dsh",
+            capture_ctx=object(),
+            capture_policy_result=object(),
+            cloud_capture_start_time=0.0,
+        )
+
+    assert response.status_code == 200
+    assert len(capture_completed) == 1
+    assert capture_cancelled == []
+
+
+@pytest.mark.asyncio
+async def test_non_stream_request_without_disconnect_support_falls_back(monkeypatch):
+    """Test-double compatibility pin: a request object without is_disconnected()
+    (SimpleNamespace, as the pre-G2 tests pass) must not break the forward —
+    the watcher exits silently and the upstream result is awaited as before."""
+    provider = SimpleNamespace(
+        name="openrouter",
+        base_url="https://provider.example/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+        extra_headers={},
+    )
+    payload = {"choices": [{"finish_reason": "stop", "message": {"content": "OK"}}], "usage": {}}
+    capture_completed = []
+    capture_cancelled = []
+    http_client = _patch_nonstream_common(
+        monkeypatch, capture_completed, provider, _FakeNonStreamClient(httpx.Response(200, json=payload))
+    )
+    monkeypatch.setattr(
+        forwarding,
+        "_dispatch_capture_request_cancelled",
+        lambda *args, **kwargs: capture_cancelled.append(kwargs),
+    )
+
+    request_body = {
+        "model": "openrouter/provider/model",
+        "messages": [{"role": "user", "content": "Say OK"}],
+        "stream": False,
+    }
+    with patch.object(forwarding.httpx, "AsyncClient", return_value=http_client):
+        response = await forwarding.forward_to_cloud_provider(
+            "chat/completions",
+            b"{}",
+            request_body,
+            "openrouter/provider/model",
+            SimpleNamespace(),
+            "dsh",
+            capture_ctx=object(),
+            capture_policy_result=object(),
+            cloud_capture_start_time=0.0,
+        )
+
+    assert response.status_code == 200
+    assert len(capture_completed) == 1
+    assert capture_cancelled == []
