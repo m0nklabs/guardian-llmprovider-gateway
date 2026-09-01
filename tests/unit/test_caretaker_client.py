@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
+import logging
+
 import httpx
 import pytest
 
@@ -138,6 +140,25 @@ async def test_ensure_transport_error_unavailable() -> None:
     client = _make_client(handler)
     with pytest.raises(CaretakerUnavailable):
         await client.ensure("minimal")
+
+
+async def test_ensure_transport_error_logs_warning_not_error(caplog) -> None:
+    """Cosmetic-but-pinned (2026-09-02): the /ensure transport error includes the
+    per-request client timeout, which fires routinely while the caretaker is in
+    a ~30s reload cycle — the gateway recovers via the adopt-poll, so this is
+    expected self-healing behavior and must log at WARNING, not ERROR."""
+
+    def handler(req: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("conn refused")
+
+    client = _make_client(handler)
+    with caplog.at_level("WARNING", logger="Guardian"):
+        with pytest.raises(CaretakerUnavailable):
+            await client.ensure("minimal")
+
+    warnings = [r for r in caplog.records if "transport error" in r.getMessage()]
+    assert warnings, "the transport error must still be logged"
+    assert all(r.levelno == logging.WARNING for r in warnings)
 
 
 async def test_ensure_unexpected_status_unavailable() -> None:

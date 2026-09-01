@@ -13,6 +13,7 @@ provider contributes its dynamic ``CloudModelCatalog`` entries as
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any
@@ -33,6 +34,9 @@ build_model_metadata_entry = None
 enrich_model_context_metadata = None
 resolve_context_window = None
 get_model_size = None
+
+# One background catalog self-heal at a time (see _schedule_catalog_self_heal).
+_ensure_fresh_inflight = False
 
 
 def init(
@@ -157,8 +161,38 @@ async def tags_ollama() -> dict[str, Any]:
     return {"models": models}
 
 
+def _schedule_catalog_self_heal() -> None:
+    """Fire-and-forget the TTL-gated catalog refresh (one in flight at most).
+
+    Wired into ``/v1/models``: discovery is the natural trigger, and
+    ``CloudModelCatalog.ensure_all_fresh()`` is a no-op for every provider
+    whose in-memory catalog is younger than the TTL — a healthy deployment
+    costs zero network traffic while a stale catalog self-heals. Fail-open by
+    construction: refresh errors are caught inside ``ensure_fresh`` and the
+    persisted disk cache keeps discovery working. Before this wiring (2026-09-02)
+    nothing called ``ensure_fresh`` — catalogs only refreshed on startup,
+    ``POST /api/cloud/catalog/refresh``, or a cold disk cache.
+    """
+    global _ensure_fresh_inflight
+    if _cloud_catalog is None or _ensure_fresh_inflight:
+        return
+    _ensure_fresh_inflight = True
+
+    async def _run() -> None:
+        global _ensure_fresh_inflight
+        try:
+            await _cloud_catalog.ensure_all_fresh()
+        except Exception as exc:  # fail-open: never break discovery
+            logger.warning("☁️  Background catalog refresh failed: %s", exc)
+        finally:
+            _ensure_fresh_inflight = False
+
+    asyncio.create_task(_run())
+
+
 async def list_models(request: Request, client_id: str) -> dict[str, Any]:
     """List available models from config and cloud providers (Phase 5: delegated)."""
+    _schedule_catalog_self_heal()
     models_list = []
     try:
         for public_name, canonical_name in _model_manager.get_public_model_map().items():
