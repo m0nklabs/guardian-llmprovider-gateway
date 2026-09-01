@@ -36,7 +36,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 import yaml
@@ -159,6 +159,11 @@ class ProviderRegistry:
         # ``model_prefixes`` config.  Exact ``models`` entries always win
         # over prefix matches (see :meth:`get_provider_for_model`).
         self._prefix_to_provider: list[tuple[str, CloudProvider]] = []
+        # Optional catalog probe injected via :meth:`set_catalog_probe` (G3,
+        # 2026-09-02): used to disambiguate bare-name models whose namespace
+        # prefix is claimed by more than one provider.  ``None`` keeps the
+        # legacy declaration-order behavior.  Survives :meth:`reload`.
+        self._catalog_probe: Callable[[str, str], bool] | None = None
         self._context_overrides: dict[str, int] = {}
         self._context_catalogs: dict[str, ContextCatalog] = {}
         self._context_catalog_locks: dict[str, asyncio.Lock] = {}
@@ -402,6 +407,35 @@ class ProviderRegistry:
 
     # ── Public API ───────────────────────────────────────────────────
 
+    def set_catalog_probe(self, probe: Callable[[str, str], bool]) -> None:
+        """Inject a catalog probe for bare-name prefix disambiguation (G3).
+
+        *probe* has the contract ``probe(canonical_model_id, provider_name)
+        -> bool`` and must answer ``True`` exactly when *provider_name*'s live
+        catalog actually contains *canonical_model_id*.  Production wiring
+        passes a closure over
+        :class:`~app.proxy.cloud_catalog.CloudModelCatalog`.  Its
+        ``get_models_for_provider`` already applies each provider's
+        ``catalog_allowlist``, so the probe sees the provider's true serving
+        set rather than its full upstream listing.
+
+        Why this exists: several providers may declare the same
+        ``model_prefixes`` namespace (e.g. ``z-ai/`` on both nvidia and
+        openrouter).  Prefix matching alone then resolves to the first
+        declaration, which can hijack a model the first provider cannot
+        actually serve (NVIDIA 404s on z-ai models its free tier does not
+        list).  The probe lets :meth:`_get_configured_provider_for_model`
+        disambiguate on positive catalog evidence; it only *breaks ties*, it
+        never narrows resolution to ``None``.
+
+        The probe is injected wiring, not config-derived state: it survives
+        :meth:`reload`.  It must never raise — the production closure wraps
+        defensively and :meth:`_get_configured_provider_for_model` additionally
+        treats a raising probe as "no evidence" and falls back to declaration
+        order.
+        """
+        self._catalog_probe = probe
+
     def is_cloud_model(self, model_name: str) -> bool:
         """Return True if *model_name* is served by a cloud provider.
 
@@ -463,14 +497,45 @@ class ProviderRegistry:
         return provider if provider is not None and provider.enabled else None
 
     def _get_configured_provider_for_model(self, model_name: str) -> CloudProvider | None:
-        """Resolve an unprefixed model against configured exact names and namespaces."""
+        """Resolve an unprefixed model against configured exact names and namespaces.
+
+        Resolution order:
+
+        1. An exact ``models`` entry always wins (preserves explicit
+           disambiguation when a model is listed on more than one provider).
+        2. Otherwise ALL providers whose ``model_prefixes`` claim a matching
+           namespace are collected in declaration order (the same prefix may
+           legitimately be claimed by more than one provider, e.g. ``z-ai/``).
+           When a catalog probe is injected and positively confirms the model
+           in one candidate's live serving catalog, the first confirmed
+           candidate wins; when there is no probe, the catalogs are not loaded
+           yet (cold start), or the model is in no catalog (new upstream model
+           not cached yet), the first declared candidate wins — the probe only
+           disambiguates on positive evidence and never narrows to ``None``.
+        """
         provider = self._model_to_provider.get(model_name)
         if provider is not None:
             return provider
-        for prefix, candidate in self._prefix_to_provider:
-            if model_name.startswith(prefix):
-                return candidate
-        return None
+        candidates = [
+            candidate
+            for prefix, candidate in self._prefix_to_provider
+            if model_name.startswith(prefix)
+        ]
+        if not candidates:
+            return None
+        if self._catalog_probe is not None:
+            canonical_name = self.canonical_model_id(model_name)
+            for candidate in candidates:
+                try:
+                    if self._catalog_probe(canonical_name, candidate.name):
+                        return candidate
+                except Exception:  # noqa: BLE001 — a broken probe must never break routing
+                    logger.warning(
+                        "⚠️  Catalog probe raised for provider '%s'; ignoring its vote",
+                        candidate.name,
+                    )
+                    continue
+        return candidates[0]
 
     def get_all_cloud_models(self) -> list[str]:
         """Return global cloud models backed by configured provider keys.
