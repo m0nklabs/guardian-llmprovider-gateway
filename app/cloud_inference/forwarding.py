@@ -15,6 +15,7 @@ import logging
 import math
 import time
 import uuid
+from contextlib import suppress
 from typing import Any
 
 import httpx
@@ -24,6 +25,11 @@ from fastapi.responses import StreamingResponse
 from app.capture.policy import PolicyResult
 from app.capture.schema import BuildContext
 from app.capture.stream_assembler import StreamResponseAssembler
+from app.gateway.queue_helpers import (
+    request_cancel_http_exception,
+    stop_background_task,
+    watch_client_disconnect,
+)
 from app.gateway.streaming import StreamProgressWatchdog
 from app.proxy.providers import ProviderRegistry
 
@@ -245,6 +251,21 @@ def _extract_cloud_usage_mirror(payload: Any) -> dict[str, Any]:
     if isinstance(reported_provider, str) and reported_provider:
         mirror["provider_name"] = reported_provider
     return mirror
+
+
+class _CloudClientDisconnected(Exception):
+    """Internal signal: the downstream client vanished mid-upstream-call.
+
+    Converted to the canonical 499 ``request_cancelled`` HTTP contract at the
+    forward boundary — deliberately NOT funneled through the failover loop's
+    generic failure handling, since the provider never failed (there is no
+    upstream answer to record) and must not be health-penalized.
+    """
+
+    def __init__(self, request_id: str | None, reason: str) -> None:
+        super().__init__(reason)
+        self.request_id = request_id or ""
+        self.reason = reason
 
 
 async def forward_to_cloud_provider(
@@ -535,13 +556,60 @@ async def forward_to_cloud_provider(
                     headers=forward_headers,
                 )
 
+            # G2 (2026-09-02): cloud routes bypass the inference queue, so the
+            # local-path disconnect watcher never runs here — a downstream
+            # abort used to leave the upstream call running to completion as
+            # an orphan (live repro 2026-09-02: client killed at +8 s, the
+            # upstream call kept burning tokens for another 56 s to full
+            # completion). Race the upstream call against a lightweight
+            # client-disconnect watcher and abort the upstream on disconnect.
+            disconnect_event: asyncio.Event = asyncio.Event()
+            disconnect_watcher = asyncio.create_task(
+                watch_client_disconnect(request, disconnect_event)
+            )
             try:
-                resp = await cloud_rate_limiter.execute_with_retry(
-                    cloud_key_fingerprint,
-                    provider.name,
-                    send_non_stream_request,
-                    retry_429=failover_group is None,
+                upstream_task = asyncio.create_task(
+                    cloud_rate_limiter.execute_with_retry(
+                        cloud_key_fingerprint,
+                        provider.name,
+                        send_non_stream_request,
+                        retry_429=failover_group is None,
+                    )
                 )
+                done, _pending = await asyncio.wait(
+                    {upstream_task, disconnect_watcher},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if upstream_task not in done and disconnect_event.is_set():
+                    # Downstream client disconnected mid-flight: cancel the
+                    # upstream request instead of letting it run to completion.
+                    logger.info(
+                        "☁️  Cloud provider '%s': downstream client disconnected "
+                        "mid-call — aborting upstream request (attempt %d/%d)",
+                        provider.name,
+                        attempt_index + 1,
+                        len(attempts),
+                    )
+                    upstream_task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await upstream_task
+                    _finish_live_request_usage(request, status_code=499, response_bytes=0)
+                    if capture_ctx is not None:
+                        _dispatch_capture_request_cancelled(
+                            capture_ctx,
+                            cancel_reason="client_disconnect",
+                            duration_ms=(
+                                (time.monotonic() - cloud_capture_start_time) * 1000
+                                if cloud_capture_start_time
+                                else None
+                            ),
+                            attempts=attempt_index + 1,
+                            policy_result=capture_policy_result,
+                        )
+                    raise _CloudClientDisconnected(cloud_request_id, "client_disconnect")
+                resp = upstream_task.result()
+            except _CloudClientDisconnected as exc:
+                raise request_cancel_http_exception(exc.request_id, exc.reason) from None
             except Exception as e:
                 failover_health.record_failure(provider.name, upstream_model)
                 logger.error(
@@ -563,6 +631,11 @@ async def forward_to_cloud_provider(
                     policy_result=capture_policy_result,
                 ) if capture_ctx is not None else None
                 raise HTTPException(status_code=502, detail=f"Cloud provider request failed: {e}")
+            finally:
+                # The watcher's job is done once the upstream call resolved
+                # (or the attempt exited): stop it so no poll loop leaks
+                # across the remaining attempt body or the next attempt.
+                await stop_background_task(disconnect_watcher)
 
             # ── Failover 429 probe: wait and retry once before falling through ──
             # Skipped when cloud_retry.enabled=false (agent harness owns 429s).
