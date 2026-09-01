@@ -53,7 +53,7 @@
 
 ## Open punten (actueel — alles wat hier niet staat is afgerond; details in `docs/ARCHIVED_HANDOFFS.md`)
 
-- **Test-isolatie-bug:** ten minste één test opent een live-verbinding naar `127.0.0.1:11434` (productie) — de pre-restart-gate's pytest kan daar onder load op hangen. Culprit-bepaling + fix (mock of port-guard) is een opvolg-issue.
+- **Test-isolatie GEFIXT (2026-09-02):** `pyproject addopts = -m "not integration and not finetune_v2_live"` — de 20 live-tests (tests/integration/*, rakten productie :11434) zijn default gedeselecteerd; opt-in via `-m integration` / `-m finetune_v2_live`. Suite 1310 passed in 47 s; gate raakt productie nooit meer.
 - **Bekende test-fout (pre-existing, bewust gedeferred):** `test_cloud_attempts_resolve_google_full_address` faalt al weken op ongewijzigde HEAD (google cold-start-assertie, niet gerelateerd aan werk).
 - **PR #18 (G2-cap, andere agent):** disconnect-propagation is nu GEBOUWD en live bewezen (2026-09-01 avond, zie hierboven); over uit dat voorstel: streaming-teardown-test als échte pin en de bewust niet-geharde cap. Streaming pre-first-chunk gap is een gedocumenteerd residual (seconden-groot, bewust niet gebouwd — regression-risk > opbrengst).
 - **ensure_fresh dead code:** niets triggert de TTL-refresh van de cloud-catalogus (v1 én v2); de refresh-endpoint vult de cache wél zelf. Voorstel: wiring in `/v1/models` of startup (kleine PR).

@@ -6,12 +6,10 @@ These tests require:
   2. A valid API key in config/api_keys.json
   3. At least one model configured in config/models.yaml
 
-Run:
-    pytest tests/integration/ -v --timeout=300
-
-Skip from normal unit test runs:
-    pytest tests/unit/              # fast, no LLM needed
-    pytest tests/ -m "not integration"  # same effect
+Run (opt-in — the pyproject addopts deselect these by default so a plain
+`pytest tests/` (e.g. the pre-restart gate) never touches production):
+    pytest -m integration tests/integration/ -v --timeout=300
+    pytest -m finetune_v2_live tests/integration/ -v   # finetune v2 smoke only
 """
 
 import json
