@@ -6,10 +6,12 @@ base_url: https://integrate.api.nvidia.com/v1
 api_key: ${NVIDIA_API_KEY}
 timeout_seconds: 1200
 model_prefixes:
+# Prefixes must stay a subset of what catalog_allowlist/the live catalog can
+# actually serve — a broader prefix hijacks bare-name models this provider 404s
+# (G3: "z-ai/" here stole z-ai/glm-5.3-flash from openrouter).
 - nvidia/
 - deepseek-ai/
 - minimaxai/
-- z-ai/
 # NVIDIA's /v1/models lists every model regardless of what the free token can
 # reach (102 total, no free marker). This allowlist restricts discovery +
 # routing to the models NVIDIA treats as free ("Free Endpoint" on

@@ -137,6 +137,26 @@ _cloud_inf.init(provider_registry)
 # /v1/models into {provider}/{brand}/{model} addresses (cloud-access redesign).
 cloud_catalog = CloudModelCatalog(provider_registry)
 
+
+# ── Bare-name catalog probe (G3, 2026-09-02) ────────────────────────────
+# Several providers may claim the same model_prefixes namespace (the G3
+# incident: "z-ai/" was declared on both nvidia and openrouter, so bare
+# "z-ai/glm-5.3-flash" resolved to nvidia — which 404s because its free-tier
+# catalog contains no z-ai model). The probe gives the registry positive
+# evidence: it answers whether the provider's live serving catalog actually
+# contains the canonical model id. CloudModelCatalog.get_models_for_provider
+# already applies each provider's catalog_allowlist, so the probe sees the
+# true serving set. It must never raise: any failure counts as "no evidence"
+# and resolution falls back to declaration order (cold start safe).
+def _catalog_probe(canonical_model_id: str, provider_name: str) -> bool:
+    try:
+        return canonical_model_id in cloud_catalog.get_models_for_provider(provider_name)
+    except Exception:  # noqa: BLE001 — fail-safe back to declaration order
+        return False
+
+
+provider_registry.set_catalog_probe(_catalog_probe)
+
 # Cross-provider failover — lets a single logical model (e.g. minimax-m3) be
 # served by multiple cloud providers via failover/{group} routes,
 # automatically skipping a provider that is currently erroring/degraded.
