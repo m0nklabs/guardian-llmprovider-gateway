@@ -26,6 +26,7 @@ from app.capture.schema import BuildContext, _utc_now_iso
 from app.capture.stream_assembler import StreamResponseAssembler
 from app.engine.manager import ModelLoadError
 from app.gateway import caretaker_runtime as _caretaker_runtime
+from app.gateway.normalization import openai_error_response
 from app.gateway.streaming import StreamProgressWatchdog
 from app.proxy.anthropic_bridge import _format_sse_event
 
@@ -476,6 +477,12 @@ async def route_v1_post(path: str, request: Request, client_id: str):
         )
 
     _release_in_finally = True
+    # Model-mismatch contract (incident 2026-09-01): set when a switch/ensure
+    # attempt for the REQUESTED local model completed successfully.  Before
+    # forwarding, the live backend must actually serve that model — verified
+    # once after the switch phase below (a same-model reload passes by
+    # definition: requested == loaded).
+    _switch_ensure_verified_pending = False
     capture_dispatched = False
     try:
         # If llama-server was unloaded, auto-reload before forwarding
@@ -516,6 +523,14 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                             ),
                             generation=generation,
                         )
+                        # The reload target IS the requested model → the ensure
+                        # above is contract-bound to have the backend serve it
+                        # (same-model cold reload; verified below before
+                        # forwarding).  A different reload target (pinned /
+                        # fallback model) is handled by the auto-switch phase,
+                        # which sets the flag on its own ensure.
+                        if reload_model == requested_model:
+                            _switch_ensure_verified_pending = True
             except Exception as e:
                 raise HTTPException(status_code=503, detail=f"Auto-reload failed: {e}")
 
@@ -613,6 +628,14 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                                         operation=operation,
                                         generation=generation,
                                     )
+                                    # The /ensure for the requested model
+                                    # returned OK — the backend must actually
+                                    # serve it before this request forwards
+                                    # (verified after the lock is released;
+                                    # the incident's /ensure 200 left the old
+                                    # model running while the gateway stamped
+                                    # the requested one).
+                                    _switch_ensure_verified_pending = True
                                 except ModelLoadError as e:
                                     if has_image_inputs and desired_model:
                                         _model_manager.mark_vision_validation(desired_model, "load_failed", str(e))
@@ -633,6 +656,31 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                 raise  # Let model-load errors propagate to the client
             except Exception as e:
                 logger.error(f"Error checking model switch: {e}")
+
+        # Model-mismatch contract (incident 2026-09-01): a successful /ensure
+        # can still leave the backend serving a DIFFERENT model than the one
+        # this request asked for.  When a switch/ensure attempt ran for the
+        # requested local model, verify the live backend before forwarding —
+        # never silently answer from another model.  The same-model reload
+        # path passes this check by definition (requested == loaded).
+        if _switch_ensure_verified_pending:
+            _actual_backend_model = await _caretaker_runtime.verify_requested_model_served(
+                requested_model
+            )
+            if _actual_backend_model is not None:
+                return openai_error_response(
+                    status_code=503,
+                    message=(
+                        f"Model '{requested_model}' failed to load; "
+                        f"backend serves '{_actual_backend_model}'"
+                    ),
+                    error_type="model_switch_failed",
+                    code="model_switch_failed",
+                    headers=_queue_headers(
+                        request_id,
+                        _inference_queue.get_queue_wait_ms(request_id),
+                    ),
+                )
 
         active_model_for_request = requested_model or await _model_manager.get_current_model()
         _set_request_usage_metadata(request, model=active_model_for_request)

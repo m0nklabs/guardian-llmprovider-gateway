@@ -9,6 +9,13 @@
 
 ## Active Handoff
 
+### Model-mismatch contract gefixt (2026-09-01, in main-tree, wacht op deploy-restart)
+
+- **Incident (2026-09-01):** client vroeg lokaal model `qwen3.8-27b-uncensored-ymq`, backend draaide `gemma-4-E4B-it-uncensored`; caretaker `/ensure` gaf 200, de post-ensure-verificatie loggde alleen MODEL MISMATCH, en het verzoek werd alsnog doorgestuurd → **HTTP 200 door het verkeerde model** (stille substitutie). Launcher-oorzaak elders gefixt; dit is de gateway-side contract-fix.
+- **Nieuw contract:** ná een switch/ensure-poging voor het opgevraagde lokale model verifieert de gateway vóór forwarding dat de live backend dat model dient — zo niet → **HTTP 503 `model_switch_failed`** op élk lokaal entry-pad: `/v1/chat/completions`+`/v1/completions`(+`/v1/messages`) krijgen de exacte OpenAI-body `{"error":{"message":"Model '<requested>' failed to load; backend serves '<actual>'","type":"model_switch_failed","code":"model_switch_failed"}}`; Ollama `/api/chat`+`/api/generate` krijgen de bestaande lokale-foutvorm (`detail.error=model_switch_failed`). Same-model cold-reload (requested == loaded) werkt onveranderd; cloud routing, failover-ordering en de vision-fallback (bewuste andere-model-route) zijn onaangetast; allowlist-geblokkeerd forward blijft bestaand gelogd beleid.
+- **Wiring:** `engine/manager.py` → nieuwe live-probe `backend_serving_model_name()` (pgrep→gguf→reverse-lookup; `None` = niet probeerbaar (remote-F6) → géén mismatch, geen false 503's); `gateway/caretaker_runtime.py` → `verify_requested_model_served()` (alias-canonieke post-ensure-check); `gateway/routing.py` + `local_inference/ollama.py` → vlag `_switch_ensure_verified_pending` ná geslaagde ensure (reload-blok alleen bij `reload_model == requested`, switch-blok altijd), verificatie ná lock-release vóór forwarding. Verificatie zit ná `active_requests += 1` → finally-release blijft gebalanceerd.
+- **Verificatie:** nieuw `tests/unit/test_model_switch_verification.py` (13 tests, incl. "niet doorgestuurd"-sentinel); de mismatch-pins falen bewust op de oude code (stash-bewijs: oude gedrag stuurde écht door). Suite: 1314/1 en 1313/2 (timing- + live-11434-flakes, beide in isolatie én op clean main groen — zie journal); ruff clean; py_compile OK. **Nog niet herstart** — code pas live na de operator-restart met pre-restart-gate; voltekst → `docs/AGENT_JOURNAL.md` §2026-09-01.
+
 > Afgeronde/gesloten DSH-sessies worden gearchiveerd in **`docs/ARCHIVED_HANDOFFS.md`**
 > (volledige tekst blijft bewaard; de Active Handoff hieronder houdt alleen sessies
 > met lopende relevantie). Gearchiveerd op 2026-08-26 (2 batches):
