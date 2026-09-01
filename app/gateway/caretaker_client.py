@@ -211,7 +211,11 @@ class CaretakerClient:
                 timeout=self._request_timeout(),
             )
         except httpx.HTTPError as exc:
-            logger.error("Caretaker /ensure transport error: %s", exc)
+            # WARNING, not ERROR: this includes the per-request client timeout
+            # (default 5s) which fires routinely while the caretaker is in a
+            # ~30s reload cycle — the gateway recovers via the adopt-poll, so
+            # this is expected and self-healing, not an operational failure.
+            logger.warning("Caretaker /ensure transport error (recovering via adopt-poll): %s", exc)
             raise CaretakerUnavailable(self._management_url) from exc
 
         if resp.status_code == 200:
