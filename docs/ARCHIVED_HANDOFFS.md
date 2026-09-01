@@ -465,3 +465,111 @@
 4. Fix remaining patch-target or model-loading failures, then run:
    `./venv/bin/python -m pytest tests/ -x`
 5. Restart Guardian before integration checks; there is no hot reload. Only push after the tests and the final `git diff` have been reviewed.
+
+
+## Batch 3 — 2026-08-30/31 (F5–F7 closure, sessie-overdrachten, cut-over, V2-productie-klaar)
+
+> Gearchiveerd 2026-09-02 (onderhoudspass, HANDOFF-budget). Inhoud ongewijzigd verplaatst.
+
+### Capture-feedback C1–C11 (2026-08-30) — wacht op /review + human merge
+
+- Branch `f-capture-feedback-c1-c11` (verwerkt uit het pr-piet-maintainer-rapport): schema **1.1.0** (additief: start/completed-timestamps, finish/native_finish_reason, rich-usage-mirror, caller-correlatie, per-leg streaming, provider-populatie) + **plain-active WAL** met gzip-on-rotate + `scripts/capture_query.py` (`--rollup daily`) + `docs/schema.md`. Gates: **1262 passed / 3 skipped** (de lang-bestaande google cold-start-faaling is op deze tree verdwenen).
+- **Refutaties (live-bewijs, in docs/schema.md):** C2 (geen float-tokens) en C7 (request_parameters staan al op `request_received`). Onderweg gefixt: null-usage liet hele completed-events vallen (NEW-4), streaming `attempts: 0` (NEW-2), lokaal finish_reason uit message i.p.v. `choices[0]`.
+- **Pas live na restart** (operator-run). Tot F7 draait productie uit de legacy-dir — backport van de capture-wijzigingen daarheen is een aparte operator-beslissing. Volledige details → `docs/AGENT_JOURNAL.md` (2026-08-30-entry).
+### F7-closure (2026-08-30 nacht, take-over V2) — F5–F7 afgerond, cut-over = operator-run
+
+- **Gemerged (alle 4):** caretaker **#8** (`33b8749`) + gateway **#14** (`353d538`), **#15** (`279b67c`), **#16** (`ea615b3`) — squash-merges; #15/#16 tussentijds door take-over V2 union-opgelost (journal resp. providers.py/test_f6) en op de merge-head gereviewd (0 open threads).
+- **Suite op écht post-merge main: 1148 passed / 20 skipped** (legacy venv; main-tree ≡ merge-head-tree `dec3eb3f`). Ijkpunt vooraf (1148/20 op de gecombineerde #16-head) bevestigd; de oude handoff-verwachting (~1144–1146) was een branch-rekensom en is superseded. Caretaker post-merge: **91 passed**.
+- **Merge-criterium-regel gewijzigd (operator-autorisatie):** de agent mag selfstandig mergen zodra het criterium volledig behaald is op de merge-head (0 open/onbeantwoorde bevindingen met bewijs, review-op-head, CI groen) + slot-comment op de PR; human merge blijft de standaard, auto-approve blijft verboden. Vastgelegd in `AGENTS.md` (Deploy-bullet + merge-criterium, 2 plekken) — deze commit.
+- **FILE_REGISTER-audit gefixt:** `docs/AGENT_CONTEXT_ARCHIVE.md` ontbrak in het delta-register (row toegevoegd, Docs-sectie → 4), Deploy-header 1→2 (TLS-dropin stond er al), tracked-count-notitie bijgewerkt (194 draft → 219 nu; 199 + 23 − 3 sinds `dce7b87`).
+- **Cut-over-runbook-correctie (review-bevinding #16, terecht):** `systemctl enable` faalt met "File exists" zolang het legacy-unitbestand op `/etc/systemd/system/llama-guardian.service` bestaat → stap toevoegen tussen stop/disable en enable: `sudo mv /etc/systemd/system/llama-guardian.service /etc/systemd/system/llama-guardian.service.legacy-f7 && sudo systemctl daemon-reload`. Rollback: bestand terugzetten + `daemon-reload` + legacy starten. Unit-comment gecorrigeerd in `58e2a88`.
+- **E2E-test v2 t.o.v. draaiende v1 (2026-08-31, cut-over voorbereiding) — 3 gevonden blokkers vóór de cut-over:**
+  1. **TLS-dropin-pad bestaat niet:** de nieuwe drop-in verwijst naar `/home/flip/.config/guardian-llmprovider-gateway/tls/` (bestaat niet); v1's cert/key staan in `/home/flip/.config/llama-guardian/tls/` (geverifieerd via `systemctl show llama-guardian -p Environment`). Runbook-stap invoegen: `sudo mkdir -p /home/flip/.config/guardian-llmprovider-gateway/tls && sudo cp /home/flip/.config/llama-guardian/tls/guardian-192.168.1.35.{crt,key} /home/flip/.config/guardian-llmprovider-gateway/tls/` (of het drop-in-pad op de bestaande locatie laten wijzen).
+  2. **Caretaker-daemon onbereikbaar (11441 connection refused) + CARETAKER_KEY niet gezet** → de F5 remote-first-guard valt weg → v2's model-manager doet bij startup een **"forced switch"** op de gedeelde backend (getest: e2e-start herlaadde de draaiende qwen3.8 naar llama3.2-3b; v1's auto-switch herstelde daarna per request). Vóór de cut-over: daemon starten + key configureren, én de startup-path van v2 moet bij "caretaker unreachable + backend serves X" adopteren i.p.v. forceren (adopt-logica bestaat al in het request-hotpath; startup-path forceert nog) — code-fix nodig, zie PR-route.
+  5. **llama-server idle-unload is normaal gedrag (niet defect):** `idle_unload_minutes: 5` (ai-kvm2-local.settings.yaml) — v1's journal bewijst 13:20:33 "Idle for 5.3m (limit 5m) — auto-unloading" → `systemctl stop llama-server` (VRAM vrij). Een "down" 11440 tussen requests is dus verwacht; de volgende lokale request start hem koud (~60-90 s voor 27B). Nuance bij finding 2: met de caretaker-daemon down werkt de idle-unload via de **lokale fallback** gewoon (v1 bewijst het pad); de echte cut-overblokker blijft de **startup forced-switch** bij caretaker-onbereikbaarheid + state-mismatch.
+  4. **Cloud-catalogus bootstrap (e2e bewezen 2026-08-31):** met lege `data/` serveert `/v1/models` alleen lokaal (43); het proces maakt `data/` + `cloud_catalog_cache.json` zelf aan bij `POST /api/cloud/catalog/refresh` (3,1 s) en dan is de telling **exact pariteit met v1: 274 = 43 lokaal + 231 cloud** (zelfde per-provider-verdeling). Bij de cut-over dus óf v1's verse cache meekopiëren naar `data/` óf één keer de refresh-endpoint aanroepen na het starten. Verbeterpunt (kleine PR, let op overlap met `f-cloud-disconnect-cap`): `ensure_fresh()` in cloud_catalog.py is dead code — niets triggert de TTL-refresh bij `/v1/models` of startup (in v1 én v2); die bedraden maakt de zelf-bootstrap automatisch.
+  3. **UI-port hardcoded 11437** (main.py) — niet een cut-overblokker (v1 gestopt → 11437 vrij), maar wél een e2e-belemmering; env-override `GUARDIAN_UI_PORT` is een kleine code-fix.
+  E2E-bevestigd wel werkend: TLS-proxy serveert (/v1/models 43 modellen, /api/tags 22), echte lokale inference round-trip 200 (qwen3.8-uncensored via gedeelde backend, geen reload bij pad-match), dashboard-bind OK.
+- **F7-cut-over = OPERATOR-RUN (bijgewerkte checklist):**
+  1. `sudo cp deploy/systemd/guardian-llmprovider-gateway.service deploy/systemd/guardian-llmprovider-gateway.service.d -r /etc/systemd/system/` (+ `daemon-reload`)
+  2. Legacy: `sudo systemctl stop llama-guardian && sudo systemctl disable llama-guardian`
+  3. **Nieuw (review-correctie):** `sudo mv /etc/systemd/system/llama-guardian.service /etc/systemd/system/llama-guardian.service.legacy-f7 && sudo systemctl daemon-reload`
+  4. `sudo systemctl enable --now guardian-llmprovider-gateway` (alias `llama-guardian.service` ontstaat nu schoon)
+  5. `nginx -t && sudo systemctl reload nginx` → `./venv/bin/python scripts/verify_post_restart.py` + `/v1/models` + lokale/cloud-inference + capture + dashboard checken
+  6. Legacy bevriezen (`/home/flip/llama_cpp_guardian` = archief-link naar `m0nklabs/llama-cpp-guardian`). Rollback = legacy-unitfile terugzetten + `daemon-reload` + legacy `--now`.
+- **Open (onveranderd):** NVIDIA context-overrides, pi-models.json bare-names, CI-adoptie pre-restart-gate, 72h soak-test, HTTP-mock-backend voor de caretaker Phase-C/D swap-tests (flake-by-design op gedeelde GPU-runners), failover-groep `local → windows` zodra de Windows-modellenlijst bekend is.
+
+### Sessie-overdracht 2026-08-30 avond — F5–F7 (volgende agent start HIER)
+
+> Deze sessie eindigde vóór de F7-cut-over; alles hieronder is de levende staat
+> op overdrachtsmoment. **Regel 1 voor de volgende agent: verifieer de live
+> state vóór je iets gelooft** (thread-check + CI-check per PR — een "klaar"-
+> oordeel heeft houdbaarheid; zie journal "houdbaarheid"-les).
+
+**Merge-signalen (live gecheckt 2026-08-30 ~19:45):**
+
+| PR | branch / head | status |
+|---|---|---|
+| Gateway **#14** (poll-vensters → config) | `f-caretaker-poll-windows-config` / `211016e` | **MERGE-KLAAR** — 5 threads resolved, `mergeable_state: clean` |
+| Gateway **#15** (F6 Windows LAN-provider) | `f6-windows-lan-provider` / `db9d61f` | **MERGE-KLAAR** — 8 threads resolved, `clean` |
+| Gateway **#16** (F7-staging unit + FILE_REGISTER) | `f7-cutover-staging` / `18226ad` | **MERGE-KLAAR** — 2 threads resolved, `clean` |
+| Caretaker **#8** (F6 Phase E Windows-process) | `f6-phase-e-windows-process` / `d6ff3e2` | **MERGE-KLAAR** — 6/6 threads resolved, CI groen, slot-comment geplaatst |
+
+**Caretaker #8 — eindstatus (20:20, na de worker-cyclus): MERGE-KLAAR op head `d6ff3e2`.**
+- **CI-fail bleek runner-contentie-flake:** de Phase-C swap-test praat tegen de échte llama-server op `127.0.0.1:11440` op de gedeelde GPU-runner (de process-laag wél ge-fake'd — dus níét de platform-selectie). Rerun-attempts 1–2 faalden identiek (runner-4/runner-2), attempt 3 groen (runner-1, 91 passed). Lokaal 9× groen (3 worktrees × 3×, incl. pre-PR-basis `6925207`). Geen branch-fix — bewust. **Follow-up (non-blocking):** HTTP-mock-backend voor de Phase-C/D swap-tests zodat ze niet meer tegen een échte backend op de runner praten.
+- **Single-quote-thread resolved (19:50):** het premise-deel ("de builder emit quotes") bleef weerlegd, maar de divergence was reëel — de POSIX-shlexer pelt operator-embedded single quotes af, de Windows-splitter niet → defensieve both-styles-strip gepusht (`d6ff3e2`) + pin uitgebreid; de verse review opende 0 nieuwe threads.
+- **Slot-comments geplaatst** (5471009832 — later ge-edit met de journal-citatie als 3e flake-bewijslijn — plus afsluitende samenvattingen 5471024540, 5471041829 en een 🟢-merge-signaal van een sibling-sessie onder het gedeelde m0nk111-account; meerdere merge-signal-comments zijn dus normaal, niet een duplicatie-mysterie). Alle 6 review-threads `is_resolved: true`, `mergeable_state: clean` — door de lead zelf geverifieerd op GitHub. Reviews-of-record zijn de twee geslaagde `pull_request`-runs (33331965956 deep + 33332549005). **Cosmetisch bij het mergen:** de rode "Review tier 2"-check-rij is een stale rij uit de vóór-de-reopen geconcurrency-cancelde run 33331954331, en de rode "comment"-runs (Unknown command) zijn pr-piet's reactie op non-slash-comments — beide beïnvloeden de merge-state niet (naast de ook verouderde `reviewDecision`-badge, zie hierboven).
+- **Infra-les (veld-geproven op deze PR, voor toekomstige cycli):** een auto-`pull_request`-run die <1 min na start door de concurrency-cancel valt is door GitHub **niet meer re-runbaar** ("cannot be rerun; workflow file may be broken" — geannuleerd vóór de workflow-checkout). Werkende alternatief: **PR close+reopen** (de `reopened`-trigger staat in pr-piet.yml) → verse auto-run (33331954331 was dood; vervolg-run 33332549005 werd groen → CLEAN).
+- **Kanttekening bij het mergen van #8:** GitHub's `reviewDecision` toont nog de verouderde bot-CHANGES_REQUESTED van oudere heads; de nieuwste review op `d6ff3e2` zegt "No major issues detected" en het merge-criterium (0 open threads, alles beantwoord) is gehaald — de verouderde badge is **geen** merge-blokkade.
+
+> Een verse worker was op overdrachtsmoment hiermee bezig; als je dit leest is
+> hij mogelijk al af — check de PR-state (0 open threads + CI groen + verse
+> slot-comment "klaar voor human merge") vóór je iets doet. **NB: de workers
+> zijn kinderen van de OUDE DSH-sessie — een nieuwe sessie kan ze niet
+> adopteren; de takeover loopt via het werk zélf** (GitHub-state + filesystem).
+> Begin daarom met `git status` in beide checkouts (een worker kan middenin
+> een turn gedood zijn: dirty tree / half-afgeronde actie) en verifieer
+> daarna de PR-state op GitHub.
+
+**Route na overname (in volgorde):**
+1. Operator mergt **HUMAN**: gateway #14, #15, #16 + caretaker #8 (head `d6ff3e2`; per PR, geen batch-auto-merge).
+2. **F7-afsluiting door de agent** (in `/home/flip/guardian-llmprovider-gateway`): AGENTS.md OPERATIONALLY-CRITICAL-flip (deploy-dir → de nieuwe dir), FILE_REGISTER-check, HANDOFF/JOURNAL-closure. **Suite-tellen ZELF verifiëren na merge** (verwachting gateway ~1144–1146, caretaker 91; PR-thread-tellings zijn branch-basis-afhankelijk — draai de volledige suite en gebruik het échte getal).
+3. **F7-cut-over = OPERATOR-RUN.** De volledige checklist staat in de PR #16-body: units stage → legacy stop/disable → nieuw enable (`guardian-llmprovider-gateway.service`, alias `llama-guardian.service`) → `nginx -t` + reload → `scripts/verify_post_restart.py` → legacy bevriezen. Rollback = legacy-unit herstarten. **De agent draait GEEN restarts** (agent-traffic loopt door Guardian).
+
+**Gedeferred / follow-ups (bewust, niet vergeten):**
+- **direct+Windows env-file merge-pariteit** (uit caretaker #8-thread-refutatie): `DirectServerProcess` merged `CURRENT_MODEL_ENV_FILE` ook niet (de reader is de systemd-wrapper `scripts/start_llama.sh`; Windows pinned env via NSSM `AppEnvironmentExtra`) — als env-file-merging voor directe spawns gewenst is: BEIDE impls in één change.
+- Stale module-docstring `app/gateway/caretaker_runtime.py` (~regel 55–62; beschrijft de mmproj-probe nog als primair) — meepakken bij de eerstvolgende code-touch.
+- Pre-existing `UP`/`I001` ruff-stijlissues (buiten de CI-selectie `E4,E7,E9,F`) — alleen in een gebatchte pass.
+- Failover-groep `local → windows` zodra de Windows-modellenlijst bekend is (de groep is per-model).
+- Open punten hierboven (NVIDIA context-overrides, pi-models.json bare-names, CI-adoptie pre-restart-gate, 72h soak-test) — onveranderd.
+
+### DSH session `20260826_rename` (repo-split: legacy + nieuwe bouwplaats)
+
+- **DRIE repos, definitief:** `m0nklabs/llama-cpp-guardian` = LEGACY/archief; `m0nklabs/guardian-llmprovider-gateway` = NIEUW (bouwplaats, volle git-history); `m0nklabs/caretaker-llamacpp` = publieke per-GPU-host-manager-repo.
+- **Productie draait nog uit `/home/flip/llama_cpp_guardian`** (systemd + venv) tot F7.
+- **In de nieuwe dir GEEN restarts/deploys** — productie draait uit de oude dir.
+- **pytest/gate via het OUDE venv:** `/home/flip/llama_cpp_guardian/venv/bin/python -m pytest tests/`.
+- **Secrets/gitignored bestanden (`.env`, keys) niet committen.**
+- **Klaargezet (deze sessie):** `venv`-symlink → legacy-venv + gekopieerde `.env`/`config/guardian.keys.yaml`/`data/`.
+- **Overige details** (volledige sessiekopie-methode naar de nieuwe workspace, docs-referentie-fix `5e02c78`) → `docs/AGENT_CONTEXT_ARCHIVE.md` §5.
+
+### F7 CUT-OFT UITGEVOERD (2026-08-31 ~10:43, operator-go)
+
+- v1 gestopt + disabled + unit weggezet naar `llama-guardian.service.legacy-f7`; v2 enabled (boot-persistent) en actief. De alias `llama-guardian.service` wijst nu via de alias-symlink naar v2 — client-naam en spiergeheugen intact.
+- **De adopt-guard bewees zichzelf bij de eerste boot:** stale args-drift + live backend serving `gemma-4-E4B-it-uncensored` → *"adopting it; new settings are NOT applied"* — nul backend-reload, precies het vanochtend-incident onschadelijk gemaakt.
+- Smoke via nginx :11434: /v1/models 272 (43 lokaal + 229 cloud — catalogus zelf-gevuld door de PR #20-loop), /api/tags 22, chat round-trip "banana", streaming 12 SSE-chunks, /v1/messages bridge OK, dashboard 200.
+- Capture: 2,4 GB v1-data gesynchroniseerd vóór de start; de migratie-sweep renamde de legacy gzip-active ("never appended to") en het nieuwe plain-active WAL groeit live.
+- Rollback-recept staat hierboven (unit terugzetten + legacy herstarten).
+- **Open na de cut-over:** `GUARDIAN_STARTUP_ADOPT_ONLY=1` in de unit mag weg zodra de deployment settled is (startup-switching bewust weer toestaan); N-1 vision-drift-asymmetrie oplossen; PR #18-vervolg; ensure_fresh-wiring is gedekt door PR #20.
+
+## V2 productie-klaar (2026-08-31 avond, PR #19 gemerged `83cb6c7`)
+
+- **Productie-checkout = main @ `83cb6c7`** met: startup-adopt-fix (geen forced switch van een live backend bij cross-model args-drift — het e2e-incident is hiermee gedicht), `GUARDIAN_UI_PORT`-override, en de **installer** (`scripts/install.sh`, idempotent, gedoogvoerd).
+- **Legacy-afhankelijkheid weg:** de `venv`-symlink naar `/home/flip/llama_cpp_guardian/venv` is vervangen door een echte venv (Python 3.14.3, exacte pins uit `requirements.txt`); suite 1290 passed / 3 skipped op de nieuwe venv.
+- **TLS:** v1's vertrouwde cert-pair gekopieerd naar `/home/flip/.config/guardian-llmprovider-gateway/tls/` via `install.sh --tls-cert/--tls-key` (LAN-clients behouden trust; geen her-trust nodig).
+- **Systemd:** unit + TLS-drop-in gerenderd en geïnstalleerd (`/etc/systemd/system/guardian-llmprovider-gateway.service` + `.service.d/20-tls.conf`), `daemon-reload` gedaan, **nog NIET enabled** — de alias-conflict-regel blijft: pas enable ná stop+disable+wegzetten van de legacy unit.
+- **Pre-restart gate:** py_compile/pyflakes/signatures OK; pytest 1290/3 groen (de gate's eigen pytest-loop werd vastgelopen door live-11434-interferentie onder load — zie test-isolatie-punt hieronder).
+- **Caretaker-daemon DRAAIT (2026-08-31 avond):** unit enabled, `/status` auth-gated (401 zonder key), `models.local.settings.yaml` geplaatst (gevalideerd via de daemon-loader: 22 modellen/21 aliases), `CARETAKER_KEY` in `/etc/caretaker/caretaker.env` (0600) én in de gateway `.env`. Bij de eerste `/ensure` neemt de daemon het backend-beheer over (state vers → één switch naar het gevraagde model, by design).
+- **Catalogus zelf-genezend (PR #20, `d30afc0`):** `ensure_all_fresh` + lifespan-loop (60 s, TTL-gated) — de handmatige refresh-stap na de start is vervallen; de catalogus warmt zichzelf binnen ~60 s.
+- **Cut-over zelf (operator of agent na go):** stop v1 → legacy unit disable + wegzetten → `sudo systemctl enable --now guardian-llmprovider-gateway.service` → smoke via nginx. LET OP: de andere agents' sessies vallen weg zolang de switch draait.
+
