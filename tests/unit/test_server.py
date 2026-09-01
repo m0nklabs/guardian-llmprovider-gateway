@@ -339,8 +339,16 @@ async def test_begin_queued_request_cleans_up_waiter_on_disconnect():
     disconnected = asyncio.Event()
 
     class _FakeRequest:
-        async def is_disconnected(self) -> bool:
-            return disconnected.is_set()
+        # Contract since 2026-09-02: the disconnect watcher consumes the raw
+        # ASGI receive channel (is_disconnected polling never fires through
+        # the gateway's BaseHTTPMiddleware — proven by mini-tests; the polling
+        # watcher had 0 fires in a week of production traffic).
+        def __init__(self) -> None:
+            self._disconnected = disconnected
+
+        async def receive(self):
+            await self._disconnected.wait()
+            return {"type": "http.disconnect"}
 
     with patch.object(server, "inference_queue", queue), patch.object(_queue_helpers, "_inference_queue", queue), patch.object(server._admin_api, "_inference_queue", queue):
         waiter_task = asyncio.create_task(
