@@ -341,19 +341,34 @@ class _HangingRateLimiter:
         raise AssertionError("hanging operation completed unexpectedly")
 
 
-class _PollCountingRequest:
-    """Fake FastAPI request: is_disconnected() turns True after N polls."""
+class _DisconnectingReceiveRequest:
+    """Fake request whose ASGI receive channel yields http.disconnect after
+    N messages (mirrors how the G2 watcher consumes the raw receive channel
+    through BaseHTTPMiddleware — is_disconnected polling does NOT work
+    through the gateway's usage middleware)."""
 
-    def __init__(self, disconnect_after_polls: int) -> None:
-        self._remaining = disconnect_after_polls
-        self.polls = 0
+    def __init__(self, disconnect_after_messages: int) -> None:
+        self._remaining = disconnect_after_messages
+        self.messages = 0
 
-    async def is_disconnected(self) -> bool:
-        self.polls += 1
+    async def receive(self):
+        self.messages += 1
+        await asyncio.sleep(0.05)  # let the upstream task get scheduled
         if self._remaining > 0:
             self._remaining -= 1
-            return False
-        return True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        return {"type": "http.disconnect"}
+
+
+class _SilentReceiveRequest:
+    """Fake request whose receive channel never yields a disconnect."""
+
+    def __init__(self) -> None:
+        self._closed = asyncio.Event()
+
+    async def receive(self):
+        await self._closed.wait()
+        return {"type": "http.disconnect"}
 
 
 @pytest.mark.asyncio
@@ -400,7 +415,7 @@ async def test_non_stream_client_disconnect_aborts_upstream(monkeypatch):
                 b"{}",
                 request_body,
                 "openrouter/provider/model",
-                _PollCountingRequest(disconnect_after_polls=1),
+                _DisconnectingReceiveRequest(disconnect_after_messages=1),
                 "dsh",
                 capture_ctx=object(),
                 capture_policy_result=object(),
@@ -449,7 +464,7 @@ async def test_non_stream_completes_normally_when_client_stays_connected(monkeyp
             b"{}",
             request_body,
             "openrouter/provider/model",
-            _PollCountingRequest(disconnect_after_polls=10**9),
+            _SilentReceiveRequest(),
             "dsh",
             capture_ctx=object(),
             capture_policy_result=object(),

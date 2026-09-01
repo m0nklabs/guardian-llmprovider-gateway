@@ -607,7 +607,16 @@ async def forward_to_cloud_provider(
                             policy_result=capture_policy_result,
                         )
                     raise _CloudClientDisconnected(cloud_request_id, "client_disconnect")
-                resp = upstream_task.result()
+                if upstream_task in done:
+                    resp = upstream_task.result()
+                else:
+                    # Watcher exited without a disconnect signal (a request
+                    # object without a receive channel — test doubles): fall
+                    # back to awaiting the upstream call to completion, the
+                    # legacy pre-G2 behavior. NOTE: Task.result() is NOT
+                    # awaitable — it raises InvalidStateError on a pending
+                    # task, so this branch must await.
+                    resp = await upstream_task
             except _CloudClientDisconnected as exc:
                 raise request_cancel_http_exception(exc.request_id, exc.reason) from None
             except Exception as e:
