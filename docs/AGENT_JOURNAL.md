@@ -55,3 +55,10 @@ Gedistilleerd (les → waar hij nu leeft):
 - **Test-les:** contract-test `test_begin_queued_request_cleans_up_waiter_on_disconnect` pinde het oude is_disconnected-contract — dat contract was in productie dode code; test overgezet naar het receive-contract. En: gate-exitcode checken via `${PIPESTATUS[0]}`, niet via `| tail &&`-ketens (mijn gate-FAIL lekte door naar een push).
 - **systemd-les:** `llama-guardian.service` is geen alias maar een aparte unit-file met eigen drop-ins — een `systemctl restart llama-guardian` start een tweede gateway; bind-race won de stray en de echte unit crashte 28× op Errno 98. Vermijd de oude naam volledig; bij twijfel `ss -ltnp` op de poorten + `systemctl show -p MainPID` van de exacte unit.
 - **Observatie:** caretaker-herstart → eerste /ensure doet een volledige garantie-cyclus (~30s); curl-timeouts onder de 30s zijn daar te kort voor (twee keer op getrapt).
+
+## 2026-09-02 — test-isolatie: de gate raakte productie via integration-tests
+
+- **Vondst:** `tests/integration/test_live_inference.py` + `test_finetune_v2_live_smoke.py` dragen al de `integration`/`finetune_v2_live`-markers, maar pyproject had **geen default-deselect** — een plain `pytest tests/` (exact wat de pre-restart-gate draait) stuurde dus live HTTP-calls naar de productie-gateway op :11434 (incl. `/admin/load`!). Onder load kan zo'n call hangen → de gate hangt → de restart-flow stagneert. Dit verklaart de bekende "volledige suite haalt 1009/1134 niet"-milieufactor-deels ook.
+- **Fix (3 regels):** `addopts = '-m "not integration and not finetune_v2_live"'` in `[tool.pytest.ini_options]` + docstring-run-instructies bijgewerkt (opt-in via CLI `-m`, die addopts overridet). 1310 passed / 20 deselected in 47 s (was ~70 s met live-probe-overhead).
+- **TOML-valkuil:** `addopts = -m "..."` (ongequote waarde) is ongeldige TOML — de waarde moet zelf een string zijn: `addopts = '-m "..."'`.
+- **Verificatie:** deselected-telling in de plain run + `pytest -m integration --collect-only` toont de 20; gate groen.

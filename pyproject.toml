@@ -1,6 +1,12 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# Default-deselect the live-marker suites: tests/integration/* hits the LIVE
+# production gateway (:11434) and must never run from a plain `pytest tests/`
+# (the pre-restart gate uses exactly that — a live call from a test during a
+# loaded gate can hang the whole restart flow). Opt in explicitly with
+# `-m integration` / `-m finetune_v2_live` (a CLI -m overrides addopts).
+addopts = '-m "not integration and not finetune_v2_live"'
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
