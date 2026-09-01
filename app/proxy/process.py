@@ -328,15 +328,29 @@ async def run_startup_check_in_background(generation: int, target_model: str | N
 
 
 def is_guardian_uvicorn_listener(listener: dict[str, object | None] | None) -> bool:
+    """True when the port holder is one of OUR gateway instances.
+
+    Identity is the command line, not the process name: the production unit
+    runs ``python3.14 -m app.main`` (comm is "python3.14", the port comes from
+    ``GUARDIAN_TLS_PORT`` — neither "uvicorn" nor ``--port`` appears in the
+    cmdline), so the historical ``process_name == "uvicorn"`` +
+    ``app.proxy.server:app`` + ``--port`` checks NEVER matched a
+    unit-launched gateway and the stale-listener termination was dead code in
+    production. Consequence (2026-09-02 restart-race): a port-holding orphan
+    survived 44 restart generations, every new generation dying on Errno 98
+    instead of clearing the way.
+
+    ``get_proxy_listener_info`` queries ``ss`` for OUR port only, so the port
+    itself needs no cmdline check; the binding identity is this repo root
+    plus our app module, in either launch form.
+    """
     if not listener:
         return False
     command = str(listener.get("command") or "")
     repo_root = str(Path(__file__).parent.parent.parent)
     return (
-        listener.get("process_name") == "uvicorn"
-        and "app.proxy.server:app" in command
-        and repo_root in command
-        and f"--port {_proxy_port}" in command
+        repo_root in command
+        and ("-m app.main" in command or "app.proxy.server:app" in command)
     )
 
 

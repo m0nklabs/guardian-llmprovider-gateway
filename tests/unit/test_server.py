@@ -1635,6 +1635,60 @@ async def test_stop_stale_guardian_listener_terminates_orphan():
 
 
 @pytest.mark.asyncio
+async def test_stop_stale_guardian_listener_recognizes_app_main_orphan():
+    """2026-09-02 restart-race pin: the production unit runs
+    `python3.14 -m app.main` (process_name "python3.14", port from env) — the
+    historical uvicorn/`--port` checks never matched it, so a port-holding
+    orphan survived 44 restart generations (each dying on Errno 98). The
+    recognizer must accept BOTH launch forms."""
+    repo_root = Path(server.__file__).resolve().parents[2]
+    listener = {
+        "pid": 5150,
+        "process_name": "python3.14",
+        "command": f"{repo_root}/venv/bin/python3.14 -m app.main",
+        "is_current_process": False,
+    }
+
+    with (
+        patch.object(server, "_wait_for_proxy_listener_release", return_value=True),
+        patch.object(server._process.os, "kill") as kill_mock,
+    ):
+        assert await server._stop_stale_guardian_listener(listener) is True
+        kill_mock.assert_called_once_with(5150, server._process.signal.SIGTERM)
+
+
+@pytest.mark.asyncio
+async def test_stop_stale_guardian_listener_ignores_foreign_port_holder():
+    """A port holder outside this repo (nginx, another app) must never be killed."""
+
+    listener = {
+        "pid": 999,
+        "process_name": "nginx",
+        "command": "nginx: worker process",
+        "is_current_process": False,
+    }
+
+    with patch.object(server._process.os, "kill") as kill_mock:
+        assert await server._stop_stale_guardian_listener(listener) is False
+        kill_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_stop_stale_guardian_listener_never_kills_own_pid():
+    repo_root = Path(server.__file__).resolve().parents[2]
+    listener = {
+        "pid": os.getpid(),
+        "process_name": "python3.14",
+        "command": f"{repo_root}/venv/bin/python3.14 -m app.main",
+        "is_current_process": True,
+    }
+
+    with patch.object(server._process.os, "kill") as kill_mock:
+        assert await server._stop_stale_guardian_listener(listener) is False
+        kill_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_admin_load_returns_400_for_runtime_override_validation_error():
     class DummyRequest:
         async def json(self):
