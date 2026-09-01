@@ -24,10 +24,6 @@ _inference_queue = None
 _get_queue_owner_id = None  # callable(request, client_id) -> str | None
 _update_live_request_usage = None  # callable(request, **kwargs) -> None
 STREAM_CLOSE_TIMEOUT_S: float = 5.0
-# Poll cadence shared by both disconnect watchers (queue-bound and
-# queue-independent) — one source of truth for how fast a downstream abort
-# is noticed.
-DISCONNECT_POLL_INTERVAL_S: float = 0.25
 
 
 def init(inference_queue, get_queue_owner_id, update_live_request_usage, close_timeout_s: float) -> None:
@@ -90,46 +86,65 @@ async def stop_background_task(task: asyncio.Task | None) -> None:
         )
 
 
+async def _consume_disconnect(request: Request) -> bool:
+    """Consume the raw ASGI receive channel until ``http.disconnect``.
+
+    Deliberately NOT ``request.is_disconnected()`` polling: the gateway's
+    usage middleware is a BaseHTTPMiddleware, whose wrapped receive channel
+    breaks starlette's cancel-scope polling trick — proven 2026-09-02 (mini
+    tests: polling fires without the middleware and never with it; the
+    production watcher had 0 fires in a week of traffic). A raw-receive
+    consumer works through the middleware.
+
+    Safe to start once the request body has been consumed: with the body
+    fully read, the only message left on the channel is ``http.disconnect``.
+
+    Returns True on disconnect. Returns False when the request object does
+    not expose a receive channel (test doubles) — callers treat that as "no
+    disconnect signal" (legacy behavior).
+    """
+    receive = getattr(request, "receive", None)
+    if receive is None:
+        return False
+    try:
+        while True:
+            message = await receive()
+            if message.get("type") == "http.disconnect":
+                return True
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        return False
+
+
 async def watch_client_disconnect(request: Request, disconnect_event: asyncio.Event) -> None:
     """Set ``disconnect_event`` as soon as the downstream client disconnects.
 
     Queue-independent companion to :func:`watch_request_disconnect`: cloud
     routes bypass the inference queue (no tracked request id to cancel
     through ``_inference_queue``), so the caller races its upstream call
-    against the event instead. If the request does not support disconnect
-    polling (test doubles), the watcher exits without setting the event and
+    against the event instead. If the request does not expose a receive
+    channel (test doubles), the watcher exits without setting the event and
     the caller falls back to awaiting the upstream result — legacy behavior.
     """
-    while True:
-        try:
-            disconnected = await request.is_disconnected()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            return
-        if disconnected:
-            disconnect_event.set()
-            return
-        await asyncio.sleep(DISCONNECT_POLL_INTERVAL_S)
+    if await _consume_disconnect(request):
+        disconnect_event.set()
 
 
 async def watch_request_disconnect(request: Request, request_id: str, client_id: str) -> None:
     """Cancel the tracked queue request as soon as the downstream client disconnects."""
-    while True:
-        if await request.is_disconnected():
-            snapshot = _inference_queue.cancel(
-                request_id,
-                client_id=client_id,
-                reason="client_disconnected",
-            )
-            logger.info(
-                "🔌 [%s] Client '%s' disconnected (%s)",
-                request_id[:8],
-                client_id,
-                (snapshot or {}).get("status", "unknown"),
-            )
-            return
-        await asyncio.sleep(DISCONNECT_POLL_INTERVAL_S)
+    if await _consume_disconnect(request):
+        snapshot = _inference_queue.cancel(
+            request_id,
+            client_id=client_id,
+            reason="client_disconnected",
+        )
+        logger.info(
+            "🔌 [%s] Client '%s' disconnected (%s)",
+            request_id[:8],
+            client_id,
+            (snapshot or {}).get("status", "unknown"),
+        )
 
 
 async def begin_queued_request(request: Request, client_id: str, model: str) -> tuple[str, asyncio.Task]:
