@@ -546,6 +546,26 @@ class ModelManager:
             return False
         return Path(actual_gguf).resolve() == Path(expected).resolve()
 
+    async def backend_serving_model_name(self) -> str | None:
+        """Return the model name the RUNNING llama-server actually serves.
+
+        Live probe (process commandline → .gguf path → reverse lookup through
+        the configured models), independent of the gateway's stamped
+        ``current_model`` state — a caretaker /ensure mirrors that state on a
+        200 response before the backend is re-verified, so it cannot decide
+        whether the request's model is really being served.  This probe can.
+
+        Returns ``None`` when no llama-server process is visible (e.g. a
+        remote F6 backend the gateway cannot inspect) or its model cannot be
+        identified — callers must treat ``None`` as "cannot verify", never as
+        a mismatch.  A mismatch is only ever reported on POSITIVE evidence
+        (the probe identified a configured model that differs from the
+        requested one).
+        """
+        actual_gguf = await asyncio.to_thread(self._get_backend_model_path)
+        if not actual_gguf:
+            return None
+        return self._identify_model_by_path(actual_gguf)
 
     async def backend_health_ok(self) -> bool:
         """Return True when the managed llama-server backend accepts requests."""

@@ -284,6 +284,10 @@ async def chat_ollama(request: Request, client_id: str):
         )
 
     _release_in_finally = True
+    # Model-mismatch contract (incident 2026-09-01): set when a switch/ensure
+    # attempt for the REQUESTED local model completed successfully — the live
+    # backend must serve that model before this request forwards.
+    _switch_ensure_verified_pending = False
     try:
         # Auto-reload if unloaded
         if _model_manager.is_unloaded:
@@ -310,6 +314,12 @@ async def chat_ollama(request: Request, client_id: str):
                         ),
                         generation=generation,
                     )
+                    # Reload target IS the requested model → contract-bound to
+                    # serve it (same-model cold reload; verified below).  A
+                    # different target (pinned/fallback) is handled by the
+                    # auto-switch phase, which sets the flag on its own ensure.
+                    if reload_model == model:
+                        _switch_ensure_verified_pending = True
 
         # Check if model switch needed (safe — we hold the queue slot)
         current_model = await _model_manager.get_current_model()
@@ -344,6 +354,12 @@ async def chat_ollama(request: Request, client_id: str):
                                 ),
                                 generation=generation,
                             )
+                            # The /ensure for the requested model returned OK —
+                            # the backend must actually serve it before this
+                            # request forwards (verified below; the incident's
+                            # /ensure 200 left the old model running while the
+                            # gateway stamped the requested one).
+                            _switch_ensure_verified_pending = True
                         except ModelLoadError as e:
                             crash = e.crash_record
                             detail = {
@@ -361,6 +377,28 @@ async def chat_ollama(request: Request, client_id: str):
 
         _model_manager.last_request_time = time.time()
         _model_manager.active_requests += 1
+
+        # Model-mismatch contract (incident 2026-09-01): a successful /ensure
+        # can still leave the backend serving a DIFFERENT model than the one
+        # this request asked for.  When a switch/ensure attempt ran for the
+        # requested local model, verify the live backend before forwarding —
+        # never silently answer from another model.  The same-model reload
+        # path passes this check by definition (requested == loaded).
+        if _switch_ensure_verified_pending:
+            _actual_backend_model = await _caretaker_runtime.verify_requested_model_served(model)
+            if _actual_backend_model is not None:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "error": "model_switch_failed",
+                        "message": (
+                            f"Model '{model}' failed to load; "
+                            f"backend serves '{_actual_backend_model}'"
+                        ),
+                        "requested_model": model,
+                        "actual_model": _actual_backend_model,
+                    },
+                )
 
         # Translate Ollama request to OpenAI format
         messages = body.get("messages", [])
@@ -670,6 +708,10 @@ async def generate_ollama(request: Request, client_id: str):
         )
 
     _release_in_finally = True
+    # Model-mismatch contract (incident 2026-09-01): set when a switch/ensure
+    # attempt for the REQUESTED local model completed successfully — the live
+    # backend must serve that model before this request forwards.
+    _switch_ensure_verified_pending = False
     try:
         # Auto-reload if unloaded
         if _model_manager.is_unloaded:
@@ -696,6 +738,12 @@ async def generate_ollama(request: Request, client_id: str):
                         ),
                         generation=generation,
                     )
+                    # Reload target IS the requested model → contract-bound to
+                    # serve it (same-model cold reload; verified below).  A
+                    # different target (pinned/fallback) is handled by the
+                    # auto-switch phase, which sets the flag on its own ensure.
+                    if reload_model == model:
+                        _switch_ensure_verified_pending = True
 
         # Model switch (safe — we hold the queue slot)
         current_model = await _model_manager.get_current_model()
@@ -728,6 +776,12 @@ async def generate_ollama(request: Request, client_id: str):
                                 ),
                                 generation=generation,
                             )
+                            # The /ensure for the requested model returned OK —
+                            # the backend must actually serve it before this
+                            # request forwards (verified below; the incident's
+                            # /ensure 200 left the old model running while the
+                            # gateway stamped the requested one).
+                            _switch_ensure_verified_pending = True
                         except ModelLoadError as e:
                             crash = e.crash_record
                             raise HTTPException(status_code=503, detail={
@@ -742,6 +796,28 @@ async def generate_ollama(request: Request, client_id: str):
 
         _model_manager.last_request_time = time.time()
         _model_manager.active_requests += 1
+
+        # Model-mismatch contract (incident 2026-09-01): a successful /ensure
+        # can still leave the backend serving a DIFFERENT model than the one
+        # this request asked for.  When a switch/ensure attempt ran for the
+        # requested local model, verify the live backend before forwarding —
+        # never silently answer from another model.  The same-model reload
+        # path passes this check by definition (requested == loaded).
+        if _switch_ensure_verified_pending:
+            _actual_backend_model = await _caretaker_runtime.verify_requested_model_served(model)
+            if _actual_backend_model is not None:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "error": "model_switch_failed",
+                        "message": (
+                            f"Model '{model}' failed to load; "
+                            f"backend serves '{_actual_backend_model}'"
+                        ),
+                        "requested_model": model,
+                        "actual_model": _actual_backend_model,
+                    },
+                )
 
         # Translate to OpenAI
         messages = body.get("messages", [{"role": "user", "content": prompt}])

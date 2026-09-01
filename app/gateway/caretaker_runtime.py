@@ -617,6 +617,53 @@ async def _ensure_with_retry(
             raise
 
 
+async def verify_requested_model_served(model: str) -> str | None:
+    """Post-ensure contract check: the backend must actually serve ``model``.
+
+    Model-mismatch incident (2026-09-01): a caretaker ``/ensure`` returned 200
+    while the backend still served a DIFFERENT model — the post-ensure
+    verification only logged MODEL MISMATCH, the gateway's stamped
+    ``current_model`` said the requested model, and the request was forwarded
+    anyway, silently answering from the wrong model with HTTP 200.
+
+    This helper is the last line of defense before local forwarding.  It
+    LIVE-probes which model the backend process serves (independent of the
+    stamped state) and reports the ACTUAL model name when it differs from the
+    requested one.  Callers MUST fail the request closed (503
+    ``model_switch_failed``) instead of forwarding to the wrong model.
+
+    Returns ``None`` when the backend serves the requested model (both sides
+    canonicalized through ``resolve_model`` so client-facing aliases never
+    produce a false mismatch) or when the live process cannot be probed
+    (``ModelManager.backend_serving_model_name()`` → ``None`` — e.g. a remote
+    F6 backend the gateway cannot inspect; the request then behaves exactly as
+    before instead of 503ing on probe blindness).  Returns the actual model
+    name only on positive evidence of a mismatch.
+    """
+    if _model_manager is None:
+        return None
+    actual = await _model_manager.backend_serving_model_name()
+    if actual is None:
+        return None
+    try:
+        resolved_requested = _model_manager.resolve_model(model)
+    except ValueError:
+        resolved_requested = model
+    try:
+        resolved_actual = _model_manager.resolve_model(actual)
+    except ValueError:
+        resolved_actual = actual
+    if resolved_actual == resolved_requested:
+        return None
+    logger.error(
+        "🚨 Requested model '%s' was not loaded — backend serves '%s'; "
+        "failing the request closed (model_switch_failed)",
+        model,
+        actual,
+    )
+    return actual
+
+
 async def ensure_backend(
     *,
     model: str,
