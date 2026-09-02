@@ -18,7 +18,7 @@
 
 - **Was:** bare `z-ai/glm-5.3-flash` resolved naar NVIDIA (404) i.p.v. openrouter — alle pr-piet tier-1 review-calls faalden (litellm stopt openai/, client kan niet prefixen). Oorzaak: `z-ai/`-prefix op nvidia + directory-volgorde (nvidia vóór openrouter) + eerste-prefix-wint-resolutie; failover probeerde niet door.
 - **Fix (`7d5d32f`, gedeployed 16:13 UTC):** catalog-gestuurde disambiguatie via `set_catalog_probe()`-DI (positief catalog-bewijs breekt ties, nooit smallen naar None; exact-entries winnen; back-compat declaratievolgorde zonder bewijs) + `z-ai/` uit nvidia-prefixes. Gate 1324/3; live: bare name → 200 `"provider":"Z.AI"` in 2,5 s. Voltekst → `docs/AGENT_JOURNAL.md` §2026-09-02.
-- **Uit de bugreports nog open:** G2 disconnect-propagatie (non-stream orphan calls; pr-piet-zijde heeft max_output_tokens-mitigatie; PR #18-cap-verdict blijft leidend) en C-feedback C2/C7-C11 (tooling/retentie; C1/C4/C5/C6 + C3 zijn al live via schema 1.1.0/PR #17). pr-piet-rapporten: `scratch/pr-piet-*-2026-09-02.json`.
+- **Bugreport-dossiers AFGESLOTEN (2026-09-02):** G2 disconnect-propagatie is gebouwd en live bewezen (zie G2-entry); de volledige C-feedback (C1–C11, incl. de v2-JSON in `scratch/`) was al afgehandeld door **PR #17** (`ef483dd`) met per-item verdicts — C2/C7 bleken (grotendeels) onterecht met refutatie (0 float-tokens in 214 records; `request_parameters` staat al op request_received), C8 (`streamed_ingress`/`streamed_upstream`), C9/C10 (`scripts/capture_query.py` + `--rollup daily`) en C11 (retention zichtbaar in `guardianctl status`; provider op cloud-records) zijn live. Onafhankelijk herverifieerd 2026-09-02.
 
 ### 2026-09-01 — Split-brain backend-launcher + /ensure-verificatie gefixt (caretaker-repo + host-unit; live bewezen)
 
