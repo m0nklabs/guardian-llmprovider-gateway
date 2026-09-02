@@ -84,8 +84,10 @@ async def favicon():
 
 @app.get("/api/stats")
 async def get_stats(_client_id: str = Depends(verify_api_key)):
-    # VRAM
-    vram = get_gpu_metrics()
+    # VRAM — structural rule: nvidia-smi never runs on the event loop
+    # (this handler is polled by the dashboard; a sync call here stalls ALL
+    # routes including cloud streams).
+    vram = await asyncio.to_thread(get_gpu_metrics)
     queue_status = inference_queue.get_status()
     
     # Active Models
