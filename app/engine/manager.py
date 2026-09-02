@@ -321,7 +321,7 @@ class ModelManager:
         Returns True if match, False if mismatch detected.
         """
         try:
-            actual_gguf = self._get_backend_model_path()
+            actual_gguf = await asyncio.to_thread(self._get_backend_model_path)
             if not actual_gguf:
                 logger.warning("⚠️ Could not detect running backend model (no llama-server process?)")
                 return False
@@ -445,7 +445,7 @@ class ModelManager:
             return
 
         # Backend mismatch detected — force switch
-        actual_gguf = self._get_backend_model_path()
+        actual_gguf = await asyncio.to_thread(self._get_backend_model_path)
         actual_name = self._identify_model_by_path(actual_gguf) if actual_gguf else "NONE"
         logger.warning(
             f"🔄 Startup mismatch: forcing switch from actual '{actual_name}' to target '{target}'"
@@ -478,7 +478,9 @@ class ModelManager:
             # args state file may be stale or absent in shared-backend
             # topologies, and stamping the wrong flag triggers an avoidable
             # reload on the first image request.
-            live_mmproj = self._backend_has_mmproj()
+            # Structural rule: pgrep (timeout 5s worst case) never runs on the
+            # event loop — offload to a thread.
+            live_mmproj = await asyncio.to_thread(self._backend_has_mmproj)
             if live_mmproj is not None:
                 self.current_vision_enabled = live_mmproj
             else:
@@ -901,7 +903,12 @@ class ModelManager:
         # Ask ComfyUI to unload models and free VRAM
         await self._request_comfyui_free()
 
-        # Log remaining GPU consumers for visibility
+        # Log remaining GPU consumers for visibility.
+        # Structural rule: the event loop must NEVER block — nvidia-smi can
+        # take 100-300ms (10s timeout worst case), so it runs in a thread.
+        await asyncio.to_thread(self._log_gpu_processes_sync)
+
+    def _log_gpu_processes_sync(self) -> None:
         try:
             result = subprocess.run(
                 ["nvidia-smi", "--query-compute-apps=pid,process_name,used_gpu_memory",

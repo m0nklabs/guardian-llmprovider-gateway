@@ -7,6 +7,7 @@ lives here.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -257,11 +258,12 @@ async def get_server_status(client_id: str) -> Any:
 
     preferred_tool_model = _model_manager.get_preferred_tool_model(current_model)
     preferred_reasoning_model = _model_manager.get_preferred_reasoning_model(current_model)
-    backend_model_path = _model_manager._get_backend_model_path()
+    # Structural rule: pgrep never runs on the event loop — offload.
+    backend_model_path = await asyncio.to_thread(_model_manager._get_backend_model_path)
     backend_model_name = _model_manager._last_backend_model
     if backend_model_name is None and backend_model_path:
         backend_model_name = _model_manager._identify_model_by_path(backend_model_path)
-    vram = _get_gpu_metrics()
+    vram = await asyncio.to_thread(_get_gpu_metrics)
     idle_minutes = _model_manager.idle_unload_minutes
     idle_secs = time.time() - _model_manager.last_request_time
     return {
