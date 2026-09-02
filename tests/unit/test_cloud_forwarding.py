@@ -150,6 +150,97 @@ async def test_cloud_streaming_with_capture_bypasses_disabled_assembler(monkeypa
     assert capture_completed[0]["tool_calls"] is None
 
 
+@pytest.mark.asyncio
+async def test_cloud_streaming_client_disconnect_during_write_records_cancel(monkeypatch):
+    """PR #18 follow-up / G2 companion pin: when the downstream client dies
+    mid-stream (the SSE iterator raises StreamClosed while chunks are being
+    written), the streaming branch must record the teardown as
+    `request_cancelled` with cancel_reason "client_disconnect" — NOT as a
+    completed request. This is the write-failure detection that bounds the
+    streaming residual of the G2 orphan-calls fix."""
+    response = httpx.Response(200, headers={"content-type": "text/event-stream"})
+    stream_client = _FakeStreamClient(response)
+    provider = SimpleNamespace(
+        name="openrouter",
+        base_url="https://provider.example/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+        extra_headers={},
+    )
+    capture_cancelled = []
+
+    async def iter_sse_dying_client(*args, **kwargs):
+        yield 'data: {"choices":[{"delta":{"content":"OK"}}]}'
+        raise httpx.StreamClosed()  # no message arg on this httpx version
+
+    monkeypatch.setattr(
+        forwarding,
+        "_resolve_cloud_attempts",
+        lambda *args, **kwargs: ([(provider, "provider/model")], None),
+    )
+    monkeypatch.setattr(
+        forwarding,
+        "_prepare_cloud_candidate_request",
+        lambda provider, upstream_model, path, body, fingerprint: (
+            path,
+            body,
+            b"{}",
+            False,
+        ),
+    )
+    monkeypatch.setattr(forwarding, "_messages_contain_image_input", lambda messages: False)
+    monkeypatch.setattr(forwarding, "_get_cloud_key_fingerprint", lambda request, client_id: "fingerprint")
+    monkeypatch.setattr(forwarding, "_set_request_usage_metadata", lambda *args, **kwargs: None)
+    monkeypatch.setattr(forwarding, "_start_live_request_usage", lambda *args, **kwargs: None)
+    monkeypatch.setattr(forwarding, "_update_live_request_usage", lambda *args, **kwargs: None)
+    monkeypatch.setattr(forwarding, "_finish_live_request_usage", lambda *args, **kwargs: None)
+    monkeypatch.setattr(forwarding, "_record_request_token_usage", lambda *args, **kwargs: None)
+    monkeypatch.setattr(forwarding, "_coerce_usage_int", lambda value: int(value or 0))
+    monkeypatch.setattr(
+        forwarding,
+        "_dispatch_capture_request_completed",
+        lambda *args, **kwargs: pytest.fail("a client-disconnect teardown must not record request_completed"),
+    )
+    monkeypatch.setattr(
+        forwarding,
+        "_dispatch_capture_request_cancelled",
+        lambda *args, **kwargs: capture_cancelled.append(kwargs),
+    )
+    monkeypatch.setattr(forwarding, "_dispatch_capture_request_failed", lambda *args, **kwargs: None)
+    monkeypatch.setattr(forwarding, "_guardian_debug_headers", lambda *args, **kwargs: {})
+    monkeypatch.setattr(forwarding, "_is_retryable_cloud_error", lambda *args, **kwargs: False)
+    monkeypatch.setattr(forwarding, "_sanitize_proxied_response_headers", lambda headers: {})
+    monkeypatch.setattr(forwarding, "_iter_sse_lines_with_watchdog", iter_sse_dying_client)
+    monkeypatch.setattr(forwarding, "cloud_rate_limiter", _FakeRateLimiter())
+    monkeypatch.setattr(forwarding, "failover_health", _FakeHealthTracker())
+    monkeypatch.setattr(forwarding, "_GuardianRequestCancelled", type("RequestCancelled", (Exception,), {}))
+
+    request_body = {
+        "model": "openrouter/provider/model",
+        "messages": [{"role": "user", "content": "Say OK"}],
+        "stream": True,
+    }
+    with patch.object(forwarding.httpx, "AsyncClient", return_value=stream_client):
+        response = await forwarding.forward_to_cloud_provider(
+            "chat/completions",
+            b"{}",
+            request_body,
+            "openrouter/provider/model",
+            SimpleNamespace(),
+            "dsh",
+            capture_ctx=object(),
+            capture_policy_result=object(),
+            cloud_capture_start_time=0.0,
+        )
+        chunks = [chunk async for chunk in response.body_iterator]
+
+    # The pre-failure chunk is still delivered (best-effort), then the
+    # generator ends cleanly (the StreamClosed is swallowed inside).
+    assert b"OK" in b"".join(chunks)
+    assert len(capture_cancelled) == 1
+    assert capture_cancelled[0]["cancel_reason"] == "client_disconnect"
+
+
 def _patch_nonstream_common(monkeypatch, capture_completed, provider, http_client):
     """Shared fake wiring for the non-streaming forward tests (mirrors the
     streaming test's monkeypatches plus the non-stream-only globals)."""
