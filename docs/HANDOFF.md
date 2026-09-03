@@ -64,4 +64,4 @@
 - **CI-adoptie (open sinds 20260813_1):** `scripts/pre_restart_check.py` als GitHub Action nog niet opgepakt.
 - **llama-guardian.service file (operator-beslissing):** aparte unit-file (géén alias!), nu disabled + failed + `Restart=no`; verwijderen/hernoemen of laten — hij is inactief en ongevaarlijk, maar de naam in AGENTS.md-documentatie ("alias") is misleidend.
 - **m0nkdash-origin (optioneel):** origineel achter `dashboard.oelala.xyz` blijft dood — raakt Guardian niet.
-- **72h soak (passief):** capture-subsystem + de G1/G2/G3-fixes draaien; soak-window loopt.
+- **72h soak AFGESLOTEN (2026-09-02, bewijs):** capture draait ~26 dagen live in productie; volledige inventarisatie: 172 bestanden, 41.044 events (20.667 received / 20.218 completed / 146 failed = 0,7% / 13 cancelled), 169/172 bestanden gezond, 0 parse-falen in gezonde bestanden. 3 beschadigde .gz-rotaties (1,7% — crash-slachtoffers van de restart-loops 09-01/02; door de restart-race-fix + kill-loop-demping niet meer reproduceerbaar; tolerant readers overslaan ze). Policy 1.1.0 actief.
