@@ -32,10 +32,21 @@ MODULES = [
     "app/gateway/routing.py",
     "app/gateway/streaming.py",
     "app/gateway/queue_helpers.py",
+    "app/gateway/admin_api.py",
     "app/cloud_inference/forwarding.py",
     "app/cloud_inference/routing.py",
     "app/local_inference/ollama.py",
     "app/local_inference/models.py",
+    "app/local_inference/model_registry.py",
+    "app/proxy/server.py",
+    "app/proxy/metrics.py",
+    "app/proxy/usage.py",
+    "app/proxy/auth.py",
+    "app/proxy/process.py",
+    "app/proxy/lifespan.py",
+    "app/scheduler/manager.py",
+    "app/capture/wal_writer.py",
+    "app/capture/integration.py",
 ]
 
 FORBIDDEN_ATTR_CALLS = {
@@ -44,10 +55,12 @@ FORBIDDEN_ATTR_CALLS = {
     ("subprocess", "check_call"),
     ("subprocess", "call"),
     ("os", "system"),
+    ("os", "fsync"),
     ("requests", "get"),
     ("requests", "post"),
     ("requests", "request"),
     ("time", "sleep"),
+    ("gzip", "GzipFile"),
 }
 
 # (module-relative key, function name, forbidden call) -> reason. Every entry
@@ -76,6 +89,31 @@ ALLOWLIST: dict[tuple[str, str, str], str] = {
         "get_gpu_metrics",
         "subprocess.check_output",
     ): "nvidia-smi metrics — every async call site offloads via asyncio.to_thread",
+    (
+        "app/proxy/metrics.py",
+        "update_gpu_metrics",
+        "subprocess.run",
+    ): "nvidia-smi — async update_gpu_metrics_cached (5s TTL) offloads via to_thread",
+    (
+        "app/proxy/auth.py",
+        "_resolve_local_process_for_port",
+        "subprocess.run",
+    ): "ss probe only on localhost 401; _log_unauthorized_attempt runs via to_thread",
+    (
+        "app/proxy/process.py",
+        "describe_process",
+        "subprocess.run",
+    ): "ps probe — every async call site offloads via asyncio.to_thread",
+    (
+        "app/proxy/process.py",
+        "get_proxy_listener_info",
+        "subprocess.run",
+    ): "ss probe — every async call site offloads via asyncio.to_thread",
+    (
+        "app/scheduler/manager.py",
+        "manage_service",
+        "subprocess.run",
+    ): "sudo systemctl — async enter/exit_maintenance_mode offload via to_thread",
 }
 
 

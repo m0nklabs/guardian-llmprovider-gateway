@@ -58,13 +58,14 @@ class SchedulerManager:
         logger.info("Entering Maintenance Mode (Idle Window)")
         self.active_mode = True
         for service in self.services_to_manage:
-            self.manage_service(service, "stop")
+            # Structural rule: sudo systemctl (timeout 30s) never on the loop.
+            await asyncio.to_thread(self.manage_service, service, "stop")
 
     async def exit_maintenance_mode(self):
         logger.info("Exiting Maintenance Mode")
         self.active_mode = False
         for service in self.services_to_manage:
-            self.manage_service(service, "start")
+            await asyncio.to_thread(self.manage_service, service, "start")
 
     def manage_service(self, service_name, action):
         """Start or stop a systemd service during maintenance mode."""

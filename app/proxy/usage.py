@@ -214,15 +214,30 @@ class ApiUsageTracker:
             "clients": clients,
         }
 
-    def _save_locked(self) -> None:
-        """Persist current usage state atomically to disk."""
+    #: Debounce window for disk persistence. _save_locked used to run twice
+    #: per inference request (full-state JSON serialize + atomic write, all on
+    #: the event loop); the dashboard only needs near-current numbers. Worst
+    #: case on a hard crash: the last <10s of usage counters are lost.
+    PERSIST_DEBOUNCE_S = 10.0
+
+    def _save_locked(self, force: bool = False) -> None:
+        """Persist current usage state atomically to disk (debounced)."""
+        now = time.monotonic()
+        if not force and now - getattr(self, "_last_persist", 0.0) < self.PERSIST_DEBOUNCE_S:
+            return
         try:
             self._state_file.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = self._state_file.with_name(f"{self._state_file.name}.tmp")
             tmp_path.write_text(json.dumps(self._serialize_locked(), ensure_ascii=True), encoding="utf-8")
             tmp_path.replace(self._state_file)
+            self._last_persist = now
         except Exception as exc:
             logger.warning("Failed to persist API usage state to %s: %s", self._state_file, exc)
+
+    def flush(self) -> None:
+        """Force-persist now, bypassing the debounce (shutdown / tests)."""
+        with self._lock:
+            self._save_locked(force=True)
 
     def _load_locked(self) -> None:
         """Restore persisted usage state if one exists."""

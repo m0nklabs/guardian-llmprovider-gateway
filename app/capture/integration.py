@@ -22,6 +22,7 @@ Ollama protocols); admin/health/metrics endpoints are excluded by policy.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any
@@ -485,13 +486,15 @@ def get_capture_controller() -> CaptureController:
     return capture_controller
 
 
-def get_capture_sink_snapshot() -> dict[str, Any]:
+async def get_capture_sink_snapshot() -> dict[str, Any]:
     """Return a metrics snapshot from the capture sink (for /metrics)."""
     try:
         controller = get_capture_controller()
-        snapshot = controller.sink.snapshot()
+        # Structural rule: rglob/stat over the capture root is disk I/O —
+        # never on the event loop.
+        snapshot = await asyncio.to_thread(controller.sink.snapshot)
         if controller.writer is not None:
-            writer_snap = controller.writer.snapshot()
+            writer_snap = await asyncio.to_thread(controller.writer.snapshot)
             snapshot.update({
                 "writer": writer_snap.get("writer_metrics", {}),
                 "disk_bytes": writer_snap.get("capture_disk_bytes", 0),

@@ -107,6 +107,7 @@ from app.proxy.metrics import (
     get_metrics_output,
     update_capture_metrics,
     update_gpu_metrics,
+    update_gpu_metrics_cached,
     update_queue_metrics,
     update_system_metrics,
 )
@@ -1417,9 +1418,9 @@ async def prometheus_metrics():
     No auth required — standard Prometheus convention for scrape targets.
     """
     update_queue_metrics(inference_queue)
-    update_gpu_metrics()
+    await update_gpu_metrics_cached()
     update_system_metrics(model_manager)
-    update_capture_metrics(get_capture_sink_snapshot())
+    update_capture_metrics(await get_capture_sink_snapshot())
     body, content_type = get_metrics_output()
     return Response(content=body, media_type=content_type)
 

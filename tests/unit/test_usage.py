@@ -1,5 +1,7 @@
 """Tests for persistent dashboard API usage tracking."""
 
+import time
+
 from app.proxy.usage import ApiUsageTracker
 
 
@@ -215,6 +217,9 @@ class TestApiUsageTracker:
             prompt_tokens=9,
             completion_tokens=4,
         )
+        # Persistence is debounced (structural rule: no disk writes on the
+        # event loop per request) — force it, as a shutdown would.
+        tracker.flush()
 
         restarted = ApiUsageTracker(state_file=state_file)
         snapshot = restarted.snapshot()
@@ -226,6 +231,40 @@ class TestApiUsageTracker:
         assert snapshot["top_clients"][0]["client_id"] == "openclaw"
         assert snapshot["top_clients"][0]["project_prefix"] == "openclaw"
         assert snapshot["recent_requests"][0]["source_ip"] == "127.0.0.1"
+
+    def test_persist_is_debounced_not_per_call(self, tmp_path):
+        """Structural rule pin: persistence runs at most once per debounce
+        window — _save_locked used to write the FULL state twice per request
+        on the event loop (a streaming-gap source). First call persists
+        (cold cache), follow-ups within the window must not rewrite."""
+        state_file = tmp_path / "api_usage_state.json"
+        tracker = ApiUsageTracker(state_file=state_file)
+
+        def record(n: int) -> None:
+            tracker.record_request(
+                client_id="openclaw",
+                endpoint="/v1/models",
+                method="GET",
+                status_code=200,
+                request_bytes=64 + n,
+                response_bytes=1024 + n,
+                duration_ms=12.5,
+                attribution={"project_prefix": "openclaw", "source_ip": "127.0.0.1"},
+            )
+
+        record(1)
+        assert state_file.exists(), "cold-cache first persist expected"
+        mtime1 = state_file.stat().st_mtime_ns
+
+        record(2)
+        record(3)
+        assert state_file.stat().st_mtime_ns == mtime1, (
+            "calls within the debounce window must not rewrite the state file"
+        )
+
+        time.sleep(0.01)  # guarantee a later filesystem mtime tick
+        tracker.flush()
+        assert state_file.stat().st_mtime_ns != mtime1, "flush() must force-persist"
 
     def test_backfills_preferred_source_from_recent_requests_on_restart(self, tmp_path):
         """Older persisted state without preferred fields is repaired from recent history."""

@@ -232,14 +232,25 @@ class ModelManager:
             return None
 
     def _load_switch_allowlist(self) -> set[str]:
-        """Load set of client names allowed to trigger model switches."""
+        """Load set of client names allowed to trigger model switches.
+
+        mtime-gated: fires on pre-switch checks; re-parses only on edits."""
+        try:
+            mtime = os.stat(self.config_path).st_mtime_ns
+        except OSError:
+            mtime = None
+        cached = getattr(self, "_switch_allowlist_cache", None)
+        if cached and cached[0] == mtime:
+            return cached[1]
         try:
             with open(self.config_path, "r") as f:
                 cfg = yaml.safe_load(f)
             allowlist = cfg.get("guardian", {}).get("switch_allowlist", [])
             if allowlist:
                 logger.info(f"🔑 Switch allowlist: {allowlist}")
-            return set(allowlist)
+            result = set(allowlist)
+            self._switch_allowlist_cache = (mtime, result)
+            return result
         except Exception:
             return set()
 
@@ -702,13 +713,26 @@ class ModelManager:
 
     @property
     def idle_unload_minutes(self) -> float | None:
-        """Return idle_unload_minutes from guardian config, or None if disabled."""
+        """Return idle_unload_minutes from guardian config, or None if disabled.
+
+        mtime-gated: the idle-unload watcher reads this every 60s and admin
+        status reads it per poll — a sync yaml read per access stalls the
+        shared event loop for all routes."""
+        try:
+            mtime = os.stat(self.config_path).st_mtime_ns
+        except OSError:
+            mtime = None
+        cached = getattr(self, "_idle_minutes_cache", None)
+        if cached and cached[0] == mtime:
+            return cached[1]
         try:
             with open(self.config_path, 'r') as f:
                 raw = yaml.safe_load(f)
-            return raw.get('guardian', {}).get('idle_unload_minutes', None)
+            value = raw.get('guardian', {}).get('idle_unload_minutes', None)
         except Exception:
-            return None
+            value = None
+        self._idle_minutes_cache = (mtime, value)
+        return value
 
     async def unload(self) -> None:
         """Stop llama-server to free all VRAM. Guard against double-unload."""
@@ -922,14 +946,26 @@ class ModelManager:
             pass
 
     def _get_comfyui_url(self) -> str:
-        """Read ComfyUI URL from global.settings.yaml, fallback to default."""
+        """Read ComfyUI URL from global.settings.yaml, fallback to default.
+
+        mtime-gated: runs during every engine switch/load (via
+        _free_gpu_memory); re-parses the yaml only when the file changed."""
         try:
             settings_path = global_settings_file()
+            mtime = os.stat(settings_path).st_mtime_ns
+        except OSError:
+            return "http://127.0.0.1:8188"
+        cached = getattr(self, "_comfyui_url_cache", None)
+        if cached and cached[0] == mtime:
+            return cached[1]
+        try:
             with open(settings_path, "r") as f:
                 cfg = yaml.safe_load(f) or {}
-            return cfg.get("services", {}).get("comfyui_url", "http://127.0.0.1:8188")
+            url = cfg.get("services", {}).get("comfyui_url", "http://127.0.0.1:8188")
         except Exception:
-            return "http://127.0.0.1:8188"
+            url = "http://127.0.0.1:8188"
+        self._comfyui_url_cache = (mtime, url)
+        return url
 
     async def _request_comfyui_free(self) -> None:
         """Ask ComfyUI to unload all models and free GPU memory via its API."""

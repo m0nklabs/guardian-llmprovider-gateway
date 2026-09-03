@@ -2,6 +2,7 @@ import hashlib
 import json
 import logging
 import os
+import asyncio
 import re
 import secrets
 import subprocess
@@ -332,7 +333,29 @@ def _normalize_key_entry(token: str, raw: Any) -> dict[str, Any]:
     return entry
 
 
+#: mtime-gated cache — verify_api_key() runs load_api_keys() on EVERY
+#: request; the yaml re-parse is pointless while the file is unchanged.
+#: save_api_keys() writes the file (mtime changes), so edits invalidate
+#: automatically.
+_API_KEYS_CACHE: dict[str, object] = {}
+
+
 def load_api_keys() -> dict[str, dict]:
+    try:
+        st = API_KEYS_FILE.stat()
+        cache_key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        cache_key = None
+    if cache_key is not None and _API_KEYS_CACHE.get("key") == cache_key:
+        return _API_KEYS_CACHE["value"]
+    loaded = _load_api_keys_uncached()
+    if cache_key is not None:
+        _API_KEYS_CACHE["key"] = cache_key
+        _API_KEYS_CACHE["value"] = loaded
+    return loaded
+
+
+def _load_api_keys_uncached() -> dict[str, dict]:
     if API_KEYS_FILE.exists():
         try:
             _ensure_api_keys_file_permissions()
@@ -400,7 +423,8 @@ async def verify_api_key(request: Request, creds: HTTPAuthorizationCredentials |
         ),
     )
     if not token:
-        _log_unauthorized_attempt(
+        await asyncio.to_thread(
+            _log_unauthorized_attempt,
             request,
             reason="missing_api_key",
             token=None,
@@ -434,7 +458,8 @@ async def verify_api_key(request: Request, creds: HTTPAuthorizationCredentials |
         logger.info(f"🔑 Auth success: {user_data.get('name', 'Unknown')}")
         return user_data["name"]  # Return client_id/name as expected by endpoints
 
-    _log_unauthorized_attempt(
+    await asyncio.to_thread(
+        _log_unauthorized_attempt,
         request,
         reason="invalid_api_key",
         token=token,
