@@ -307,7 +307,8 @@ async def get_server_status(client_id: str) -> Any:
         "proxy": {
             "pid": os.getpid(),
             "port": _proxy_port,
-            "listener": _get_proxy_listener_info(),
+            # Structural rule: ss + ps subprocesses never on the loop.
+            "listener": await asyncio.to_thread(_get_proxy_listener_info),
             "pid_file": _get_pid_file_status(),
         },
         "scaler": {
@@ -470,12 +471,13 @@ async def get_capture_status(client_id: str) -> Any:
     }
 
     # Sink snapshot (queue depth, dropped events, etc.)
-    sink_snap = controller.sink.snapshot()
+    # Structural rule: disk I/O (stat) off the event loop.
+    sink_snap = await asyncio.to_thread(controller.sink.snapshot)
 
     # Writer snapshot (if writer exists)
     writer_snap = {}
     if controller.writer is not None:
-        writer_snap = controller.writer.snapshot()
+        writer_snap = await asyncio.to_thread(controller.writer.snapshot)
         writer_snap["running"] = controller._writer_started
     else:
         writer_snap = {"running": False, "reason": "writer_not_initialized"}
@@ -523,7 +525,7 @@ async def rotate_capture_file(client_id: str) -> Any:
     rotated_path = None
     active_path = None
     try:
-        rotated_path = writer.rotate()
+        rotated_path = await asyncio.to_thread(writer.rotate)
         active_path = str(writer.get_write_path())
     except Exception as e:
         return {"message": f"Rotation failed: {e}", "rotated": False}

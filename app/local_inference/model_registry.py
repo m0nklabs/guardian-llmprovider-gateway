@@ -70,6 +70,9 @@ class ModelRegistry:
         if config_path is None:
             config_path = str(local_models_file())
         self.config_path = Path(config_path)
+        # mtime-gated parse cache: resolve_model() runs per local request and
+        # used to re-open + re-parse models.yaml every time.
+        self._config_cache: tuple[int, dict] | None = None
         # Runtime state mirror (the authoritative values live on the bound
         # lifecycle owner; these provide a sane standalone default).
         self._current_model: str | None = None
@@ -109,11 +112,19 @@ class ModelRegistry:
     # ------------------------------------------------------------------------
 
     def _load_config(self) -> dict:
+        try:
+            mtime = self.config_path.stat().st_mtime_ns
+        except OSError:
+            mtime = None
+        if mtime is not None and self._config_cache and self._config_cache[0] == mtime:
+            return self._config_cache[1]
         if not self.config_path.exists():
             logger.warning(f"Config not found at {self.config_path}")
             return {}
         with open(self.config_path, "r") as f:
-            return yaml.safe_load(f).get("models", {})
+            cfg = yaml.safe_load(f).get("models", {})
+        self._config_cache = (mtime, cfg)
+        return cfg
 
     def _refresh_model_registry(self) -> None:
         """Reload models.yaml-derived registry state for hot config edits."""

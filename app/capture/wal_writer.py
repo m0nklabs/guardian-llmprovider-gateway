@@ -218,7 +218,7 @@ class CaptureWALWriter:
                 timestamp=timestamp, seq=f"{seq}-{os.getpid()}")
         return candidate, seq
 
-    def _compress_atomically(self, src_path: Path, dst_path: Path) -> None:
+    def _compress_atomically_sync(self, src_path: Path, dst_path: Path) -> None:
         """Gzip-compress ``src_path`` into ``dst_path`` atomically.
 
         The gzip data is written to ``<dst_path>.tmp`` in the same directory
@@ -312,7 +312,7 @@ class CaptureWALWriter:
                     # Plain completed file without its .gz.
                     target = entry.with_suffix(".jsonl.gz")
                     source = entry
-                self._compress_atomically(entry, target)
+                self._compress_atomically_sync(entry, target)
                 if source is not None:
                     source.unlink(missing_ok=True)
                 self._write_sidecar(target)
@@ -345,7 +345,7 @@ class CaptureWALWriter:
                     target, seq = self._next_completed_path(mtime)
                     self._rotation_seq = seq
                     self._state["rotation_seq"] = seq
-                    self._compress_atomically(legacy, target)
+                    self._compress_atomically_sync(legacy, target)
                     legacy.unlink(missing_ok=True)
                     self._write_sidecar(target)
                     os.chmod(str(target), self._config.file_mode)
@@ -359,7 +359,7 @@ class CaptureWALWriter:
 
     # ── File management ────────────────────────────────────────────────
 
-    def _terminate_partial_line(self, active_path: Path) -> None:
+    def _terminate_partial_line_sync(self, active_path: Path) -> None:
         """Ensure an existing active file ends with a newline before appending.
 
         A crash mid-write can leave a partial record without its trailing
@@ -406,7 +406,7 @@ class CaptureWALWriter:
             # Isolate any partial trailing record left by a crash BEFORE
             # appending (plain text has no gzip-member boundaries to rely on).
             if active_path.exists():
-                self._terminate_partial_line(active_path)
+                self._terminate_partial_line_sync(active_path)
             # Open with O_APPEND for atomic appends; create if needed.
             # Binary mode: records are plain UTF-8 JSON lines.
             fd = os.open(
@@ -455,7 +455,7 @@ class CaptureWALWriter:
         """
         if self._active_file is None or self._active_file_size == 0:
             return None
-        rotated = self._rotate_file()
+        rotated = self._rotate_file_sync()
         # Re-open a new active file for subsequent writes
         self._open_active_file()
         return rotated
@@ -509,7 +509,7 @@ class CaptureWALWriter:
             logger.error("Rotation failed and sidecar regeneration failed for %s: %s",
                          completed_path.name, exc)
 
-    def _rotate_file(self) -> str | None:
+    def _rotate_file_sync(self) -> str | None:
         """Close the active plain file, rename it to its completed name, and
         gzip-compress it atomically.
 
@@ -537,7 +537,7 @@ class CaptureWALWriter:
 
             # 2. Gzip-compress atomically: compress to a temp file in the
             #    same directory, then os.replace over the final .gz name.
-            self._compress_atomically(completed_path, completed_path)
+            self._compress_atomically_sync(completed_path, completed_path)
 
             # 3. Checksum over the final .gz bytes + sidecar.
             checksum = self._write_sidecar(completed_path)
@@ -569,7 +569,7 @@ class CaptureWALWriter:
 
     # ── Retention ──────────────────────────────────────────────────────
 
-    def _enforce_retention(self) -> None:
+    def _enforce_retention_sync(self) -> None:
         """Remove completed capture files older than retention_days.
 
         ``retention_days=0`` means remove all completed files immediately.
@@ -666,7 +666,7 @@ class CaptureWALWriter:
 
     # ── Core write logic ───────────────────────────────────────────────
 
-    def _write_event(self, event: CaptureEvent) -> bool:
+    def _write_event_sync(self, event: CaptureEvent) -> bool:
         """Write one event to the active file.  Returns True on success."""
         if self._active_fd is None:
             self._open_active_file()
@@ -718,19 +718,21 @@ class CaptureWALWriter:
                         break
                     continue
 
-                # Write the event
-                self._write_event(event)
+                # Write the event — structural rule: file I/O + fsync never
+                # run on the event loop (streaming clients share it).
+                await asyncio.to_thread(self._write_event_sync, event)
                 consecutive_errors = 0
 
                 # Check rotation
                 if self._needs_rotation():
-                    self._rotate_file()
+                    # Gzip of up to 256MB takes seconds — MUST stay off the loop.
+                    await asyncio.to_thread(self._rotate_file_sync)
 
                 # Check retention periodically (every ~60s)
                 now = time.monotonic()
                 if now - last_retention_check > 60:
                     last_retention_check = now
-                    self._enforce_retention()
+                    await asyncio.to_thread(self._enforce_retention_sync)
 
             except asyncio.CancelledError:
                 break
@@ -754,11 +756,11 @@ class CaptureWALWriter:
         # Final drain on shutdown
         remaining = await self._sink.drain_remaining()
         for event in remaining:
-            self._write_event(event)
+            await asyncio.to_thread(self._write_event_sync, event)
 
         # Final rotation
         if self._needs_rotation():
-            self._rotate_file()
+            await asyncio.to_thread(self._rotate_file_sync)
 
         logger.info("Capture WAL writer loop exited (wrote %d bytes, %d failures)",
                      self._metrics.bytes_written, self._metrics.write_failures)

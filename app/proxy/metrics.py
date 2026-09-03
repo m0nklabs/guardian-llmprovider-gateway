@@ -4,6 +4,7 @@ Exposes counters, gauges, and histograms for monitoring via /metrics endpoint.
 All metrics are prefixed with 'guardian_' for easy Grafana dashboard filtering.
 """
 
+import asyncio
 import logging
 import time
 from contextlib import contextmanager
@@ -262,3 +263,18 @@ def get_metrics_output() -> tuple[bytes, str]:
     Returns (body_bytes, content_type) ready for HTTP response.
     """
     return generate_latest(REGISTRY), CONTENT_TYPE_LATEST
+
+
+_gpu_metrics_last = 0.0
+_GPU_METRICS_TTL_S = 5.0
+
+
+async def update_gpu_metrics_cached() -> None:
+    """Off-loop nvidia-smi with a short TTL — /metrics scrapes are frequent
+    and unauthenticated; a sync nvidia-smi there stalled the shared loop."""
+    global _gpu_metrics_last
+    now = time.monotonic()
+    if now - _gpu_metrics_last < _GPU_METRICS_TTL_S:
+        return
+    _gpu_metrics_last = now
+    await asyncio.to_thread(update_gpu_metrics)

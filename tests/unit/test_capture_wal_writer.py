@@ -177,8 +177,8 @@ class TestWALWriterWriting:
         sink.try_put(CaptureEvent(data={"test": "data"}))
 
         # Patch the write to fail
-        with patch.object(writer, "_write_event", side_effect=OSError("disk full")):
-            _write_error = writer._write_event  # This will fail
+        with patch.object(writer, "_write_event_sync", side_effect=OSError("disk full")):
+            _write_error = writer._write_event_sync  # This will fail
             # The writer loop catches exceptions
             await asyncio.sleep(0.2)
 
@@ -422,7 +422,7 @@ class TestWALWriterRetention:
         os.utime(str(old_file), (old_time, old_time))
 
         # Trigger retention
-        writer._enforce_retention()
+        writer._enforce_retention_sync()
         await asyncio.sleep(0.1)
 
         assert not old_file.exists(), "Old file should have been removed by retention"
@@ -454,7 +454,7 @@ class TestWALWriterRetention:
         os.utime(str(old_data), (old_time, old_time))
         os.utime(str(old_sidecar), (old_time, old_time))
 
-        writer._enforce_retention()
+        writer._enforce_retention_sync()
 
         assert not old_data.exists(), "old file must be pruned by age"
         assert not old_sidecar.exists(), "old sidecar must go with its data file"
@@ -476,7 +476,7 @@ class TestWALWriterRetention:
         for f in (old_gz, old_sidecar):
             os.utime(str(f), (old_time, old_time))
 
-        writer._enforce_retention()
+        writer._enforce_retention_sync()
 
         assert not old_gz.exists()
         assert not old_sidecar.exists(), "sidecar must be removed together with its data file"
@@ -490,7 +490,7 @@ class TestWALWriterRetention:
 
         orphan = tmp_capture_root / "guardian_capture_0000000000_2.jsonl.sha256"
         orphan.write_text("0" * 64 + "  guardian_capture_0000000000_2.jsonl.sha256\n")
-        writer._enforce_retention()
+        writer._enforce_retention_sync()
 
         assert not orphan.exists()
         await writer.stop()
@@ -509,7 +509,7 @@ class TestWALWriterRetention:
         state = tmp_capture_root / STATE_FILENAME
         assert active.exists() and state.exists()
 
-        writer._enforce_retention()
+        writer._enforce_retention_sync()
 
         assert active.exists(), "active file must never be pruned by retention"
         assert state.exists(), "state file must never be pruned by retention"
@@ -529,7 +529,7 @@ class TestWALWriterRetention:
         # No start(): the startup sweep (which migrates the legacy active
         # file) is exactly the step that failed in this scenario.
         writer = CaptureWALWriter(sink, replace(config, retention_days=0))
-        writer._enforce_retention()
+        writer._enforce_retention_sync()
 
         assert legacy.exists(), "legacy active file must never be pruned by retention"
         assert not completed.exists(), "real completed files must still be pruned"
@@ -545,7 +545,7 @@ class TestWALWriterRetention:
         old_plain.write_text('{"seq": 0}\n')
         os.utime(str(old_plain), (old_time, old_time))
 
-        writer._enforce_retention()
+        writer._enforce_retention_sync()
         assert not old_plain.exists()
         await writer.stop()
 
@@ -570,7 +570,7 @@ class TestWALWriterRetention:
         await writer.stop()
 
         # Trigger retention manually (the writer checks every 60s, too slow for tests)
-        writer._enforce_retention()
+        writer._enforce_retention_sync()
 
         # Check disk usage is within a reasonable multiple of quota
         disk_bytes = sum(f.stat().st_size for f in tmp_capture_root.rglob("*") if f.is_file())
@@ -971,18 +971,18 @@ class TestWALWriterCrashRecovery:
         sink.try_put(CaptureEvent(data={"seq": 1}))
         await asyncio.sleep(0.1)
 
-        # Patch _write_event to simulate failure
-        original_write = writer._write_event
+        # Patch _write_event_sync to simulate failure
+        original_write = writer._write_event_sync
 
         def failing_write(event):
             return False  # Simulate write failure
 
-        writer._write_event = failing_write
+        writer._write_event_sync = failing_write
         sink.try_put(CaptureEvent(data={"seq": 2}))
         await asyncio.sleep(0.1)
 
         # Restore and verify recovery
-        writer._write_event = original_write
+        writer._write_event_sync = original_write
         sink.try_put(CaptureEvent(data={"seq": 3}))
         await asyncio.sleep(0.1)
         await writer.stop()
