@@ -122,3 +122,11 @@ De eerste pass verving 24 entries door één bulk-zin — te grof. Nieuwe regel 
 - **Eén TTL over:** de catalog-TTL (3600s, ensure_fresh-gated). REGISTRY-side: ContextCatalog/locks/_extract_context_windows/asyncio/httpx-imports weg — providers.py doet geen HTTP meer.
 - **Pins:** 44/44 test_providers (4 context-pins herleid naar catalog-niveau + 3 nieuwe: unbound-None, oude-cache-compat, key-space-equivalentie) + suite groen + gate 5/5.
 - **Trap 2 (modaliteiten-extractie) blijft verplicht vervolg** — nu is de basis daarvoor gereed (één fetch die alle velden kan bewaren).
+
+## 2026-09-02 — Consolidatie live-verificatie: 229 fallback-warnings zijn PRE-EXISTING (geen regressie, met bewijs)
+
+- **Vraagstuk:** na deploy 229× "context could not be resolved" — nieuw of regressie?
+- **Bewijs 1 (payload-probe, live):** openai /models → 124 entries, **0 met context_length/max_input_tokens** (entry-keys: created/id/object/owned_by/shutdown_date); google → 55 entries, 0 context-velden. De live upstreams adverteren géén context-metadata.
+- **Bewijs 2 (keten-equivalentie):** de oude registry-fetch las dezelfde payload met dezelfde (lege) velden → zelfde fallback. De 18:00-20:30 "0 warnings" was geen apples-to-apples: geen discovery-polls in dat venster; de once-per-model-warnings vuurden bij de eerste poll na restart.
+- **Conclusie:** consolidatie is gedragsgetrouw (strikt gelijk bij context-loze payloads, strikt beter bij payloads mét context — pins bewijzen het bewaren/leveren). De context die wél klopt komt uit overrides (openrouter kimi-k3/deepseek 1048576 live ✓). Les: "with_context=274" was een te zwak criterium (fallback-telling); het bewijs hoort op payload-niveau.
+- **Restsignaal (optioneel, trap-2-gebied):** de once-warn-ruis bij discovery kan stiller via context_overrides in settings.yaml voor de modellen die er toe doen.
