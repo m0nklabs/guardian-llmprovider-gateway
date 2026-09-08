@@ -86,3 +86,13 @@ Gedistilleerd (les → waar hij nu leeft):
 - **Guard uitgebreid (gat 8):** MODULES 8→19 bestanden; FORBIDDEN += os.fsync + gzip.GzipFile; 6 ALLOWLIST-entries met audit-geverifieerde redenen; `*_sync`-conventie (7 helpers). 20/20 groen op productie.
 - **Lessen onderweg:** monkeypatch-tests volgen hernoemingen niet automatisch (attribuut-calls met punt ontsnapten aan de eerste regex — lookbehind-corrigendum); de usage-debounce-pin vergde een mtime-tick-sleep (nanoseconde-ticks kunnen colliden); een flaky gate-tick bij de eerste timing-pin — tweede run groen, pin daarna robuust.
 - **Status:** alle client-verkeer (lokaal én cloud) deelt één loop zonder bekende blokkades meer; de guard voorkomt regressie machinaal.
+
+## 2026-09-02 (nachtdienst-2) — operator-besluiten: NVIDIA-probe, orphan-forensica, consolidatie-plan
+
+- **NVIDIA volledige probe (operator-keuze "2"):** 81 modellen, 53 s — 12 OK / 55×404 / 11×timeout / 3×5xx. De 68% dode entries zijn een NVIDIA-gefailing. Geen context-metadata in de catalog → "max context" wacht op model-card-keuzes voor de 12 werkende.
+- **Orphan-forensica (gebonden pass, AFGEROND):** 22:08:47-venster = wekenlange host-chaos (vllm-bench 53.640 restarts, nervesplat 52.311 op exact dat tijdstip). Beste verklaring cgroup-escape: verzadigde systemd-wachtrij. Handoffs naar caramba + nervesplat; raadsel gesloten op beste verklaring.
+- **Consolidatie:** twee-traps plan vastgelegd per operator — trap 1 consolidatie, **trap 2 modaliteiten verplicht daarna**.
+- **Host-hygiene:** de 5 crash-loop-units spawneren nog steeds tientallen processen/min — hercheck over een week.
+
+## 2026-09-02 — promotion/compaction-pass (budget-werkopdracht zelf uitgevoerd)
+HANDOFF 22.7→11.9 kB: 24 afgeronde verhaal-blokken → docs/ARCHIVED_HANDOFFS.md (archive, never destroy); actuele status + open punten blijven. JOURNAL 18.0 kB (binnen budget). Geheugen-idee geshelved met operator-bezwaar (kruisbesmetting over projectgrenzen) vastgelegd in HANDOFF.
