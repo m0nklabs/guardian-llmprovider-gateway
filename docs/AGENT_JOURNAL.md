@@ -96,3 +96,6 @@ Gedistilleerd (les → waar hij nu leeft):
 
 ## 2026-09-02 — promotion/compaction-pass (budget-werkopdracht zelf uitgevoerd)
 HANDOFF 22.7→11.9 kB: 24 afgeronde verhaal-blokken → docs/ARCHIVED_HANDOFFS.md (archive, never destroy); actuele status + open punten blijven. JOURNAL 18.0 kB (binnen budget). Geheugen-idee geshelved met operator-bezwaar (kruisbesmetting over projectgrenzen) vastgelegd in HANDOFF.
+
+## 2026-09-02 — compaction-regel verfijnd (operator): archiveer eerst verbatim, componeer dan LICHT
+De eerste pass verving 24 entries door één bulk-zin — te grof. Nieuwe regel (vastgelegd in dsh-config-private ): archiveer verbatim, daarna per-entry one-liner (essentie + refs) in de handoff. Retroactief toegepast: HANDOFF 13.3 kB met lichte lijst.
