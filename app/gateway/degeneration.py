@@ -42,6 +42,8 @@ DEFAULTS = {
     "min_repeats": 3,
     "min_repeat_bytes": 240,
     "max_window_chars": 4096,
+    "marker_enabled": True,
+    "marker_text": "[guardian: generation cut off - repetition loop detected]",
 }
 
 
@@ -53,6 +55,11 @@ class DegenerationConfig:
     min_repeats: int = 3
     min_repeat_bytes: int = 240
     max_window_chars: int = 4096
+    # Human-visible notice appended to the output at cutoff so a reader of
+    # the text knows the generation was cut short (machine readers use the
+    # standard finish_reason + the capture degeneration_cutoff flag).
+    marker_enabled: bool = True
+    marker_text: str = "[guardian: generation cut off - repetition loop detected]"
 
 
 @dataclass(frozen=True)
@@ -100,6 +107,12 @@ def load_degeneration_config(path: Path | None = None) -> DegenerationConfig:
                 max_window_chars=int(
                     section.get("max_window_chars", DEFAULTS["max_window_chars"])
                 ),
+                marker_enabled=bool(
+                    section.get("marker_enabled", DEFAULTS["marker_enabled"])
+                ),
+                marker_text=str(
+                    section.get("marker_text", DEFAULTS["marker_text"])
+                ),
             )
     except Exception as exc:
         logger.warning("Degeneration config load failed (using defaults): %s", exc)
@@ -128,6 +141,16 @@ class DegenerationDetector:
         window_cap = self.config.max_window_chars
         self._window = (self._window + delta)[-window_cap:]
         return self._check(self._window)
+
+    def marker_delta(self) -> str | None:
+        """Human-visible notice to append at cutoff (None = marker off)."""
+        if (
+            not self.config.enabled
+            or not self.config.marker_enabled
+            or not self.config.marker_text
+        ):
+            return None
+        return "\n\n" + self.config.marker_text
 
     def run_full(self, text: str) -> DegenerationVerdict | None:
         """Non-stream form: check the complete text for a tail loop."""

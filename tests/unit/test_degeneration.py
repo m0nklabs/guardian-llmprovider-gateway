@@ -104,6 +104,24 @@ class TestDetectorFalsePositives:
         assert d.run_full(text) is None
 
 
+class TestMarker:
+    def test_marker_delta_default_on(self, cfg):
+        d = DegenerationDetector(cfg)
+        assert d.marker_delta() == "\n\n[guardian: generation cut off - repetition loop detected]"
+
+    def test_marker_delta_off(self):
+        d = DegenerationDetector(DegenerationConfig(marker_enabled=False))
+        assert d.marker_delta() is None
+
+    def test_marker_delta_custom_text(self):
+        d = DegenerationDetector(DegenerationConfig(marker_text="[truncated]"))
+        assert d.marker_delta() == "\n\n[truncated]"
+
+    def test_marker_delta_off_when_disabled(self):
+        d = DegenerationDetector(DegenerationConfig(enabled=False))
+        assert d.marker_delta() is None
+
+
 class TestKillSwitch:
     def test_disabled_config_never_verdicts(self):
         d = DegenerationDetector(DegenerationConfig(enabled=False))
@@ -309,3 +327,6 @@ class TestCloudStreamCutoff:
         assert '"finish_reason":"length"' in body or '"finish_reason": "length"' in body
         assert body.rstrip().endswith("data: [DONE]")
         assert captured_kwargs.get("degeneration_cutoff") is True
+        # human-visible marker injected BEFORE the finish chunk
+        assert "[guardian: generation cut off" in body
+        assert body.index("[guardian: generation cut off") < body.index("finish_reason")

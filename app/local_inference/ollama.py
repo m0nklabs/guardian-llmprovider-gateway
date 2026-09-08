@@ -498,6 +498,14 @@ async def chat_ollama(request: Request, client_id: str):
                                             if _deg_v is not None:
                                                 _local_deg_cut = True
                                                 log_cutoff(model, _deg_v)
+                                                _mk = _deg_detector.marker_delta()
+                                                if _mk:
+                                                    yield json.dumps({
+                                                        "model": model,
+                                                        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+                                                        "message": {"role": "assistant", "content": _mk},
+                                                        "done": False
+                                                    }) + "\n"
                                                 break
                                         ollama_chunk = {
                                             "model": model,
@@ -593,6 +601,9 @@ async def chat_ollama(request: Request, client_id: str):
                 _deg_v = _deg_detector.run_full(content) if (content and _deg_detector.enabled) else None
                 if _deg_v is not None:
                     content = content[: len(content) - _deg_v.cut_from_end]
+                    _mk = _deg_detector.marker_delta()
+                    if _mk:
+                        content += _mk
                     data["choices"][0]["message"]["content"] = content
                     data["choices"][0]["finish_reason"] = "length"
                     log_cutoff(model, _deg_v)
@@ -934,6 +945,14 @@ async def generate_ollama(request: Request, client_id: str):
                                             if _deg_v is not None:
                                                 _local_deg_cut = True
                                                 log_cutoff(model, _deg_v)
+                                                _mk = _deg_detector.marker_delta()
+                                                if _mk:
+                                                    yield json.dumps({
+                                                        "model": model,
+                                                        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+                                                        "response": _mk,
+                                                        "done": False
+                                                    }) + "\n"
                                                 break
                                         # /api/generate response format: { "response": "..." }
                                         ollama_chunk = {

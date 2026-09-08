@@ -168,3 +168,7 @@ degeneration:
   min_repeats: 3
   min_repeat_bytes: 240
   max_window_chars: 4096
+  # Human-visible notice injected at the end of the output on cutoff, so a
+  # reader of the text sees something went wrong. Empty text / false = off.
+  marker_enabled: true
+  marker_text: "[guardian: generation cut off - repetition loop detected]"
