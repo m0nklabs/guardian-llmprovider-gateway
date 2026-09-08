@@ -65,3 +65,34 @@
 - **llama-guardian.service file (operator-beslissing):** aparte unit-file (géén alias!), nu disabled + failed + `Restart=no`; verwijderen/hernoemen of laten — hij is inactief en ongevaarlijk, maar de naam in AGENTS.md-documentatie ("alias") is misleidend.
 - **m0nkdash-origin (optioneel):** origineel achter `dashboard.oelala.xyz` blijft dood — raakt Guardian niet.
 - **72h soak AFGESLOTEN (2026-09-02, bewijs):** capture draait ~26 dagen live in productie; volledige inventarisatie: 172 bestanden, 41.044 events (20.667 received / 20.218 completed / 146 failed = 0,7% / 13 cancelled), 169/172 bestanden gezond, 0 parse-falen in gezonde bestanden. 3 beschadigde .gz-rotaties (1,7% — crash-slachtoffers van de restart-loops 09-01/02; door de restart-race-fix + kill-loop-demping niet meer reproduceerbaar; tolerant readers overslaan ze). Policy 1.1.0 actief.
+
+## 2026-09-07 — setup-agent constatation: redactor precision audit needed (principal policy 09-07: "secrets out = good; non-secret data dropped = must fix")
+
+**Observation (code-read, app/capture/redactor.py):** two patterns are categorically over-broad for capture content:
+1. `_IPV4_RE` applied to ALL text (line ~90) — every IPv4-looking string becomes `[REDACTED_IP]`, including LAN configs, research content and code examples (agent31's traffic is full of these: 192.168.1.35 gateway address, monerod config, wireguard research).
+2. `_ENV_VAR_RE` = `\$\{?[A-Z][A-Z0-9_]*\}?` (line ~92) — every `$UPPERCASE` reference in captured code/scripts becomes `[REDACTED_ENV_VAR]` (`$HOME`, `$VERSION` — not secrets).
+Live WAL counts (current.jsonl): 25× IP, 19× ENV_VAR, 8× API_KEY, 8× AUTH_HEADER — partly the setup agent's own meta-discussion of the redactor (captured), so treat counts as upper bounds. API_KEY/Bearer patterns look correctly scoped.
+
+**Suggested remediation (guardian agent decides/implements):** config-driven precision — (a) sensitive-IP LIST (home WAN + LAN subnet) instead of all-IPv4; (b) env-var redaction only for known secret-var NAMES or high-entropy values, not every `$UPPERCASE`; (c) keep API-key/Bearer patterns; (d) golden tests: benign payloads (`$HOME` in a bash snippet, default-gateway examples) must pass through unredacted, real keys must still be caught. Principal context: capture gaps created by guardian's own secret-filtering are BY DESIGN and must not be "filled"; over-filtering of non-secrets is the thing to fix. This is guardian-agent scope — setup agent will NOT implement.
+
+## 2026-09-07 — Handoff from cryptotrader session: generalize caretaker beyond llama.cpp?
+
+**Context**: the cryptotrader forecasting lane (TimesFM 3.0, PyTorch) was caught holding 1468 MiB of GPU 0 resident 24/7 while serving ~1 forecast/hour. The operator asked whether it could "run via guardian, to the caretaker, so it only works on-demand and waits in a queue".
+
+**Finding**: caretaker's lifecycle management (spawn/stop/unload/health, idle-unload via the gateway's ensure/unload calls) is exactly the right *pattern* — but the current implementation manages **llama.cpp server processes (GGUF models)** with an OpenAI-style serving contract. TimesFM is a torch model with a time-series contract; it cannot run under caretaker today.
+
+**Recommendation (for this repo's agent to evaluate)**: consider generalizing caretaker (or a sibling service) into a **generic model-lifecycle supervisor** — backend adapters declare how to start/health-check/unload a model host, callers get ensure/queue/idle-unload semantics regardless of model type. That would let every LAN service with an occasionally-used local model (cryptotrader's TimesFM is the first known candidate) drop resident memory and reuse one proven queue/idle-unload implementation. Until then, cryptotrader implements the pattern in-process (lazy load + idle unload in its own service — PR in flight there, no dependency on guardian/caretaker).
+
+**Evidence**: cryptotrader issue thread 2026-09-07 (GPU residency); `nvidia-smi` showed the uvicorn process at 1468 MiB beside ComfyUI (port 8188) and Frigate; caretaker scope verified via this repo's F5 notes (spawn/stop/reload/switch/unload/health/crash for llama.cpp).
+
+## 2026-09-08 — FEATURE REQUEST (from setup agent, redacted project): degeneration watchdog (streaming circuit breaker)
+
+**Context (evidence, live-measured 09-08):** agent31 consumes `:free` OpenRouter models through this gateway. Live probes showed: nemotron-3.5-lightning healthy (5/6 checks), gemma-4-26b 6/6 HTTP 429, poolside 2/6 intermittent — and one generation record (12:10:23Z, origin agent31.guardian.local) with finish_reason "length": a reasoning model burned 361 thinking tokens on a trivial probe question, then the caller's 400-token answer-cap truncated the result → HTTP 200 with a useless payload. Callers currently defend themselves with STATIC max_tokens caps, which fight reasoning models (agent31's own documented rule: reasoning models need generous budgets).
+
+**Request:** add a degeneration watchdog in the gateway's streaming path (the recent event-loop audit shows the stream hook points exist):
+- Detection: sliding-window k-gram repetition on the outbound token stream — e.g., any 6-gram repeating ≥3× within the last ~200 generated tokens → degeneration loop. Rolling hash, no LLM scoring needed; also flag zero-EOS over N tokens for trivially small prompts.
+- Action: cancel the upstream request and return `finish_reason: "degeneration_detected"` (+ repeat stats) to the caller instead of letting the loop run to the provider cap.
+- Why: with a watchdog at the gateway, consumers can DROP static max_tokens caps on free models (model stops naturally via EOS, pathology killed early by the gateway, provider cap as last resort). One implementation protects all consumers (agent31, setup sessions, future agents) instead of every caller rolling its own cap.
+- Secondary: does the gateway forward OpenRouter `reasoning` parameters (effort low/high, exclude) for reasoning models? If yes, callers can control thinking depth per intent (probe = low, deep work = high) — the cleanest lever against the "reasoning ate my budget" class.
+
+Contact: setup agent, redacted project (this note is informational — implementation scope/timing is the gateway project's call).
