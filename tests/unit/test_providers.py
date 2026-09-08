@@ -13,9 +13,9 @@ from unittest.mock import patch
 import httpx
 import pytest
 
+from app.proxy.cloud_catalog import CloudModelCatalog
 from app.proxy.providers import (
     CloudProvider,
-    ContextCatalog,
     ProviderRegistry,
     _expand_env,
 )
@@ -289,7 +289,13 @@ class TestCloudContextMetadata:
 
     @pytest.mark.asyncio
     async def test_cloud_context_catalog_is_cached_by_provider(self, settings_with_providers: Path):
+        # Consolidation (2026-09-02): the dynamic CloudModelCatalog is the
+        # SINGLE fetch source — context sizes ride along on the catalog fetch
+        # and the registry reads them through the bound reader (no second HTTP
+        # fetch anywhere).
         registry = ProviderRegistry(settings_path=settings_with_providers)
+        catalog = CloudModelCatalog(registry)
+        registry.set_context_catalog_lookup(catalog.get_context_window)
         requested_urls = []
 
         class FakeResponse:
@@ -321,7 +327,10 @@ class TestCloudContextMetadata:
                 requested_urls.append(url)
                 return FakeResponse()
 
-        with patch("app.proxy.providers.httpx.AsyncClient", FakeAsyncClient):
+        with patch("app.proxy.cloud_catalog.httpx.AsyncClient", FakeAsyncClient):
+            provider = registry.get_provider_for_model("openai/gpt-4o")
+            await catalog.refresh_provider(provider)
+            # Both reads are pure in-memory lookups — no second fetch.
             first = await registry.get_cloud_context_window("openai/gpt-4o")
             second = await registry.get_cloud_context_window("openai/gpt-4o")
 
@@ -351,6 +360,8 @@ class TestCloudContextMetadata:
             )
         )
         registry = ProviderRegistry(settings_path=settings)
+        catalog = CloudModelCatalog(registry)
+        registry.set_context_catalog_lookup(catalog.get_context_window)
         requested_urls = []
 
         class FakeResponse:
@@ -382,7 +393,8 @@ class TestCloudContextMetadata:
                 requested_urls.append(url)
                 return FakeResponse()
 
-        with patch("app.proxy.providers.httpx.AsyncClient", FakeAsyncClient):
+        with patch("app.proxy.cloud_catalog.httpx.AsyncClient", FakeAsyncClient):
+            await catalog.refresh_provider(registry.get_provider_for_model("openai/gpt-4o"))
             ctx = await registry.get_cloud_context_window("openai/gpt-4o")
 
         assert ctx == 1048576
@@ -391,6 +403,8 @@ class TestCloudContextMetadata:
     @pytest.mark.asyncio
     async def test_cloud_catalog_uses_effective_per_key_credential(self, settings_with_providers: Path):
         registry = ProviderRegistry(settings_path=settings_with_providers)
+        catalog = CloudModelCatalog(registry)
+        registry.set_context_catalog_lookup(catalog.get_context_window)
         effective_provider = CloudProvider(
             name="openrouter",
             base_url="https://openrouter.ai/api/v1",
@@ -419,7 +433,10 @@ class TestCloudContextMetadata:
                 captured_headers.update(headers)
                 return FakeResponse()
 
-        with patch("app.proxy.providers.httpx.AsyncClient", FakeAsyncClient):
+        with patch("app.proxy.cloud_catalog.httpx.AsyncClient", FakeAsyncClient):
+            # The single fetch honors the effective (per-key) credential…
+            await catalog.refresh_provider(effective_provider)
+            # …and the lookup reads from that provider's stored catalog.
             context_window = await registry.get_cloud_context_window(
                 "openrouter/moonshotai/kimi-k3",
                 provider=effective_provider,
@@ -433,15 +450,21 @@ class TestCloudContextMetadata:
         self,
         settings_with_providers: Path,
     ):
+        """A failed refresh keeps the last successful catalog (incl. context map)."""
         registry = ProviderRegistry(settings_path=settings_with_providers)
+        catalog = CloudModelCatalog(registry)
+        registry.set_context_catalog_lookup(catalog.get_context_window)
         provider = registry.get_provider_for_model("openai/gpt-4o")
         assert provider is not None
-        registry._context_catalogs[registry._catalog_cache_key(provider)] = ContextCatalog(
-            fetched_at=0.0,
-            context_windows={"openai/gpt-4o": 128000},
-        )
 
-        class FailingAsyncClient:
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"data": [{"id": "openai/gpt-4o", "context_length": 128000}]}
+
+        class FakeAsyncClient:
             def __init__(self, *args, **kwargs):
                 pass
 
@@ -452,12 +475,76 @@ class TestCloudContextMetadata:
                 return False
 
             async def get(self, url, headers):
+                return FakeResponse()
+
+        class FailingAsyncClient(FakeAsyncClient):
+            async def get(self, url, headers):
                 raise httpx.ConnectError("temporary catalog outage")
 
-        with patch("app.proxy.providers.httpx.AsyncClient", FailingAsyncClient):
-            context_window = await registry.get_cloud_context_window("openai/gpt-4o")
+        with patch("app.proxy.cloud_catalog.httpx.AsyncClient", FakeAsyncClient):
+            await catalog.refresh_provider(provider)
+        with patch("app.proxy.cloud_catalog.httpx.AsyncClient", FailingAsyncClient):
+            await catalog.refresh_provider(provider)
 
-        assert context_window == 128000
+        # Refresh failed → previous catalog (incl. context) stays intact.
+        assert await registry.get_cloud_context_window("openai/gpt-4o") == 128000
+
+    @pytest.mark.asyncio
+    async def test_cloud_context_reader_unbound_returns_none(self, settings_with_providers: Path):
+        """Fail-safe: before wiring, no upstream context data and no crash."""
+        registry = ProviderRegistry(settings_path=settings_with_providers)
+        assert await registry.get_cloud_context_window("openai/gpt-4o") is None
+
+    def test_context_lookup_survives_old_disk_cache_without_context(self, settings_with_providers: Path):
+        """Backward compat: caches written before consolidation lack the
+        'context' map — the reader returns None instead of raising."""
+        registry = ProviderRegistry(settings_path=settings_with_providers)
+        catalog = CloudModelCatalog(registry)
+        catalog._catalogs["openrouter"] = {
+            "fetched_at": 123.0,
+            "models": {"openai/gpt-4o": "openai/gpt-4o"},
+            "reasoning": {},
+            "auth_error": False,
+        }
+        registry.set_context_catalog_lookup(catalog.get_context_window)
+
+        assert catalog.get_context_window("openrouter", "openai/gpt-4o") is None
+
+    @pytest.mark.asyncio
+    async def test_context_key_space_matches_old_extractor(self, settings_with_providers: Path):
+        """The catalog stores context under canonical_model_id(raw_id) — the
+        exact key space the pre-consolidation registry extractor used."""
+        registry = ProviderRegistry(settings_path=settings_with_providers)
+        catalog = CloudModelCatalog(registry)
+        registry.set_context_catalog_lookup(catalog.get_context_window)
+
+        class FakeResponse:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"data": [{"id": "openai/gpt-4o", "context_length": 128000}]}
+
+        class FakeAsyncClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, traceback):
+                return False
+
+            async def get(self, url, headers):
+                return FakeResponse()
+
+        with patch("app.proxy.cloud_catalog.httpx.AsyncClient", FakeAsyncClient):
+            await catalog.refresh_provider(registry.get_provider_for_model("openai/gpt-4o"))
+
+        assert await registry.get_cloud_context_window("openai/gpt-4o") == 128000
+        assert await registry.get_cloud_context_window(
+            "openrouter/openai/gpt-4o"
+        ) == 128000
 
 
 # ── Disabled providers ─────────────────────────────────────────────────

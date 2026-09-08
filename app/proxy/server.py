@@ -137,6 +137,10 @@ _cloud_inf.init(provider_registry)
 # Dynamic cloud model catalog — fetches/normalizes/caches each provider's
 # /v1/models into {provider}/{brand}/{model} addresses (cloud-access redesign).
 cloud_catalog = CloudModelCatalog(provider_registry)
+# Catalog consolidation (2026-09-02): the dynamic catalog is the SINGLE fetch
+# source for provider /models — bind it as the registry's context-window reader
+# (replaces the registry's own second HTTP fetch).
+provider_registry.set_context_catalog_lookup(cloud_catalog.get_context_window)
 
 
 # ── Bare-name catalog probe (G3, 2026-09-02) ────────────────────────────

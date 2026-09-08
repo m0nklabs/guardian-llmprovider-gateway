@@ -28,7 +28,6 @@ rate limiting and concurrency.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 import os
@@ -38,7 +37,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-import httpx
 import yaml
 
 from app.config_loader import provider_settings_documents
@@ -51,15 +49,6 @@ logger = logging.getLogger("Guardian.Providers")
 
 # Matches ``${ENV_VAR}`` or ``$ENV_VAR`` in config strings.
 _ENV_VAR_PATTERN = re.compile(r"\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)\}")
-
-CONTEXT_CATALOG_TTL_SECONDS = 3600.0
-@dataclass(frozen=True)
-class ContextCatalog:
-    """A timestamped upstream model catalog reduced to context windows."""
-
-    fetched_at: float
-    context_windows: dict[str, int]
-
 
 def _expand_env(value: str) -> str:
     """Expand ``${VAR}`` references in a string using process environment.
@@ -165,8 +154,13 @@ class ProviderRegistry:
         # legacy declaration-order behavior.  Survives :meth:`reload`.
         self._catalog_probe: Callable[[str, str], bool] | None = None
         self._context_overrides: dict[str, int] = {}
-        self._context_catalogs: dict[str, ContextCatalog] = {}
-        self._context_catalog_locks: dict[str, asyncio.Lock] = {}
+        # Optional context-window reader injected via
+        # :meth:`set_context_catalog_lookup` (catalog consolidation, 2026-09-02):
+        # the dynamic CloudModelCatalog is the SINGLE fetch source for the
+        # provider /models endpoint and now also stores context sizes, so this
+        # registry no longer performs its own second HTTP fetch.  ``None``
+        # (before wiring) yields no upstream context data.
+        self._context_catalog_lookup: Callable[[str, str], int | None] | None = None
         self.reload()
 
     # ── Loading ──────────────────────────────────────────────────────
@@ -176,8 +170,6 @@ class ProviderRegistry:
         self._providers.clear()
         self._model_to_provider.clear()
         self._prefix_to_provider.clear()
-        self._context_catalogs.clear()
-        self._context_catalog_locks.clear()
 
         raw_config = self._load_settings_config()
         raw_overrides = raw_config.get("context_overrides", {})
@@ -573,65 +565,16 @@ class ProviderRegistry:
         provider = self.get_provider_for_model(model_name)
         return provider, canonical_name
 
-    @classmethod
-    def _extract_context_windows(cls, payload: Any) -> dict[str, int]:
-        """Extract valid context sizes from OpenAI-compatible model catalogs."""
-        if not isinstance(payload, dict):
-            return {}
-        entries = payload.get("data", payload.get("models", []))
-        if not isinstance(entries, list):
-            return {}
+    def set_context_catalog_lookup(
+        self,
+        lookup: Callable[[str, str], int | None] | None,
+    ) -> None:
+        """Bind the single-source context reader (CloudModelCatalog.get_context_window).
 
-        context_windows: dict[str, int] = {}
-        for entry in entries:
-            if not isinstance(entry, dict):
-                continue
-            model_id = entry.get("id") or entry.get("name")
-            if not isinstance(model_id, str) or not model_id:
-                continue
-            context_window = cls._parse_positive_integer(entry.get("context_length"))
-            if context_window is None:
-                context_window = cls._parse_positive_integer(entry.get("max_input_tokens"))
-            if context_window is not None:
-                context_windows[cls.canonical_model_id(model_id)] = context_window
-        return context_windows
-
-    async def _get_context_catalog(self, provider: CloudProvider) -> ContextCatalog:
-        """Fetch a provider catalog at most once per configured TTL window."""
-        cache_key = self._catalog_cache_key(provider)
-        now = time.monotonic()
-        cached = self._context_catalogs.get(cache_key)
-        if cached is not None and now - cached.fetched_at < CONTEXT_CATALOG_TTL_SECONDS:
-            return cached
-
-        lock = self._context_catalog_locks.setdefault(cache_key, asyncio.Lock())
-        async with lock:
-            now = time.monotonic()
-            cached = self._context_catalogs.get(cache_key)
-            if cached is not None and now - cached.fetched_at < CONTEXT_CATALOG_TTL_SECONDS:
-                return cached
-
-            context_windows: dict[str, int] = {}
-            catalog_url = f"{provider.base_url}{provider.catalog_url or '/models'}"
-            try:
-                headers = self.build_forward_headers(provider)
-                timeout_seconds = min(max(provider.timeout_seconds, 1.0), 10.0)
-                async with httpx.AsyncClient(timeout=timeout_seconds) as client:
-                    response = await client.get(catalog_url, headers=headers)
-                response.raise_for_status()
-                context_windows = self._extract_context_windows(response.json())
-            except (httpx.HTTPError, ValueError, TypeError) as exc:
-                logger.warning(
-                    "⚠️  Unable to refresh context catalog for provider '%s'; preserving last known context data: %s",
-                    provider.name,
-                    exc,
-                )
-                if cached is not None:
-                    context_windows = cached.context_windows
-
-            catalog = ContextCatalog(fetched_at=now, context_windows=context_windows)
-            self._context_catalogs[cache_key] = catalog
-            return catalog
+        The reader receives ``(provider_name, canonical_model_id)`` and returns
+        the upstream-advertised context window, or ``None`` when unknown.
+        """
+        self._context_catalog_lookup = lookup
 
     async def get_cloud_context_window(
         self,
@@ -647,8 +590,9 @@ class ProviderRegistry:
         effective_provider = provider or resolved_provider
         if effective_provider is None or not canonical_name:
             return None
-        catalog = await self._get_context_catalog(effective_provider)
-        return catalog.context_windows.get(canonical_name)
+        if self._context_catalog_lookup is None:
+            return None
+        return self._context_catalog_lookup(effective_provider.name, canonical_name)
 
     # ── Model metadata ───────────────────────────────────────────────
 
