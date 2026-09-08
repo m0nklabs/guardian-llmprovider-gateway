@@ -19,6 +19,8 @@ from contextlib import suppress
 from typing import Any
 
 import httpx
+
+from app.gateway.degeneration import log_cutoff, make_detector
 from fastapi import HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
@@ -718,12 +720,27 @@ async def forward_to_cloud_provider(
                     policy_result=capture_policy_result,
                 ) if capture_ctx is not None else None
             else:
+                _cloud_degeneration_cut = False
                 _cloud_content, _cloud_tool_calls = _extract_cloud_response_content(payload)
                 # Reasoning is always captured separately from content, and
                 # content stays null when the model returned null content
                 # (e.g. OpenRouter puts reasoning at message.reasoning).
                 _cloud_reasoning = _extract_cloud_reasoning_content(payload)
                 _cloud_finish_reason = _extract_cloud_finish_reason(payload)
+                # ── Degeneration guard (non-stream): trim a repetition loop ──
+                _deg_content = _cloud_content or ""
+                if _deg_content:
+                    _deg_v = make_detector().run_full(_deg_content)
+                    if _deg_v is not None:
+                        _cloud_degeneration_cut = True
+                        _deg_cut = len(_deg_content) - _deg_v.cut_from_end
+                        try:
+                            payload["choices"][0]["message"]["content"] = _deg_content[:_deg_cut]
+                            payload["choices"][0]["finish_reason"] = "length"
+                        except (KeyError, IndexError, TypeError):
+                            pass
+                        _cloud_finish_reason = "length"
+                        log_cutoff(model_name, _deg_v)
                 _cloud_native_finish_reason = _extract_cloud_native_finish_reason(payload)
                 _cloud_usage_mirror = _extract_cloud_usage_mirror(payload)
                 # Token counts, None-safe and int-coerced (C2): a missing or
@@ -753,6 +770,7 @@ async def forward_to_cloud_provider(
                     cost=_cloud_usage_mirror.get("cost"),
                     provider_name=_cloud_usage_mirror.get("provider_name"),
                     http_status=resp.status_code,
+                    degeneration_cutoff=_cloud_degeneration_cut,
                     streamed=False,
                     # Non-streaming cloud request: neither leg streamed.
                     streamed_ingress=False,
@@ -820,8 +838,16 @@ async def forward_to_cloud_provider(
     if capture_ctx is not None:
         _cloud_assembler = StreamResponseAssembler()
 
+    _cloud_deg_detector = make_detector()
+    _cloud_degeneration_cut = False
+
     async def _read_sse_lines():
-        """Yield raw SSE lines from the upstream response with watchdog."""
+        """Yield raw SSE lines from the upstream response with watchdog.
+
+        Degeneration guard: feed every content delta; on a detected
+        repetition loop stop consuming upstream and synthesize a clean
+        OpenAI finish (finish_reason "length") so the client sees a normal
+        stream end — no budget burned on the loop."""
         watchdog = StreamProgressWatchdog(provider.timeout_seconds)
         async for line in _iter_sse_lines_with_watchdog(
             resp,
@@ -832,6 +858,39 @@ async def forward_to_cloud_provider(
             model_name=model_name,
             heartbeat_interval_s=STREAM_HEARTBEAT_INTERVAL_S,
         ):
+            if (
+                _cloud_deg_detector.enabled
+                and line.startswith("data: ")
+                and "[DONE]" not in line
+            ):
+                try:
+                    _deg_data = json.loads(line[6:])
+                    _deg_delta = (_deg_data.get("choices") or [{}])[0].get("delta") or {}
+                    _deg_text = (
+                        _deg_delta.get("content")
+                        or _deg_delta.get("reasoning_content")
+                        or ""
+                    )
+                    if _deg_text:
+                        _deg_v = _cloud_deg_detector.feed(_deg_text)
+                        if _deg_v is not None:
+                            nonlocal _cloud_degeneration_cut
+                            _cloud_degeneration_cut = True
+                            log_cutoff(model_name, _deg_v)
+                            _deg_fin = {
+                                "id": f"guardian-deg-{uuid.uuid4().hex[:12]}",
+                                "object": "chat.completion.chunk",
+                                "created": int(time.time()),
+                                "model": model_name,
+                                "choices": [
+                                    {"index": 0, "delta": {}, "finish_reason": "length"}
+                                ],
+                            }
+                            yield "data: " + json.dumps(_deg_fin)
+                            yield "data: [DONE]"
+                            return
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    pass
             yield line
 
     _cloud_stream_cancelled = False
@@ -991,6 +1050,7 @@ async def forward_to_cloud_provider(
                         prompt_tokens=usage_totals["prompt_tokens"],
                         completion_tokens=usage_totals["completion_tokens"],
                         http_status=resp.status_code,
+                        degeneration_cutoff=_cloud_degeneration_cut,
                         streamed=True,
                         # Cloud streaming: the upstream leg streams because the
                         # client requested streaming (is_stream gates both).

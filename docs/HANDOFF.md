@@ -92,3 +92,5 @@ Contact: setup agent, redacted project (this note is informational — implement
 - **72h-soak afgesloten:** 26 dagen live, 41.044 events, 169/172 bestanden gezond, 0 parse-falen; 3 truncaties = crash-slachtoffers (niet meer reproduceerbaar).
 - **Nul-delta-meting + gap-vrij architectureel:** alle event-loop-blokkades uit de audit verwijderd (`f38af54`/`97de6ea`); structural guard 19 modules; via-gateway p95=2ms, 0 gaps>0.5s.
 - **C-feedback dossiers:** volledig afgehandeld door PR #17 (`ef483dd`) — C2/C7 refutaties, C8-C11 live; onafhankelijk herverifieerd.
+
+- **Degeneratie-guard LIVE-bouw afgerond (`app/gateway/degeneration.py`, schema 1.2.0):** server-side cutoff van repetition-loops (operator-feature, koelkast-noot hieronder blijft staan), thresholds in `config/global.settings.yaml` `degeneration:`, kill-switch `enabled: false`. Pins 17×, gate groen; deploy + live-sanity volgt in deze sessie. Open: thresholds tunen op echte degeneratie-cases via capture-veld `degeneration_cutoff` (monitoring), en de letter-level-vrijstelling (q=1) her-evalueren als er "aaaa"-cases opduiken.

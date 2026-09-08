@@ -99,3 +99,11 @@ HANDOFF 22.7→11.9 kB: 24 afgeronde verhaal-blokken → docs/ARCHIVED_HANDOFFS.
 
 ## 2026-09-02 — compaction-regel verfijnd (operator): archiveer eerst verbatim, componeer dan LICHT
 De eerste pass verving 24 entries door één bulk-zin — te grof. Nieuwe regel (vastgelegd in dsh-config-private ): archiveer verbatim, daarna per-entry one-liner (essentie + refs) in de handoff. Retroactief toegepast: HANDOFF 13.3 kB met lichte lijst.
+
+## 2026-09-02 — Degeneratie-guard gebouwd (operator-feature: herhalende tokenoutput afkappen)
+
+- **Feature:** bij een repetition-loop in modeloutput kapt Guardian de stream server-side af met een gesynthetiseerde standaard `finish_reason: "length"` (OpenAI) / `done_reason: "length"` (Ollama) — de harness kan met ruime `max_tokens`-budgetten werken zonder dat degeneratie die verbrandt. Cloud (streaming via `_read_sse_lines()` — één detector voedt óók de Anthropic-vertaler) + lokaal (chat én generate) + non-stream (payload-truncatie, één loop-instantie blijft staan).
+- **Kernles (harmonische matches):** een period-p-loop is óók een 2p/3p-loop; period-floors helpen niet tegen korte echo's ("ha "×200 matcht period 6). Fix: altijd de **fundamentele (kleinste) period q** bepalen; q < min_period (6) → vrijgesteld. Bewuste trade-off: letter-level loops (q=1, "aaaa...") zijn vrijgesteld (niet te onderscheiden van scheidingslijnen/fills); woord-/zin-level loops (het echte LLM-degeneratie-venster) worden gevangen. Deliberate, gedocumenteerd in tests.
+- **Config:** `degeneration:` in global.settings.yaml (enabled/min_period/max_period/min_repeats/min_repeat_bytes=240/max_window_chars=4096), mtime-gated cache; kill-switch = `enabled: false`.
+- **Capture:** additief veld `degeneration_cutoff: true` op request_completed, schema 1.2.0; streaming-dispatch krijgt de vlag via `_dispatch_capture_stream_completed(degeneration_cutoff=...)`.
+- **Pins:** 17 in tests/unit/test_degeneration.py (detector-math, false-positives: ha/OK/listen/code, kill-switch, feed-midstream, config-loader, schema-veld, **full-wiring stream-cut**: degenererende SSE → `finish_reason:"length"`+`[DONE]`+capture-vlag). Gate-pak de versie-pin (1.1.0→1.2.0 bijgewerkt).
