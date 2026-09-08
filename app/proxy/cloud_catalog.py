@@ -157,6 +157,10 @@ class CloudModelCatalog:
                 # Restore reasoning metadata when present (older caches lack it).
                 if not isinstance(stored.get("reasoning"), dict):
                     stored["reasoning"] = {}
+                # Restore consolidated context map when present (older caches
+                # lack it; the next refresh fills it).
+                if not isinstance(stored.get("context"), dict):
+                    stored["context"] = {}
                 self._catalogs[provider.name] = stored
             if self._catalogs:
                 logger.info(
@@ -328,6 +332,7 @@ class CloudModelCatalog:
         brand = self._default_brand(provider)
         normalized: dict[str, str] = {}
         reasoning_by_model: dict[str, dict[str, Any]] = {}
+        context_by_model: dict[str, int] = {}
         entries = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(entries, list):
             self._set_auth_error(provider.name, False)
@@ -347,6 +352,17 @@ class CloudModelCatalog:
             reasoning = self._extract_reasoning(entry)
             if reasoning:
                 reasoning_by_model[norm] = reasoning
+            # Consolidated (2026-09-02): the provider /models endpoint is now
+            # fetched ONCE — context sizes ride along here instead of a second
+            # independent fetch in ProviderRegistry._get_context_catalog.
+            # Key space matches the old extractor: canonical_model_id(raw_id).
+            raw_context = entry.get("context_length")
+            if raw_context is None:
+                raw_context = entry.get("max_input_tokens")
+            if isinstance(raw_context, int) and not isinstance(raw_context, bool) and raw_context > 0:
+                ctx_key = self._registry.canonical_model_id(raw_id.strip())
+                if ctx_key:
+                    context_by_model[ctx_key] = raw_context
         if not normalized:
             self._set_auth_error(provider.name, False)
             logger.warning("⚠️  Provider '%s' /v1/models returned an empty catalog", provider.name)
@@ -356,6 +372,7 @@ class CloudModelCatalog:
             "fetched_at": time.time(),
             "models": normalized,
             "reasoning": reasoning_by_model,
+            "context": context_by_model,
             "auth_error": False,
         }
         self._persist_cache()
@@ -426,6 +443,28 @@ class CloudModelCatalog:
         if allowlist:
             models = {k: v for k, v in models.items() if k in allowlist}
         return models
+
+    def get_context_window(self, provider_name: str, normalized_id: str) -> int | None:
+        """Return the upstream-advertised context window for a model id.
+
+        ``normalized_id`` is in the registry-canonical key space (the same the
+        pre-consolidation registry extractor used).  Returns ``None`` when the
+        provider catalog has no context data (cold cache or unadvertised
+        model) — callers fall back to the configured default.  Deliberately
+        does NOT apply ``catalog_allowlist``: the pre-consolidation context
+        fetch never filtered either, and context is needed for models that
+        routing already resolved.
+        """
+        data = self._catalogs.get(provider_name)
+        if not isinstance(data, dict):
+            return None
+        context_map = data.get("context")
+        if not isinstance(context_map, dict):
+            return None
+        value = context_map.get(normalized_id)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+        return None
 
     def get_model_reasoning(self, provider_name: str, normalized_id: str) -> dict[str, Any]:
         """Return reasoning-effort metadata for a ``{brand}/{model}`` id.
