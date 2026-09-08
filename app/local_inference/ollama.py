@@ -17,6 +17,8 @@ from contextlib import suppress
 from typing import Any
 
 import httpx
+
+from app.gateway.degeneration import log_cutoff, make_detector
 from fastapi import HTTPException, Request
 from fastapi.responses import StreamingResponse
 
@@ -457,6 +459,10 @@ async def chat_ollama(request: Request, client_id: str):
                     )
                 )
                 try:
+                    # Degeneration guard (streaming): cut repetition loops
+                    # server-side; the shared done-chunk closes the stream cleanly.
+                    _deg_detector = make_detector()
+                    _local_deg_cut = False
                     watchdog = StreamProgressWatchdog(timeout_sec)
                     async for chunk in _iter_sse_lines_with_watchdog(
                         r,
@@ -487,6 +493,12 @@ async def chat_ollama(request: Request, client_id: str):
                                     delta = data["choices"][0].get("delta", {})
                                     content = _extract_assistant_delta_text(delta)
                                     if content:
+                                        if _deg_detector.enabled:
+                                            _deg_v = _deg_detector.feed(content)
+                                            if _deg_v is not None:
+                                                _local_deg_cut = True
+                                                log_cutoff(model, _deg_v)
+                                                break
                                         ollama_chunk = {
                                             "model": model,
                                             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
@@ -515,6 +527,7 @@ async def chat_ollama(request: Request, client_id: str):
                             "model": model, 
                             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()), 
                             "done": True,
+                            **({"done_reason": "length"} if _local_deg_cut else {}),
                             "total_duration": 0,
                             "load_duration": 0,
                             "prompt_eval_count": 0,
@@ -550,6 +563,7 @@ async def chat_ollama(request: Request, client_id: str):
                                 model, _capture_ctx,
                                 _capture_policy_result, _ollama_capture_assembler,
                                 usage_totals, "chat/completions", r.status_code,
+                                degeneration_cutoff=_local_deg_cut,
                             )
                         except Exception:
                             pass
@@ -574,12 +588,21 @@ async def chat_ollama(request: Request, client_id: str):
                 )
                 data = json.loads(data)
                 content = _extract_assistant_message_text(data["choices"][0]["message"])
+                # Degeneration guard (non-stream): trim a repetition loop.
+                _deg_detector = make_detector()
+                _deg_v = _deg_detector.run_full(content) if (content and _deg_detector.enabled) else None
+                if _deg_v is not None:
+                    content = content[: len(content) - _deg_v.cut_from_end]
+                    data["choices"][0]["message"]["content"] = content
+                    data["choices"][0]["finish_reason"] = "length"
+                    log_cutoff(model, _deg_v)
                 _record_usage_from_payload(client_id, "/api/chat", model, data, request=request)
                 ollama_resp = {
                     "model": model,
                     "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
                     "message": {"role": "assistant", "content": content},
                     "done": True,
+                    **({"done_reason": "length"} if _deg_v is not None else {}),
                     "total_duration": 0,
                     "load_duration": 0,
                     "prompt_eval_count": data.get("usage", {}).get("prompt_tokens", 0),
@@ -873,6 +896,10 @@ async def generate_ollama(request: Request, client_id: str):
                     )
                 )
                 try:
+                    # Degeneration guard (streaming): cut repetition loops
+                    # server-side; the shared done-chunk closes the stream cleanly.
+                    _deg_detector = make_detector()
+                    _local_deg_cut = False
                     watchdog = StreamProgressWatchdog(timeout_sec)
                     async for chunk in _iter_sse_lines_with_watchdog(
                         r,
@@ -902,6 +929,12 @@ async def generate_ollama(request: Request, client_id: str):
                                     delta = data["choices"][0].get("delta", {})
                                     content = _extract_assistant_delta_text(delta)
                                     if content:
+                                        if _deg_detector.enabled:
+                                            _deg_v = _deg_detector.feed(content)
+                                            if _deg_v is not None:
+                                                _local_deg_cut = True
+                                                log_cutoff(model, _deg_v)
+                                                break
                                         # /api/generate response format: { "response": "..." }
                                         ollama_chunk = {
                                             "model": model,
@@ -931,6 +964,7 @@ async def generate_ollama(request: Request, client_id: str):
                             "model": model, 
                             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()), 
                             "done": True,
+                            **({"done_reason": "length"} if _local_deg_cut else {}),
                             "response": "",
                             "total_duration": 0,
                             "load_duration": 0,
@@ -967,6 +1001,7 @@ async def generate_ollama(request: Request, client_id: str):
                                 model, _capture_ctx,
                                 _capture_policy_result, _ollama_capture_assembler,
                                 usage_totals, "chat/completions", r.status_code,
+                                degeneration_cutoff=_local_deg_cut,
                             )
                         except Exception:
                             pass

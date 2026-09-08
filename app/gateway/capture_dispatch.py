@@ -222,6 +222,7 @@ def dispatch_capture_request_completed(
     streamed: bool | None = None,
     streamed_ingress: bool | None = None,
     streamed_upstream: bool | None = None,
+    degeneration_cutoff: bool | None = None,
     incomplete: bool | None = None,
     attempts: int | None = None,
 ) -> None:
@@ -250,6 +251,7 @@ def dispatch_capture_request_completed(
             streamed=streamed,
             streamed_ingress=streamed_ingress,
             streamed_upstream=streamed_upstream,
+        degeneration_cutoff=degeneration_cutoff,
             incomplete=incomplete,
             attempts=attempts,
         )
@@ -318,6 +320,7 @@ def dispatch_capture_stream_completed(
     usage_totals: dict[str, Any],
     path: str,
     status_code: int,
+    degeneration_cutoff: bool = False,
 ) -> None:
     """Dispatch request_completed for the streaming path (fail-open)."""
     if ctx is None or policy_result is None or not policy_result.should_capture:
@@ -337,6 +340,7 @@ def dispatch_capture_stream_completed(
             native_tokens_cached=assembled.get("native_tokens_cached"),
             cost=assembled.get("cost"),
             provider_name=assembled.get("provider_name"),
+            degeneration_cutoff=degeneration_cutoff,
             prompt_tokens=usage_totals.get("prompt_tokens") or None,
             completion_tokens=usage_totals.get("completion_tokens") or None,
             http_status=status_code,

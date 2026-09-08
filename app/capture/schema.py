@@ -38,7 +38,7 @@ SCHEMA_NAME = "guardian_capture_v1"
 #: rich upstream usage mirror (completion_tokens_details, native token
 #: counts, cost, provider_name), caller correlation identity
 #: (caller_request_id / app_title / app_referer) and explicit streamed legs.
-SCHEMA_VERSION = "1.1.0"
+SCHEMA_VERSION = "1.2.0"
 
 #: Maximum length for caller-supplied identity strings stored on events
 #: (caller_request_id, app_title, app_referer).
@@ -454,6 +454,7 @@ def build_request_completed_event(
     streamed_ingress: bool | None = None,
     streamed_upstream: bool | None = None,
     incomplete: bool | None = None,
+    degeneration_cutoff: bool | None = None,
     attempts: int | None = None,
     sequence: int = 1,
 ) -> dict[str, Any]:
@@ -530,6 +531,11 @@ def build_request_completed_event(
         event["cost"] = cost_val
     if isinstance(provider_name, str) and provider_name:
         event["provider_name"] = provider_name
+
+    # Additive 1.2.0 — repetition-loop cutoff (server-side degeneration
+    # guard). Field stays absent unless the cutoff actually fired.
+    if degeneration_cutoff:
+        event["degeneration_cutoff"] = True
 
     if queue_wait_ms is not None:
         event["queue_wait_ms"] = float(queue_wait_ms)

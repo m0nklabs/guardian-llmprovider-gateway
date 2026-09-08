@@ -80,9 +80,9 @@ class TestSchemaIdentity:
         assert SCHEMA_VERSION.startswith("1.")
         assert re.match(r"^1\.\d+\.\d+$", SCHEMA_VERSION)
 
-    def test_schema_version_bumped_to_1_1_0(self):
-        # Capture-feedback batch (C1-C11) is an additive minor bump.
-        assert SCHEMA_VERSION == "1.1.0"
+    def test_schema_version_bumped_to_1_2_0(self):
+        # Additive minor bumps: C1-C11 batch (1.1.0), degeneration_cutoff field (1.2.0).
+        assert SCHEMA_VERSION == "1.2.0"
 
 
 # ── Event ID computation ───────────────────────────────────────────────
