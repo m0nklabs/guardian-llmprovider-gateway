@@ -76,6 +76,19 @@ Live WAL counts (current.jsonl): 25× IP, 19× ENV_VAR, 8× API_KEY, 8× AUTH_HE
 
 Contact: setup agent, redacted project (this note is informational — implementation scope/timing is the gateway project's call).
 
-## Afgerond deze sessie (voltekst → `docs/ARCHIVED_HANDOFFS.md`)
+## Afgerond deze sessie (licht gecompacteerd; voltekst → `docs/ARCHIVED_HANDOFFS.md`)
 
-- Model-mismatch contract (503 `model_switch_failed`, live bewezen) · G3 bare-name hijack fix · C-feedback dossiers afgesloten (PR #17 verdicts) · caretaker split-brain + /ensure strict (PR #9/#10 gemerged) · G2 orphan-calls gefixt (raw-ASGI watchers) · adopt-only omzeild verwijderd · test-isolatie (integration default uit) · google-test-note verwijderd · restart-race gefixt (listener-herkenning) · ensure_fresh gewired · pi-models opgeschoond + llama-guardian alias hersteld als symlink · 72h-soak afgesloten (26 dagen, 41k events) · nul-delta-meting + gap-vrij architectureel (97de6ea).
+- **Model-mismatch contract:** 503 `model_switch_failed` op elk lokaal entry-pad, live probe `backend_serving_model_name()` — live bewezen, `ba9467e`.
+- **Caretaker split-brain + /ensure strict:** legacy-launcher weg, /ensure fail-closed + retry — PR #9/#10 gemerged (`ba866ff`/`f0bdeb6`).
+- **G3 bare-name routing hijack:** catalog-gestuurde disambiguatie + `z-ai/` uit nvidia-prefixes — `7d5d32f`, live bewezen.
+- **G2 orphan non-stream calls:** raw-ASGI receive-watchers (cloud + queue), 499-contract — `3fa1479`/`f2d4d9f`/`6db7f5b`, live bewezen (0 tokens verbrand).
+- **`GUARDIAN_STARTUP_ADOPT_ONLY=1` verwijderd** uit beide unit-files; startup-heal weer volledig actief.
+- **UNIT-VALKUIL opgelost:** `llama-guardian.service` is nu een **symlink** op de echte unit (aparte file + drop-ins bewaard als `.disabled-20260902`) — restart via alias veilig.
+- **Test-isolatie:** 20 live integration-tests default gedeselecteerd (`7db5ba3`); de verouderde google-test-note gecorrigeerd (niet reproduceerbaar op HEAD).
+- **Streaming-teardown pin:** client-disconnect tijdens write = `request_cancelled`/`client_disconnect` — `f61c2f1`.
+- **Gateway restart-race gefixt:** listener-herkenning herkent `python3.14 -m app.main` weer (`ec1211e`); post-restart-verificatie (MainPID == listener) standaard.
+- **ensure_fresh gewired** aan `/v1/models` + `/ensure` ERROR→WARNING (`7f777a5`); live 272 modellen, geen fouten.
+- **pi-models opgeschoond:** 216→99 entries, alle resolvem live; backup `models.json.bak-20260902`.
+- **72h-soak afgesloten:** 26 dagen live, 41.044 events, 169/172 bestanden gezond, 0 parse-falen; 3 truncaties = crash-slachtoffers (niet meer reproduceerbaar).
+- **Nul-delta-meting + gap-vrij architectureel:** alle event-loop-blokkades uit de audit verwijderd (`f38af54`/`97de6ea`); structural guard 19 modules; via-gateway p95=2ms, 0 gaps>0.5s.
+- **C-feedback dossiers:** volledig afgehandeld door PR #17 (`ef483dd`) — C2/C7 refutaties, C8-C11 live; onafhankelijk herverifieerd.
