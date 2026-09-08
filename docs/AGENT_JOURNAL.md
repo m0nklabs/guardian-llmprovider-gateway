@@ -107,3 +107,9 @@ De eerste pass verving 24 entries door één bulk-zin — te grof. Nieuwe regel 
 - **Config:** `degeneration:` in global.settings.yaml (enabled/min_period/max_period/min_repeats/min_repeat_bytes=240/max_window_chars=4096), mtime-gated cache; kill-switch = `enabled: false`.
 - **Capture:** additief veld `degeneration_cutoff: true` op request_completed, schema 1.2.0; streaming-dispatch krijgt de vlag via `_dispatch_capture_stream_completed(degeneration_cutoff=...)`.
 - **Pins:** 17 in tests/unit/test_degeneration.py (detector-math, false-positives: ha/OK/listen/code, kill-switch, feed-midstream, config-loader, schema-veld, **full-wiring stream-cut**: degenererende SSE → `finish_reason:"length"`+`[DONE]`+capture-vlag). Gate-pak de versie-pin (1.1.0→1.2.0 bijgewerkt).
+
+## 2026-09-02 — Degeneratie-guard: leesbare marker-injectie toegevoegd (operator-verzoek)
+
+- **Vraag:** "wordt er een bericht meegestuurd als injectie aan het einde van de output, zodat de lezer weet dat er iets mis is gegaan?" — antwoord was: nee, alleen machine-signalen (`finish_reason: length` + capture-veld). Nu wel: bij cutoff injecteert Guardian als **laatste content-delta** `\n\n[guardian: generation cut off - repetition loop detected]` vóór de finish-chunk.
+- **Dekking:** cloud-streaming (marker-delta loopt via de bestaande Anthropic-vertaler automatisch mee als content_block_delta), ollama chat (`message.content`-chunk) en generate (`response`-chunk), en non-stream (append na truncatie). Capture-cloud neemt de marker mee in response_content; de machine-vlag blijft `degeneration_cutoff: true`.
+- **Config:** `degeneration.marker_enabled` (default true) + `degeneration.marker_text` (overridebaar); lege text of false = uit. 21 pins (4 nieuw), gate groen.

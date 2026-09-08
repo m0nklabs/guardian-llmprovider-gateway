@@ -94,3 +94,5 @@ Contact: setup agent, redacted project (this note is informational — implement
 - **C-feedback dossiers:** volledig afgehandeld door PR #17 (`ef483dd`) — C2/C7 refutaties, C8-C11 live; onafhankelijk herverifieerd.
 
 - **Degeneratie-guard LIVE-bouw afgerond (`app/gateway/degeneration.py`, schema 1.2.0):** server-side cutoff van repetition-loops (operator-feature, koelkast-noot hieronder blijft staan), thresholds in `config/global.settings.yaml` `degeneration:`, kill-switch `enabled: false`. Pins 17×, gate groen; deploy + live-sanity volgt in deze sessie. Open: thresholds tunen op echte degeneratie-cases via capture-veld `degeneration_cutoff` (monitoring), en de letter-level-vrijstelling (q=1) her-evalueren als er "aaaa"-cases opduiken.
+
+- **Degeneratie-marker-injectie (operator-verzoek, zelfde sessie):** bij cutoff krijgt de lezer nu een zichtbare slot-marker `\n\n[guardian: generation cut off - repetition loop detected]` als laatste content-delta (alle paden, `marker_enabled`/`marker_text` configureerbaar). Machine-signaal onveranderd (`finish_reason: "length"` + capture-vlag).

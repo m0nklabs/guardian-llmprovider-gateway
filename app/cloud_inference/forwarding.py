@@ -730,12 +730,17 @@ async def forward_to_cloud_provider(
                 # ── Degeneration guard (non-stream): trim a repetition loop ──
                 _deg_content = _cloud_content or ""
                 if _deg_content:
-                    _deg_v = make_detector().run_full(_deg_content)
+                    _deg_det = make_detector()
+                    _deg_v = _deg_det.run_full(_deg_content)
                     if _deg_v is not None:
                         _cloud_degeneration_cut = True
                         _deg_cut = len(_deg_content) - _deg_v.cut_from_end
+                        _deg_marked = _deg_content[:_deg_cut]
+                        _deg_marker = _deg_det.marker_delta()
+                        if _deg_marker:
+                            _deg_marked += _deg_marker
                         try:
-                            payload["choices"][0]["message"]["content"] = _deg_content[:_deg_cut]
+                            payload["choices"][0]["message"]["content"] = _deg_marked
                             payload["choices"][0]["finish_reason"] = "length"
                         except (KeyError, IndexError, TypeError):
                             pass
@@ -877,6 +882,22 @@ async def forward_to_cloud_provider(
                             nonlocal _cloud_degeneration_cut
                             _cloud_degeneration_cut = True
                             log_cutoff(model_name, _deg_v)
+                            _deg_marker = _cloud_deg_detector.marker_delta()
+                            if _deg_marker:
+                                yield "data: " + json.dumps(
+                                    {
+                                        "id": f"guardian-deg-{uuid.uuid4().hex[:12]}",
+                                        "object": "chat.completion.chunk",
+                                        "created": int(time.time()),
+                                        "model": model_name,
+                                        "choices": [
+                                            {
+                                                "index": 0,
+                                                "delta": {"content": _deg_marker},
+                                            }
+                                        ],
+                                    }
+                                )
                             _deg_fin = {
                                 "id": f"guardian-deg-{uuid.uuid4().hex[:12]}",
                                 "object": "chat.completion.chunk",
