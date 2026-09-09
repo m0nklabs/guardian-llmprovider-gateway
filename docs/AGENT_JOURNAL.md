@@ -139,3 +139,10 @@ De eerste pass verving 24 entries door één bulk-zin — te grof. Nieuwe regel 
 - **Deferred:** `/v1/models`-cloud-entries krijgen nog géén `input_modalities`-veld (discovery-metadata; klein vervolgdelen, niet blokkerend voor routing).
 - **Pins:** 10× tests/unit/test_modality_capability.py (list-form, string-form, onbekend, oude-cache-compat, catalog-capable, config-wint, legacy-gedrag, image-fallback-skip).
 - **Pre-existing gevonden tijdens dit werk (niet gefixt, inter-repo-vrij):** server.py F401 `update_gpu_metrics` imported-but-unused (sinds de metrics-cache-refactor; pyflakes-gate-selectie vangt F821, niet F401 — bewijs via git stash).
+
+## 2026-09-02 — Trap 2 live: persist-subset-bug gevonden en gefixt (belangrijke les)
+
+- **Live-vondst na deploy:** disk-cache toonde 0 modalities terwijl de live payload ze WEL had (14 entries met architecture). **Root cause:** `_persist_cache` serialiseerde een expliciete subset (fetched_at/models/reasoning/source) — de geconsolideerde `context`- én `modalities`-mappen vielen STIL weg bij elke disk-write. Dit verklaart ook de eerdere "context_entries=0"-waarneming (toen fout-geïnterpreteerd als "payload heeft geen velden" — dáár apart van bewezen, maar de cache-0 had dit als tweede oorzaak).
+- **Les:** een persist-functie die een expliciete veld-lijst serialiseert valt stilletjes nieuw-geadditieve velden weg. Contract-pin toegevoegd: persist→read roundtrip moet context+modalities overleven (tests/unit/test_modality_capability.py).
+- **Tweede les (modalities_explicit):** de dataclass kon "expliciet text-only" niet van "default text-only" onderscheiden — een operator die `modalities: ["text"]` zet dwingt bewust text-only af (image-capable model niet voor vision). Fix: `modalities_explicit`-veld (builder zet hem op config-declaratie); expliciet wint ALTIJD, implicit defereert naar de catalog.
+- **Live eindstaat (1b9493b):** 14 modality-entries, 7 met image-input, 30 context-entries — de single-fetch bewaart nu ALLE capability-velden en overleeft restarts.
