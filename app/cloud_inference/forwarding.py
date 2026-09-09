@@ -270,6 +270,35 @@ class _CloudClientDisconnected(Exception):
         self.reason = reason
 
 
+#: Endpoints whose successful responses must contain a ``choices`` list.
+#: ``embeddings`` answers with a ``data`` list — different contract, excluded.
+_CHOICES_REQUIRED_PATHS = frozenset({"chat/completions", "completions", "messages"})
+
+
+def _detect_upstream_invalid_response(path: str, payload: Any) -> str | None:
+    """Return a reason string when an HTTP-200 body is not a usable completion.
+
+    Two upstream failure shapes pass through as HTTP 200 today (setup-agent
+    handoff, 2026-09-09): OpenRouter embeds per-choice errors
+    (``choices[].error``) and some providers return a body with no ``choices``
+    at all.  Callers cannot distinguish "empty answer" from "provider down"
+    without bespoke parsing, so the gateway surfaces a real 502 instead.
+    """
+    if not isinstance(payload, dict):
+        return "upstream response is not a JSON object"
+    if path in _CHOICES_REQUIRED_PATHS and "choices" not in payload:
+        return "upstream response has no choices"
+    choices = payload.get("choices")
+    if isinstance(choices, list) and isinstance(choices[0], dict):
+        err = choices[0].get("error")
+        if isinstance(err, dict):
+            return (
+                f"upstream embedded error {err.get('code')}: "
+                f"{err.get('error_type') or err.get('message') or 'unknown'}"
+            )
+    return None
+
+
 async def forward_to_cloud_provider(
     path: str,
     body: bytes,
@@ -720,6 +749,34 @@ async def forward_to_cloud_provider(
                     policy_result=capture_policy_result,
                 ) if capture_ctx is not None else None
             else:
+                # HTTP 200 with a non-completion body: surface a REAL error
+                # instead of passing 200-with-garbage through (setup-agent
+                # handoff, 2026-09-09 — nemotron 200+null+embedded error,
+                # poolside body without choices).
+                _upstream_invalid = _detect_upstream_invalid_response(path, payload)
+                if _upstream_invalid is not None:
+                    _dispatch_capture_request_failed(
+                        capture_ctx,
+                        error_code="upstream_invalid_response",
+                        http_status=502,
+                        sanitized_message=f"Upstream answered 200 but body is not a usable completion: {_upstream_invalid}",
+                        queue_wait_ms=0,
+                        duration_ms=_cloud_capture_duration_ms,
+                        attempts=_cloud_capture_attempts,
+                        policy_result=capture_policy_result,
+                    ) if capture_ctx is not None else None
+                    logger.warning(
+                        "⚠️  Upstream '%s' answered 200 with an unusable body (%s); returning 502",
+                        model_name,
+                        _upstream_invalid,
+                    )
+                    raise HTTPException(
+                        status_code=502,
+                        detail={
+                            "error": "upstream_invalid_response",
+                            "message": _upstream_invalid,
+                        },
+                    )
                 _cloud_degeneration_cut = False
                 _cloud_content, _cloud_tool_calls = _extract_cloud_response_content(payload)
                 # Reasoning is always captured separately from content, and
