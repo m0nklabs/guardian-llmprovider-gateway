@@ -161,6 +161,10 @@ class CloudModelCatalog:
                 # lack it; the next refresh fills it).
                 if not isinstance(stored.get("context"), dict):
                     stored["context"] = {}
+                # Restore modality capability when present (older caches lack
+                # it; the next refresh fills it).
+                if not isinstance(stored.get("modalities"), dict):
+                    stored["modalities"] = {}
                 self._catalogs[provider.name] = stored
             if self._catalogs:
                 logger.info(
@@ -333,6 +337,7 @@ class CloudModelCatalog:
         normalized: dict[str, str] = {}
         reasoning_by_model: dict[str, dict[str, Any]] = {}
         context_by_model: dict[str, int] = {}
+        modalities_by_model: dict[str, dict[str, Any]] = {}
         entries = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(entries, list):
             self._set_auth_error(provider.name, False)
@@ -363,6 +368,11 @@ class CloudModelCatalog:
                 ctx_key = self._registry.canonical_model_id(raw_id.strip())
                 if ctx_key:
                     context_by_model[ctx_key] = raw_context
+            # Trap 2 (2026-09-02): modality capability rides along on the
+            # same single fetch (OpenRouter exposes architecture.modalities).
+            mods = self._extract_modalities(entry)
+            if mods:
+                modalities_by_model[norm] = mods
         if not normalized:
             self._set_auth_error(provider.name, False)
             logger.warning("⚠️  Provider '%s' /v1/models returned an empty catalog", provider.name)
@@ -373,6 +383,7 @@ class CloudModelCatalog:
             "models": normalized,
             "reasoning": reasoning_by_model,
             "context": context_by_model,
+            "modalities": modalities_by_model,
             "auth_error": False,
         }
         self._persist_cache()
@@ -443,6 +454,64 @@ class CloudModelCatalog:
         if allowlist:
             models = {k: v for k, v in models.items() if k in allowlist}
         return models
+
+    @staticmethod
+    def _extract_modalities(entry: dict[str, Any]) -> dict[str, list[str]] | None:
+        """Extract input/output modality capability from a catalog entry.
+
+        Preferred shape: ``architecture.input_modalities`` / ``output_modalities``
+        lists.  Fallback: parse the ``architecture.modality`` string form
+        ``"text+image+video->text"`` (input side before the arrow).  Returns
+        ``None`` when the entry advertises no modality data at all.
+        """
+        architecture = entry.get("architecture")
+        if not isinstance(architecture, dict):
+            return None
+        input_mods = architecture.get("input_modalities")
+        if not isinstance(input_mods, list):
+            modality = architecture.get("modality")
+            if isinstance(modality, str) and "->" in modality:
+                input_side = modality.split("->", 1)[0]
+                input_mods = [m for m in input_side.split("+") if m]
+            else:
+                return None
+        clean_input = sorted(
+            {m.strip().lower() for m in input_mods if isinstance(m, str) and m.strip()}
+        )
+        if not clean_input:
+            return None
+        output_mods = architecture.get("output_modalities")
+        clean_output: list[str] = []
+        if isinstance(output_mods, list):
+            clean_output = sorted(
+                {m.strip().lower() for m in output_mods if isinstance(m, str) and m.strip()}
+            )
+        result: dict[str, list[str]] = {"input": clean_input}
+        if clean_output:
+            result["output"] = clean_output
+        return result
+
+    def get_model_modalities(self, provider_name: str, normalized_id: str) -> dict[str, list[str]] | None:
+        """Return upstream-advertised modality capability for a model id.
+
+        ``normalized_id`` is the catalog key space (``{brand}/{model}``, the
+        same shape as failover-candidate configs).  Returns ``None`` when the
+        provider catalog has no modality data (cold cache, unadvertised model,
+        or an upstream that does not advertise it) — callers then fall back to
+        configured behavior.  Deliberately does NOT apply ``catalog_allowlist``:
+        routing decisions on explicitly configured candidates need the real
+        capability, and the pre-trap-2 config-only path never filtered either.
+        """
+        data = self._catalogs.get(provider_name)
+        if not isinstance(data, dict):
+            return None
+        mods_map = data.get("modalities")
+        if not isinstance(mods_map, dict):
+            return None
+        mods = mods_map.get(normalized_id)
+        if isinstance(mods, dict) and isinstance(mods.get("input"), list) and mods["input"]:
+            return mods
+        return None
 
     def get_context_window(self, provider_name: str, normalized_id: str) -> int | None:
         """Return the upstream-advertised context window for a model id.

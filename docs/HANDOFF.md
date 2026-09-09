@@ -100,3 +100,5 @@ Contact: setup agent, redacted project (this note is informational — implement
 - **Catalogus-consolidatie trap 1 AFGEROND (2026-09-02):** dubbele /models-fetch weg — CloudModelCatalog is nu de enige fetch-bron (bewaart models + reasoning + context); registry leest via DI-reader, geen HTTP meer in providers.py. Pins herleid + 3 nieuwe, gate groen. **Trap 2 (modaliteiten-extractie) is het verplichte vervolg** — basis gereed.
 
 - **OPEN VRAAG (operator, op todo):** rapporteert de caretaker OOM's terug aan Guardian? (OOM-kill detectie + rapportage-oppervlak naar Guardian — inter-repo: m0nklabs/caretaker-llamacpp; raadpleeg caretaker_client/caretaker_runtime-wiring + caretaker-repo status-endpoints).
+
+- **Trap 2 AFGEROND (2026-09-02):** modaliteiten-extractie live — catalog bewaart input/output-modalities (single fetch), failover image-capability beslist config-first, dan catalog. Deferred: `input_modalities`-veld op /v1/models-cloud-entries. **Beide traps van het twee-traps plan zijn nu gesloten.**

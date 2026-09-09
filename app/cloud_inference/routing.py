@@ -164,7 +164,7 @@ def resolve_cloud_vision_fallback(model_name: str) -> str | None:
     first, sep, rest = model_name.partition("/")
     if sep and first == "failover":
         group = _failover_registry.get_group(rest)
-        if group is None or group.has_image_capable_candidate():
+        if group is None or _failover_registry.group_has_image_capable_candidate(group):
             return None
         return group.image_fallback_model
     # Non-failover cloud route: look up the failover registry by the

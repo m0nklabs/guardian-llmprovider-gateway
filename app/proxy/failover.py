@@ -44,6 +44,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
+from typing import Callable
 
 import yaml
 
@@ -274,7 +275,43 @@ class FailoverRegistry:
     def __init__(self, path: Path = FAILOVER_CONFIG_FILE) -> None:
         self._path = path
         self._groups: dict[str, FailoverGroup] = {}
+        # Optional modality reader injected via :meth:`set_modality_lookup`
+        # (trap 2, 2026-09-02): the dynamic CloudModelCatalog is the single
+        # source of upstream modality capability — candidates whose config
+        # does not declare ``modalities`` are judged by the live catalog.
+        self._modality_lookup: Callable[[str, str], tuple[str, ...] | None] | None = None
         self.reload()
+
+    def set_modality_lookup(
+        self,
+        lookup: Callable[[str, str], tuple[str, ...] | None] | None,
+    ) -> None:
+        """Bind the catalog modality reader ``(provider, model) -> input mods``.
+
+        ``None`` unbinds (config-only behavior, backwards compatible).
+        """
+        self._modality_lookup = lookup
+
+    def _candidate_input_modalities(self, candidate: FailoverCandidate) -> tuple[str, ...]:
+        """Resolve a candidate's input modalities: config first, then catalog.
+
+        Explicit ``modalities`` config always wins (override-first principle,
+        same as context_overrides).  Without explicit config the catalog's
+        upstream-advertised capability is used; ``("text",)`` when neither
+        knows (conservative: treat as text-only).
+        """
+        declared = tuple(candidate.modalities)
+        if declared != ("text",):
+            return declared
+        if self._modality_lookup is not None:
+            looked_up = self._modality_lookup(candidate.provider, candidate.model)
+            if looked_up:
+                return looked_up
+        return declared
+
+    def group_has_image_capable_candidate(self, group: FailoverGroup) -> bool:
+        """True if any candidate supports image input (config OR catalog)."""
+        return any("image" in self._candidate_input_modalities(c) for c in group.candidates)
 
     def _load_raw_groups(self) -> dict:
         """Return the ``failover_groups`` map (global.settings.yaml, else legacy file)."""
@@ -360,7 +397,7 @@ class FailoverRegistry:
             for candidate in group.candidates:
                 if candidate.model != model_name:
                     continue
-                if "image" in candidate.modalities:
+                if "image" in self._candidate_input_modalities(candidate):
                     return None
                 return group.image_fallback_model
         return None
