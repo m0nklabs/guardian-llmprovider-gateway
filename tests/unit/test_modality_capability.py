@@ -7,6 +7,7 @@ config always wins.
 """
 
 import httpx
+import json
 import pytest
 
 from app.proxy.cloud_catalog import CloudModelCatalog
@@ -112,6 +113,29 @@ class TestCatalogModalityStorage:
         assert catalog.get_model_modalities("openrouter", "does/not-exist") is None
         assert catalog.get_model_modalities("ghost-provider", "x/y") is None
 
+    def test_persist_roundtrip_keeps_context_and_modalities(self, wired, tmp_path):
+        """Regression: _persist_cache serialized an explicit subset and
+        silently dropped the consolidated maps on every restart."""
+        registry, catalog, _failover = wired
+        cache_file = tmp_path / "cloud_catalog_cache.json"
+        object.__setattr__(catalog, "_cache_file", cache_file)
+        catalog._catalogs["openrouter"] = {
+            "fetched_at": 1.0,
+            "models": {"z-ai/glm-5.3-flash": "z-ai/glm-5.3-flash"},
+            "reasoning": {},
+            "context": {"z-ai/glm-5.3-flash": 131072},
+            "modalities": {
+                "z-ai/glm-5.3-flash": {"input": ["text", "image"], "output": ["text"]}
+            },
+        }
+        catalog._persist_cache()
+        raw = json.loads(cache_file.read_text())
+        assert raw["openrouter"]["modalities"]["z-ai/glm-5.3-flash"]["input"] == [
+            "text",
+            "image",
+        ]
+        assert raw["openrouter"]["context"]["z-ai/glm-5.3-flash"] == 131072
+
     def test_old_cache_without_modalities_map_is_tolerated(self, wired):
         _registry, catalog, _failover = wired
         catalog._catalogs["openrouter"] = {"fetched_at": 1.0, "models": {}}
@@ -127,6 +151,10 @@ class TestFailoverDecision:
         )
         return FailoverGroup(name="vision", candidates=[candidate], image_fallback_model="local-vision")
 
+    def _unbound_registry(self) -> FailoverRegistry:
+        """A registry with NO catalog lookup (pure legacy behavior)."""
+        return FailoverRegistry()
+
     def test_catalog_capability_makes_candidate_image_capable(self, wired):
         _registry, catalog, failover = wired
         provider = next(iter(_registry.get_enabled_providers()))
@@ -140,11 +168,13 @@ class TestFailoverDecision:
 
     def test_explicit_config_wins_over_catalog(self, wired):
         _registry, _catalog, failover = wired
-        group = self._group(modalities=("text",))
+        # Explicit text-only declaration forces text-only even though the
+        # catalog advertises image for this model.
+        group = self._group(modalities=("text",), modalities_explicit=True)
         assert failover.group_has_image_capable_candidate(group) is False
 
     def test_no_lookup_keeps_legacy_behavior(self, wired):
-        _registry, _catalog, failover = wired
+        failover = self._unbound_registry()
         group = self._group()
         assert failover.group_has_image_capable_candidate(group) is False
 
