@@ -191,6 +191,11 @@ class CloudModelCatalog:
                     "fetched_at": data["fetched_at"],
                     "models": data["models"],
                     "reasoning": data.get("reasoning") or {},
+                    # Persist the consolidated maps too (context since trap 1,
+                    # modalities since trap 2) — a subset here would silently
+                    # drop them on every restart.
+                    "context": data.get("context") or {},
+                    "modalities": data.get("modalities") or {},
                     "source": self._provider_endpoint_key(by_name.get(provider_name)),
                 }
                 for provider_name, data in self._catalogs.items()

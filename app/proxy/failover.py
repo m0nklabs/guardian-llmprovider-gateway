@@ -84,6 +84,10 @@ class FailoverCandidate:
     provider: str
     model: str
     modalities: tuple[str, ...] = ("text",)
+    # True when the config explicitly declared ``modalities`` (even
+    # text-only) — explicit declarations win over the catalog's advertised
+    # capability; the default (implicit) defers to the catalog.
+    modalities_explicit: bool = False
 
 
 @dataclass(frozen=True)
@@ -301,7 +305,7 @@ class FailoverRegistry:
         knows (conservative: treat as text-only).
         """
         declared = tuple(candidate.modalities)
-        if declared != ("text",):
+        if candidate.modalities_explicit:
             return declared
         if self._modality_lookup is not None:
             looked_up = self._modality_lookup(candidate.provider, candidate.model)
@@ -357,12 +361,15 @@ class FailoverRegistry:
                 raw_mods = c.get("modalities")
                 if isinstance(raw_mods, list):
                     modalities = tuple(str(m) for m in raw_mods)
+                    modalities_explicit = True
                 else:
                     modalities = ("text",)  # default: text-only (backwards compat)
+                    modalities_explicit = False
                 candidates.append(FailoverCandidate(
                     provider=str(c["provider"]),
                     model=str(c["model"]),
                     modalities=modalities,
+                    modalities_explicit=modalities_explicit,
                 ))
             if not candidates:
                 continue
