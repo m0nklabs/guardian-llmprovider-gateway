@@ -172,3 +172,28 @@ degeneration:
   # reader of the text sees something went wrong. Empty text / false = off.
   marker_enabled: true
   marker_text: "[guardian: generation cut off - repetition loop detected]"
+# Cross-provider failover group (operator decision 2026-09-09: failover
+# groups are a global concern — candidates span providers — so they live in
+# the global settings, the primary source per FailoverRegistry). Address:
+# "failover/free". Order: currently-healthy first, then the usual primary,
+# then the workable :free range. The attempts-loop + failover_health tracking
+# skips candidates in failure cooldown, so single-model provider capacity
+# windows (nemotron lightning 200+null+500, poolside request_failed — capture
+# evidence 09-09) no longer strand a caller.
+failover_groups:
+  free:
+    candidates:
+      - provider: openrouter
+        model: nvidia/nemotron-3-super-120b-a12b:free
+      - provider: openrouter
+        model: nvidia/nemotron-3.5-lightning:free
+      - provider: openrouter
+        model: poolside/laguna-s-2.1:free
+      - provider: openrouter
+        model: poolside/laguna-xs-2.1:free
+      - provider: openrouter
+        model: google/gemma-4-31b-it:free
+      - provider: openrouter
+        model: google/gemma-4-26b-a4b-it:free
+      - provider: openrouter
+        model: nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free

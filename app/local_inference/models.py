@@ -24,6 +24,7 @@ logger = logging.getLogger("Guardian")
 # ── Injected (set once at startup by init()) ─────────────────────────
 _model_manager = None
 _provider_registry = None
+_failover_registry = None
 _config: dict[str, Any] = {}
 _safe_vram_limit_mb = 0
 _model_switch_lock = None
@@ -36,6 +37,7 @@ def init(
     *,
     model_manager,
     provider_registry,
+    failover_registry=None,
     config: dict[str, Any],
     safe_vram_limit_mb: int,
     model_switch_lock,
@@ -44,10 +46,11 @@ def init(
     model_load_error_cls,
 ) -> None:
     """Inject all dependencies. Called once at startup."""
-    global _model_manager, _provider_registry, _config, _safe_vram_limit_mb
+    global _model_manager, _provider_registry, _failover_registry, _config, _safe_vram_limit_mb
     global _model_switch_lock, _reset_startup_check_status, _run_guardian_operation, _ModelLoadError
     _model_manager = model_manager
     _provider_registry = provider_registry
+    _failover_registry = failover_registry
     _config = config
     _safe_vram_limit_mb = safe_vram_limit_mb
     _model_switch_lock = model_switch_lock
@@ -94,6 +97,12 @@ def resolve_or_reject_inference_model(raw_model: str | None, current_model: str)
     Cloud models addressed as ``{provider}/{brand}/{model}`` (first segment
     names a configured provider) are also accepted — the actual upstream
     model name is extracted at forwarding time via the cloud catalog.
+
+    Failover addresses (``failover/{group}``) are accepted when the named
+    group exists in the failover registry — the cloud routing layer then
+    walks the group's candidates with health tracking (setup-agent handoff
+    2026-09-09: discovery listed failover groups but chat admission rejected
+    them before routing ever saw the address).
     """
     resolved_model = resolve_inference_model(raw_model, current_model)
     if not resolved_model or resolved_model == "__MISMATCH__":
@@ -105,6 +114,12 @@ def resolve_or_reject_inference_model(raw_model: str | None, current_model: str)
     # Cloud address {provider}/{brand}/{model}: first segment is a provider.
     if _provider_registry._provider_from_address(resolved_model) is not None:
         return resolved_model
+    # Failover address failover/{group}: accept when the group is configured;
+    # candidate selection + health tracking happen in cloud routing.
+    if resolved_model.startswith("failover/") and _failover_registry is not None:
+        group_name = resolved_model.partition("/")[2]
+        if group_name and _failover_registry.get_group(group_name) is not None:
+            return resolved_model
     reject_unserved_inference_model(raw_model)
 
 
