@@ -124,7 +124,7 @@
 | Path | Function | Related processes/files |
 |------|----------|------------------------|
 | `config/global.settings.yaml` | Global settings: proxy (port/target/pid), queue, timeouts, capture, cloud_retry, failover_health | `app/config_loader.py`, scripts, systemd |
-| `config/local_models.yaml` | Model registry for local models | `app/local_inference/models.py` |
+| `config/providers/ai-kvm2-local.settings.yaml` | Local model registry: models, aliases, guardian (symlink `config/local_models.yaml` removed 2026-09-09) | `app/local_inference/model_registry.py` via `local_models_file()` |
 | `config/models.cloud.overrides.yaml` | Merged cloud model overrides (context_window, model_defaults) | `app/proxy/providers.py`, `app/gateway/context_metadata.py` |
 | `config/models.local.settings.yaml` | Local model registry (aliases, runtime, tensor_split, switch policy) | `app/local_inference/models.py` |
 | `config/providers.overrides.yaml` | Per-provider overrides (win over defaults) | `app/config_loader.py`, `app/proxy/providers.py` |

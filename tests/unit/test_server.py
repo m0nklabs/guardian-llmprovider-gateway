@@ -960,7 +960,7 @@ def test_cloud_vision_fallback_resolves_by_underlying_model(tmp_path: Path, mode
             }
         )
     )
-    registry = FailoverRegistry(config_path)
+    registry = FailoverRegistry(groups=json.loads(config_path.read_text())["failover_groups"])
 
     with patch.object(server._cloud_routing, "_failover_registry", registry):
         fallback = server._resolve_cloud_vision_fallback(model_name)
@@ -969,7 +969,7 @@ def test_cloud_vision_fallback_resolves_by_underlying_model(tmp_path: Path, mode
 
 
 def test_cloud_vision_fallback_ignores_unconfigured_models(tmp_path: Path):
-    registry = FailoverRegistry(tmp_path / "cloud_keys.json")
+    registry = FailoverRegistry(groups={})
 
     with patch.object(server._cloud_routing, "_failover_registry", registry):
         fallback = server._resolve_cloud_vision_fallback("openrouter/openai/gpt-4o")
@@ -1005,7 +1005,7 @@ def test_cloud_vision_fallback_skips_image_capable_models(tmp_path: Path, model_
             }
         )
     )
-    registry = FailoverRegistry(config_path)
+    registry = FailoverRegistry(groups=json.loads(config_path.read_text())["failover_groups"])
 
     with patch.object(server._cloud_routing, "_failover_registry", registry):
         fallback = server._resolve_cloud_vision_fallback(model_name)

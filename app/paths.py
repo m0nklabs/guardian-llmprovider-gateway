@@ -70,7 +70,6 @@ PROVIDERS_DIR = CONFIG_DIR / "providers"
 GUARDIAN_KEYS_FILE = CONFIG_DIR / "guardian.keys.yaml"
 
 # Local model registry (new name preferred; old names are backward-compat aliases).
-LEGACY_LOCAL_MODELS_FILE = CONFIG_DIR / "local_models.yaml"
 LEGACY_MODELS_FILE = CONFIG_DIR / "models.yaml"
 
 # Guardian API keys (legacy aliases).
@@ -170,9 +169,6 @@ def local_models_file() -> "Path":
     """
     return resolve_config_file(
         "providers/ai-kvm2-local.settings.yaml",
-        "models.local.settings.yaml",
-        "local_models.yaml",
-        "models.yaml",
     )
 
 

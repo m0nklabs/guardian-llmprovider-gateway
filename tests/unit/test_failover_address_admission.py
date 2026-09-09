@@ -15,6 +15,28 @@ from types import SimpleNamespace
 from app.local_inference import models as local_models
 
 
+@pytest.fixture(autouse=True)
+def _restore_local_models_init_state():
+    """``local_models.init()`` writes module globals; restore them after each
+    test so later tests (server-shell routing, grammar stripping) keep running
+    against the real dependency wiring instead of this file's fakes."""
+    names = (
+        "_model_manager",
+        "_provider_registry",
+        "_failover_registry",
+        "_config",
+        "_safe_vram_limit_mb",
+        "_model_switch_lock",
+        "_reset_startup_check_status",
+        "_run_guardian_operation",
+        "_ModelLoadError",
+    )
+    saved = {n: getattr(local_models, n) for n in names if hasattr(local_models, n)}
+    yield
+    for n, v in saved.items():
+        setattr(local_models, n, v)
+
+
 class _FakeManager:
     models: dict = {}
 

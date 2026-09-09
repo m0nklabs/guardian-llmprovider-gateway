@@ -327,8 +327,7 @@ async def reload_config(client_id: str) -> Any:
     1. settings.yaml: re-parsed into the shared ``CONFIG`` dict (config_loader
        keeps the same dict object, so all existing accessors see the update).
     2. ``ProviderRegistry.reload()`` — provider lists / prefixes / models.
-    3. ``FailoverRegistry.reload()`` — ``failover_groups`` (settings.yaml or
-       legacy cloud_keys.json).
+    3. ``FailoverRegistry.reload()`` — ``failover_groups`` (settings.yaml).
     4. ``CloudModelCatalog.reload()`` — re-reads cloud_models.yaml overrides.
     5. ``CaptureController.reload_config()`` — capture config, incl.
        cloud_capture / cloud_model_prefixes; WAL writer re-initialised when
@@ -363,7 +362,7 @@ async def reload_config(client_id: str) -> Any:
         errors.append(f"providers: {exc}")
         not_reloaded.append("providers")
 
-    # 3. Failover groups (settings.yaml or legacy cloud_keys.json)
+    # 3. Failover groups (settings.yaml)
     try:
         _failover_registry.reload()
         reloaded.append("failover_groups")
