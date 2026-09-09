@@ -166,6 +166,20 @@ provider_registry.set_catalog_probe(_catalog_probe)
 # served by multiple cloud providers via failover/{group} routes,
 # automatically skipping a provider that is currently erroring/degraded.
 failover_registry = FailoverRegistry()
+
+
+def _catalog_input_modalities(provider_name: str, model_id: str) -> tuple[str, ...] | None:
+    """Bridge the catalog modality reader into the failover lookup shape."""
+    mods = cloud_catalog.get_model_modalities(provider_name, model_id)
+    if not mods:
+        return None
+    input_mods = mods.get("input")
+    return tuple(input_mods) if input_mods else None
+
+
+# Trap 2 (2026-09-02): failover candidates without explicit config
+# ``modalities`` are judged by the catalog's upstream-advertised capability.
+failover_registry.set_modality_lookup(_catalog_input_modalities)
 _failover_health_cfg = CONFIG.get("failover_health", {}) or {}
 failover_health = ProviderHealthTracker(
     failure_threshold=int(_failover_health_cfg.get("failure_threshold", FAILURE_THRESHOLD)),
