@@ -123,10 +123,18 @@ def is_cloud_or_guardian_route(model_name: str) -> bool:
     ``google/google/gemini-...``) or it matches a configured cloud model by
     name/prefix.
 
+    Failover group addresses (``failover/{group}``) are cloud-routed too —
+    the attempts loop in forwarding walks the group's candidates with health
+    tracking (setup-agent handoff 2026-09-09: without this branch the group
+    address fell through to local inference). A missing group surfaces as a
+    404 from ``resolve_cloud_attempts`` — a clean client-facing error.
+
     Managed (local) providers resolve as ``{local-provider}/{model}`` addresses
     too, but they are NOT cloud-routed — they stay on the local path.
     """
     if _provider_registry.is_cloud_model(model_name):
+        return True
+    if model_name.startswith("failover/"):
         return True
     provider = _provider_registry._provider_from_address(model_name)
     if provider is None or provider.managed:

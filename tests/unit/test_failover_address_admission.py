@@ -81,3 +81,24 @@ def test_regular_unknown_model_still_rejected():
     with pytest.raises(HTTPException) as exc:
         local_models.resolve_or_reject_inference_model("totally/unknown-model", "x")
     assert exc.value.status_code == 404
+
+
+def test_failover_address_is_cloud_routed(monkeypatch):
+    """Route predicate: failover/{group} must be cloud-routed, not local.
+
+    Without the failover branch in is_cloud_or_guardian_route, the chat
+    dispatcher sent the group address to the LOCAL backend (observed live
+    09-09: 'failover/free' answered by llama.cpp instead of the group's
+    cloud candidates).
+    """
+    import app.cloud_inference as ci
+
+    fake_registry = SimpleNamespace(
+        is_cloud_model=lambda name: name.startswith("openrouter/"),
+        _provider_from_address=lambda name: None,
+    )
+    monkeypatch.setattr(ci, "_provider_registry", fake_registry)
+    assert ci.is_cloud_or_guardian_route("failover/free") is True
+    assert ci.is_cloud_or_guardian_route("failover/any-group") is True
+    assert ci.is_cloud_or_guardian_route("openrouter/deepseek/deepseek-chat") is True
+    assert ci.is_cloud_or_guardian_route("totally/unknown-model") is False
