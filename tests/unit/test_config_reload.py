@@ -7,6 +7,7 @@ Covers:
 - admin_api.reload_config(): end-to-end orchestration via injected deps
 """
 
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -92,7 +93,7 @@ def test_failover_registry_loads_proposed_groups(tmp_path: Path):
         '{"provider": "openrouter", "model": "moonshotai/kimi-k3"}]}'
         "}}"
     )
-    registry = FailoverRegistry(cfg_path)
+    registry = FailoverRegistry(groups=json.loads(cfg_path.read_text())["failover_groups"])
     groups = set(registry._groups.keys())
     assert groups == {"gemini-flash", "kimi-k3", "laguna", "minimax-m3"}
     m3 = registry.get_group("minimax-m3")

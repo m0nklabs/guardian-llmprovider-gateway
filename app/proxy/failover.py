@@ -38,11 +38,9 @@ when one provider has a bad day.
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from threading import Lock
 from typing import Callable
 
@@ -51,12 +49,6 @@ import yaml
 from app.paths import global_settings_file
 
 logger = logging.getLogger("Guardian.Failover")
-
-#: Path to the legacy on-disk store that used to hold failover group
-#: definitions (shared with the removed per-key cloud credential store). Since
-#: the cloud-access redesign (2026-08-21) groups come from settings.yaml
-#: ``failover_groups:``; this file remains only as a backward-compat fallback.
-FAILOVER_CONFIG_FILE: Path = Path(__file__).parent.parent.parent / "config" / "cloud_keys.json"
 
 #: Consecutive failures before a (provider, model) candidate is tripped.
 #: Overridden by settings.yaml ``failover_health.failure_threshold`` at startup.
@@ -276,15 +268,19 @@ class FailoverRegistry:
     pick up new/changed groups without restarting Guardian.
     """
 
-    def __init__(self, path: Path = FAILOVER_CONFIG_FILE) -> None:
-        self._path = path
+    def __init__(self, groups: dict[str, dict] | None = None) -> None:
+        """Inject ``groups`` directly (tests/programmatic setup) instead of
+        loading from global.settings.yaml.  In-memory only — no disk source."""
         self._groups: dict[str, FailoverGroup] = {}
         # Optional modality reader injected via :meth:`set_modality_lookup`
         # (trap 2, 2026-09-02): the dynamic CloudModelCatalog is the single
         # source of upstream modality capability — candidates whose config
         # does not declare ``modalities`` are judged by the live catalog.
         self._modality_lookup: Callable[[str, str], tuple[str, ...] | None] | None = None
-        self.reload()
+        if groups is None:
+            self.reload()
+        else:
+            self._build_groups(groups)
 
     def set_modality_lookup(
         self,
@@ -318,7 +314,12 @@ class FailoverRegistry:
         return any("image" in self._candidate_input_modalities(c) for c in group.candidates)
 
     def _load_raw_groups(self) -> dict:
-        """Return the ``failover_groups`` map (global.settings.yaml, else legacy file)."""
+        """Return the ``failover_groups`` map from global.settings.yaml.
+
+        Sole source since 2026-09-09: the legacy ``config/cloud_keys.json``
+        fallback (whose credential store was already removed on 2026-08-22)
+        is gone — its last group (``free``) was migrated to settings.yaml.
+        """
         try:
             settings_path = global_settings_file()
             if settings_path.exists():
@@ -330,24 +331,15 @@ class FailoverRegistry:
                         return fg
         except Exception as e:
             logger.warning("⚠️  Failed to read failover_groups from settings.yaml: %s", e)
-
-        try:
-            if self._path.exists():
-                with open(self._path, "r", encoding="utf-8") as f:
-                    data = json.load(f) or {}
-                if isinstance(data, dict):
-                    fg = data.get("failover_groups")
-                    if isinstance(fg, dict):
-                        return fg
-        except (OSError, json.JSONDecodeError) as e:
-            logger.warning("⚠️  Failed to load failover groups from %s: %s", self._path, e)
         return {}
 
     def reload(self) -> None:
         """Re-read failover group definitions from disk."""
-        self._groups.clear()
-        raw_groups = self._load_raw_groups()
+        self._build_groups(self._load_raw_groups())
 
+    def _build_groups(self, raw_groups: dict) -> None:
+        """Parse a raw ``failover_groups`` map into FailoverGroup objects."""
+        self._groups.clear()
         for group_name, raw_group in raw_groups.items():
             if not isinstance(raw_group, dict):
                 continue
