@@ -146,3 +146,10 @@ De eerste pass verving 24 entries door één bulk-zin — te grof. Nieuwe regel 
 - **Les:** een persist-functie die een expliciete veld-lijst serialiseert valt stilletjes nieuw-geadditieve velden weg. Contract-pin toegevoegd: persist→read roundtrip moet context+modalities overleven (tests/unit/test_modality_capability.py).
 - **Tweede les (modalities_explicit):** de dataclass kon "expliciet text-only" niet van "default text-only" onderscheiden — een operator die `modalities: ["text"]` zet dwingt bewust text-only af (image-capable model niet voor vision). Fix: `modalities_explicit`-veld (builder zet hem op config-declaratie); expliciet wint ALTIJD, implicit defereert naar de catalog.
 - **Live eindstaat (1b9493b):** 14 modality-entries, 7 met image-input, 30 context-entries — de single-fetch bewaart nu ALLE capability-velden en overleeft restarts.
+
+## 2026-09-09 — Setup-agent handoff afgehandeld: HTTP 200-garbage surfacet nu als 502 (2e51140)
+
+- **Handoff (07:45):** upstream-failure-vormen passeerden als HTTP 200 — nemotron: 200 + content:null + embedded `choices[].error {code:500}`; poolside: body zonder `choices`. Callers konden "leeg antwoord" niet van "provider down" onderscheiden.
+- **Fix:** `_detect_upstream_invalid_response(path, payload)` in forwarding.py — op chat-vormige paths (chat/completions, completions, messages) vereist een 200-body `choices`; een embedded `choices[0].error` (OpenRouter-vorm) is óók invalid. Resultaat: 502 `upstream_invalid_response` + capture `request_failed` (error_code), met path-uitsluiting voor embeddings (data-contract).
+- **Pins:** 4× tests/unit/test_upstream_invalid_response.py (embedded-error, no-choices, valid-payload-regressie, embeddings-uitzondering). Gate 5/5, live MainPID==listener.
+- **Request 2 (failover bij :free-modellen) beoordeeld, niet gebouwd:** de machinerie bestaat al (failover/{group}-adressen + health-tracking + attempts-loop). Wat ontbreekt is een groep-config voor de free-modellen — dat is config-werk + eventueel een klein routing-kenmerk (groep-alias). Beoordelingsnotitie bij deze journal-entry; wacht op operator-keuze.
