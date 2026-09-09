@@ -98,3 +98,5 @@ Contact: setup agent, redacted project (this note is informational — implement
 - **Degeneratie-marker-injectie (operator-verzoek, zelfde sessie):** bij cutoff krijgt de lezer nu een zichtbare slot-marker `\n\n[guardian: generation cut off - repetition loop detected]` als laatste content-delta (alle paden, `marker_enabled`/`marker_text` configureerbaar). Machine-signaal onveranderd (`finish_reason: "length"` + capture-vlag).
 
 - **Catalogus-consolidatie trap 1 AFGEROND (2026-09-02):** dubbele /models-fetch weg — CloudModelCatalog is nu de enige fetch-bron (bewaart models + reasoning + context); registry leest via DI-reader, geen HTTP meer in providers.py. Pins herleid + 3 nieuwe, gate groen. **Trap 2 (modaliteiten-extractie) is het verplichte vervolg** — basis gereed.
+
+- **OPEN VRAAG (operator, op todo):** rapporteert de caretaker OOM's terug aan Guardian? (OOM-kill detectie + rapportage-oppervlak naar Guardian — inter-repo: m0nklabs/caretaker-llamacpp; raadpleeg caretaker_client/caretaker_runtime-wiring + caretaker-repo status-endpoints).
