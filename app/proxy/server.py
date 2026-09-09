@@ -825,6 +825,7 @@ _process.init(
 _local_models.init(
     model_manager=model_manager,
     provider_registry=provider_registry,
+    failover_registry=failover_registry,
     config=CONFIG,
     safe_vram_limit_mb=SAFE_VRAM_LIMIT_MB,
     model_switch_lock=_model_switch_lock,
