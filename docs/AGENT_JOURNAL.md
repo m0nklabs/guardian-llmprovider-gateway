@@ -162,3 +162,15 @@ De eerste pass verving 24 entries door één bulk-zin — te grof. Nieuwe regel 
 - **Bonus-moment:** de gemigreerde `free`-groep is de gateway-zijdige infrastructuur voor setup-agent's Request 2 — callers kunnen nu `failover/free` gebruiken en de gateway cycled bij 429/5xx door de groep.
 - **Suite-falen onderweg (7×) was NIET van de migratie:** tests/unit/test_failover_address_admission.py (setup-agent's bestand, vandaag toegevoegd) roept `local_models.init()` met fakes aan en lekt de module-globals — latere server-shell-tests draaiden tegen de nep-provider-registry (404 model_not_served op 'gpt-4o'). Gefixt met een autouse restore-fixture in dat bestand (globals-snapshot/herstel). Diagnoseweg: isoleer-groen/suite-rood → bisection per file.
 - **Verificatie:** 64 gericht + gate 5/5 + live: free-groep 7 candidates via de nieuwe bron, resolver → provider-file, MainPID==listener (038382b).
+
+## 2026-09-10 — Nemotron-diegonderzoek: de "crap-outputs" verklaard en de canonieke adapter gebouwd (3c0edb4)
+
+- **Operator-terechttwijfel:** eerdere fix (chat_template_kwargs-toggle) was symptoombestrijding — de live A/B-drieër Bundel bewees dat de toggle via OpenRouter NOOIT vuurt (reasoning_tokens > 0 in álle calls, ook met de toggle). Adaptive-retry-met-markers (onverstuurde commit) volledig verwijderd — patchwork.
+- **De echte mechaniek (primair: HF-modelkaart nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16):** "Reasoning Mode: Configurable on/off via chat template (enable_thinking=True/False)", thinking ON by default; de vLLM-validated deployment draait `--reasoning-parser nemotron_v3` — de thinking/content-scheiding is SERVING-SIDE parser-werk.
+- **Levende bewijzen (14 geïnstrumenteerde calls, 2026-09-10):**
+  - De "crap"-signatuur: `finish_reason=length` midden-in thinking → de parser ziet geen close-signal en dupliceert de thinking-tekst in `content` (smoking gun: content_len == reasoning_len == 1130 op mt=250). ALLE crap-cases = length; ALLE clean-cases = stop.
+  - OpenAI-style `reasoning_effort: "low"` (wat agent31 stuurt) → genegeerd voor nvidia op OpenRouter (417 reasoning-tokens bij effort=low).
+  - `chat_template_kwargs.enable_thinking=false` → niet geëerd via OpenRouter (B2 crap met toggle aan).
+  - **OpenRouter unified dialect wél:** `reasoning: {"enabled": false}` → reasoning_tokens=0 (H1, deterministisch); `reasoning: {"max_tokens": 100}` → thinking gecapt (111 tok), clean antwoord (H3).
+- **De canonieke adapter (3c0edb4):** `adapt_nemotron_reasoning_intent` in cloud_inference/routing.py — vertaalt client-intent naar het dialect dat de provider écht eert: openrouter → unified `reasoning.enabled=false`; nvidia-direct → `chat_template_kwargs.enable_thinking=false` (NVIDIA-documented). Client-explicit `reasoning.enabled=true` wint altijd; config-override `enable_thinking: false` in het models:-blok kan het per model vastpinnen. Zonder low/none-intent: untouched — nemotron redeneert gewoon (live: 402 reasoning-tokens netjes in het reasoning-veld, clean antwoord).
+- **End-to-end bewezen via Guardian:** effort=low → reasoning_tok=0 + stop + clean; geen effort → 402 reasoning-tokens + clean. 12 pins + gate 5/5.
