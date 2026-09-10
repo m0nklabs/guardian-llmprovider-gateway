@@ -221,7 +221,7 @@ def prepare_cloud_candidate_request(
         "advertised_context",
     }
     model_defaults = _cloud_catalog.get_override(upstream_model) or {}
-    candidate_json_body = adapt_nemotron_thinking_params(
+    candidate_json_body = adapt_nemotron_reasoning_intent(
         provider, upstream_model, candidate_json_body, model_defaults
     )
     if model_defaults:
@@ -248,47 +248,71 @@ def prepare_cloud_candidate_request(
 _NEMOTRON_THINKING_OFF_EFFORTS = frozenset({"none", "off", "disable", "disabled", "low"})
 
 
-def adapt_nemotron_thinking_params(
+def _nemotron_reasoning_off_dialect(
+    provider_name: str, body: dict[str, Any]
+) -> dict[str, Any]:
+    """Inject "thinking off" in the dialect the target provider honors.
+
+    Live evidence (2026-09-10, nemotron-3.5-lightning:free via openrouter,
+    14 instrumented calls): ``chat_template_kwargs: {"enable_thinking":
+    false}`` is NOT honored through OpenRouter (reasoning_tokens > 0 in every
+    call) — while the unified ``reasoning: {"enabled": false}`` API yields
+    ``reasoning_tokens=0``.  NVIDIA's own NIM endpoint documents the
+    chat-template toggle (model card: enable_thinking=True/False), so the
+    direct nvidia provider keeps that dialect.
+    """
+    if provider_name == "openrouter":
+        reasoning = body.get("reasoning")
+        merged = dict(reasoning) if isinstance(reasoning, dict) else {}
+        merged["enabled"] = False
+        return {**body, "reasoning": merged}
+    template_kwargs = body.get("chat_template_kwargs")
+    merged = dict(template_kwargs) if isinstance(template_kwargs, dict) else {}
+    merged["enable_thinking"] = False
+    return {**body, "chat_template_kwargs": merged}
+
+
+def adapt_nemotron_reasoning_intent(
     provider: CloudProvider,
     upstream_model: str,
     body: dict[str, Any],
     model_defaults: dict[str, Any],
 ) -> dict[str, Any]:
-    """Map client reasoning intent onto Nemotron's thinking toggle.
+    """Translate the client's reasoning intent into the provider's dialect.
 
-    Nemotron hybrid-reasoning models ignore ``reasoning_effort`` and think by
-    default, burning the completion budget on visible reasoning until nothing
-    is left for the answer (live A/B evidence, 2026-09-09: same prompt gave
-    400 reasoning tokens + finish_reason=length without the toggle, and a
-    clean answer with finish_reason=stop with it).
+    Nemotron hybrid-reasoning models think by default and IGNORE the
+    OpenAI-style ``reasoning_effort`` through OpenRouter.  When the budget
+    runs out mid-thinking (``finish_reason=length``) the serving-side
+    reasoning parser never sees the close signal and the thinking text is
+    duplicated into ``content`` — the reported "bad outputs" (live proof:
+    content_len == reasoning_len on a truncated request, 2026-09-10).
 
     Resolution order (client-explicit wins):
-    1. Client set ``chat_template_kwargs.enable_thinking`` → untouched.
-    2. Provider-config override ``enable_thinking`` (``models:`` block) → use it.
-    3. Client ``reasoning_effort`` in the thinking-off set → disable thinking.
-    4. Otherwise → untouched (model default: thinking ON — nemotron keeps reasoning).
+    1. Client ``reasoning`` dict explicitly sets ``enabled`` → untouched.
+    2. Provider-config override ``enable_thinking: false`` (``models:``
+       block) → thinking off in the provider's dialect.
+    3. Client intent for minimal reasoning (``reasoning_effort`` or
+       ``reasoning.effort`` = low/none) → thinking off in the dialect.
+    4. Otherwise → untouched (model default: thinking ON — nemotron keeps
+       reasoning; with a sufficient budget the reasoning arrives properly
+       separated in the ``reasoning`` field).
     """
-    # Model-scoped, provider-agnostic: the free failover group routes
-    # nemotron through the openrouter provider, the toggle passes through
-    # OpenRouter to NVIDIA either way (live A/B evidence).
     if "nemotron" not in upstream_model.lower():
         return body
-    template_kwargs = body.get("chat_template_kwargs")
-    if isinstance(template_kwargs, dict) and "enable_thinking" in template_kwargs:
-        return body  # client explicit — wins
-    desired: bool | None = None
+    client_reasoning = body.get("reasoning")
+    client_reasoning = client_reasoning if isinstance(client_reasoning, dict) else {}
+    if client_reasoning.get("enabled") is True:
+        return body  # client explicitly wants reasoning — wins
     override_value = model_defaults.get("enable_thinking") if isinstance(model_defaults, dict) else None
-    if isinstance(override_value, bool):
-        desired = override_value
-    else:
-        effort = str(body.get("reasoning_effort") or "").strip().lower()
-        if effort in _NEMOTRON_THINKING_OFF_EFFORTS:
-            desired = False
-    if desired is None:
-        return body
-    merged = dict(template_kwargs) if isinstance(template_kwargs, dict) else {}
-    merged["enable_thinking"] = desired
-    return {**body, "chat_template_kwargs": merged}
+    if override_value is False:
+        return _nemotron_reasoning_off_dialect(provider.name, body)
+    for effort in (
+        client_reasoning.get("effort"),
+        body.get("reasoning_effort"),
+    ):
+        if str(effort or "").strip().lower() in _NEMOTRON_THINKING_OFF_EFFORTS:
+            return _nemotron_reasoning_off_dialect(provider.name, body)
+    return body
 
 
 # ── Response content extraction ─────────────────────────────────────
