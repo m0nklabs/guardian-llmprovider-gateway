@@ -221,6 +221,9 @@ def prepare_cloud_candidate_request(
         "advertised_context",
     }
     model_defaults = _cloud_catalog.get_override(upstream_model) or {}
+    candidate_json_body = adapt_nemotron_thinking_params(
+        provider, upstream_model, candidate_json_body, model_defaults
+    )
     if model_defaults:
         missing = {
             k: v for k, v in model_defaults.items()
@@ -236,6 +239,56 @@ def prepare_cloud_candidate_request(
 
     candidate_body = json.dumps(candidate_json_body).encode("utf-8")
     return effective_path, candidate_json_body, candidate_body, needs_translation
+
+
+#: Effort values that mean "spend as little reasoning as possible".  Nemotron
+#: hybrid-reasoning models have no effort gradation — only thinking on/off
+#: (model card: enable_thinking via chat template, ON by default) — so "low"
+#: maps to thinking OFF, the only way to honor the client's intent.
+_NEMOTRON_THINKING_OFF_EFFORTS = frozenset({"none", "off", "disable", "disabled", "low"})
+
+
+def adapt_nemotron_thinking_params(
+    provider: CloudProvider,
+    upstream_model: str,
+    body: dict[str, Any],
+    model_defaults: dict[str, Any],
+) -> dict[str, Any]:
+    """Map client reasoning intent onto Nemotron's thinking toggle.
+
+    Nemotron hybrid-reasoning models ignore ``reasoning_effort`` and think by
+    default, burning the completion budget on visible reasoning until nothing
+    is left for the answer (live A/B evidence, 2026-09-09: same prompt gave
+    400 reasoning tokens + finish_reason=length without the toggle, and a
+    clean answer with finish_reason=stop with it).
+
+    Resolution order (client-explicit wins):
+    1. Client set ``chat_template_kwargs.enable_thinking`` → untouched.
+    2. Provider-config override ``enable_thinking`` (``models:`` block) → use it.
+    3. Client ``reasoning_effort`` in the thinking-off set → disable thinking.
+    4. Otherwise → untouched (model default: thinking ON — nemotron keeps reasoning).
+    """
+    # Model-scoped, provider-agnostic: the free failover group routes
+    # nemotron through the openrouter provider, the toggle passes through
+    # OpenRouter to NVIDIA either way (live A/B evidence).
+    if "nemotron" not in upstream_model.lower():
+        return body
+    template_kwargs = body.get("chat_template_kwargs")
+    if isinstance(template_kwargs, dict) and "enable_thinking" in template_kwargs:
+        return body  # client explicit — wins
+    desired: bool | None = None
+    override_value = model_defaults.get("enable_thinking") if isinstance(model_defaults, dict) else None
+    if isinstance(override_value, bool):
+        desired = override_value
+    else:
+        effort = str(body.get("reasoning_effort") or "").strip().lower()
+        if effort in _NEMOTRON_THINKING_OFF_EFFORTS:
+            desired = False
+    if desired is None:
+        return body
+    merged = dict(template_kwargs) if isinstance(template_kwargs, dict) else {}
+    merged["enable_thinking"] = desired
+    return {**body, "chat_template_kwargs": merged}
 
 
 # ── Response content extraction ─────────────────────────────────────
