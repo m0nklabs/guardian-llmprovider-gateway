@@ -370,6 +370,7 @@ class CaptureController:
         streamed_upstream: bool | None = None,
         incomplete: bool | None = None,
         attempts: int | None = None,
+        degeneration_cutoff: bool | None = None,
         sequence: int = 1,
     ) -> None:
         """Dispatch a request_completed event (fail-open)."""
@@ -405,6 +406,7 @@ class CaptureController:
                 streamed_upstream=streamed_upstream,
                 incomplete=incomplete,
                 attempts=attempts,
+                degeneration_cutoff=degeneration_cutoff,
                 sequence=sequence,
             )
             self._dispatch(event)

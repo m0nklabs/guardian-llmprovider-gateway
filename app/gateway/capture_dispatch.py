@@ -251,11 +251,17 @@ def dispatch_capture_request_completed(
             streamed=streamed,
             streamed_ingress=streamed_ingress,
             streamed_upstream=streamed_upstream,
-        degeneration_cutoff=degeneration_cutoff,
+            degeneration_cutoff=degeneration_cutoff,
             incomplete=incomplete,
             attempts=attempts,
         )
-    except Exception:
+    except Exception as exc:
+        # Fail-open stays (capture must never break inference), but the
+        # swallow must not be silent: log content-free diagnostics so a
+        # dispatcher/controller contract drift (e.g. the degeneration_cutoff
+        # TypeError that silently killed ALL terminal captures for a day —
+        # found 2026-09-11 by the agent31 setup session) surfaces in the log.
+        logger.warning("capture dispatch failed (fail-open): %r", exc)
         pass
 
 

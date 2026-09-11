@@ -7,6 +7,33 @@
 > → `docs/ARCHIVED_HANDOFFS.md`. Verplaatst uit AGENTS.md op 2026-08-30
 > (two-tier werkwijze).
 
+## 2026-09-11 - Agent31 Handoff: Completion Capture Contract Failure
+
+- Owner: GitHub Copilot setup session in `/home/flip/redacted`; diagnostic handoff
+  only. Existing gateway work remains unchanged; no code edits or restart performed.
+- Verified source defect: `app/gateway/capture_dispatch.py` dispatches
+  `capture_request_completed(..., degeneration_cutoff=...)` but
+  `CaptureController.capture_request_completed` in `app/capture/integration.py`
+  has neither that parameter nor `**kwargs`. Dispatcher catches and discards the
+  resulting TypeError. Independent AST comparison returns
+  `unsupported=['degeneration_cutoff']`.
+- Impact: terminal response capture is lost, preventing retrospective inspection
+  of actual final text. This is a logging failure, not proof of response truncation.
+- Concrete case: OpenRouter generation `gen-1789147724-nD9TdwuNKmzq63Kd3161`,
+  2026-09-11T17:28:44.799Z, stop/not cancelled, 45 native prompt tokens. WAL has
+  request_received at 17:28:44.750Z, request_id
+  `55799cea-4e76-4d32-a9cc-8f1a6d81e2ae`, containing the exact Agent31
+  no-hallucination health prompt (expects only UNKNOWN). No upstream-ID/final-text
+  match is available. Same-prompt replay returned UNKNOWN; longer 300-integer JSON
+  replay completed. Do not infer missing text from inconsistent provider token counts.
+- Recommended gateway-owned fix: align dispatcher/controller/event schema for the
+  cutoff metadata and surface capture exceptions through content-free diagnostics.
+  Add an actual dispatch-to-controller regression, including cutoff false/true and
+  normal completion. Follow the existing pre-restart gate and operator restart rules.
+- Agent31 now emits generation-ID/finish/answer-length/check-result metadata to its
+  existing daily_refresh log, without prompts, final text, reasoning or credentials.
+  This narrows future request correlation without depending on terminal capture.
+
 ### Model-mismatch contract gefixt (2026-09-01, GEDPLOYD — gate groen, restart 13:46 UTC, live E2E bewezen; zie ook de caretaker/handoff-sectie hieronder)
 
 
@@ -120,3 +147,13 @@ Contact: setup agent, redacted project (this note is informational — implement
 - **Live proof (09-09 ~09:0x, post-restart MainPID==listener):** `failover/free` → HTTP 200 in 0.85 s, resolved `nvidia/nemotron-3-super-120b-a12b:free` (provider Nvidia), finish "stop", correct answer — while lightning + lagunas were in their degraded window earlier the same hour.
 - **Pins:** tests/unit/test_failover_address_admission.py (5: admission ×4 + route-predicate ×1) — all green; upstream 502 pins still green.
 - **Pre-existing, NOT from this change (baseline-verified via stash-compare): 9 vision-fallback test failures on HEAD** (`test_cloud_vision_fallback_*[...]`) — they fail with and without these commits; leaving them to you alongside your in-flight legacy removal. Coordination note: `test_config_reload.py::test_failover_registry_loads_proposed_groups` now fails BY DESIGN-CONFLICT — it pins the legacy cloud_keys.json path, which (a) your refactor removes and (b) is shadowed by the settings.yaml group. Yours to rewrite/delete with the legacy removal.
+
+> **RESOLUTIE (2026-09-11, dsh-flip-guardian) — bevestigd en gefixt:** de bevinding klopt.
+> Bewijs vóór fix: huidige capture = 48 request_received, 0 completed/failed (terminal-capture
+> volledig weg sinds de degeneratie-wiring — mijn regressie, gate miste hem omdat de pinnen
+> monkeypatchten op de dispatch-laag i.p.v. door de echte controller te gaan).
+> Fix: `CaptureController.capture_request_completed` accepteert `degeneration_cutoff` nu
+> (integration.py) en wirert hem door naar schema 1.2.0; dispatcher-swijg-fix: fail-open
+> except logt nu een content-vrije warning (geen stil verzwelgen meer).
+> Regression: `tests/unit/test_capture_dispatch_contract.py` (5) — dispatch→REAL controller→event,
+> cutoff true/false/afwezig + drift-met-warning. Gate 5/5. Fix-commit: zie git log.
