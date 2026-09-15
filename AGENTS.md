@@ -119,7 +119,7 @@ When touching these areas, read the referenced detail docs:
 - **Client setup** → `@docs/CLIENT_INTEGRATION.md`
 - **GPU/hardware tuning** → `@docs/HARDWARE_TUNING.md`
 - **Deployment & operations** → `@docs/skills/operator-runbook.md`
-- **Guardian 2.0 masterplan (PLAN 2026-08-26, goedgekeurd)** → `@docs/IMPLEMENTATION_PLAN.md` (canoniek) + GitHub issue #1. Fases: F0 foundation + F1 file register → **gebouwd (PR #2)**; F2 → **gemerged (PR #7)**; F3 → **gemerged (PR #8)**; F4 → **gemerged (PR #10)**; F5 caretaker + local passief → **in uitvoering** (caretaker fases A–D + PR #6 gemerged in `m0nklabs/caretaker-llamacpp`, gateway-wiring tranche 1 PR #11 gemerged, tranche 2 `caretaker_runtime.py` merge-klaar — PR #12, wacht op human merge); F6 Windows/14700K + F7 cut-over → **open**.
+- **Guardian 2.0 masterplan (PLAN 2026-08-26, goedgekeurd)** → `@docs/IMPLEMENTATION_PLAN.md` (canoniek) + GitHub issue #1. Fases: F0 foundation + F1 file register → **gebouwd (PR #2)**; F2 → **gemerged (PR #7)**; F3 → **gemerged (PR #8)**; F4 → **gemerged (PR #10)**; F5 caretaker + local passief → **gemerged** (caretaker fases A–D + PR #6 in `m0nklabs/caretaker-llamacpp`; gateway-wiring tranche 1 PR #11, tranche 2 PR #12 + opvolg #13/#14 — all live, 2026-08-30); F6 Windows/14700K + F7 cut-over → **open**.
   - Deelplannen + voltekst (LAN_GPU_BACKENDS / GATEWAY_MANAGER_SPLIT / CONFIG_PROVIDER_FILES) → `docs/AGENT_CONTEXT_ARCHIVE.md` §2; F5-detail → `@docs/F5_GATEWAY_WIRING_ANALYSIS.md`; **actuele status: zie `@docs/HANDOFF.md`.**
 
 ## References
