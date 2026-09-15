@@ -5,155 +5,48 @@
 > (`AGENTS.md`) verandert alleen in gebatchte promotie-passes (werkwijze:
 > `~/.dsh/AGENTS.md` → "AGENTS.md maintenance discipline"). Afgeronde sessies
 > → `docs/ARCHIVED_HANDOFFS.md`. Verplaatst uit AGENTS.md op 2026-08-30
-> (two-tier werkwijze).
-
-## 2026-09-11 - Agent31 Handoff: Completion Capture Contract Failure
-
-- Owner: GitHub Copilot setup session in `/home/flip/redacted`; diagnostic handoff
-  only. Existing gateway work remains unchanged; no code edits or restart performed.
-- Verified source defect: `app/gateway/capture_dispatch.py` dispatches
-  `capture_request_completed(..., degeneration_cutoff=...)` but
-  `CaptureController.capture_request_completed` in `app/capture/integration.py`
-  has neither that parameter nor `**kwargs`. Dispatcher catches and discards the
-  resulting TypeError. Independent AST comparison returns
-  `unsupported=['degeneration_cutoff']`.
-- Impact: terminal response capture is lost, preventing retrospective inspection
-  of actual final text. This is a logging failure, not proof of response truncation.
-- Concrete case: OpenRouter generation `gen-1789147724-nD9TdwuNKmzq63Kd3161`,
-  2026-09-11T17:28:44.799Z, stop/not cancelled, 45 native prompt tokens. WAL has
-  request_received at 17:28:44.750Z, request_id
-  `55799cea-4e76-4d32-a9cc-8f1a6d81e2ae`, containing the exact Agent31
-  no-hallucination health prompt (expects only UNKNOWN). No upstream-ID/final-text
-  match is available. Same-prompt replay returned UNKNOWN; longer 300-integer JSON
-  replay completed. Do not infer missing text from inconsistent provider token counts.
-- Recommended gateway-owned fix: align dispatcher/controller/event schema for the
-  cutoff metadata and surface capture exceptions through content-free diagnostics.
-  Add an actual dispatch-to-controller regression, including cutoff false/true and
-  normal completion. Follow the existing pre-restart gate and operator restart rules.
-- Agent31 now emits generation-ID/finish/answer-length/check-result metadata to its
-  existing daily_refresh log, without prompts, final text, reasoning or credentials.
-  This narrows future request correlation without depending on terminal capture.
-
-### Model-mismatch contract gefixt (2026-09-01, GEDPLOYD — gate groen, restart 13:46 UTC, live E2E bewezen; zie ook de caretaker/handoff-sectie hieronder)
-
-
-### G3 bare-name routing hijack GEFIXT (2026-09-02, live bewezen) — uit pr-piet bugreport v3
-
-
-### 2026-09-01 — Split-brain backend-launcher + /ensure-verificatie gefixt (caretaker-repo + host-unit; live bewezen)
-
-
-> Afgeronde/gesloten DSH-sessies worden gearchiveerd in **`docs/ARCHIVED_HANDOFFS.md`**
-> (volledige tekst blijft bewaard; de Active Handoff hieronder houdt alleen sessies
-> met lopende relevantie). Gearchiveerd op 2026-08-26 (2 batches):
-> **Batch 1:** `20260826_muse_catalog`, `20260826_raw_capture`, `20260824_reasoning_effort`.
-> **Batch 2 (alles afgerond):** `20260822_cleanup`, `20260822_nvidia_free_filter`,
-> `20260824_cloud_audit`, `20260821_config_schema`, `20260815_bench`, `20260815_gcd`,
-> `20260815_1`, `20260816_1`, `20260816_2`, `20260819_1`, `20260820_1`,
-> `20260820_cloud_refactor`, `20260813_1`, `20260812_1`, `20260809_5`.
-> Alleen `20260826_rename` blijft actief (huidige workspace-transitie) — de écht
-> openstaande zaken staan hieronder in **Open punten**.
-
-### 2026-09-01 (avond) — G2 orphan-calls gefixt (3-lagige root cause) + adopt-only eraf
-
-- Tests: 3 nieuwe cloud-forwarding pins + contract-test `test_begin_queued_request_cleans_up_waiter_on_disconnect` overgezet naar het receive-contract. Pre-restart gate: alle poorten PASS (eerste gate-run faalde op het oude polling-contract — exitcode checken met PIPESTATUS, niet via `| tail`).
-- DSH-sessie-breuk 20:31 was NIET Guardian (gateway draaide door; de DSH-webserver op :3080 herstartte zelf).
-
+> (two-tier werkwijze). Laatste compaction-pass: **2026-09-15** (21,9 kB → dit;
+> verbatim archief in ARCHIVED_HANDOFFS, sectie "gearchiveerd 2026-09-15").
 
 ## Open punten (actueel — alles wat hier niet staat is afgerond; details in `docs/ARCHIVED_HANDOFFS.md`)
 
-- **NVIDIA bruikbaarheidskaart GEMETEN (2026-09-02, volledige probe, `scratch/nvidia_probe_results.json`):** 81 catalogusmodellen geprobed: **12 OK** (minimaxai/minimax-m3, moonshotai/kimi-k3, nvidia/nemotron-3-super-120b-a12b, nemotron-3.5-lightning-30b-a3b, nemotron-3-nano-omni-30b-a3b-reasoning, llama-3.2-11b-vision-instruct, poolside/laguna-xs-2.1, 3 safety/guard, 2 riva-translate), **55×404** (68% dode catalogus-entries), 11×timeout (o.a. deepseek-v4-flash/pro), 2×500, 1×400. **Metadata-vondst:** NVIDIA's `/models` geeft géén context_length — overrides vereisen model-card-kennis en zijn alleen zinnig voor de 12 werkende.
-- **Catalogus-consolidatie: twee-traps plan VASTGELEGD (operator-besluit):** trap 1 = consolidatie (één bron, één TTL, dubbele fetches weg) — volgende te bouwen, ~1-2 uur, geen routing-gedragsverandering; **trap 2 = modaliteiten-extractie is verplicht vervolg** (pas ná trap 1 — op de ongeconsolideerde basis bouwen verdubbelt tijdelijk de schuld).
-- **Orphan-herkomst: gebonden forensica-pass AFGEROND (2026-09-02) — beste verklaring:** het journal-venster 22:08:44-50 toont een host in systemd-chaos: vllm-bench-cpu/gpu (53.640 herstarts!), vllm (27.098, 203/EXEC — binary ontbreekt), nervesplat (52.311, spawnde op exact 22:08:47), caramba-processor (27.065). Plausibele verklaring cgroup-escape: verzadigde systemd job-wachtrij tijdens de guardian-transitie. Handoffs aangemaakt in `/home/flip/caramba/docs/HANDOFF.md` + `/home/flip/nervesplat/docs/HANDOFF.md` (inter-repo). Raadsel gesloten op beste verklaring; risico blijft gedempt.
-- **Geheugen-idee (capture → agent-geheugen) IN DE KOELKAST (operator-besluit 2026-09-02):** stap 1 FTS/SQLite-index, stap 2 semantische embeddings — ontwerp staat in deze journal (2026-09-02 nachtdienst). **Bezwaar van de operator dat het shelven veroorzaakte:** een gedeeld geheugen kan nadelig zijn zodra agents over projectgrenzen heen lezen (kruisbesmetting/isolatie) — een toekomstige uitwerking moet per-project scoping/key-isolation als eerste-klas eis ontwerpen, niet als optie. Pas oppakken als de operator dat weer op tafel legt.
-- **OpenRouter modaliteiten + catalogusvelden (GEWENST, deferred — operator-besluit):** `/models`-payload bevat `architecture.*_modalities`, `pricing`, `supported_parameters` e.d. die Guardian weggooit — nodig voor capability-gebaseerde vision-routing; dezelfde catalog-URL wordt 2× onafhankelijk gefetcht (consolidatie hoort in die verbouwing). Analyse → JOURNAL-archief §2026-08-30 catalogusvelden.
+- **Redactor precision audit (verzoek setup-agent 09-07, guardian-scope, NOG TE BOUWEN):** twee patronen in `app/capture/redactor.py` zijn categorisch te breed: `_IPV4_RE` op alle tekst (LAN-configs/codevoorbeelden → `[REDACTED_IP]`) en `_ENV_VAR_RE` = elke `$UPPERCASE` → `[REDACTED_ENV_VAR]` (`$HOME` is geen secret). Remedie-richting (operator-policy 09-07: "secrets out = good; non-secret data dropped = must fix"): config-gestuurde precisie — (a) gevoelige-IP-lijst (home WAN + LAN-subnet) i.p.v. all-IPv4; (b) env-var-redactie alleen bij bekende secret-namen/hoge entropie; (c) API-key/Bearer-patronen blijven; (d) golden tests: `$HOME` in een bash-snippet en default-gateway-voorbeelden passeren onredacted, echte keys worden nog steeds gevangen. Capture-gaten door guardian's eigen secret-filtering zijn BY DESIGN; over-filtering van non-secrets is de fix.
+- **Caretaker generaliseren? (handoff cryptotrader 09-07, te evalueren door deze repo):** caretaker beheert nu llama.cpp/GGUF-processen met een OpenAI-style contract; TimesFM (torch, 1468 MiB resident voor ~1 forecast/uur) past daar niet in. Overweging: generieke model-lifecycle-supervisor (backend-adapters declareren start/health/unload; callers krijgen ensure/queue/idle-unload). Tot die tijd lost cryptotrader het in-process op (lazy load + idle unload, eigen PR) — geen afhankelijkheid van guardian/caretaker. Eerste kandidaat-customer: cryptotrader.
+- **Degeneratie-guard open nasleep (live sinds 09-02, schema 1.2.0, guard + marker + capture-veld):** thresholds tunen op echte degeneratie-cases via capture-veld `degeneration_cutoff` (monitoring); letter-level-vrijstelling (q=1) her-evalueren zodra "aaaa"-cases opduiken. Deels open vraag (setup-agent 09-08): bredere OpenRouter `reasoning`-parameter-forwarding voor reasoning-modellen — deels beantwoord door de nemotron-adapter (journal 09-10); metadata-gedreven verfijning (alleen vertalen bij modellen zonder `supported_efforts`) staat open als catalog-optimalisatie.
+- **OOM-rapportage (open vraag operator, op todo):** rapporteert de caretaker OOM-kills terug aan Guardian? (inter-repo: m0nklabs/caretaker-llamacpp; raadpleeg caretaker_client/caretaker_runtime-wiring + status-endpoints).
+- **Test-nasleep legacy-removal (laatst gemeten 09-09):** 9 vision-fallback-failures op HEAD zijn pre-existing (stash-verified: falen met én zonder de failover-commits) — op te pakken bij de in-flight legacy-removal; `test_config_reload.py::test_failover_registry_loads_proposed_groups` pinde de verwijderde cloud_keys.json-fallback (by-design conflict; regel ~81 gebruikt nog tmp cloud_keys.json) → herschrijven/verwijderen bij diezelfde legacy-removal.
 - **CI-adoptie (open sinds 20260813_1):** `scripts/pre_restart_check.py` als GitHub Action nog niet opgepakt.
-- **llama-guardian.service file (operator-beslissing):** aparte unit-file (géén alias!), nu disabled + failed + `Restart=no`; verwijderen/hernoemen of laten — hij is inactief en ongevaarlijk, maar de naam in AGENTS.md-documentatie ("alias") is misleidend.
-- **m0nkdash-origin (optioneel):** origineel achter `dashboard.oelala.xyz` blijft dood — raakt Guardian niet.
-- **72h soak AFGESLOTEN (2026-09-02, bewijs):** capture draait ~26 dagen live in productie; volledige inventarisatie: 172 bestanden, 41.044 events (20.667 received / 20.218 completed / 146 failed = 0,7% / 13 cancelled), 169/172 bestanden gezond, 0 parse-falen in gezonde bestanden. 3 beschadigde .gz-rotaties (1,7% — crash-slachtoffers van de restart-loops 09-01/02; door de restart-race-fix + kill-loop-demping niet meer reproduceerbaar; tolerant readers overslaan ze). Policy 1.1.0 actief.
+- **Parked (operator-besluit 09-02, koelkast):** geheugen-idee (capture → agent-geheugen; stap 1 FTS/SQLite-index, stap 2 semantische embeddings). Bezwaar van de operator: kruisbesmetting over projectgrenzen — per-project scoping/key-isolation is eerste-klas eis in elke toekomstige uitwerking, niet een optie. Pas oppakken als de operator het weer op tafel legt.
+- **Klein/deferred:** `input_modalities`-veld op /v1/models-cloud-entries (discovery-metadata, klein vervolgdeel); NVIDIA-bruikbaarheidskaart (09-02, `scratch/nvidia_probe_results.json`): 81 geprobed → 12 OK / 55×404 (68% dode catalogus-entries) / 11×timeout — context-metadata vereist model-card-werk voor de 12 werkende; m0nkdash-origin achter dashboard.oelala.xyz blijft dood (raakt Guardian niet); host-hygiene: crash-loop-units (vllm-bench/nervesplat/caramba-processor) herchecken — spawnerden tientallen processen/min op 09-02.
 
-## 2026-09-07 — setup-agent constatation: redactor precision audit needed (principal policy 09-07: "secrets out = good; non-secret data dropped = must fix")
+## Terminal-capture regressie GEFIXT (2026-09-11 — gevonden door de agent31 setup-session via deze handoff: correct kanaal, correcte bevinding)
 
-**Observation (code-read, app/capture/redactor.py):** two patterns are categorically over-broad for capture content:
-1. `_IPV4_RE` applied to ALL text (line ~90) — every IPv4-looking string becomes `[REDACTED_IP]`, including LAN configs, research content and code examples (agent31's traffic is full of these: 192.168.1.G gateway address, monerod config, wireguard research).
-2. `_ENV_VAR_RE` = `\$\{?[A-Z][A-Z0-9_]*\}?` (line ~92) — every `$UPPERCASE` reference in captured code/scripts becomes `[REDACTED_ENV_VAR]` (`$HOME`, `$VERSION` — not secrets).
-Live WAL counts (current.jsonl): 25× IP, 19× ENV_VAR, 8× API_KEY, 8× AUTH_HEADER — partly the setup agent's own meta-discussion of the redactor (captured), so treat counts as upper bounds. API_KEY/Bearer patterns look correctly scoped.
+- Defect: `capture_request_completed(..., degeneration_cutoff=...)` → controller had de parameter niet → TypeError → fail-open swallow → **0 terminal-capture-events sinds de degeneratie-deploy** (hard bewijs: 48 request_received, 0 completed/failed).
+- Fix: controller-signature + schema 1.2.0-wiring (`integration.py`); fail-open except logt nu een content-vrije warning. Regression: `tests/unit/test_capture_dispatch_contract.py` (5) over de ÉCHTE keten (dispatch→controller→event). Gate 5/5; live verschijnen events weer. Les: contract-drift-tests door de echte controller, niet door de geschminkte dispatch-laag. Fix-commit: `5446949`.
 
-**Suggested remediation (guardian agent decides/implements):** config-driven precision — (a) sensitive-IP LIST (home WAN + LAN subnet) instead of all-IPv4; (b) env-var redaction only for known secret-var NAMES or high-entropy values, not every `$UPPERCASE`; (c) keep API-key/Bearer patterns; (d) golden tests: benign payloads (`$HOME` in a bash snippet, default-gateway examples) must pass through unredacted, real keys must still be caught. Principal context: capture gaps created by guardian's own secret-filtering are BY DESIGN and must not be "filled"; over-filtering of non-secrets is the thing to fix. This is guardian-agent scope — setup agent will NOT implement.
+## Afgerond (carry-forward one-liners; voltekst → `docs/ARCHIVED_HANDOFFS.md`)
 
-## 2026-09-07 — Handoff from cryptotrader session: generalize caretaker beyond llama.cpp?
-
-**Context**: the cryptotrader forecasting lane (TimesFM 3.0, PyTorch) was caught holding 1468 MiB of GPU 0 resident 24/7 while serving ~1 forecast/hour. The operator asked whether it could "run via guardian, to the caretaker, so it only works on-demand and waits in a queue".
-
-**Finding**: caretaker's lifecycle management (spawn/stop/unload/health, idle-unload via the gateway's ensure/unload calls) is exactly the right *pattern* — but the current implementation manages **llama.cpp server processes (GGUF models)** with an OpenAI-style serving contract. TimesFM is a torch model with a time-series contract; it cannot run under caretaker today.
-
-**Recommendation (for this repo's agent to evaluate)**: consider generalizing caretaker (or a sibling service) into a **generic model-lifecycle supervisor** — backend adapters declare how to start/health-check/unload a model host, callers get ensure/queue/idle-unload semantics regardless of model type. That would let every LAN service with an occasionally-used local model (cryptotrader's TimesFM is the first known candidate) drop resident memory and reuse one proven queue/idle-unload implementation. Until then, cryptotrader implements the pattern in-process (lazy load + idle unload in its own service — PR in flight there, no dependency on guardian/caretaker).
-
-**Evidence**: cryptotrader issue thread 2026-09-07 (GPU residency); `nvidia-smi` showed the uvicorn process at 1468 MiB beside ComfyUI (port 8188) and Frigate; caretaker scope verified via this repo's F5 notes (spawn/stop/reload/switch/unload/health/crash for llama.cpp).
-
-## 2026-09-08 — FEATURE REQUEST (from setup agent, redacted project): degeneration watchdog (streaming circuit breaker)
-
-**Context (evidence, live-measured 09-08):** agent31 consumes `:free` OpenRouter models through this gateway. Live probes showed: nemotron-3.5-lightning healthy (5/6 checks), gemma-4-26b 6/6 HTTP 429, poolside 2/6 intermittent — and one generation record (12:10:23Z, origin agent31.guardian.local) with finish_reason "length": a reasoning model burned 361 thinking tokens on a trivial probe question, then the caller's 400-token answer-cap truncated the result → HTTP 200 with a useless payload. Callers currently defend themselves with STATIC max_tokens caps, which fight reasoning models (agent31's own documented rule: reasoning models need generous budgets).
-
-**Request:** add a degeneration watchdog in the gateway's streaming path (the recent event-loop audit shows the stream hook points exist):
-- Detection: sliding-window k-gram repetition on the outbound token stream — e.g., any 6-gram repeating ≥3× within the last ~200 generated tokens → degeneration loop. Rolling hash, no LLM scoring needed; also flag zero-EOS over N tokens for trivially small prompts.
-- Action: cancel the upstream request and return `finish_reason: "degeneration_detected"` (+ repeat stats) to the caller instead of letting the loop run to the provider cap.
-- Why: with a watchdog at the gateway, consumers can DROP static max_tokens caps on free models (model stops naturally via EOS, pathology killed early by the gateway, provider cap as last resort). One implementation protects all consumers (agent31, setup sessions, future agents) instead of every caller rolling its own cap.
-- Secondary: does the gateway forward OpenRouter `reasoning` parameters (effort low/high, exclude) for reasoning models? If yes, callers can control thinking depth per intent (probe = low, deep work = high) — the cleanest lever against the "reasoning ate my budget" class.
-
-Contact: setup agent, redacted project (this note is informational — implementation scope/timing is the gateway project's call).
-
-## Afgerond deze sessie (licht gecompacteerd; voltekst → `docs/ARCHIVED_HANDOFFS.md`)
-
-- **Model-mismatch contract:** 503 `model_switch_failed` op elk lokaal entry-pad, live probe `backend_serving_model_name()` — live bewezen, `ba9467e`.
-- **Caretaker split-brain + /ensure strict:** legacy-launcher weg, /ensure fail-closed + retry — PR #9/#10 gemerged (`ba866ff`/`f0bdeb6`).
-- **G3 bare-name routing hijack:** catalog-gestuurde disambiguatie + `z-ai/` uit nvidia-prefixes — `7d5d32f`, live bewezen.
-- **G2 orphan non-stream calls:** raw-ASGI receive-watchers (cloud + queue), 499-contract — `3fa1479`/`f2d4d9f`/`6db7f5b`, live bewezen (0 tokens verbrand).
+- **Terminal-capture contract-drift gefixt** (09-11, `5446949`) — zie sectie hierboven.
+- **Nemotron "crap-outputs" verklaard + canonieke reasoning-adapter** (09-10, `3c0edb4`): length-cut in thinking → vLLM-parser dupliceert thinking in content; adapter vertaalt intent → provider-dialect (openrouter `reasoning.enabled=false` / nvidia-direct `chat_template_kwargs.enable_thinking=false`); 12 pins, end-to-end bewezen.
+- **Legacy-config volledig opgeruimd + test-lekkage gefixt** (09-09, `038382b`): local_models.yaml-symlink weg; **cloud_keys.json bleek de actieve failover-bron** — eerst gemigreerd (failover_groups → global.settings.yaml), toen pas verwijderd; failover.py leest uitsluitend settings.yaml.
+- **HTTP 200-garbage surfacet als 502** (09-09, `2e51140`): `_detect_upstream_invalid_response` — 200-body op chat-paths vereist `choices`; embedded `choices[0].error` (OpenRouter-vorm) = invalid; embeddings uitgezonderd.
+- **Failover-groep `failover/free` live end-to-end** (09-09, operator-besluit: groups zijn globaal → settings.yaml): 2 admission/routing-gaps gefixt (chat-admissie + `is_cloud_or_guardian_route`); live `failover/free` → 200 in 0,85 s op nemotron-3-super terwijl lightning/lagunas degraded waren.
+- **Degeneratie-guard + marker-injectie LIVE** (09-02, schema 1.2.0): server-side cutoff van repetition-loops (fundamentele period q; q<6 vrijgesteld; letter-level bewust vrijgesteld), leesbare slot-marker als laatste content-delta, kill-switch `degeneration.enabled: false`.
+- **Catalogus-consolidatie trap 1 + trap 2 AFGEROND** (09-02): één bron/één TTL (dubbele /models-fetch weg); modaliteiten + context bewaard in de single fetch; persist-subset-bug gevonden+gefixt (`1b9493b`); beide traps gesloten.
+- **Gap-vrij architectureel** (09-02, `97de6ea`/`f38af54`): WAL-rotatie gzip'd sync op de event loop (5–15 s stall!) → to_thread; MUST-FIX 1–8 compleet; structural guard 19 modules; via-gateway p95=2 ms, 0 gaps>0,5 s.
+- **Restart-race gefixt** (09-02, `ec1211e`): listener-herkenning herkent `python3.14 -m app.main` weer; post-restart-verificatie (MainPID == listener) is standaard-procedure.
+- **G2 orphan-calls gefixt** (09-01, `3fa1479`/`f2d4d9f`/`6db7f5b`): raw-ASGI receive-watchers (cloud + queue), 499-contract — live bewezen (0 tokens verbrand).
+- **Model-mismatch contract gefixt** (09-01, `ba9467e`): 503 `model_switch_failed` op elk lokaal entry-pad; /ensure fail-closed + retry (PR #9/#10, `ba866ff`/`f0bdeb6`).
+- **G3 bare-name routing hijack gefixt** (09-02, `7d5d32f`): catalog-gestuurde disambiguatie; `z-ai/` uit nvidia-prefixes — live bewezen.
+- **Test-isolatie** (09-02, `7db5ba3`): 20 live integration-tests default gedeselecteerd; gate raakt productie nooit meer.
+- **Streaming-teardown pin** (09-02, `f61c2f1`): client-disconnect tijdens write = `request_cancelled`/`client_disconnect`.
+- **ensure_fresh gewired** (09-02, `7f777a5`): /v1/models triggert ensure_all_fresh; /ensure transport-error → WARNING; live 272 modellen.
+- **pi-models opgeschoond** (09-02): 216→99 entries, alle resolvem live; backup `models.json.bak-20260902`.
+- **UNIT-VALKUIL opgelost** (09-02): `llama-guardian.service` is nu een symlink op de echte unit (aparte file + drop-ins bewaard als `.disabled-20260902`) — restart via alias veilig.
 - **`GUARDIAN_STARTUP_ADOPT_ONLY=1` verwijderd** uit beide unit-files; startup-heal weer volledig actief.
-- **UNIT-VALKUIL opgelost:** `llama-guardian.service` is nu een **symlink** op de echte unit (aparte file + drop-ins bewaard als `.disabled-20260902`) — restart via alias veilig.
-- **Test-isolatie:** 20 live integration-tests default gedeselecteerd (`7db5ba3`); de verouderde google-test-note gecorrigeerd (niet reproduceerbaar op HEAD).
-- **Streaming-teardown pin:** client-disconnect tijdens write = `request_cancelled`/`client_disconnect` — `f61c2f1`.
-- **Gateway restart-race gefixt:** listener-herkenning herkent `python3.14 -m app.main` weer (`ec1211e`); post-restart-verificatie (MainPID == listener) standaard.
-- **ensure_fresh gewired** aan `/v1/models` + `/ensure` ERROR→WARNING (`7f777a5`); live 272 modellen, geen fouten.
-- **pi-models opgeschoond:** 216→99 entries, alle resolvem live; backup `models.json.bak-20260902`.
-- **72h-soak afgesloten:** 26 dagen live, 41.044 events, 169/172 bestanden gezond, 0 parse-falen; 3 truncaties = crash-slachtoffers (niet meer reproduceerbaar).
-- **Nul-delta-meting + gap-vrij architectureel:** alle event-loop-blokkades uit de audit verwijderd (`f38af54`/`97de6ea`); structural guard 19 modules; via-gateway p95=2ms, 0 gaps>0.5s.
-- **C-feedback dossiers:** volledig afgehandeld door PR #17 (`ef483dd`) — C2/C7 refutaties, C8-C11 live; onafhankelijk herverifieerd.
-
-- **Degeneratie-guard LIVE-bouw afgerond (`app/gateway/degeneration.py`, schema 1.2.0):** server-side cutoff van repetition-loops (operator-feature, koelkast-noot hieronder blijft staan), thresholds in `config/global.settings.yaml` `degeneration:`, kill-switch `enabled: false`. Pins 17×, gate groen; deploy + live-sanity volgt in deze sessie. Open: thresholds tunen op echte degeneratie-cases via capture-veld `degeneration_cutoff` (monitoring), en de letter-level-vrijstelling (q=1) her-evalueren als er "aaaa"-cases opduiken.
-
-- **Degeneratie-marker-injectie (operator-verzoek, zelfde sessie):** bij cutoff krijgt de lezer nu een zichtbare slot-marker `\n\n[guardian: generation cut off - repetition loop detected]` als laatste content-delta (alle paden, `marker_enabled`/`marker_text` configureerbaar). Machine-signaal onveranderd (`finish_reason: "length"` + capture-vlag).
-
-- **Catalogus-consolidatie trap 1 AFGEROND (2026-09-02):** dubbele /models-fetch weg — CloudModelCatalog is nu de enige fetch-bron (bewaart models + reasoning + context); registry leest via DI-reader, geen HTTP meer in providers.py. Pins herleid + 3 nieuwe, gate groen. **Trap 2 (modaliteiten-extractie) is het verplichte vervolg** — basis gereed.
-
-- **OPEN VRAAG (operator, op todo):** rapporteert de caretaker OOM's terug aan Guardian? (OOM-kill detectie + rapportage-oppervlak naar Guardian — inter-repo: m0nklabs/caretaker-llamacpp; raadpleeg caretaker_client/caretaker_runtime-wiring + caretaker-repo status-endpoints).
-
-- **Trap 2 AFGEROND (2026-09-02):** modaliteiten-extractie live — catalog bewaart input/output-modalities (single fetch), failover image-capability beslist config-first, dan catalog. Deferred: `input_modalities`-veld op /v1/models-cloud-entries. **Beide traps van het twee-traps plan zijn nu gesloten.**
-
-## 2026-09-08/09 — FOLLOW-UP on the degeneration handoff: upstream failures surface as HTTP 200 + null content (capture-log evidence)
-
-**Second live finding (setup agent, redacted project) — a DIFFERENT failure class than repetition loops, observed in the same window:**
-- 09-09 ~07:17-07:40 UTC, data/capture/guardian_capture_current.jsonl: agent31 probe battery (nemotron mt=2000 effort=low) produced no usable answer; laguna-s + laguna-xs probes = `request_failed` within ~1s (x4). Setup's own live calls reproduced it: nemotron-3.5-lightning returned **HTTP 200 with `content: null`, partial reasoning ("Here") and an embedded upstream `error: {code: 500, error_type: "server"}`** (Nvidia); poolside returned a body with **no `choices` key at all**. Meanwhile nemotron-3-super-120b-a12b:free answered correctly in the same minute. agent31 correctly flagged "primary DEGRADED" in run 3 and cycled models manually (visible in capture + OpenRouter activity).
-- **Request 1 — surface upstream failures as real HTTP errors:** when the upstream response carries `choices[].error` (OpenRouter's embedded-error shape) or a body without `choices`, the gateway should return a proper 502/503 to the caller instead of passing 200-with-garbage through. Callers (python urllib, dsh tooling) currently can't distinguish "empty answer" from "provider down" without bespoke parsing.
-- **Request 2 — gateway-side failover:** the recent modalities work added failover machinery; consider auto-retry within a failover group when the upstream 500s/429s on a `:free` model — callers ask for "a free model", the gateway picks a healthy one. This removes the caller-side model-cycling visible in today's capture.
-- Same-minute evidence that capacity windows rotate: nemotron-3-super answered fine while lightning + both lagunas failed. Detection/fallback at the caller works (agent31's DEGRADED flag); the gateway could own it centrally.
-
-## 2026-09-09 ~09:0x — Request 2 IMPLEMENTED (operator-directed, setup agent): failover group live end-to-end
-
-- **Operator decision:** failover groups are a GLOBAL concern (candidates span providers) → the `free` group (7 workable :free ids, healthy-first order) lives in `config/global.settings.yaml` `failover_groups:` — the PRIMARY source per FailoverRegistry. The temporary `cloud_keys.json` attempt was removed (operator: no json in the yaml config dir, no keys-named file without keys).
-- **Two admission/routing gaps fixed (were why the group 404'd / fell to local llama):**
-  1. `app/local_inference/models.py` `resolve_or_reject_inference_model` now accepts `failover/{group}` when the group exists (commit: chat admission + pins) — discovery listed groups but chat rejected them before routing.
-  2. `app/cloud_inference/__init__.py` `is_cloud_or_guardian_route` now returns True for `failover/` — without it the chat dispatcher sent the group to the LOCAL backend (observed live: group request answered by llama.cpp, 53 s). A missing group surfaces as the clean 404 from `resolve_cloud_attempts`.
-- **Live proof (09-09 ~09:0x, post-restart MainPID==listener):** `failover/free` → HTTP 200 in 0.85 s, resolved `nvidia/nemotron-3-super-120b-a12b:free` (provider Nvidia), finish "stop", correct answer — while lightning + lagunas were in their degraded window earlier the same hour.
-- **Pins:** tests/unit/test_failover_address_admission.py (5: admission ×4 + route-predicate ×1) — all green; upstream 502 pins still green.
-- **Pre-existing, NOT from this change (baseline-verified via stash-compare): 9 vision-fallback test failures on HEAD** (`test_cloud_vision_fallback_*[...]`) — they fail with and without these commits; leaving them to you alongside your in-flight legacy removal. Coordination note: `test_config_reload.py::test_failover_registry_loads_proposed_groups` now fails BY DESIGN-CONFLICT — it pins the legacy cloud_keys.json path, which (a) your refactor removes and (b) is shadowed by the settings.yaml group. Yours to rewrite/delete with the legacy removal.
-
-> **RESOLUTIE (2026-09-11, dsh-flip-guardian) — bevestigd en gefixt:** de bevinding klopt.
-> Bewijs vóór fix: huidige capture = 48 request_received, 0 completed/failed (terminal-capture
-> volledig weg sinds de degeneratie-wiring — mijn regressie, gate miste hem omdat de pinnen
-> monkeypatchten op de dispatch-laag i.p.v. door de echte controller te gaan).
-> Fix: `CaptureController.capture_request_completed` accepteert `degeneration_cutoff` nu
-> (integration.py) en wirert hem door naar schema 1.2.0; dispatcher-swijg-fix: fail-open
-> except logt nu een content-vrije warning (geen stil verzwelgen meer).
-> Regression: `tests/unit/test_capture_dispatch_contract.py` (5) — dispatch→REAL controller→event,
-> cutoff true/false/afwezig + drift-met-warning. Gate 5/5. Fix-commit: zie git log.
+- **Nul-delta-meting + gap-vrij architectureel bewezen** (09-02): pijplijn gezond; baseline TTFT ~1 s, inter-chunk p95 < 30 ms, maxGap < 400 ms.
+- **C-feedback dossiers volledig afgehandeld** (PR #17, `ef483dd`): C2/C7-refutaties, C8-C11 live; onafhankelijk herverifieerd.
+- **72h soak AFGESLOTEN** (09-02, bewijs): capture ~26 dagen live; 41.044 events; 169/172 bestanden gezond, 0 parse-falen; 3 truncaties = crash-slachtoffers (niet meer reproduceerbaar). Policy 1.1.0 actief.
+- **NVIDIA bruikbaarheidskaart GEMETEN** (09-02, volledige probe): 81 modellen → 12 OK / 55×404 / 11×timeout / 2×500 / 1×400; metadata-vondst: NVIDIA's /models geeft géén context_length.
+- **Orphan-herkomst forensica AFGEROND op beste verklaring** (09-02): verzadigde systemd job-wachtrij tijdens de guardian-transitie (vllm-bench 53.640 herstarts, nervesplat 52.311); inter-repo-handoffs naar caramba + nervesplat; risico gedempt.
+- **Geheugen-idee IN DE KOELKAST** (09-02, operator-besluit) — zie parked-punt hierboven.
