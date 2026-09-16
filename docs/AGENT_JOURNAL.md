@@ -55,3 +55,8 @@ Gedistilleerde lessen uit de gearchiveerde entries (les → waar hij nu leeft):
 ## 2026-09-15 — promotion/compaction-pass (deze)
 
 JOURNAL 38,6 kB → dit (~8 kB); verbatim → `docs/AGENT_JOURNAL_ARCHIVE.md` Batch 2 (09-01 t/m 09-10). HANDOFF 21,9 → ~9 kB, verbatim → ARCHIVED_HANDOFFS "gearchiveerd 2026-09-15". Hot-file F5-statusregel (stale PR #12) gecorrigeerd — dit was de geplande promotie-pass.
+
+## 2026-09-11 — Fase-status gecontroleerd: F7 is feitelijk AFGEROND (stale statusregel)
+
+- Bewijs: systemd-unit `WorkingDirectory=/home/flip/guardian-llmprovider-gateway` + `ExecStart=<new-dir>/venv/bin/python3.14 -m app.main`; proces-cwd van de draaiende MainPID = new dir; legacy `/home/flip/llama_cpp_guardian` bevroren; nginx TLS-mux live; `llama-guardian.service` = alias op de nieuwe unit. Exact de F7-acceptatie-endstate uit IMPLEMENTATION_PLAN.md.
+- **AGENTS.md-faseregel ("F6 Windows/homelab + F7 cut-over → open") is stale op F7** — corrigeren in de eerstvolgende promotion-pass. Alleen F6 is nog echt open.
