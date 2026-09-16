@@ -114,7 +114,11 @@ async def handle_audio_speech(request: Request, client_id: str) -> Response:
     # watcher stops the service when the route goes unused — VRAM freed).
     if cfg.get("ondemand_enabled", True) and cfg.get("caretaker_url"):
         ensure_url = str(cfg["caretaker_url"]).rstrip("/") + "/tts/ensure"
-        ensure_key = str(cfg.get("caretaker_key") or "")
+        # The tts section is read raw from YAML: expand ${VAR} references the
+        # same way the provider registry does (single source of truth).
+        from app.proxy.providers import _expand_env
+
+        ensure_key = _expand_env(str(cfg.get("caretaker_key") or ""))
         ensure_headers = {"Authorization": f"Bearer {ensure_key}"} if ensure_key else {}
         try:
             async with httpx.AsyncClient(timeout=90.0) as client:

@@ -272,3 +272,25 @@ async def test_ondemand_disabled_skips_ensure(monkeypatch):
     resp = await tts_mod.handle_audio_speech(_FakeRequest({"input": "x"}), "dsh")
     assert resp.status_code == 200
     assert [c["url"] for c in calls] == ["http://192.168.1.245:11450/tts"]
+
+
+@pytest.mark.asyncio
+async def test_caretaker_key_env_reference_is_expanded(monkeypatch):
+    """caretaker_key: ${WINDOWS_LAN_KEY} must expand to the real key — the
+    tts section is read raw from YAML (the provider registry's expansion does
+    not apply to it); a literal placeholder produced a live 401 (2026-09-16)."""
+    import os
+
+    monkeypatch.setenv("WINDOWS_LAN_KEY", "ctk_expanded_test")
+    monkeypatch.setattr(
+        tts_mod, "load_tts_config", lambda: _cfg_ondemand(caretaker_key="${WINDOWS_LAN_KEY}")
+    )
+
+    def handler(url, json, headers):
+        if url.endswith("/tts/ensure"):
+            return httpx.Response(200, json={"ok": True, "already_running": True})
+        return httpx.Response(200, content=b"RIFFwav", headers={"content-type": "audio/wav"})
+
+    calls = _patch_routing_client(monkeypatch, handler)
+    await tts_mod.handle_audio_speech(_FakeRequest({"input": "x"}), "dsh")
+    assert calls[0]["headers"]["Authorization"] == "Bearer ctk_expanded_test"
