@@ -1,6 +1,9 @@
 enabled: true
 base_url: http://127.0.0.1:11440/v1
 management_url: http://127.0.0.1:11441
+management_key: ${CARETAKER_KEY}
+# TTS engine (qwen3tts-http, caretaker-managed on-demand lifecycle)
+tts_url: http://127.0.0.1:11450
 local: true
 models:
   llama3.2-3b:

@@ -213,12 +213,12 @@ failover_groups:
 # LAN-firewall-covered). Read at request time — hot-reloadable.
 tts:
   enabled: true
-  backend_url: http://192.168.1.W:11450
   timeout_seconds: 120
   default_instruct: ""
-  # On-demand lifecycle: the Windows caretaker starts the engine on demand and
-  # stops it after idle (VRAM freed when the audio route is unused). The key
-  # is the same LAN caretaker key (see windows-gpu-local management_url).
-  ondemand_enabled: true
-  caretaker_url: http://192.168.1.W:11441
-  caretaker_key: ${WINDOWS_LAN_KEY}
+  # Provider-driven speech routing (NO cloud/local distinction — the caretaker
+  # is a provider and behaves identically on a LAN box or a cloud GPU host).
+  # Each provider declares tts_url + management_url + management_key in its own
+  # file; the order below is the failover order (first = primary).
+  providers:
+    - ai-node-local
+    - windows-gpu-local
