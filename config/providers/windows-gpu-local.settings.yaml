@@ -3,30 +3,22 @@
 # caretaker (operator-managed, NSSM service on Windows); Guardian only forwards
 # traffic — NO lifecycle / idle-unload / VRAM scheduler / auto-switch for this GPU.
 #
-# Naming: the `-local` suffix comes from the plan naming, but this is a REMOTE
-# host — `local: false` overrides the name-based managed heuristic so the
-# provider is cloud-routed (LAN-inference) instead of treated as this gateway's
-# managed llama-server.
-#
-# Fill in the real Windows LAN address, set WINDOWS_LAN_KEY in .env, flip
-# `enabled: true`, then POST /api/config/reload — config-only, no restart.
+# ACTIVATED 2026-09-11 (guardian session): host 192.168.1.W, caretaker live on
+# :11441 (NSSM), llama-server b10964 CUDA 13.3 on :11440, model qwen3.5-9b
+# (ngl 24, 16k ctx — display-GPU VRAM-realistic, see the Windows models file).
 local: false
-enabled: false
-base_url: http://192.168.1.x:11440/v1
+enabled: true
+base_url: http://192.168.1.W:11440/v1
 api_key: ${WINDOWS_LAN_KEY}
 brand: windows
 # llama-server advertises /v1/models (OpenAI-compatible); bare model ids are
 # normalized to windows/<model> by the catalog (brand above).  catalog_url is
 # APPENDED to base_url (which already ends in /v1) — /models → /v1/models.
 catalog_url: /models
-# Reference for the Windows-side caretaker control API (the gateway's own
-# caretaker runtime only manages THIS host's llama-server; the Windows GPU is
-# operator-managed).  Auth is mandatory from the first LAN bind (CARETAKER_KEY
-# equivalent on the Windows side).
-management_url: http://192.168.1.x:11441
-# llama-server reports no context_length: per-model overrides go here once the
-# operator has sized the models (same pattern as openrouter/nvidia overrides —
-# keys are the brand-normalized windows/<model> ids):
-# models:
-#   windows/qwen3-8b-q5:
-#     context_window: 32768
+management_url: http://192.168.1.W:11441
+# llama-server reports no context_length: per-model overrides (brand-normalized
+# windows/<model> ids).
+models:
+  windows/qwen3.5-9b:
+    context_window: 16384
+    benchmark_context_limit: 131072

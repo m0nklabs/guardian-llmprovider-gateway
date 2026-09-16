@@ -57,6 +57,11 @@ DEFAULT_BRAND_BY_PROVIDER: dict[str, str] = {
     "openai": "openai",
     "google": "google",
     "nvidia": "nvidia",
+    # F6 (2026-09-11): the Windows LAN provider declares ``brand: windows`` in
+    # its provider file; without this entry the bare llama-server ids would
+    # fall back to the provider stem as brand and the advertised address would
+    # double to ``windows-gpu-local/windows-gpu-local/<model>``.
+    "windows-gpu-local": "windows",
 }
 
 
