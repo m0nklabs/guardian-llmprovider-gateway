@@ -56,6 +56,7 @@ from app.gateway import queue_helpers as _queue_helpers
 
 # ── Gateway v1 routing (Phase 5 extraction) ─────────────────────────
 from app.gateway import routing as _gw_routing
+from app.gateway import tts as _tts
 
 # ── Session slots (Phase 5 extraction) ───────────────────────────────
 from app.gateway import sessions as _sessions
@@ -1602,6 +1603,15 @@ async def _forward_to_cloud_provider(
         cloud_request_id=cloud_request_id,
         cloud_capture_start_time=cloud_capture_start_time,
     )
+
+# TTS routing (F6 extension): OpenAI-compatible speech via the Windows engine.
+# Registered BEFORE the /v1/{path:path} catch-all so Starlette matches the
+# specific path first.
+@app.post("/v1/audio/speech")
+async def tts_audio_speech(request: Request, client_id: str = Depends(verify_api_key)):
+    """OpenAI-compatible /v1/audio/speech → qwen3tts-http engine (app/gateway/tts.py)."""
+    return await _tts.handle_audio_speech(request, client_id)
+
 
 @app.post("/v1/{path:path}")
 async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(verify_api_key)):

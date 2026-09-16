@@ -207,3 +207,18 @@ failover_groups:
         model: google/gemma-4-26b-a4b-it:free
       - provider: openrouter
         model: nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free
+
+# TTS routing (F6 extension): OpenAI-compatible /v1/audio/speech → the
+# qwen3tts-http engine on the Windows host (always-on NSSM service, keyless,
+# LAN-firewall-covered). Read at request time — hot-reloadable.
+tts:
+  enabled: true
+  backend_url: http://192.168.1.245:11450
+  timeout_seconds: 120
+  default_instruct: ""
+  # On-demand lifecycle: the Windows caretaker starts the engine on demand and
+  # stops it after idle (VRAM freed when the audio route is unused). The key
+  # is the same LAN caretaker key (see 14700k-local management_url).
+  ondemand_enabled: true
+  caretaker_url: http://192.168.1.245:11441
+  caretaker_key: ${WINDOWS_LAN_KEY}
