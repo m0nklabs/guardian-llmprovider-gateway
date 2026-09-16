@@ -322,6 +322,40 @@ Queue rule for generic `POST /v1/{path:path}`:
 - direct passthrough for all other `POST /v1/*` paths
 - for queued inference paths, Guardian requires a valid JSON object body with a served `model` field before queue admission
 
+### Speech (TTS) endpoint
+
+| Method | Path | Queued | Purpose |
+| --- | --- | --- | --- |
+| `POST` | `/v1/audio/speech` | No (blocks up to `tts.ensure_timeout_seconds`) | OpenAI-compatible speech synthesis via provider-declared TTS engines |
+
+Provider-driven routing (2026-09-16): a host participates in speech routing
+when its provider file declares `tts_url` (the qwen3tts-http engine) plus
+`management_url` + `management_key` (the caretaker control API). `tts.providers`
+in `global.settings.yaml` lists provider names in failover order; each attempt
+is `POST {management_url}/tts/ensure` (the caretaker's uniform on-demand
+lifecycle: VRAM gate, optional llama-stop, VRAM wait, spawn/idle-stop) followed
+by `POST {tts_url}/tts`. There is no cloud/local distinction — any host (LAN or
+cloud GPU box) serves speech purely by configuration.
+
+Request mapping (OpenAI speech → engine contract):
+
+| OpenAI field | Engine field | Notes |
+| --- | --- | --- |
+| `input` | `text` | required, non-empty |
+| `voice` | `instruct` | stock names (`alloy`…`ballad`) map to VoiceDesign instructions; unknown strings pass through verbatim |
+| `instruct` (extra) | `instruct` | explicit extra wins over `voice` |
+| `seed`, `sub_seed`, `temperature` | same | passthrough when present |
+| `response_format` | — | must be `wav` or `pcm` (engine serves 16-bit PCM mono 24 kHz WAV); others → 400 |
+
+Config (`tts:` in `global.settings.yaml`, hot-reloadable): `enabled`,
+`providers` (failover order), `timeout_seconds` (engine call),
+`ensure_timeout_seconds` (must exceed `CARETAKER_TTS_START_TIMEOUT` +
+`CARETAKER_TTS_VRAM_WAIT_SECONDS` of the slowest host), `default_instruct`.
+
+Errors: `404` when disabled, `503` when no provider declares `tts_url`, `400`
+for empty `input`/bad format, `502` when all configured providers fail (detail
+lists the per-provider reasons, e.g. insufficient VRAM).
+
 ### Queue and status endpoints
 
 | Method | Path | Queued | Purpose |
