@@ -1,8 +1,9 @@
-"""TTS routing pins (F6 extension): /v1/audio/speech → qwen3tts-http engine.
+"""TTS routing pins — provider-driven, platform-agnostic speech routing.
 
-The engine contract is NOT OpenAI-shaped (own POST /tts → audio/wav): the
-route maps input→text, voice→instruct (stock-voice map), passes seed /
-sub_seed / temperature through, and enforces wav-only output.
+Guardian makes no cloud/local distinction: a TTS backend is a provider
+capability (tts_url + management_url + management_key in the provider file);
+``tts.providers`` gives the failover order.  The caretaker on EVERY host runs
+the same on-demand lifecycle (spawn/idle-stop).
 """
 
 import httpx
@@ -13,15 +14,40 @@ from types import SimpleNamespace
 from app.gateway import tts as tts_mod
 
 
+def _provider_docs():
+    return {
+        "providers": {
+            "ai-kvm2-local": {
+                "management_url": "http://127.0.0.1:11441",
+                "management_key": "${CARETAKER_KEY}",
+                "tts_url": "http://127.0.0.1:11450",
+            },
+            "14700k-local": {
+                "management_url": "http://192.168.1.245:11441",
+                "management_key": "${WINDOWS_LAN_KEY}",
+                "tts_url": "http://192.168.1.245:11450",
+            },
+            "openrouter": {"api_key": "sk-x"},  # no TTS capability — skipped
+        }
+    }
+
+
 def _cfg(**overrides):
     base = {
         "enabled": True,
-        "backend_url": "http://192.168.1.245:11450",
         "timeout_seconds": 120,
         "default_instruct": "",
+        "providers": ["ai-kvm2-local", "14700k-local"],
     }
     base.update(overrides)
     return base
+
+
+def _patch_config(monkeypatch, cfg=None, docs=None):
+    monkeypatch.setattr(tts_mod, "load_tts_config", lambda: cfg or _cfg())
+    monkeypatch.setattr(tts_mod, "CONFIG", docs or _provider_docs())
+    monkeypatch.setenv("CARETAKER_KEY", "ctk_local")
+    monkeypatch.setenv("WINDOWS_LAN_KEY", "ctk_windows")
 
 
 class _FakeRequest:
@@ -34,151 +60,7 @@ class _FakeRequest:
         return self._body
 
 
-def _patch_cfg(monkeypatch, **overrides):
-    monkeypatch.setattr(tts_mod, "load_tts_config", lambda: _cfg(**overrides))
-
-
-def _patch_client(monkeypatch, responder):
-    """Patch httpx.AsyncClient in the tts module to return a fake transport."""
-    class _FakeAsyncClient:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        async def __aenter__(self):
-            return SimpleNamespace(post=responder)
-
-        async def __aexit__(self, *args):
-            return False
-
-    monkeypatch.setattr(tts_mod.httpx, "AsyncClient", _FakeAsyncClient)
-
-
-# ---------------------------------------------------------------------------
-# Mapping (pure functions — the OpenAI → engine contract)
-# ---------------------------------------------------------------------------
-
-
-def test_mapping_voice_stock_names_map_to_instruct():
-    cfg = _cfg()
-    payload = tts_mod._build_engine_payload(
-        {"input": "Hello", "voice": "nova"}, cfg
-    )
-    assert payload["text"] == "Hello"
-    assert payload["instruct"] == "bright, friendly female voice"
-
-
-def test_mapping_unknown_voice_passes_through_verbatim():
-    payload = tts_mod._build_engine_payload(
-        {"input": "Hallo", "voice": "zachte vrouwelijke stem, blij"}, _cfg()
-    )
-    assert payload["instruct"] == "zachte vrouwelijke stem, blij"
-
-
-def test_mapping_explicit_instruct_wins_over_voice():
-    payload = tts_mod._build_engine_payload(
-        {"input": "x", "voice": "alloy", "instruct": "boze stem"}, _cfg()
-    )
-    assert payload["instruct"] == "boze stem"
-
-
-def test_mapping_default_instruct_fallback():
-    payload = tts_mod._build_engine_payload(
-        {"input": "x"}, _cfg(default_instruct="neutral voice")
-    )
-    assert payload["instruct"] == "neutral voice"
-
-
-def test_mapping_engine_extras_passthrough():
-    payload = tts_mod._build_engine_payload(
-        {"input": "x", "seed": 42, "sub_seed": 7, "temperature": 0.9}, _cfg()
-    )
-    assert payload["seed"] == 42
-    assert payload["sub_seed"] == 7
-    assert payload["temperature"] == 0.9
-
-
-# ---------------------------------------------------------------------------
-# Handler behavior
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_success_returns_audio_wav_passthrough(monkeypatch):
-    _patch_cfg(monkeypatch)
-    seen = {}
-
-    async def responder(url, json=None):
-        seen["url"] = url
-        seen["payload"] = json
-        return httpx.Response(200, content=b"RIFFwavdata", headers={"content-type": "audio/wav"})
-
-    _patch_client(monkeypatch, responder)
-    resp = await tts_mod.handle_audio_speech(_FakeRequest({"input": "Hallo", "voice": "nova"}), "dsh")
-    assert resp.status_code == 200
-    assert resp.media_type == "audio/wav"
-    assert resp.body == b"RIFFwavdata"
-    assert seen["url"] == "http://192.168.1.245:11450/tts"
-    assert seen["payload"]["instruct"] == "bright, friendly female voice"
-
-
-@pytest.mark.asyncio
-async def test_disabled_config_returns_404(monkeypatch):
-    _patch_cfg(monkeypatch, enabled=False)
-    with pytest.raises(HTTPException) as excinfo:
-        await tts_mod.handle_audio_speech(_FakeRequest({"input": "x"}), "dsh")
-    assert excinfo.value.status_code == 404
-
-
-@pytest.mark.asyncio
-async def test_non_wav_response_format_rejected(monkeypatch):
-    _patch_cfg(monkeypatch)
-    with pytest.raises(HTTPException) as excinfo:
-        await tts_mod.handle_audio_speech(
-            _FakeRequest({"input": "x", "response_format": "mp3"}), "dsh"
-        )
-    assert excinfo.value.status_code == 400
-    assert "wav" in str(excinfo.value.detail)
-
-
-@pytest.mark.asyncio
-async def test_empty_input_rejected(monkeypatch):
-    _patch_cfg(monkeypatch)
-    with pytest.raises(HTTPException) as excinfo:
-        await tts_mod.handle_audio_speech(_FakeRequest({"input": "  "}), "dsh")
-    assert excinfo.value.status_code == 400
-
-
-@pytest.mark.asyncio
-async def test_engine_unreachable_returns_502(monkeypatch):
-    _patch_cfg(monkeypatch)
-
-    async def responder(url, json=None):
-        raise httpx.ConnectError("connection refused")
-
-    _patch_client(monkeypatch, responder)
-    with pytest.raises(HTTPException) as excinfo:
-        await tts_mod.handle_audio_speech(_FakeRequest({"input": "x"}), "dsh")
-    assert excinfo.value.status_code == 502
-
-
-@pytest.mark.asyncio
-async def test_engine_error_status_passthrough(monkeypatch):
-    _patch_cfg(monkeypatch)
-
-    async def responder(url, json=None):
-        return httpx.Response(422, content=b'{"detail":"bad"}')
-
-    _patch_client(monkeypatch, responder)
-    resp = await tts_mod.handle_audio_speech(_FakeRequest({"input": "x"}), "dsh")
-    assert resp.status_code == 422
-
-
-# ---------------------------------------------------------------------------
-# On-demand lifecycle (ensure via the Windows caretaker before every forward)
-# ---------------------------------------------------------------------------
-
-
-def _patch_routing_client(monkeypatch, handler):
+def _patch_client(monkeypatch, handler):
     """handler(url, json=None, headers=None) -> httpx.Response; records calls."""
     calls = []
 
@@ -200,97 +82,154 @@ def _patch_routing_client(monkeypatch, handler):
     return calls
 
 
-def _cfg_ondemand(**overrides):
-    base = _cfg(
-        ondemand_enabled=True,
-        caretaker_url="http://192.168.1.245:11441",
-        caretaker_key="ctk_test",
+# ---------------------------------------------------------------------------
+# Mapping (pure functions — the OpenAI → engine contract)
+# ---------------------------------------------------------------------------
+
+
+def test_mapping_voice_stock_names_map_to_instruct():
+    payload = tts_mod._build_engine_payload({"input": "Hello", "voice": "nova"}, _cfg())
+    assert payload["text"] == "Hello"
+    assert payload["instruct"] == "bright, friendly female voice"
+
+
+def test_mapping_unknown_voice_passes_through_verbatim():
+    payload = tts_mod._build_engine_payload({"input": "Hallo", "voice": "zachte stem"}, _cfg())
+    assert payload["instruct"] == "zachte stem"
+
+
+def test_mapping_explicit_instruct_wins_and_extras_passthrough():
+    payload = tts_mod._build_engine_payload(
+        {"input": "x", "voice": "alloy", "instruct": "boze stem", "seed": 42, "temperature": 0.9},
+        _cfg(),
     )
-    base.update(overrides)
-    return base
+    assert payload["instruct"] == "boze stem"
+    assert payload["seed"] == 42
+    assert payload["temperature"] == 0.9
+
+
+# ---------------------------------------------------------------------------
+# Backend resolution (provider-driven, no cloud/local distinction)
+# ---------------------------------------------------------------------------
+
+
+def test_backends_resolve_in_configured_order(monkeypatch):
+    _patch_config(monkeypatch)
+    backends = tts_mod._tts_backends(_cfg())
+    assert [b["name"] for b in backends] == ["ai-kvm2-local", "14700k-local"]
+    assert backends[0]["tts_url"] == "http://127.0.0.1:11450"
+    assert backends[0]["key"] == "ctk_local"
+    assert backends[1]["key"] == "ctk_windows"
+
+
+def test_provider_without_tts_capability_is_skipped(monkeypatch):
+    _patch_config(monkeypatch, cfg=_cfg(providers=["openrouter", "14700k-local"]))
+    backends = tts_mod._tts_backends(_cfg(providers=["openrouter", "14700k-local"]))
+    assert [b["name"] for b in backends] == ["14700k-local"]
+
+
+# ---------------------------------------------------------------------------
+# Handler behavior
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_ensure_called_before_engine_forward(monkeypatch):
-    monkeypatch.setattr(tts_mod, "load_tts_config", lambda: _cfg_ondemand())
+async def test_success_primary_provider_and_expanded_keys(monkeypatch):
+    _patch_config(monkeypatch)
 
     def handler(url, json, headers):
         if url.endswith("/tts/ensure"):
-            return httpx.Response(200, json={"ok": True, "already_running": False})
+            assert headers["Authorization"] == ("Bearer ctk_local" if "127.0.0.1" in url else "Bearer ctk_windows")
+            return httpx.Response(200, json={"ok": True, "already_running": True})
         return httpx.Response(200, content=b"RIFFwav", headers={"content-type": "audio/wav"})
 
-    calls = _patch_routing_client(monkeypatch, handler)
-    resp = await tts_mod.handle_audio_speech(_FakeRequest({"input": "Hallo"}), "dsh")
+    calls = _patch_client(monkeypatch, handler)
+    resp = await tts_mod.handle_audio_speech(_FakeRequest({"input": "Hallo", "voice": "nova"}), "dsh")
     assert resp.status_code == 200
+    assert resp.media_type == "audio/wav"
     assert [c["url"] for c in calls] == [
-        "http://192.168.1.245:11441/tts/ensure",
-        "http://192.168.1.245:11450/tts",
+        "http://127.0.0.1:11441/tts/ensure",
+        "http://127.0.0.1:11450/tts",
     ]
-    assert calls[0]["headers"]["Authorization"] == "Bearer ctk_test"
 
 
 @pytest.mark.asyncio
-async def test_ensure_unreachable_returns_502(monkeypatch):
-    monkeypatch.setattr(tts_mod, "load_tts_config", lambda: _cfg_ondemand())
-
-    def handler(url, json=None, headers=None):
-        raise httpx.ConnectError("down")
-
-    _patch_routing_client(monkeypatch, handler)
-    with pytest.raises(HTTPException) as excinfo:
-        await tts_mod.handle_audio_speech(_FakeRequest({"input": "x"}), "dsh")
-    assert excinfo.value.status_code == 502
-    assert "caretaker" in str(excinfo.value.detail).lower()
-
-
-@pytest.mark.asyncio
-async def test_ensure_engine_wont_start_returns_502(monkeypatch):
-    monkeypatch.setattr(tts_mod, "load_tts_config", lambda: _cfg_ondemand())
+async def test_primary_failure_falls_over_to_second_provider(monkeypatch):
+    _patch_config(monkeypatch)
 
     def handler(url, json, headers):
         if url.endswith("/tts/ensure"):
-            return httpx.Response(200, json={"ok": False, "reason": "engine not healthy within 90s"})
-        return httpx.Response(200, content=b"RIFFwav")
+            if "127.0.0.1" in url:
+                return httpx.Response(200, json={"ok": False, "reason": "engine exited during startup"})
+            return httpx.Response(200, json={"ok": True, "already_running": True})
+        return httpx.Response(200, content=b"RIFFwav-windows", headers={"content-type": "audio/wav"})
 
-    _patch_routing_client(monkeypatch, handler)
-    with pytest.raises(HTTPException) as excinfo:
-        await tts_mod.handle_audio_speech(_FakeRequest({"input": "x"}), "dsh")
-    assert excinfo.value.status_code == 502
-    assert "could not be started" in str(excinfo.value.detail)
-
-
-@pytest.mark.asyncio
-async def test_ondemand_disabled_skips_ensure(monkeypatch):
-    monkeypatch.setattr(
-        tts_mod, "load_tts_config", lambda: _cfg_ondemand(ondemand_enabled=False)
-    )
-
-    def handler(url, json, headers):
-        return httpx.Response(200, content=b"RIFFwav", headers={"content-type": "audio/wav"})
-
-    calls = _patch_routing_client(monkeypatch, handler)
+    _patch_client(monkeypatch, handler)
     resp = await tts_mod.handle_audio_speech(_FakeRequest({"input": "x"}), "dsh")
     assert resp.status_code == 200
-    assert [c["url"] for c in calls] == ["http://192.168.1.245:11450/tts"]
+    assert resp.body == b"RIFFwav-windows"
 
 
 @pytest.mark.asyncio
-async def test_caretaker_key_env_reference_is_expanded(monkeypatch):
-    """caretaker_key: ${WINDOWS_LAN_KEY} must expand to the real key — the
-    tts section is read raw from YAML (the provider registry's expansion does
-    not apply to it); a literal placeholder produced a live 401 (2026-09-16)."""
-    import os
+async def test_all_providers_failed_returns_502(monkeypatch):
+    _patch_config(monkeypatch)
 
-    monkeypatch.setenv("WINDOWS_LAN_KEY", "ctk_expanded_test")
-    monkeypatch.setattr(
-        tts_mod, "load_tts_config", lambda: _cfg_ondemand(caretaker_key="${WINDOWS_LAN_KEY}")
-    )
+    def handler(url, json, headers):
+        raise httpx.ConnectError("down")
+
+    _patch_client(monkeypatch, handler)
+    with pytest.raises(HTTPException) as excinfo:
+        await tts_mod.handle_audio_speech(_FakeRequest({"input": "x"}), "dsh")
+    assert excinfo.value.status_code == 502
+    assert "ai-kvm2-local" in str(excinfo.value.detail) and "14700k-local" in str(excinfo.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_disabled_config_returns_404(monkeypatch):
+    _patch_config(monkeypatch, cfg=_cfg(enabled=False))
+    with pytest.raises(HTTPException) as excinfo:
+        await tts_mod.handle_audio_speech(_FakeRequest({"input": "x"}), "dsh")
+    assert excinfo.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_no_tts_capable_provider_returns_503(monkeypatch):
+    _patch_config(monkeypatch, cfg=_cfg(providers=["openrouter"]))
+    with pytest.raises(HTTPException) as excinfo:
+        await tts_mod.handle_audio_speech(_FakeRequest({"input": "x"}), "dsh")
+    assert excinfo.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_non_wav_response_format_rejected(monkeypatch):
+    _patch_config(monkeypatch)
+    with pytest.raises(HTTPException) as excinfo:
+        await tts_mod.handle_audio_speech(
+            _FakeRequest({"input": "x", "response_format": "mp3"}), "dsh"
+        )
+    assert excinfo.value.status_code == 400
+    assert "wav" in str(excinfo.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_empty_input_rejected(monkeypatch):
+    _patch_config(monkeypatch)
+    with pytest.raises(HTTPException) as excinfo:
+        await tts_mod.handle_audio_speech(_FakeRequest({"input": "  "}), "dsh")
+    assert excinfo.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_engine_error_status_falls_through(monkeypatch):
+    _patch_config(monkeypatch)
 
     def handler(url, json, headers):
         if url.endswith("/tts/ensure"):
             return httpx.Response(200, json={"ok": True, "already_running": True})
+        if "127.0.0.1" in url:
+            return httpx.Response(500, content=b'{"error":"boom"}')
         return httpx.Response(200, content=b"RIFFwav", headers={"content-type": "audio/wav"})
 
-    calls = _patch_routing_client(monkeypatch, handler)
-    await tts_mod.handle_audio_speech(_FakeRequest({"input": "x"}), "dsh")
-    assert calls[0]["headers"]["Authorization"] == "Bearer ctk_expanded_test"
+    _patch_client(monkeypatch, handler)
+    resp = await tts_mod.handle_audio_speech(_FakeRequest({"input": "x"}), "dsh")
+    assert resp.status_code == 200

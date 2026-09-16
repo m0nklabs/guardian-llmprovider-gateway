@@ -16,6 +16,9 @@ brand: windows
 # APPENDED to base_url (which already ends in /v1) — /models → /v1/models.
 catalog_url: /models
 management_url: http://192.168.1.245:11441
+management_key: ${WINDOWS_LAN_KEY}
+# TTS engine (qwen3tts-http, caretaker-managed on-demand lifecycle)
+tts_url: http://192.168.1.245:11450
 # llama-server reports no context_length: per-model overrides (brand-normalized
 # windows/<model> ids).
 models:
