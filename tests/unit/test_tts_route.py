@@ -36,6 +36,7 @@ def _cfg(**overrides):
     base = {
         "enabled": True,
         "timeout_seconds": 120,
+        "ensure_timeout_seconds": 300,
         "default_instruct": "",
         "providers": ["ai-node-local", "windows-gpu-local"],
     }
@@ -70,7 +71,7 @@ def _patch_client(monkeypatch, handler):
 
     class _FakeAsyncClient:
         def __init__(self, *args, **kwargs):
-            pass
+            calls.append({"client_timeout": kwargs.get("timeout")})
 
         async def __aenter__(self):
             return SimpleNamespace(post=post)
@@ -147,7 +148,7 @@ async def test_success_primary_provider_and_expanded_keys(monkeypatch):
     resp = await tts_mod.handle_audio_speech(_FakeRequest({"input": "Hallo", "voice": "nova"}), "dsh")
     assert resp.status_code == 200
     assert resp.media_type == "audio/wav"
-    assert [c["url"] for c in calls] == [
+    assert [c["url"] for c in calls if "url" in c] == [
         "http://127.0.0.1:11441/tts/ensure",
         "http://127.0.0.1:11450/tts",
     ]
@@ -233,3 +234,21 @@ async def test_engine_error_status_falls_through(monkeypatch):
     _patch_client(monkeypatch, handler)
     resp = await tts_mod.handle_audio_speech(_FakeRequest({"input": "x"}), "dsh")
     assert resp.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_ensure_timeout_is_configurable_and_above_cold_start(monkeypatch):
+    """The ensure client timeout must honor ensure_timeout_seconds — a cold
+    model load blocks the caretaker's /tts/ensure for minutes; a hardcoded
+    short timeout would silently fail over a healthy primary."""
+    _patch_config(monkeypatch)
+
+    def handler(url, json, headers):
+        if url.endswith("/tts/ensure"):
+            return httpx.Response(200, json={"ok": True, "already_running": True})
+        return httpx.Response(200, content=b"RIFFwav", headers={"content-type": "audio/wav"})
+
+    calls = _patch_client(monkeypatch, handler)
+    await tts_mod.handle_audio_speech(_FakeRequest({"input": "x"}), "dsh")
+    timeouts = [c["client_timeout"] for c in calls if "client_timeout" in c]
+    assert 300.0 in timeouts
