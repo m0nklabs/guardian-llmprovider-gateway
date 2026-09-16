@@ -1131,6 +1131,7 @@ _cloud_forwarding.init(
     health_tracker=failover_health,
     guardian_request_cancelled=_GuardianRequestCancelled,
     stream_heartbeat_interval_s=STREAM_HEARTBEAT_INTERVAL_S,
+    model_manager=model_manager,
     grammar_enabled=_GRAMMAR_CFG.get("enabled", True),
     grammar_cloud_auto_convert_json=_GRAMMAR_CFG.get("cloud_auto_convert_json", False),
     grammar_cloud_strict_mode=_GRAMMAR_CFG.get("cloud_strict_mode", False),
