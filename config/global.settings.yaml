@@ -181,6 +181,16 @@ degeneration:
 # windows (nemotron lightning 200+null+500, poolside request_failed — capture
 # evidence 09-09) no longer strand a caller.
 failover_groups:
+  # F6 cross-host failover (plan §F6): qwen3.5-9b op beide LAN-GPU's.
+  # Windows eerst (dedicated GPU, altijd geladen via boot-ensure); de lokale
+  # candidate als echte fallback — bij een lokale ensure schakelt de gateway
+  # de eigen backend naar qwen3.5-9b (model-switch, disruptief voor de lokaal
+  # geladen workload; daarom alleen als fallback).
+  qwen35:
+    candidates:
+      - {provider: 14700k-local, model: windows/qwen3.5-9b}
+      - {provider: ai-kvm2-local, model: qwen3.5-9b}
+
   free:
     candidates:
       - provider: openrouter

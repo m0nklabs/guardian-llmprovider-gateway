@@ -41,6 +41,7 @@ logger = logging.getLogger("Guardian")
 _resolve_cloud_attempts = None
 _prepare_cloud_candidate_request = None
 _extract_cloud_response_content = None
+_model_manager = None
 _extract_cloud_reasoning_content = None
 _extract_cloud_finish_reason = None
 _guardian_debug_headers = None
@@ -105,6 +106,7 @@ def init(
     health_tracker,
     guardian_request_cancelled,
     stream_heartbeat_interval_s,
+    model_manager=None,
     grammar_enabled=True,
     grammar_cloud_auto_convert_json=False,
     grammar_cloud_strict_mode=False,
@@ -120,6 +122,7 @@ def init(
     global _dispatch_capture_request_completed, _dispatch_capture_request_cancelled
     global _dispatch_capture_request_failed, _classify_capture_error
     global _sanitize_capture_error_message, _iter_sse_lines_with_watchdog
+    global _model_manager
     global _translate_openai_error_to_anthropic, _translate_openai_response_to_anthropic
     global _translate_openai_stream_to_anthropic
     global cloud_rate_limiter, failover_health, _GuardianRequestCancelled
@@ -148,6 +151,7 @@ def init(
     _dispatch_capture_request_failed = dispatch_capture_request_failed
     _classify_capture_error = classify_capture_error
     _sanitize_capture_error_message = sanitize_capture_error_message
+    _model_manager = model_manager
     _iter_sse_lines_with_watchdog = iter_sse_lines_with_watchdog
     _translate_openai_error_to_anthropic = translate_openai_error_to_anthropic
     _translate_openai_response_to_anthropic = translate_openai_response_to_anthropic
@@ -377,6 +381,47 @@ async def forward_to_cloud_provider(
 
     for attempt_index, (provider, upstream_model) in enumerate(attempts):
         is_last_attempt = attempt_index == len(attempts) - 1
+
+        # ── Local failover candidate (F6 cross-host): a managed provider in a
+        # failover group is THIS gateway's own llama-server — its lifecycle
+        # must run before the forward, or the backend may silently serve a
+        # DIFFERENT loaded model (llama-server ignores the request model name;
+        # the 2026-09-01 mismatch incident class).  ensure_backend is
+        # idempotent (no-op fast-path when the backend already serves the
+        # model, remote-first via the caretaker) and raises on load failure —
+        # treat that as a failed attempt and fall through to the next
+        # candidate, exactly like a failed cloud send.
+        if getattr(provider, "managed", False):
+            from app.gateway import caretaker_runtime
+
+            try:
+                await caretaker_runtime.ensure_backend(
+                    model=upstream_model,
+                    local_fallback=lambda: _model_manager.switch_model(upstream_model),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "🔀 Failover: local candidate '%s/%s' could not be ensured (%s) — next candidate",
+                    provider.name, upstream_model, exc,
+                )
+                if not is_last_attempt:
+                    continue
+                _finish_live_request_usage(request, status_code=503, response_bytes=0)
+                _dispatch_capture_request_failed(
+                    capture_ctx,
+                    error_code="model_load_failed",
+                    http_status=503,
+                    sanitized_message=f"local failover candidate failed to load: {upstream_model}",
+                    queue_wait_ms=0,
+                    duration_ms=(time.monotonic() - cloud_capture_start_time) * 1000 if cloud_capture_start_time else None,
+                    attempts=attempt_index + 1,
+                    policy_result=capture_policy_result,
+                ) if capture_ctx is not None else None
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Local failover candidate '{upstream_model}' failed to load: {exc}",
+                )
+
         # Capture: record the resolved provider on the capture context (C11)
         # so every terminal event for this request reports which provider
         # actually served it (failover candidates update it per attempt).
