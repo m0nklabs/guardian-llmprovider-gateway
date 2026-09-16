@@ -19,6 +19,6 @@ management_url: http://192.168.1.W:11441
 # llama-server reports no context_length: per-model overrides (brand-normalized
 # windows/<model> ids).
 models:
-  windows/qwen3.5-9b:
+  "windows-gpu-local/windows/qwen3.5-9b":
     context_window: 16384
     benchmark_context_limit: 131072
