@@ -113,6 +113,11 @@ async def handle_audio_speech(request: Request, client_id: str) -> Response:
     if not cfg.get("enabled", False):
         raise HTTPException(status_code=404, detail="TTS routing is disabled")
     timeout_s = float(cfg.get("timeout_seconds", 120) or 120)
+    # Must exceed the caretaker's CARETAKER_TTS_START_TIMEOUT: a cold start
+    # (model load) can take minutes and the ensure BLOCKS until the engine is
+    # healthy — a shorter client timeout silently turns a working primary
+    # into a failover.
+    ensure_timeout_s = float(cfg.get("ensure_timeout_seconds", 300) or 300)
     backends = _tts_backends(cfg)
     if not backends:
         raise HTTPException(status_code=503, detail="no provider declares a TTS engine (tts_url)")
@@ -137,7 +142,7 @@ async def handle_audio_speech(request: Request, client_id: str) -> Response:
     payload = _build_engine_payload(body, cfg)
     failures: list[str] = []
     for backend in backends:
-        result = await _try_backend(backend, payload, client_id, timeout_s)
+        result = await _try_backend(backend, payload, client_id, timeout_s, ensure_timeout_s)
         if isinstance(result, Response):
             return result
         failures.append(result)
@@ -146,7 +151,11 @@ async def handle_audio_speech(request: Request, client_id: str) -> Response:
 
 
 async def _try_backend(
-    backend: dict[str, str], payload: dict[str, Any], client_id: str, timeout_s: float
+    backend: dict[str, str],
+    payload: dict[str, Any],
+    client_id: str,
+    timeout_s: float,
+    ensure_timeout_s: float = 300.0,
 ) -> Response | str:
     """ensure -> forward on one provider backend; returns a Response on success
     or a failure string for the failover log."""
@@ -154,7 +163,7 @@ async def _try_backend(
     started = time.monotonic()
     headers = {"Authorization": f"Bearer {backend['key']}"} if backend["key"] else {}
     try:
-        async with httpx.AsyncClient(timeout=90.0) as client:
+        async with httpx.AsyncClient(timeout=ensure_timeout_s) as client:
             ensure_resp = await client.post(f"{mgmt_url}/tts/ensure", headers=headers)
         ensure_body: dict[str, Any] = {}
         try:

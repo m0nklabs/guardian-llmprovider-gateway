@@ -214,11 +214,14 @@ failover_groups:
 tts:
   enabled: true
   timeout_seconds: 120
+  # The caretaker blocks on the engine's cold start (model load); this must
+  # stay above CARETAKER_TTS_START_TIMEOUT on the slowest configured host.
+  ensure_timeout_seconds: 300
   default_instruct: ""
   # Provider-driven speech routing (NO cloud/local distinction — the caretaker
   # is a provider and behaves identically on a LAN box or a cloud GPU host).
   # Each provider declares tts_url + management_url + management_key in its own
   # file; the order below is the failover order (first = primary).
   providers:
-    - ai-kvm2-local
     - 14700k-local
+    - ai-kvm2-local
