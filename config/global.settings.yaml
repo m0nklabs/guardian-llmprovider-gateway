@@ -62,6 +62,17 @@ caretaker:
   rebind_poll_attempts: 15
   rebind_poll_interval_seconds: 1.0
   client_timeout_seconds: 5.0
+stt:
+  enabled: true
+  timeout_seconds: 300
+  # Same arithmetic as tts.ensure_timeout_seconds (must cover the caretaker's
+  # CARETAKER_STT_START_TIMEOUT + CARETAKER_STT_VRAM_WAIT_SECONDS).
+  ensure_timeout_seconds: 420
+  # Provider-driven failover order — only providers that declare stt_url
+  # participate (mirrors tts.providers; see docs/API_REFERENCE.md).
+  providers:
+    - 14700k-local
+
 timeouts:
   tiers:
     tier_70b:

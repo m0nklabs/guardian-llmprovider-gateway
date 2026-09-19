@@ -356,6 +356,27 @@ Errors: `404` when disabled, `503` when no provider declares `tts_url`, `400`
 for empty `input`/bad format, `502` when all configured providers fail (detail
 lists the per-provider reasons, e.g. insufficient VRAM).
 
+### Speech-to-text (STT) endpoint
+
+| Method | Path | Queued | Purpose |
+| --- | --- | --- | --- |
+| `POST` | `/v1/audio/transcriptions` | No (blocks up to `stt.ensure_timeout_seconds`) | OpenAI Whisper-compatible transcription via provider-declared STT engines |
+
+Provider-driven routing (2026-09-19, mirrors the TTS section): a host
+participates when its provider file declares `stt_url` (the qwen3-asr
+sidecar on :11451) plus `management_url` + `management_key`; the caretaker
+runs the same on-demand lifecycle (`POST {management_url}/stt/ensure`).
+`stt.providers` in `global.settings.yaml` is the failover order.
+
+Request: multipart/form-data — `file` (raw audio bytes; wav 16-bit PCM mono
+preferred, sample rate arbitrary), optional `model`, optional `language` as an
+ISO-639-1 code (`nl`/`en`) mapped to the Qwen3-ASR language names; without it
+the host default applies. Response: `{"text", "language", "seconds",
+"elapsed_s"}`.
+
+Errors: `404` disabled, `503` no provider declares `stt_url`, `400` missing
+`file`, `502` all providers failed (per-provider reasons).
+
 ### Queue and status endpoints
 
 | Method | Path | Queued | Purpose |

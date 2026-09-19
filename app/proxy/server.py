@@ -57,6 +57,7 @@ from app.gateway import queue_helpers as _queue_helpers
 # ── Gateway v1 routing (Phase 5 extraction) ─────────────────────────
 from app.gateway import routing as _gw_routing
 from app.gateway import tts as _tts
+from app.gateway import stt as _stt
 
 # ── Session slots (Phase 5 extraction) ───────────────────────────────
 from app.gateway import sessions as _sessions
@@ -1611,6 +1612,12 @@ async def _forward_to_cloud_provider(
 async def tts_audio_speech(request: Request, client_id: str = Depends(verify_api_key)):
     """OpenAI-compatible /v1/audio/speech → qwen3tts-http engine (app/gateway/tts.py)."""
     return await _tts.handle_audio_speech(request, client_id)
+
+
+@app.post("/v1/audio/transcriptions")
+async def stt_audio_transcriptions(request: Request, client_id: str = Depends(verify_api_key)):
+    """OpenAI-compatible /v1/audio/transcriptions → qwen3-asr sidecar (app/gateway/stt.py)."""
+    return await _stt.handle_audio_transcriptions(request, client_id)
 
 
 @app.post("/v1/{path:path}")
