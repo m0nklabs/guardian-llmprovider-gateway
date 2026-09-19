@@ -19,6 +19,8 @@ management_url: http://192.168.1.W:11441
 management_key: ${WINDOWS_LAN_KEY}
 # TTS engine (qwen3tts-http, caretaker-managed on-demand lifecycle)
 tts_url: http://192.168.1.W:11450
+# STT engine (Qwen3-ASR via sherpa-onnx, caretaker-managed on-demand lifecycle)
+stt_url: http://192.168.1.W:11451
 # llama-server reports no context_length: per-model overrides (brand-normalized
 # windows/<model> ids).
 models:

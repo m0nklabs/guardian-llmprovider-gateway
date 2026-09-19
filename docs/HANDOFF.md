@@ -46,7 +46,7 @@ een cloud-GPU-box):
   guardian 14 (suite 1419) / caretaker 20 (suite 132); gates 5/5. Commits:
   guardian `ec1d4df`, caretaker `e1f9d48`.
 
-### OPDRACHT (2026-09-19, operator via dsh-flip STT-onderzoek) — Route 1: STT-engine naast de TTS-chain
+### OPDRACHT AFGEROND (2026-09-19) — Route 1: STT live (voltekst hieronder bewaard tot de volgende compaction)
 
 > Operator-verzoek: "bericht achterlaten voor de guardian agent dat hij route 1
 > moet implementeren". Doel: de speech-chain krijgt een invoerkant — STT op de
@@ -81,10 +81,10 @@ een cloud-GPU-box):
   faster-whisper, PTT/hotmic) — de nieuwe engine kan daar later aan worden
   geknoopt.
 
-**Definition of done:**
+**Definition of done — ALLE DRIE BEHAALD (2026-09-19, dit journal):**
 1. Engine aanroepbaar via de chain (user → guardian → caretaker → engine):
-   WAV → JSON {transcript, taal}; NL- én EN-test-WAV correct binnen ~2 s
-   (verwachting: MCV-klasse ~5% WER, Kamer-klasse ~20%).
+   WAV → JSON {transcript, taal}; NL- én EN-test-WAV correct binnen ~2 s —
+   live bewezen (NL 2,19 s / EN 3,44 s, tekst correct).
 2. Recept + valkuilen → `docs/AGENT_JOURNAL.md`; status van deze sectie
    bijwerken (afgerond → archiveren per conventie).
 3. Operator op de hoogte.

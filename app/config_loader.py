@@ -267,6 +267,12 @@ def load_tts_config(config: dict[str, Any] | None = None) -> dict:
     return cfg.get("tts", {}) or {}
 
 
+def load_stt_config(config: dict[str, Any] | None = None) -> dict:
+    """Return the ``stt`` section (speech-to-text routing; see app/gateway/stt.py)."""
+    cfg = config if config is not None else CONFIG
+    return cfg.get("stt", {}) or {}
+
+
 def load_grammar_config(config: dict[str, Any] | None = None) -> dict:
     """Return the ``grammar`` section of the configuration.
 
