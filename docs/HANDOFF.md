@@ -46,6 +46,49 @@ een cloud-GPU-box):
   guardian 14 (suite 1419) / caretaker 20 (suite 132); gates 5/5. Commits:
   guardian `ec1d4df`, caretaker `e1f9d48`.
 
+### OPDRACHT (2026-09-19, operator via dsh-flip STT-onderzoek) — Route 1: STT-engine naast de TTS-chain
+
+> Operator-verzoek: "bericht achterlaten voor de guardian agent dat hij route 1
+> moet implementeren". Doel: de speech-chain krijgt een invoerkant — STT op de
+> caretaker (windows-host), gespiegeld aan de live TTS-chain (zelfde
+> provider-declaratie/caretaker-lifecycle-patroon: analoog aan `tts_url` een
+> `stt_url`-declaratie en een `CARETAKER_STT_COMMAND`-lifecycle — de
+> ontwerpkeuzes zijn aan de guardian). Volledige onderzoeksgrondslag, alle
+> claims met bron: `~/onderzoek/stt-lokaal/docs/stt-lokaal-onderzoek.md`
+> (§7 runtime-matrix, §10 aanbeveling) + journal-entry 2026-09-19 in
+> `~/.dsh/docs/IDEAS_JOURNAL.md`.
+
+**Kernfeiten (geverifieerd 2026-09-19):**
+- Model: `Qwen/Qwen3-ASR-1.7B-hf` — Apache-2.0, 30 talen incl. NL, #1
+  open-weights Engels (WER 4.31), NL MCV 5.43; streaming+offline in één
+  checkpoint; ~2 GB VRAM int8 → past naast de TTS-engine op de RTX 5050.
+- Runtime: sherpa-onnx v1.13.8+ heeft native Qwen3-ASR-**offline**-recognizers
+  (VAD-gechunkt; geen continue streaming — voice-assistent-patroon); Windows
+  x64/arm64-builds zijn first-class.
+- Pakketten: 0.6B int8 = `csukuangfj2/sherpa-onnx-qwen3-asr-0.6B-int8-2026-03-25`
+  (officiële maintainer); 1.7B int8 = community (`solavr/sherpa-onnx-qwen3-asr-1.7B-int8`,
+  2026-09-13, of `thieunv-asilla/...`; beide Apache-2.0) — zelf exporteren via
+  sherpa-onnx export-scripts is het fallback-pad.
+- Voorgestelde poort **:11451** (symmetrisch aan :11450), firewall- /24-regel
+  erbij; wrapper-patroon: `~/onderzoek/tts-llamacpp-emotie/files/tts_http_wrapper.py`
+  (omgekeerde richting: WAV erin, JSON-transcript eruit).
+- GGUF/llama.cpp = no-go voor Qwen3-ASR (geen ggml-implementatie; whisper.cpp
+  = alleen Whisper-familie + Parakeet TDT via zelf-convert).
+- Back-upmodel op dezelfde service: `parakeet-tdt-0.6b-v3` int8
+  (`csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8`, CC-BY-4.0,
+  NL-capable, RTFx-koning).
+- DSH-context: er bestaat al een lokaal-STT-plugin (`dsh-voxtype`,
+  faster-whisper, PTT/hotmic) — de nieuwe engine kan daar later aan worden
+  geknoopt.
+
+**Definition of done:**
+1. Engine aanroepbaar via de chain (user → guardian → caretaker → engine):
+   WAV → JSON {transcript, taal}; NL- én EN-test-WAV correct binnen ~2 s
+   (verwachting: MCV-klasse ~5% WER, Kamer-klasse ~20%).
+2. Recept + valkuilen → `docs/AGENT_JOURNAL.md`; status van deze sectie
+   bijwerken (afgerond → archiveren per conventie).
+3. Operator op de hoogte.
+
 ## Open punten (actueel — alles wat hier niet staat is afgerond; details in `docs/ARCHIVED_HANDOFFS.md`)
 
 - **Watchdog draait nergens (handoff caretaker-agent, 09-19):** `start_watchdog()`
