@@ -670,3 +670,32 @@
 **Generalize caretaker beyond llama.cpp? (cryptotrader handoff):** the cryptotrader forecasting lane (TimesFM 3.0, PyTorch) was caught holding 1468 MiB of GPU 0 resident 24/7 while serving ~1 forecast/hour. Finding: caretaker's lifecycle management (spawn/stop/unload/health, idle-unload via the gateway's ensure/unload calls) is exactly the right *pattern* — but the current implementation manages **llama.cpp server processes (GGUF models)** with an OpenAI-style serving contract. TimesFM is a torch model with a time-series contract; it cannot run under caretaker today. Recommendation: consider generalizing caretaker (or a sibling service) into a **generic model-lifecycle supervisor** — backend adapters declare how to start/health-check/unload a model host, callers get ensure/queue/idle-unload semantics regardless of model type. Until then, cryptotrader implements the pattern in-process (lazy load + idle unload in its own service — PR in flight there, no dependency on guardian/caretaker). Evidence: cryptotrader issue thread 2026-09-07 (GPU residency); `nvidia-smi` showed the uvicorn process at 1468 MiB beside ComfyUI (port 8188) and Frigate; caretaker scope verified via this repo's F5 notes.
 
 **Degeneration watchdog request (09-08) — deels gebouwd (guard + marker + capture-veld live sinds 09-02):** detection sliding-window k-gram repetition on the outbound token stream (6-gram ≥3× within last ~200 tokens → degeneration loop; rolling hash, no LLM scoring; flag zero-EOS over N tokens for trivially small prompts); action: cancel upstream + `finish_reason: "degeneration_detected"` (+ repeat stats). Why: consumers can DROP static max_tokens caps on free models. Secondary question: does the gateway forward OpenRouter `reasoning` parameters (effort low/high, exclude)? — deels beantwoord door de nemotron-adapter (journal 09-10).
+
+## Handoff-entries gearchiveerd 2026-09-19 (nieuwe handoff: TTS-chain live, guardian `ec1d4df` / caretaker `e1f9d48`)
+
+### Terminal-capture regressie GEFIXT (2026-09-11 — gevonden door de agent31 setup-session via deze handoff: correct kanaal, correcte bevinding) — verbatim uit de 09-15-handoff
+
+- Defect: `capture_request_completed(..., degeneration_cutoff=...)` → controller had de parameter niet → TypeError → fail-open swallow → **0 terminal-capture-events sinds de degeneratie-deploy** (hard bewijs: 48 request_received, 0 completed/failed).
+- Fix: controller-signature + schema 1.2.0-wiring (`integration.py`); fail-open except logt nu een content-vrije warning. Regression: `tests/unit/test_capture_dispatch_contract.py` (5) over de ÉCHTE keten (dispatch→controller→event). Gate 5/5; live verschijnen events weer. Les: contract-drift-tests door de echte controller, niet door de geschminkte dispatch-laag. Fix-commit: `5446949`.
+
+### One-liners 09-01/09-02 (oudere carry-forwards; voltekst al in eerdere batches) — verbatim uit de 09-15-handoff
+
+- **Degeneratie-guard + marker-injectie LIVE** (09-02, schema 1.2.0): server-side cutoff van repetition-loops (fundamentele period q; q<6 vrijgesteld; letter-level bewust vrijgesteld), leesbare slot-marker als laatste content-delta, kill-switch `degeneration.enabled: false`.
+- **Catalogus-consolidatie trap 1 + trap 2 AFGEROND** (09-02): één bron/één TTL (dubbele /models-fetch weg); modaliteiten + context bewaard in de single fetch; persist-subset-bug gevonden+gefixt (`1b9493b`); beide traps gesloten.
+- **Gap-vrij architectureel** (09-02, `97de6ea`/`f38af54`): WAL-rotatie gzip'd sync op de event loop (5–15 s stall!) → to_thread; MUST-FIX 1–8 compleet; structural guard 19 modules; via-gateway p95=2 ms, 0 gaps>0,5 s.
+- **Restart-race gefixt** (09-02, `ec1211e`): listener-herkenning herkent `python3.14 -m app.main` weer; post-restart-verificatie (MainPID == listener) is standaard-procedure.
+- **G2 orphan-calls gefixt** (09-01, `3fa1479`/`f2d4d9f`/`6db7f5b`): raw-ASGI receive-watchers (cloud + queue), 499-contract — live bewezen (0 tokens verbrand).
+- **Model-mismatch contract gefixt** (09-01, `ba9467e`): 503 `model_switch_failed` op elk lokaal entry-pad; /ensure fail-closed + retry (PR #9/#10, `ba9467ff`/`f0bdeb6`).
+- **G3 bare-name routing hijack gefixt** (09-02, `7d5d32f`): catalog-gestuurde disambiguatie; `z-ai/` uit nvidia-prefixes — live bewezen.
+- **Test-isolatie** (09-02, `7db5ba3`): 20 live integration-tests default gedeselecteerd; gate raakt productie nooit meer.
+- **Streaming-teardown pin** (09-02, `f61c2f1`): client-disconnect tijdens write = `request_cancelled`/`client_disconnect`.
+- **ensure_fresh gewired** (09-02, `7f777a5`): /v1/models triggert ensure_all_fresh; /ensure transport-error → WARNING; live 272 modellen.
+- **pi-models opgeschoond** (09-02): 216→99 entries, alle resolvem live; backup `models.json.bak-20260902`.
+- **UNIT-VALKUIL opgelost** (09-02): `llama-guardian.service` is nu een symlink op de echte unit (aparte file + drop-ins bewaard als `.disabled-20260902`) — restart via alias veilig.
+- **`GUARDIAN_STARTUP_ADOPT_ONLY=1` verwijderd** uit beide unit-files; startup-heal weer volledig actief.
+- **Nul-delta-meting + gap-vrij architectureel bewezen** (09-02): pijplijn gezond; baseline TTFT ~1 s, inter-chunk p95 < 30 ms, maxGap < 400 ms.
+- **C-feedback dossiers volledig afgehandeld** (PR #17, `ef483dd`): C2/C7-refutaties, C8-C11 live; onafhankelijk herverifieerd.
+- **72h soak AFGESLOTEN** (09-02, bewijs): capture ~26 dagen live; 41.044 events; 169/172 bestanden gezond, 0 parse-falen; 3 truncaties = crash-slachtoffers (niet meer reproduceerbaar). Policy 1.1.0 actief.
+- **NVIDIA bruikbaarheidskaart GEMETEN** (09-02, volledige probe): 81 modellen → 12 OK / 55×404 / 11×timeout / 2×500 / 1×400; metadata-vondst: NVIDIA's /models geeft géén context_length.
+- **Orphan-herkomst forensica AFGEROND op beste verklaring** (09-02): verzadigde systemd job-wachtrij tijdens de guardian-transitie (vllm-bench 53.640 herstarts, nervesplat 52.311); inter-repo-handoffs naar caramba + nervesplat; risico gedempt.
+- **Geheugen-idee IN DE KOELKAST** (09-02, operator-besluit) — zie parked-punt in de handoff.

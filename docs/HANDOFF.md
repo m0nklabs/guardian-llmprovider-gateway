@@ -5,48 +5,117 @@
 > (`AGENTS.md`) verandert alleen in gebatchte promotie-passes (werkwijze:
 > `~/.dsh/AGENTS.md` → "AGENTS.md maintenance discipline"). Afgeronde sessies
 > → `docs/ARCHIVED_HANDOFFS.md`. Verplaatst uit AGENTS.md op 2026-08-30
-> (two-tier werkwijze). Laatste compaction-pass: **2026-09-15** (21,9 kB → dit;
-> verbatim archief in ARCHIVED_HANDOFFS, sectie "gearchiveerd 2026-09-15").
+> (two-tier werkwijze). Laatste vernieuwing: **2026-09-19** (TTS-chain live;
+> gesloten secties + oude one-liners verbatim gearchiveerd, sectie
+> "gearchiveerd 2026-09-19").
+
+## Actuele status — speech (TTS) chain LIVE (2026-09-16→19, operator-directed)
+
+De volledige spraakketen draait in productie; **capaciteiten zijn puur
+configuratie, geen technische mogelijkheid** (operator-principe 09-16: een
+provider die toevallig op de LAN draait moet exact hetzelfde kunnen als één op
+een cloud-GPU-box):
+
+- **Provider-declaratie:** een host doet mee aan speech-routing via drie regels
+  in `config/providers/<naam>.settings.yaml`: `tts_url` (de
+  qwen3tts-http-engine), `management_url` + `management_key` (de caretaker
+  control API). Volgorde = failover: `tts.providers: [windows-gpu-local,
+  ai-node-local]` — **Windows is TTS-first**, ai-node (productie, 27b altijd
+  druk) is fallback. Guardian-docs: `docs/API_REFERENCE.md` § Speech.
+- **Caretaker-lifecycle (uniform, geen platform-gate):** `CARETAKER_TTS_COMMAND`
+  spawnt de engine op elke host; health-first ensure; idle-stop na 600 s;
+  ensure-lock (geen dubbele spawns). Knobs: `CARETAKER_TTS_STOP_LLAMA`
+  (Windows=1 → **deterministisch TTS-first**: de eigen llama-server unloadt
+  vóór élke engine-start; ai-node=0 → productie-27b wordt nooit weggestopt),
+  `CARETAKER_TTS_MIN_FREE_MB`, `CARETAKER_TTS_VRAM_WAIT_SECONDS` (ai-node=120:
+  wachten op de idle-unload of eerlijk opgeven → failover; Windows=0),
+  `CARETAKER_TTS_START_TIMEOUT`, `CARETAKER_TTS_LOG`,
+  `CARETAKER_TTS_CUDA_DEVICE`. Implementatie: `caretaker/tts.py` (+19 pins).
+- **Timeout-aritmetiek (valkuil):** guardian `tts.ensure_timeout_seconds: 420`
+  moet ≥ `CARETAKER_TTS_START_TIMEOUT` + `CARETAKER_TTS_VRAM_WAIT_SECONDS`
+  van de traagste host (240+120=360); een kortere timeout liet eerder een
+  werkende primary stil wegvallen naar failover.
+- **Engine (qwen3tts-http, VoiceDesign 1.7B):** op Windows via caretaker
+  (NSSM qwen3tts-http = disabled), op ai-node met een zelfgebouwde
+  llama.cpp-b10621-CUDA-toolchain (libs in `inference/bin/`) + wrapper-fixes:
+  bind vóór de load (`/health` 503 "loading" tijdens koude start),
+  thread-safe `get_engine()`, UTF-8 IO. Les die universeel geldt: de caretaker
+  spawnt engine-kinderen altijd met `PYTHONIOENCODING=utf-8`+
+  `PYTHONUTF8=1` (cp1252-redirect crashte de model-load middenin).
+- **Bewijs:** koude start 18–20 s (incl. llama-yield), warm 3,5 s; pinnen
+  guardian 14 (suite 1419) / caretaker 20 (suite 132); gates 5/5. Commits:
+  guardian `ec1d4df`, caretaker `e1f9d48`.
 
 ## Open punten (actueel — alles wat hier niet staat is afgerond; details in `docs/ARCHIVED_HANDOFFS.md`)
 
-- **Redactor precision audit (verzoek setup-agent 09-07, guardian-scope, NOG TE BOUWEN):** twee patronen in `app/capture/redactor.py` zijn categorisch te breed: `_IPV4_RE` op alle tekst (LAN-configs/codevoorbeelden → `[REDACTED_IP]`) en `_ENV_VAR_RE` = elke `$UPPERCASE` → `[REDACTED_ENV_VAR]` (`$HOME` is geen secret). Remedie-richting (operator-policy 09-07: "secrets out = good; non-secret data dropped = must fix"): config-gestuurde precisie — (a) gevoelige-IP-lijst (home WAN + LAN-subnet) i.p.v. all-IPv4; (b) env-var-redactie alleen bij bekende secret-namen/hoge entropie; (c) API-key/Bearer-patronen blijven; (d) golden tests: `$HOME` in een bash-snippet en default-gateway-voorbeelden passeren onredacted, echte keys worden nog steeds gevangen. Capture-gaten door guardian's eigen secret-filtering zijn BY DESIGN; over-filtering van non-secrets is de fix.
-- **Caretaker generaliseren? (handoff cryptotrader 09-07, te evalueren door deze repo):** caretaker beheert nu llama.cpp/GGUF-processen met een OpenAI-style contract; TimesFM (torch, 1468 MiB resident voor ~1 forecast/uur) past daar niet in. Overweging: generieke model-lifecycle-supervisor (backend-adapters declareren start/health/unload; callers krijgen ensure/queue/idle-unload). Tot die tijd lost cryptotrader het in-process op (lazy load + idle unload, eigen PR) — geen afhankelijkheid van guardian/caretaker. Eerste kandidaat-customer: cryptotrader.
-- **Degeneratie-guard open nasleep (live sinds 09-02, schema 1.2.0, guard + marker + capture-veld):** thresholds tunen op echte degeneratie-cases via capture-veld `degeneration_cutoff` (monitoring); letter-level-vrijstelling (q=1) her-evalueren zodra "aaaa"-cases opduiken. Deels open vraag (setup-agent 09-08): bredere OpenRouter `reasoning`-parameter-forwarding voor reasoning-modellen — deels beantwoord door de nemotron-adapter (journal 09-10); metadata-gedreven verfijning (alleen vertalen bij modellen zonder `supported_efforts`) staat open als catalog-optimalisatie.
-- **OOM-rapportage (open vraag operator, op todo):** rapporteert de caretaker OOM-kills terug aan Guardian? (inter-repo: m0nklabs/caretaker-llamacpp; raadpleeg caretaker_client/caretaker_runtime-wiring + status-endpoints).
-- **Test-nasleep legacy-removal (laatst gemeten 09-09):** 9 vision-fallback-failures op HEAD zijn pre-existing (stash-verified: falen met én zonder de failover-commits) — op te pakken bij de in-flight legacy-removal; `test_config_reload.py::test_failover_registry_loads_proposed_groups` pinde de verwijderde cloud_keys.json-fallback (by-design conflict; regel ~81 gebruikt nog tmp cloud_keys.json) → herschrijven/verwijderen bij diezelfde legacy-removal.
-- **CI-adoptie (open sinds 20260813_1):** `scripts/pre_restart_check.py` als GitHub Action nog niet opgepakt.
-- **Parked (operator-besluit 09-02, koelkast):** geheugen-idee (capture → agent-geheugen; stap 1 FTS/SQLite-index, stap 2 semantische embeddings). Bezwaar van de operator: kruisbesmetting over projectgrenzen — per-project scoping/key-isolation is eerste-klas eis in elke toekomstige uitwerking, niet een optie. Pas oppakken als de operator het weer op tafel legt.
-- **Klein/deferred:** `input_modalities`-veld op /v1/models-cloud-entries (discovery-metadata, klein vervolgdeel); NVIDIA-bruikbaarheidskaart (09-02, `scratch/nvidia_probe_results.json`): 81 geprobed → 12 OK / 55×404 (68% dode catalogus-entries) / 11×timeout — context-metadata vereist model-card-werk voor de 12 werkende; m0nkdash-origin achter dashboard.oelala.xyz blijft dood (raakt Guardian niet); host-hygiene: crash-loop-units (vllm-bench/nervesplat/caramba-processor) herchecken — spawnerden tientallen processen/min op 09-02.
-
-## Terminal-capture regressie GEFIXT (2026-09-11 — gevonden door de agent31 setup-session via deze handoff: correct kanaal, correcte bevinding)
-
-- Defect: `capture_request_completed(..., degeneration_cutoff=...)` → controller had de parameter niet → TypeError → fail-open swallow → **0 terminal-capture-events sinds de degeneratie-deploy** (hard bewijs: 48 request_received, 0 completed/failed).
-- Fix: controller-signature + schema 1.2.0-wiring (`integration.py`); fail-open except logt nu een content-vrije warning. Regression: `tests/unit/test_capture_dispatch_contract.py` (5) over de ÉCHTE keten (dispatch→controller→event). Gate 5/5; live verschijnen events weer. Les: contract-drift-tests door de echte controller, niet door de geschminkte dispatch-laag. Fix-commit: `5446949`.
+- **Watchdog draait nergens (handoff caretaker-agent, 09-19):** `start_watchdog()`
+  wordt nergens aangeroepen — op Windows blijft een echte llama-crash
+  onopgemerkt tot de volgende ensure. De bestaande `is_unloaded`-guard
+  respecteert TTS-unloads, dus starten is veilig. Voelt verwant aan het
+  OOM-rapportage-punt hieronder.
+- **OOM-rapportage (open vraag operator, op todo):** rapporteert de caretaker
+  OOM-kills terug aan Guardian? (inter-repo: m0nklabs/caretaker-llamacpp;
+  raadpleeg caretaker_client/caretaker_runtime-wiring + status-endpoints).
+- **Windows-llama auto-return na TTS-idle — bewust NIET gebouwd** (operator
+  geïnformeerd 09-16): na een TTS-sessie komt de Windows-llama alleen via de
+  boot-ensure of een handmatige ensure terug; chat valt via
+  `failover/qwen35` op de lokale 27b terug. Auto-return zou een
+  start/stop-cyclus worden zolang TTS prioriteit heeft — pas bouwen als de
+  operator er anders over beslist.
+- **Speech dagelijkse validatie (operator):** de keten is synthetisch bewezen
+  (curl-cycles + pinnen); de realistische check is Open WebUI → Settings →
+  Audio → TTS: engine `OpenAI`, base `http://192.168.1.G:11434/v1`, model
+  `qwen3-tts`, voice `nova` → 🔊-knop per chatbericht.
+- **Redactor precision audit (verzoek setup-agent 09-07, NOG TE BOUWEN):**
+  `_IPV4_RE` en `_ENV_VAR_RE` in `app/capture/redactor.py` zijn categorisch te
+  breed (non-secrets verdwijnen). Remedie-richting (operator-policy 09-07):
+  config-gestuurde precisie — gevoelige-IP-lijst i.p.v. all-IPv4;
+  env-var-redactie alleen bij bekende secret-namen/hoge entropie;
+  API-key/Bearer-patronen blijven; golden tests (`$HOME` en
+  default-gateway-voorbeelden passeren onredacted).
+- **Caretaker generaliseren? (handoff cryptotrader 09-07, te evalueren):**
+  generieke model-lifecycle-supervisor (backend-adapters) vs in-process
+  oplossing van cryptotrader; her-evalueren als er een tweede non-llama
+  klant is.
+- **Degeneratie-guard nasleep (live sinds 09-02):** thresholds tunen via
+  capture-veld `degeneration_cutoff`; letter-level-vrijstelling (q=1)
+  her-evalueren zodra "aaaa"-cases opduiken.
+- **Test-nasleep legacy-removal (laatst gemeten 09-09):** 9 vision-fallback-
+  failures op HEAD zijn pre-existing (stash-verified);
+  `test_config_reload.py::test_failover_registry_loads_proposed_groups`
+  pinde de verwijderde cloud_keys.json-fallback → herschrijven/verwijderen
+  bij de legacy-removal.
+- **CI-adoptie (open sinds 20260813_1):** `scripts/pre_restart_check.py` als
+  GitHub Action nog niet opgepakt.
+- **F7 cut-over (masterplan):** F6 (Windows/homelab-provider incl. TTS) is nu
+  voltooid; F7 (formele cut-over) staat nog open in
+  `docs/IMPLEMENTATION_PLAN.md` / issue #1.
+- **Parked (operator-besluit 09-02, koelkast):** geheugen-idee (capture →
+  agent-geheugen). Kruisbesmetting-over-projectgrenzen is dé eerste-klas eis
+  in elke toekomstige uitwerking. Pas oppakken als de operator het weer op
+  tafel legt.
+- **Klein/deferred:** `input_modalities`-veld op /v1/models-cloud-entries;
+  NVIDIA context-metadata voor de 12 werkende catalogus-entries (09-02-probe:
+  81 → 12 OK / 55×404); m0nkdash-origin achter dashboard.oelala.xyz blijft
+  dood; host-hygiene: crash-loop-units (vllm-bench/nervesplat/
+  caramba-processor) herchecken.
 
 ## Afgerond (carry-forward one-liners; voltekst → `docs/ARCHIVED_HANDOFFS.md`)
 
-- **Terminal-capture contract-drift gefixt** (09-11, `5446949`) — zie sectie hierboven.
-- **Nemotron "crap-outputs" verklaard + canonieke reasoning-adapter** (09-10, `3c0edb4`): length-cut in thinking → vLLM-parser dupliceert thinking in content; adapter vertaalt intent → provider-dialect (openrouter `reasoning.enabled=false` / nvidia-direct `chat_template_kwargs.enable_thinking=false`); 12 pins, end-to-end bewezen.
-- **Legacy-config volledig opgeruimd + test-lekkage gefixt** (09-09, `038382b`): local_models.yaml-symlink weg; **cloud_keys.json bleek de actieve failover-bron** — eerst gemigreerd (failover_groups → global.settings.yaml), toen pas verwijderd; failover.py leest uitsluitend settings.yaml.
-- **HTTP 200-garbage surfacet als 502** (09-09, `2e51140`): `_detect_upstream_invalid_response` — 200-body op chat-paths vereist `choices`; embedded `choices[0].error` (OpenRouter-vorm) = invalid; embeddings uitgezonderd.
-- **Failover-groep `failover/free` live end-to-end** (09-09, operator-besluit: groups zijn globaal → settings.yaml): 2 admission/routing-gaps gefixt (chat-admissie + `is_cloud_or_guardian_route`); live `failover/free` → 200 in 0,85 s op nemotron-3-super terwijl lightning/lagunas degraded waren.
-- **Degeneratie-guard + marker-injectie LIVE** (09-02, schema 1.2.0): server-side cutoff van repetition-loops (fundamentele period q; q<6 vrijgesteld; letter-level bewust vrijgesteld), leesbare slot-marker als laatste content-delta, kill-switch `degeneration.enabled: false`.
-- **Catalogus-consolidatie trap 1 + trap 2 AFGEROND** (09-02): één bron/één TTL (dubbele /models-fetch weg); modaliteiten + context bewaard in de single fetch; persist-subset-bug gevonden+gefixt (`1b9493b`); beide traps gesloten.
-- **Gap-vrij architectureel** (09-02, `97de6ea`/`f38af54`): WAL-rotatie gzip'd sync op de event loop (5–15 s stall!) → to_thread; MUST-FIX 1–8 compleet; structural guard 19 modules; via-gateway p95=2 ms, 0 gaps>0,5 s.
-- **Restart-race gefixt** (09-02, `ec1211e`): listener-herkenning herkent `python3.14 -m app.main` weer; post-restart-verificatie (MainPID == listener) is standaard-procedure.
-- **G2 orphan-calls gefixt** (09-01, `3fa1479`/`f2d4d9f`/`6db7f5b`): raw-ASGI receive-watchers (cloud + queue), 499-contract — live bewezen (0 tokens verbrand).
-- **Model-mismatch contract gefixt** (09-01, `ba9467e`): 503 `model_switch_failed` op elk lokaal entry-pad; /ensure fail-closed + retry (PR #9/#10, `ba866ff`/`f0bdeb6`).
-- **G3 bare-name routing hijack gefixt** (09-02, `7d5d32f`): catalog-gestuurde disambiguatie; `z-ai/` uit nvidia-prefixes — live bewezen.
-- **Test-isolatie** (09-02, `7db5ba3`): 20 live integration-tests default gedeselecteerd; gate raakt productie nooit meer.
-- **Streaming-teardown pin** (09-02, `f61c2f1`): client-disconnect tijdens write = `request_cancelled`/`client_disconnect`.
-- **ensure_fresh gewired** (09-02, `7f777a5`): /v1/models triggert ensure_all_fresh; /ensure transport-error → WARNING; live 272 modellen.
-- **pi-models opgeschoond** (09-02): 216→99 entries, alle resolvem live; backup `models.json.bak-20260902`.
-- **UNIT-VALKUIL opgelost** (09-02): `llama-guardian.service` is nu een symlink op de echte unit (aparte file + drop-ins bewaard als `.disabled-20260902`) — restart via alias veilig.
-- **`GUARDIAN_STARTUP_ADOPT_ONLY=1` verwijderd** uit beide unit-files; startup-heal weer volledig actief.
-- **Nul-delta-meting + gap-vrij architectureel bewezen** (09-02): pijplijn gezond; baseline TTFT ~1 s, inter-chunk p95 < 30 ms, maxGap < 400 ms.
-- **C-feedback dossiers volledig afgehandeld** (PR #17, `ef483dd`): C2/C7-refutaties, C8-C11 live; onafhankelijk herverifieerd.
-- **72h soak AFGESLOTEN** (09-02, bewijs): capture ~26 dagen live; 41.044 events; 169/172 bestanden gezond, 0 parse-falen; 3 truncaties = crash-slachtoffers (niet meer reproduceerbaar). Policy 1.1.0 actief.
-- **NVIDIA bruikbaarheidskaart GEMETEN** (09-02, volledige probe): 81 modellen → 12 OK / 55×404 / 11×timeout / 2×500 / 1×400; metadata-vondst: NVIDIA's /models geeft géén context_length.
-- **Orphan-herkomst forensica AFGEROND op beste verklaring** (09-02): verzadigde systemd job-wachtrij tijdens de guardian-transitie (vllm-bench 53.640 herstarts, nervesplat 52.311); inter-repo-handoffs naar caramba + nervesplat; risico gedempt.
-- **Geheugen-idee IN DE KOELKAST** (09-02, operator-besluit) — zie parked-punt hierboven.
+- **Speech/TTS-chain live: provider-driven, platform-pariteit, Windows
+  TTS-first** (09-16→19, guardian `ec1d4df`, caretaker `e1f9d48`) — zie
+  "Actuele status" hierboven. Kernlessen in het journal: UTF-8 spawn-env
+  (cp1252-crash), ensure-timeout-aritmetiek, ensure-lock, deterministische
+  llama-yield, nooit handmatig llama-server killen (stale manager-state).
+- **Terminal-capture contract-drift gefixt** (09-11, `5446949`) — verbatim
+  gearchiveerd 09-19.
+- **Nemotron "crap-outputs" verklaard + canonieke reasoning-adapter** (09-10,
+  `3c0edb4`): adapter vertaalt reasoning-intent → provider-dialect (openrouter
+  `reasoning.enabled=false` / nvidia-direct `enable_thinking=false`); 12 pins.
+- **Legacy-config volledig opgeruimd + test-lekkage gefixt** (09-09,
+  `038382b`): cloud_keys.json bleek de actieve failover-bron — gemigreerd
+  (failover_groups → global.settings.yaml) toen pas verwijderd.
+- **HTTP 200-garbage surfacet als 502** (09-09, `2e51140`): 200-body op
+  chat-paths vereist `choices`; embedded `choices[0].error` = invalid.
+- **Failover-groep `failover/free` live end-to-end** (09-09): 2
+  admission/routing-gaps gefixt; groepen zijn globaal (settings.yaml).
