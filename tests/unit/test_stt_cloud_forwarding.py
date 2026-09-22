@@ -10,7 +10,6 @@ failure falls through to the local engine chain unchanged; with the switch off
 
 import httpx
 import pytest
-from fastapi import HTTPException
 from types import SimpleNamespace
 
 from app.gateway import stt as stt_mod
