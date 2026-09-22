@@ -225,3 +225,28 @@ async def test_cloud_unreachable_falls_through(monkeypatch):
     )
     assert resp.status_code == 200
     assert b"lokaal" in resp.body
+
+
+async def test_cloud_language_passes_verbatim_iso(monkeypatch):
+    """THE subtle contract: the cloud provider receives the ISO-639-1 code
+    verbatim ("nl" — Groq/whisper shape), while the LOCAL engine chain gets
+    the Qwen name ("Dutch").  One client field, two engine dialects."""
+    _patch_config(monkeypatch)
+
+    def handler(url, json, content, params, headers, files=None, data=None):
+        if url.endswith("/audio/transcriptions"):
+            return httpx.Response(200, json={"text": "cloud"})
+        return httpx.Response(200, json={"ok": True})
+
+    calls = _patch_client(monkeypatch, handler)
+    resp = await stt_mod.handle_audio_transcriptions(
+        _fake_request({"file": _Upload(b"RIFF"), "language": "nl", "model": "groq/groq/whisper-large-v3"}),
+        "dsh",
+    )
+    assert resp.status_code == 200
+    assert resp.body == b'{"text":"cloud"}'
+    # The cloud POST carried the verbatim ISO code ("nl") in its multipart form
+    # data — NOT the Qwen name; that mapping is local-engine-specific only.
+    cloud_call = [c for c in calls if c["url"].endswith("/audio/transcriptions")][0]
+    assert cloud_call["data"]["language"] == "nl"
+    assert cloud_call["data"]["model"] == "whisper-large-v3"  # final path segment

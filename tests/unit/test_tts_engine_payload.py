@@ -34,3 +34,11 @@ def test_none_and_empty_values_are_dropped():
     payload = _build_engine_payload({"input": "x", "ref_audio": None, "language": ""}, {})
     assert "ref_audio" not in payload
     assert "language" not in payload
+
+
+def test_zero_seed_survives_falsy_drop_rule():
+    """seed=0 is a legitimate deterministic seed — the empty-string drop rule
+    must not swallow falsy numbers."""
+    payload = _build_engine_payload({"input": "x", "seed": 0, "ref_audio": ""}, {})
+    assert payload["seed"] == 0
+    assert "ref_audio" not in payload
