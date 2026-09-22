@@ -165,3 +165,30 @@ JOURNAL 38,6 kB → dit (~8 kB); verbatim → `docs/AGENT_JOURNAL_ARCHIVE.md` Ba
   voice until restart. Council app handles this gracefully (tts_error surfaced).
 - Consumer: `councelofdicksv2` council app — voices library `config/voices/*.json`,
   samples upload endpoint, per-participant `voice_id`, celebrity presets.
+
+## 2026-09-22 — STT cloud forwarding + 2026-09-21 WIP rescue — DSH agent (openrouter/z-ai/glm-5.3-flash)
+
+- **Change**: `app/gateway/stt.py` — opt-in cloud forwarding op
+  `/v1/audio/transcriptions`. Dubbele opt-in (`stt.cloud_forwarding.enabled` +
+  per-provider `cloud_stt: true`); model-routing via eerste padsegment
+  (`groq/groq/whisper-large-v3` → provider `groq`, upstream id = laatste
+  segment); `language` verbatim door (ISO-639-1, géén Qwen-mapping — die is
+  engine-specifiek); cloud vóór lokaal, failures vallen door. Default OFF.
+- **Verification**: `tests/unit/test_stt_cloud_forwarding.py` 7 pinnen; hele
+  STT-suite 16/16; `scripts/pre_restart_check.py` ALL GATES (1438 passed, 20
+  deselected). Let op: de gate liep één keer vast op de bekende flaky
+  `test_lifespan_does_not_wait_for_startup_check` (timing) — herstart van de
+  gate zelf was groen, geen code-oorzaak.
+- **Pitfall**: `_cloud_stt_target` leest de module-global `CONFIG` — unit-tests
+  moeten `stt_mod.CONFIG`/`load_stt_config` patchen vóór een directe aanroep;
+  de eerste run las de échte config en faalde op de lege
+  `${GROQ_API_KEY}`-expansie (geen key in het pytest-proces).
+- **Rescue**: de 2026-09-21 TTS clone passthrough (`tts.py` + pins + journal)
+  draaide al in productie maar was nooit gecommit — verbatim als eigen commit
+  vastgelegd vóór de feature-commit, zodat een clean checkout de clone-voices
+  (Sjonnie/council) behoudt.
+- **STT-kwaliteitscontext**: eigen benchmark (qwen3tts-NL audio) toonde dat
+  qwen3-asr en Groq whisper-large-v3-turbo identieke fouten maken op
+  samengestelde woorden → de test-audio was de confounder, niet de engine;
+  echte mic-audio presteert beter dan de benchmark suggereerde. Cloud-forwarding
+  maakt A/B-testen op echte Discord-clips nu zero-config mogelijk.
