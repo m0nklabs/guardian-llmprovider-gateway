@@ -72,6 +72,12 @@ stt:
   # participate (mirrors tts.providers; see docs/API_REFERENCE.md).
   providers:
     - 14700k-local
+  # Cloud STT forwarding (2026-09-22): a requested model whose first path
+  # segment matches a provider with cloud_stt: true is forwarded to that
+  # provider's OpenAI-compatible /audio/transcriptions. Failures fall back to
+  # the local engines above. See docs/API_REFERENCE.md § STT.
+  cloud_forwarding:
+    enabled: true
 
 timeouts:
   tiers:

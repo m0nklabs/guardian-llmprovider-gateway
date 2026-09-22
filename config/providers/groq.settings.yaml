@@ -2,4 +2,7 @@
 enabled: true
 base_url: https://api.groq.com/openai/v1
 api_key: ${GROQ_API_KEY}
+# Opt-in for STT cloud forwarding: requests with model=groq/... are forwarded
+# to {base_url}/audio/transcriptions (see docs/API_REFERENCE.md § STT).
+cloud_stt: true
 timeout_seconds: 1200
