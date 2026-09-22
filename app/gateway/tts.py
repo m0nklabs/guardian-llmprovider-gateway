@@ -72,15 +72,22 @@ def _resolve_instruct(body: dict[str, Any], cfg: dict[str, Any]) -> str:
 
 
 def _build_engine_payload(body: dict[str, Any], cfg: dict[str, Any]) -> dict[str, Any]:
-    """Map the OpenAI speech request onto the engine's /tts contract."""
+    """Map the OpenAI speech request onto the engine's /tts contract.
+
+    ``ref_audio`` (filename inside the engine's samples dir), ``ref_text``
+    and ``language`` enable the engine's clone mode; they are optional and
+    change nothing for design-mode clients.
+    """
     payload: dict[str, Any] = {
         "text": str(body.get("input", "")).strip(),
         "instruct": _resolve_instruct(body, cfg),
     }
-    for passthrough in ("seed", "sub_seed", "temperature"):
+    for passthrough in ("seed", "sub_seed", "temperature", "ref_audio", "ref_text",
+                        "language", "zero_shot"):
         value = body.get(passthrough)
-        if value is not None:
-            payload[passthrough] = value
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
+        payload[passthrough] = value
     return payload
 
 

@@ -142,3 +142,26 @@ JOURNAL 38,6 kB → dit (~8 kB); verbatim → `docs/AGENT_JOURNAL_ARCHIVE.md` Ba
   4. `sherpa_onnx.OfflineStream` heeft géén `accept_waveform_done()` — direct `decode_stream` na accept.
   5. Qwen3-ASR taalforcering = een decode-prompt met de TAALNAAM ("Dutch", niet "nl"); auto-detect is onbetrouwbaar op synthetische audio — forceer per verzoek vanaf de client.
   6. De `tail`-pipe in de gate-chain at de exit-code — de gate kan je restart NIET blokkeren als je `cmd | tail` koppelt aan `&&`. Gebruik PIPESTATUS of laat de gate direct lopen.
+
+## 2026-09-21 — TTS clone passthrough (council v2 integration) — DSH agent (openrouter/z-ai/glm-5.3-flash)
+
+- **Change**: `app/gateway/tts.py` `_build_engine_payload` now passes `ref_audio`, `ref_text`
+  and `language` through to the qwen3-tts engine (clone mode: voice anchor from a reference
+  sample in the engine's `voice_samples/` dir). Additive only; design-mode clients (RimTalk,
+  council design voices) are unaffected. Empty-string values are dropped.
+- **Companion change (Qwen3-TTS-GGUF repo)**: `tts_http_wrapper.py` gained clone mode —
+  `ref_audio` (filename, resolved inside `TTS_SAMPLES_DIR`, traversal-safe), optional
+  `ref_text`, `language` (clone default `english`); `set_voice(sample)` + `clone()` instead
+  of `design()`. `resolve_ref_audio` logic unit-checked (6/6); wrapper py_compile OK.
+- **Verification**: focused pytest `tests/unit/test_tts_engine_payload.py` (3 passed) +
+  full `scripts/pre_restart_check.py` ALL GATES PASSED (first run had one flaky
+  test_server.py::test_lifespan_does_not_wait_for_startup_check failure — passes in
+  isolation and in the full rerun; timing-sensitive test, not related to this change).
+- **PENDING**: `sudo systemctl restart llama-guardian` — operator must run it (agent
+  traffic routes through Guardian). Until then, clone-mode requests via
+  `/v1/audio/speech` are accepted by Guardian? NO — the passthrough is in the working
+  tree but NOT live until restart; clone voices fall back… they don't: Guardian live
+  code strips `ref_audio` (unknown field) → engine gets design-mode request → wrong
+  voice until restart. Council app handles this gracefully (tts_error surfaced).
+- Consumer: `councelofdicksv2` council app — voices library `config/voices/*.json`,
+  samples upload endpoint, per-participant `voice_id`, celebrity presets.
