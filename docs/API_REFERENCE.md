@@ -357,13 +357,15 @@ for empty `input`/bad format, `502` when all configured providers fail (detail
 lists the per-provider reasons, e.g. insufficient VRAM).
 
 Speech model routing (2026-09-23, route-oriented — no opt-in switches): the
-`model` field is an ADDRESS, `[guardian/]{provider}/{brand}/{model}`, resolved
+`model` field is an ADDRESS, `[guardian/]{provider}/{upstream-model-id}`, resolved
 through the provider file alone (`app/gateway/speech_routing.py`). A provider
 declaring `tts_url` (+ `management_url`) serves the request with its LOCAL
 engine (caretaker-managed lifecycle); one declaring `base_url` + `api_key`
 serves it from its OpenAI-compatible cloud endpoint; the upstream model id is
-`{brand}/{model}` (e.g. `guardian/groq/canopylabs/orpheus-v1-english` →
-`canopylabs/orpheus-v1-english`). An explicit address is EXACT — a failure
+everything after the provider segment, VERBATIM — the provider's real id, bare
+(`guardian/groq/whisper-large-v3` → `whisper-large-v3`) or namespaced
+(`guardian/groq/canopylabs/orpheus-v1-english` → `canopylabs/orpheus-v1-english`)
+alike. An explicit address is EXACT — a failure
 surfaces honestly for that route (`502` with the route name) and never falls
 back to a different provider. Without an addressable `model` field the default
 local failover chain (`tts.providers`) serves. Unknown or malformed addresses
@@ -384,10 +386,11 @@ client gets a clear `400` instead of a failed upstream call.
 | `POST` | `/v1/audio/transcriptions` | No (blocks up to `stt.ensure_timeout_seconds`) | OpenAI Whisper-compatible transcription via provider-declared STT engines |
 
 Provider-driven routing (2026-09-19; route-oriented 2026-09-23): an
-addressable `model` (`[guardian/]{provider}/{brand}/{model}`) resolves through
-the provider file alone — `stt_url` serves with that provider's local engine
-(caretaker `POST {management_url}/stt/ensure`), `base_url` + `api_key` serves
-from its OpenAI-compatible cloud endpoint (upstream id = `{brand}/{model}`).
+addressable `model` (`[guardian/]{provider}/{upstream-model-id}`) resolves
+through the provider file alone — `stt_url` serves with that provider's local
+engine (caretaker `POST {management_url}/stt/ensure`), `base_url` + `api_key`
+serves from its OpenAI-compatible cloud endpoint (upstream id = everything
+after the provider segment, verbatim — bare or namespaced ids alike).
 `stt.providers` is the failover order for the DEFAULT path (no address).
 
 Request: multipart/form-data — `file` (raw audio bytes; wav 16-bit PCM mono

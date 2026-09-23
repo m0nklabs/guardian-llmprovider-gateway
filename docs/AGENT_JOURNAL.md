@@ -227,3 +227,10 @@ JOURNAL 38,6 kB → dit (~8 kB); verbatim → `docs/AGENT_JOURNAL_ARCHIVE.md` Ba
 - **Switches weg:** `cloud_forwarding`-blokken uit global.settings.yaml, `cloud_stt/cloud_tts` uit de providerbestanden — capability IS configuratie.
 - **Pin-val:** mijn eerste handler-versie gaf een kale modelnaam (`qwen3-asr`) ten onrechte 404 en liet de format-400 vóór de route-404 gaan — de pinnen vingen het; `address_intent()` maakt guardian/-voorvoegsels altijd adres-intentie (malformed → 404) terwijl korte kale namen naar de default-keten vallen.
 - 21 routepinnen (10 STT + 11 TTS) + de bestaande routepinnen; gate 5/5.
+
+## 2026-09-23 — Speech-adresvorm gecorrigeerd: upstream-id verbatim (2-segment minimum) — DSH agent (glm-5.3-flash) — OPEN
+
+- **Live e2e-weerlegging:** `guardian/groq/groq/whisper-large-v3` → 502 "cloud HTTP 404" — Groq's API wil KAALE ids (`whisper-large-v3`), terwijl de eerstversie het adres als `{brand}/{model}` interpreteerde. Direct bewijs: dezelfde call rechtstreeks op api.groq.com met `whisper-large-v3` → 200 + transcript.
+- **De oplossing stond al in het chat-contract:** `resolve_cloud_target` accepteert `{provider}/{upstream-id}` waar de rest het ÉCHTE id is (kaal óf namespaced). Speech nagevolgd: minimum 2 segmenten (provider + id), upstream-id = alles na de provider, verbatim.
+- **Provider-e2e-bewijs (live geprobeerd):** groq `/audio/transcriptions` + `whisper-large-v3` → **200** ✓; groq `/audio/speech` + `canopylabs/orpheus-v1-english` → endpoint bestaat, **terms-acceptance vereist** (org-admin, console.groq.com); openrouter → **géén speech-service** (geen /audio/speech; catalog heeft geen whisper/orpheus/grok-stt; de transcriptions-probe routet wél maar blokkeert op workspace-guardrails).
+- Consequentie voor de adreslijst van de operator: de 14700k-local- en groq-adressen zijn echt (groq-TTS na terms-acceptance); de openrouter-speech-adressen leveren eerlijke 502's tot openrouter speech endpoints ship't (of tot een providerbestand naar een wél-servend endpoint wijst).

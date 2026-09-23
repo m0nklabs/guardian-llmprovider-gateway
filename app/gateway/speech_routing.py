@@ -16,11 +16,14 @@ opt-in or on/off switches anywhere in the speech path:
 - neither, or an unknown provider                            -> the caller
   raises ``404 model_not_served`` (the chat routing contract).
 
-The upstream model id is ``{brand}/{model}`` — everything after the provider
-segment (``guardian/groq/canopylabs/orpheus-v1-english`` ->
-``canopylabs/orpheus-v1-english``), exactly the chat routing resolution. The
-optional ``guardian/`` prefix is the operator's canonical speech form; the
-bare chat-style form resolves identically.
+The upstream model id is EVERYTHING after the provider segment, verbatim —
+the provider's real model id, bare (``guardian/groq/whisper-large-v3`` ->
+``whisper-large-v3``) or namespaced (``guardian/groq/canopylabs/orpheus-v1-english``
+-> ``canopylabs/orpheus-v1-english``, ``guardian/openrouter/x-ai/grok-stt-1.0``
+-> ``x-ai/grok-stt-1.0``), exactly the chat routing resolution
+(``resolve_cloud_target`` accepts the same shape). The optional ``guardian/``
+prefix is the operator's canonical speech form; the bare chat-style form
+resolves identically.
 
 An explicit address is EXACT: a failure surfaces honestly for that route and
 never silently falls back to a different provider. The default path (no
@@ -47,7 +50,7 @@ def parse_speech_model(model: str) -> tuple[str, str] | None:
     parts = [p.strip() for p in model.strip().split("/")]
     if parts and parts[0].lower() == "guardian":
         parts = parts[1:]
-    if len(parts) < 3 or not parts[0] or not all(parts[1:]):
+    if len(parts) < 2 or not parts[0] or not all(parts[1:]):
         return None
     return parts[0].lower(), "/".join(parts[1:])
 
@@ -61,7 +64,7 @@ def address_intent(model: str) -> bool:
     parts = [p.strip() for p in model.strip().split("/") if p.strip()]
     if parts and parts[0].lower() == "guardian":
         return True
-    return len(parts) >= 3
+    return len(parts) >= 2
 
 
 def resolve_speech_route(model: str, local_capability: str) -> dict[str, Any] | None:
