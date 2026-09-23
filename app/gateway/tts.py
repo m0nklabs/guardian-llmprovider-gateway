@@ -184,7 +184,11 @@ async def handle_audio_speech(request: Request, client_id: str) -> Response:
         # the excuse for passing garbage upstream.
         raise HTTPException(status_code=400, detail="'speed' must be a number between 0.25 and 4.0")
 
-    if response_format not in ("wav", "pcm") and cloud_target is None:
+    # The wav/pcm restriction binds every LOCAL route (default chain and
+    # explicit local address): the engine serves wav only and ignores the
+    # field, so an mp3 request must 400 instead of silently returning wav.
+    # Cloud routes pass the format verbatim (the upstream validates).
+    if response_format not in ("wav", "pcm") and (cloud_target is None or cloud_target["kind"] != "cloud"):
         raise HTTPException(
             status_code=400,
             detail=(

@@ -241,3 +241,17 @@ async def test_speed_validated_early_with_clear_400(monkeypatch):
     assert resp.status_code == 200
     cloud = [c for c in calls if _is_cloud_host(c["url"])][0]
     assert cloud["json"]["speed"] == 1.5
+
+
+@pytest.mark.asyncio
+async def test_explicit_local_route_keeps_format_400(monkeypatch):
+    """The wav/pcm 400 binds explicit LOCAL addresses too — the engine serves
+    wav only and silently ignoring a requested mp3 would be worse than a clear
+    400. Only cloud routes get format verbatim."""
+    _patch(monkeypatch)
+    _patch_client(monkeypatch, lambda url, j, c, p, h, f=None, d=None: httpx.Response(200, content=b"wav"))
+    with pytest.raises(HTTPException) as excinfo:
+        await tts_mod.handle_audio_speech(_FakeRequest(_body(
+            model="guardian/14700k-local/qwen/qwen3-tts", response_format="mp3")), "dsh")
+    assert excinfo.value.status_code == 400
+    assert "response_format" in str(excinfo.value.detail)
