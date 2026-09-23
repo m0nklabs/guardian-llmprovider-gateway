@@ -22,12 +22,27 @@ map to VoiceDesign instructions; unknown strings pass through verbatim);
 
 Config (``tts:`` section, read at request time so POST /api/config/reload
 applies without a restart): ``enabled`` / ``providers`` / ``timeout_seconds`` /
-``default_instruct``.
+``ensure_timeout_seconds`` / ``default_instruct``.
+
+Cloud forwarding (opt-in twice, 2026-09-22 — mirrors app/gateway/stt.py): when
+``tts.cloud_forwarding.enabled`` is set AND the requested ``model`` maps to a
+provider that declares ``cloud_tts: true`` (plus ``base_url`` + ``api_key``),
+the request is forwarded to that provider's OpenAI-compatible
+``/audio/speech`` endpoint. The upstream model id is the final path segment of
+the requested name (``cloudtts/cloudtts/orpheus-v1-english`` ->
+``orpheus-v1-english``); the forwarded payload is the canonical OpenAI shape
+(``model``/``input``/``voice``/``response_format``[/``speed``]) — the local
+engine's clone passthroughs (``ref_audio``/``ref_text``/``zero_shot``) and
+``instruct`` are NOT forwarded. A cloud attempt runs before the local engine
+chain; any cloud failure falls through to the local engines unchanged. With
+the switch off (default) or no ``model`` field, behavior is identical to the
+pre-forwarding route.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any
 
@@ -38,6 +53,16 @@ from app.config_loader import CONFIG, load_tts_config
 from app.proxy.providers import _expand_env
 
 logger = logging.getLogger("Guardian.TTS")
+
+_LOG_UNSAFE = re.compile(r"[\r\n\t\x00-\x1f]+")
+
+
+def _clean_log(value: Any, limit: int = 160) -> str:
+    """Log-injection guard (mirror of app/gateway/stt.py): collapse control
+    characters (fake log lines via user-provided model ids, upstream response
+    bodies, exception texts) and cap the length. Response-bodies-in-502-details
+    are JSON-escaped by FastAPI; only log sinks need this."""
+    return _LOG_UNSAFE.sub(" ", str(value)).strip()[:limit]
 
 # OpenAI stock voice names (clients like Open WebUI send these verbatim) map to
 # Qwen3-TTS VoiceDesign instructions; unknown strings pass through as-is.
@@ -125,9 +150,6 @@ async def handle_audio_speech(request: Request, client_id: str) -> Response:
     # healthy — a shorter client timeout silently turns a working primary
     # into a failover.
     ensure_timeout_s = float(cfg.get("ensure_timeout_seconds", 300) or 300)
-    backends = _tts_backends(cfg)
-    if not backends:
-        raise HTTPException(status_code=503, detail="no provider declares a TTS engine (tts_url)")
 
     try:
         body = await request.json()
@@ -137,7 +159,26 @@ async def handle_audio_speech(request: Request, client_id: str) -> Response:
         raise HTTPException(status_code=400, detail="'input' (non-empty string) is required")
 
     response_format = str(body.get("response_format", "wav") or "wav").lower()
-    if response_format not in ("wav", "pcm"):
+
+    # Cloud target resolution happens BEFORE response-format validation: a
+    # cloud-routed request may request any format the upstream provider
+    # supports (e.g. mp3); the wav/pcm restriction is a property of the LOCAL
+    # engine only and must not 400 a request the cloud could serve.
+    cloud_target = None
+    if (cfg.get("cloud_forwarding") or {}).get("enabled", False) and str(body.get("model") or ""):
+        cloud_target = _cloud_tts_target(str(body["model"]))
+
+    speed = body.get("speed")
+    if speed is not None and (
+        not isinstance(speed, (int, float)) or isinstance(speed, bool) or not (0.25 <= speed <= 4.0)
+    ):
+        # OpenAI /audio/speech contract (0.25-4.0). Validating early gives the
+        # client a clear 400 instead of a burned cloud attempt followed by an
+        # opaque upstream 4xx; the local engine ignores it but must not become
+        # the excuse for passing garbage upstream.
+        raise HTTPException(status_code=400, detail="'speed' must be a number between 0.25 and 4.0")
+
+    if response_format not in ("wav", "pcm") and cloud_target is None:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -148,13 +189,119 @@ async def handle_audio_speech(request: Request, client_id: str) -> Response:
 
     payload = _build_engine_payload(body, cfg)
     failures: list[str] = []
+
+    # Cloud forwarding (opt-in): a cloud attempt runs before the local engine
+    # chain and never blocks local failover on failure. The backends-empty 503
+    # is only raised when the cloud path did not attempt/serve, so a
+    # cloud-only deployment is possible while default deployments are
+    # unaffected.
+    cloud_attempted = False
+    if cloud_target is not None:
+        cloud_attempted = True
+        result = await _try_cloud_backend(cloud_target, body, response_format, client_id, timeout_s)
+        if isinstance(result, Response):
+            return result
+        failures.append(result)
+
+    backends = _tts_backends(cfg)
+    if not backends and not cloud_attempted:
+        raise HTTPException(status_code=503, detail="no provider declares a TTS engine (tts_url)")
+
     for backend in backends:
         result = await _try_backend(backend, payload, client_id, timeout_s, ensure_timeout_s)
         if isinstance(result, Response):
             return result
         failures.append(result)
-    logger.warning("TTS: all providers failed for client '%s': %s", client_id, "; ".join(failures))
+    logger.warning(
+        "TTS: all providers failed for client '%s': %s",
+        _clean_log(client_id, 64), _clean_log("; ".join(failures)),
+    )
     raise HTTPException(status_code=502, detail="; ".join(failures))
+
+
+def _cloud_tts_target(model: str) -> dict[str, str] | None:
+    """Resolve a cloud TTS target from the requested ``model`` body field.
+
+    Returns ``{"name", "base_url", "api_key", "model"}`` when the provider
+    (first path segment of the requested name) opted into cloud TTS via
+    ``cloud_tts: true`` in its provider file and exposes ``base_url`` +
+    ``api_key``; None otherwise, so the request falls through to the local
+    engine chain unchanged.
+    """
+    if not model or "/" not in model:
+        return None
+    provider_name = model.split("/", 1)[0].strip().lower()
+    doc = (CONFIG.get("providers") or {}).get(provider_name)
+    if not isinstance(doc, dict) or not doc.get("cloud_tts"):
+        return None
+    base_url = _expand_env(str(doc.get("base_url") or "")).rstrip("/")
+    api_key = _expand_env(str(doc.get("api_key") or ""))
+    if not base_url or not api_key:
+        return None
+    return {
+        "name": provider_name,
+        "base_url": base_url,
+        "api_key": api_key,
+        "model": model.split("/")[-1].strip(),
+    }
+
+
+async def _try_cloud_backend(
+    target: dict[str, str],
+    body: dict[str, Any],
+    response_format: str,
+    client_id: str,
+    timeout_s: float,
+) -> Response | str:
+    """Forward the request to a cloud OpenAI-compatible ``/audio/speech``
+    endpoint. Returns a Response on success or a failure string for the
+    failover log — the local engines still get a chance afterwards. The
+    forwarded payload is the canonical OpenAI shape; the local engine's clone
+    passthroughs and ``instruct`` do not travel to cloud providers."""
+    name = target["name"]
+    started = time.monotonic()
+    payload: dict[str, Any] = {
+        "model": target["model"],
+        "input": body["input"],
+        "response_format": response_format,
+    }
+    if str(body.get("voice") or "").strip():
+        payload["voice"] = str(body["voice"])
+    speed = body.get("speed")
+    if speed is not None:
+        payload["speed"] = speed
+    try:
+        async with httpx.AsyncClient(timeout=timeout_s) as client:
+            resp = await client.post(
+                f"{target['base_url']}/audio/speech",
+                json=payload,
+                headers={"Authorization": f"Bearer {target['api_key']}"},
+            )
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "TTS cloud provider '%s' unreachable: %s", _clean_log(name), _clean_log(exc)
+        )
+        # Client detail is structured-only: the exception text may carry
+        # internal hosts/proxy details — the guarded log line keeps the full
+        # message for the operator.
+        return f"{name}: unreachable ({type(exc).__name__})"
+    if resp.status_code != 200:
+        logger.warning(
+            "TTS cloud provider '%s' HTTP %s: %s",
+            _clean_log(name), resp.status_code, _clean_log(resp.text),
+        )
+        return f"{name}: cloud HTTP {resp.status_code}"
+    duration_ms = (time.monotonic() - started) * 1000
+    logger.info(
+        "🔊 TTS: client '%s' served by cloud '%s' (%s) -> %s bytes %s in %.1fs",
+        _clean_log(client_id, 64), _clean_log(name, 64), _clean_log(target["model"], 64),
+        len(resp.content), resp.headers.get("content-type", "audio/wav"), duration_ms / 1000,
+    )
+    return Response(
+        content=resp.content,
+        status_code=200,
+        media_type=resp.headers.get("content-type", "audio/wav"),
+    )
 
 
 async def _try_backend(
@@ -181,13 +328,16 @@ async def _try_backend(
             pass
         if ensure_resp.status_code != 200 or ensure_body.get("ok") is False:
             reason = str(ensure_body.get("reason") or ensure_resp.text)[:160]
-            return f"{name}: ensure failed (HTTP {ensure_resp.status_code}): {reason}"
+            return f"{name}: ensure failed (HTTP {ensure_resp.status_code}): {_clean_log(reason)}"
         logger.info("🔊 TTS ensure via %s: %s", name, ensure_body.get("already_running", "?"))
 
         async with httpx.AsyncClient(timeout=timeout_s) as client:
             resp = await client.post(f"{tts_url}/tts", json=payload, headers=headers)
         if resp.status_code != 200:
-            return f"{name}: engine HTTP {resp.status_code}: {resp.text[:120]}"
+            logger.warning(
+                "TTS engine '%s' HTTP %s: %s", _clean_log(name), resp.status_code, _clean_log(resp.text)
+            )
+            return f"{name}: engine HTTP {resp.status_code}"
         duration_ms = (time.monotonic() - started) * 1000
         logger.info(
             "🔊 TTS: client '%s' served by '%s' -> %s bytes audio/wav in %.1fs (instruct: %r)",
@@ -195,5 +345,5 @@ async def _try_backend(
         )
         return Response(content=resp.content, status_code=200, media_type="audio/wav")
     except httpx.HTTPError as exc:
-        logger.warning("TTS provider '%s' unreachable: %s", name, exc)
-        return f"{name}: unreachable ({exc})"
+        logger.warning("TTS provider '%s' unreachable: %s", _clean_log(name), _clean_log(exc))
+        return f"{name}: unreachable ({type(exc).__name__})"
