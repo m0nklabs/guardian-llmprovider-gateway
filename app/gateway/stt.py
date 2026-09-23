@@ -24,7 +24,8 @@ is set AND the requested ``model`` maps to a provider that declares
 ``cloud_stt: true`` (plus ``base_url`` + ``api_key``), the upload is forwarded
 to that provider's OpenAI-compatible ``/audio/transcriptions`` endpoint. The
 upstream model id is the final path segment of the requested name
-(``groq/groq/whisper-large-v3`` -> ``whisper-large-v3``). A cloud attempt runs
+(``cloudstt/cloudstt/whisper-large-v3`` -> ``whisper-large-v3``). A cloud
+attempt runs
 before the local engine chain; any cloud failure falls through to the local
 engines unchanged, so disabling the switch (or omitting the model field)
 restores the pre-forwarding behavior exactly.
@@ -181,7 +182,8 @@ async def _try_cloud_backend(
     timeout_s: float,
 ) -> Response | str:
     """Forward the upload to a cloud OpenAI-compatible transcription endpoint
-    (e.g. Groq). Returns a Response on success or a failure string for the
+    (any OpenAI-compatible endpoint). Returns a Response on success or a
+    failure string for the
     failover log — the local engines still get a chance afterwards. The
     ``language`` value is passed through verbatim (ISO-639-1); the Qwen name
     mapping is engine-specific and does not apply here."""

@@ -381,8 +381,8 @@ Cloud forwarding (2026-09-22, opt-in twice): when `stt.cloud_forwarding.enabled`
 is set in `global.settings.yaml` AND the requested `model` maps to a provider
 that declares `cloud_stt: true` (plus `base_url` + `api_key`) in its provider
 file, the upload is forwarded to that provider's OpenAI-compatible
-`/audio/transcriptions` endpoint — e.g. `model=groq/groq/whisper-large-v3`
-routes to Groq (upstream model id = final path segment). `language` passes
+`/audio/transcriptions` endpoint — e.g. `model=cloudstt/cloudstt/whisper-large-v3`
+routes to the `cloudstt` provider (upstream model id = final path segment). `language` passes
 through verbatim (ISO-639-1; the Qwen name mapping is engine-specific). A
 cloud attempt runs before the local engine chain; any cloud failure falls
 through to the local engines unchanged. With the switch off (default) or no

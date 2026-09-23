@@ -167,8 +167,9 @@ een cloud-GPU-box):
 
 - **Wat**: `/v1/audio/transcriptions` kan nu (opt-in) forwarden naar cloud-STT.
   Dubbele opt-in: `stt.cloud_forwarding.enabled` (global.settings.yaml) +
-  `cloud_stt: true` in het providerbestand. `model=groq/groq/whisper-large-v3`
-  → Groq's OpenAI-compatibele `/audio/transcriptions` (upstream model-id =
+  `cloud_stt: true` in het providerbestand.
+  `model=cloudstt/cloudstt/whisper-large-v3` → de provider's OpenAI-compatibele
+  `/audio/transcriptions` (upstream model-id =
   laatste padsegment; `language` verbatim ISO-639-1 — de Qwen-naammapping is
   engine-specifiek). Cloud loopt vóór de lokale keten; elke cloud-fout valt
   terug op lokaal, ongewijzigd. Default OFF = gedrag byte-identiek aan voor.

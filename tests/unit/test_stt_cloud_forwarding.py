@@ -1,7 +1,7 @@
 """Cloud STT forwarding pins — model-based provider routing.
 
 Opt-in twice: global ``stt.cloud_forwarding.enabled`` + per-provider
-``cloud_stt: true``. A requested model like ``groq/groq/whisper-large-v3``
+``cloud_stt: true``. A requested model like ``cloudstt/cloudstt/whisper-large-v3``
 forwards the multipart upload to the provider's OpenAI-compatible
 ``/audio/transcriptions``; the upstream model id is the final path segment and
 ``language`` passes through verbatim (ISO-639-1, no Qwen mapping). Any cloud
@@ -16,22 +16,22 @@ from types import SimpleNamespace
 from app.gateway import stt as stt_mod
 
 
-def _is_groq(url: str) -> bool:
-    """Exact-host match — startswith would also match
-    https://api.groq.com.evil.com/ (CodeQL incomplete-URL-substring)."""
-    return urlparse(url).hostname == "api.groq.com"
+def _is_cloud_host(url: str) -> bool:
+    """Exact-host match against the test fixture — startswith would also match
+    an attacker-shaped sibling host (CodeQL incomplete-URL-substring)."""
+    return urlparse(url).hostname == "stt.cloudtest.invalid"
 
 
-def _provider_docs(**groq_overrides):
-    groq = {
-        "base_url": "https://api.groq.com/openai/v1",
-        "api_key": "${GROQ_API_KEY}",
+def _provider_docs(**overrides):
+    cloud = {
+        "base_url": "https://stt.cloudtest.invalid/openai/v1",
+        "api_key": "${CLOUD_STT_API_KEY}",
         "cloud_stt": True,
     }
-    groq.update(groq_overrides)
+    cloud.update(overrides)
     return {
         "providers": {
-            "groq": groq,
+            "cloudstt": cloud,
             "14700k-local": {
                 "management_url": "http://192.168.1.245:11441",
                 "management_key": "${WINDOWS_LAN_KEY}",
@@ -77,7 +77,7 @@ def _patch_config(monkeypatch, cfg=None, docs=None):
     monkeypatch.setattr(stt_mod, "load_stt_config", lambda: cfg or _cfg())
     monkeypatch.setattr(stt_mod, "CONFIG", docs or _provider_docs())
     monkeypatch.setenv("WINDOWS_LAN_KEY", "ctk_windows")
-    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+    monkeypatch.setenv("CLOUD_STT_API_KEY", "stt_test_key")
 
 
 def _patch_client(monkeypatch, handler):
@@ -109,11 +109,11 @@ def _patch_client(monkeypatch, handler):
 
 def test_target_strips_to_final_model_segment(monkeypatch):
     _patch_config(monkeypatch)
-    target = stt_mod._cloud_stt_target("groq/groq/whisper-large-v3")
+    target = stt_mod._cloud_stt_target("cloudstt/cloudstt/whisper-large-v3")
     assert target == {
-        "name": "groq",
-        "base_url": "https://api.groq.com/openai/v1",
-        "api_key": "gsk_test",
+        "name": "cloudstt",
+        "base_url": "https://stt.cloudtest.invalid/openai/v1",
+        "api_key": "stt_test_key",
         "model": "whisper-large-v3",
     }
 
@@ -127,7 +127,7 @@ def test_target_rejects_non_matching_models(monkeypatch):
 
 def test_target_rejects_provider_without_credentials(monkeypatch):
     _patch_config(monkeypatch, docs=_provider_docs(api_key=""))
-    assert stt_mod._cloud_stt_target("groq/groq/whisper-large-v3") is None
+    assert stt_mod._cloud_stt_target("cloudstt/cloudstt/whisper-large-v3") is None
 
 
 # --- handler routing ---
@@ -144,10 +144,10 @@ async def test_disabled_switch_keeps_local_only(monkeypatch):
 
     calls = _patch_client(monkeypatch, handler)
     resp = await stt_mod.handle_audio_transcriptions(
-        _fake_request({"file": _Upload(), "model": "groq/groq/whisper-large-v3"}), "dsh"
+        _fake_request({"file": _Upload(), "model": "cloudstt/cloudstt/whisper-large-v3"}), "dsh"
     )
     assert resp.status_code == 200
-    assert not any(_is_groq(c["url"]) for c in calls)
+    assert not any(_is_cloud_host(c["url"]) for c in calls)
     assert any(c["url"].endswith("/transcriptions") for c in calls)
 
 
@@ -156,21 +156,21 @@ async def test_cloud_success_serves_request_without_local_engines(monkeypatch):
     _patch_config(monkeypatch)
 
     def handler(url, json, content, params, headers, files, data):
-        assert url == "https://api.groq.com/openai/v1/audio/transcriptions"
-        assert headers["Authorization"] == "Bearer gsk_test"
+        assert url == "https://stt.cloudtest.invalid/openai/v1/audio/transcriptions"
+        assert headers["Authorization"] == "Bearer stt_test_key"
         return httpx.Response(200, json={"text": "cloud transcript"})
 
     calls = _patch_client(monkeypatch, handler)
     resp = await stt_mod.handle_audio_transcriptions(
         _fake_request({
             "file": _Upload(b"RIFFaudio", "audio/wav", "clip.wav"),
-            "model": "groq/groq/whisper-large-v3",
+            "model": "cloudstt/cloudstt/whisper-large-v3",
             "language": "nl",
         }), "dsh"
     )
     assert resp.status_code == 200
     assert b"cloud transcript" in resp.body
-    cloud_calls = [c for c in calls if _is_groq(c["url"])]
+    cloud_calls = [c for c in calls if _is_cloud_host(c["url"])]
     assert len(cloud_calls) == 1
     part = cloud_calls[0]["files"]["file"]
     assert part[0] == "clip.wav" and part[1] == b"RIFFaudio" and part[2] == "audio/wav"
@@ -183,7 +183,7 @@ async def test_cloud_failure_falls_through_to_local_engine(monkeypatch):
     _patch_config(monkeypatch)
 
     def handler(url, json, content, params, headers, files, data):
-        if _is_groq(url):
+        if _is_cloud_host(url):
             return httpx.Response(503, content=b"rate limited")
         if url.endswith("/stt/ensure"):
             return httpx.Response(200, json={"ok": True})
@@ -191,7 +191,7 @@ async def test_cloud_failure_falls_through_to_local_engine(monkeypatch):
 
     calls = _patch_client(monkeypatch, handler)
     resp = await stt_mod.handle_audio_transcriptions(
-        _fake_request({"file": _Upload(), "model": "groq/groq/whisper-large-v3"}), "dsh"
+        _fake_request({"file": _Upload(), "model": "cloudstt/cloudstt/whisper-large-v3"}), "dsh"
     )
     assert resp.status_code == 200
     assert b"lokaal" in resp.body
@@ -212,7 +212,7 @@ async def test_no_matching_cloud_model_keeps_local_flow(monkeypatch):
         _fake_request({"file": _Upload(), "model": "qwen3-asr"}), "dsh"
     )
     assert resp.status_code == 200
-    assert not any(_is_groq(c["url"]) for c in calls)
+    assert not any(_is_cloud_host(c["url"]) for c in calls)
 
 
 @pytest.mark.asyncio
@@ -220,7 +220,7 @@ async def test_cloud_unreachable_falls_through(monkeypatch):
     _patch_config(monkeypatch)
 
     def handler(url, json, content, params, headers, files, data):
-        if _is_groq(url):
+        if _is_cloud_host(url):
             raise httpx.ConnectError("DNS fail")
         if url.endswith("/stt/ensure"):
             return httpx.Response(200, json={"ok": True})
@@ -228,7 +228,7 @@ async def test_cloud_unreachable_falls_through(monkeypatch):
 
     _patch_client(monkeypatch, handler)
     resp = await stt_mod.handle_audio_transcriptions(
-        _fake_request({"file": _Upload(), "model": "groq/groq/whisper-large-v3"}), "dsh"
+        _fake_request({"file": _Upload(), "model": "cloudstt/cloudstt/whisper-large-v3"}), "dsh"
     )
     assert resp.status_code == 200
     assert b"lokaal" in resp.body
@@ -236,7 +236,7 @@ async def test_cloud_unreachable_falls_through(monkeypatch):
 
 async def test_cloud_language_passes_verbatim_iso(monkeypatch):
     """THE subtle contract: the cloud provider receives the ISO-639-1 code
-    verbatim ("nl" — Groq/whisper shape), while the LOCAL engine chain gets
+    verbatim ("nl" — OpenAI/whisper shape), while the LOCAL engine chain gets
     the Qwen name ("Dutch").  One client field, two engine dialects."""
     _patch_config(monkeypatch)
 
@@ -247,7 +247,7 @@ async def test_cloud_language_passes_verbatim_iso(monkeypatch):
 
     calls = _patch_client(monkeypatch, handler)
     resp = await stt_mod.handle_audio_transcriptions(
-        _fake_request({"file": _Upload(b"RIFF"), "language": "nl", "model": "groq/groq/whisper-large-v3"}),
+        _fake_request({"file": _Upload(b"RIFF"), "language": "nl", "model": "cloudstt/cloudstt/whisper-large-v3"}),
         "dsh",
     )
     assert resp.status_code == 200
