@@ -11,6 +11,7 @@ the pre-forwarding route."""
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from urllib.parse import urlparse
 from types import SimpleNamespace
 
@@ -247,3 +248,51 @@ async def test_no_matching_cloud_model_keeps_local_flow(monkeypatch):
     resp = await tts_mod.handle_audio_speech(_FakeRequest(_body(model="qwen3tts")), "dsh")
     assert resp.status_code == 200
     assert not any(_is_cloud_host(c["url"]) for c in calls)
+
+
+@pytest.mark.asyncio
+async def test_cloud_routed_request_allows_upstream_formats(monkeypatch):
+    """The wav/pcm restriction is a property of the LOCAL engine — a
+    cloud-routed request passes response_format verbatim (mp3 etc.) instead of
+    getting a 400 the cloud provider could have served."""
+    _patch_config(monkeypatch)
+    calls = _patch_client(monkeypatch, lambda url, j, c, p, h, f=None, d=None: httpx.Response(200, content=b"mp3data", headers={"content-type": "audio/mpeg"}))
+    resp = await tts_mod.handle_audio_speech(_FakeRequest(_body(
+        response_format="mp3")), "dsh")
+    assert resp.status_code == 200
+    assert resp.body == b"mp3data"
+    assert resp.media_type == "audio/mpeg"
+    cloud_call = [c for c in calls if _is_cloud_host(c["url"])][0]
+    assert cloud_call["json"]["response_format"] == "mp3"
+
+
+@pytest.mark.asyncio
+async def test_local_routed_request_keeps_format_400(monkeypatch):
+    """Without an opted-in cloud target the wav/pcm restriction still applies —
+    the 400 is the local engine's contract, unchanged."""
+    _patch_config(monkeypatch)
+    _patch_client(monkeypatch, lambda url, j, c, p, h, f=None, d=None: httpx.Response(200, content=b"wav"))
+    with pytest.raises(HTTPException) as excinfo:
+        await tts_mod.handle_audio_speech(_FakeRequest(_body(
+            model="unknown-brand/brand/model", response_format="mp3")), "dsh")
+    assert excinfo.value.status_code == 400
+    assert "response_format" in str(excinfo.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_speed_validated_early_with_clear_400(monkeypatch):
+    """A non-numeric or out-of-range speed is a clear client 400 — not a burned
+    cloud attempt followed by an opaque upstream 4xx."""
+    _patch_config(monkeypatch)
+    _patch_client(monkeypatch, lambda url, j, c, p, h, f=None, d=None: httpx.Response(200, content=b"x"))
+    for bad in ("fast", 10.0, True):
+        with pytest.raises(HTTPException) as excinfo:
+            await tts_mod.handle_audio_speech(_FakeRequest(_body(speed=bad)), "dsh")
+        assert excinfo.value.status_code == 400
+        assert "speed" in str(excinfo.value.detail)
+    # a valid speed passes through verbatim
+    calls = _patch_client(monkeypatch, lambda url, j, c, p, h, f=None, d=None: httpx.Response(200, content=b"x"))
+    resp = await tts_mod.handle_audio_speech(_FakeRequest(_body(speed=1.5)), "dsh")
+    assert resp.status_code == 200
+    cloud_call = [c for c in calls if _is_cloud_host(c["url"])][0]
+    assert cloud_call["json"]["speed"] == 1.5

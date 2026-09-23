@@ -159,7 +159,26 @@ async def handle_audio_speech(request: Request, client_id: str) -> Response:
         raise HTTPException(status_code=400, detail="'input' (non-empty string) is required")
 
     response_format = str(body.get("response_format", "wav") or "wav").lower()
-    if response_format not in ("wav", "pcm"):
+
+    # Cloud target resolution happens BEFORE response-format validation: a
+    # cloud-routed request may request any format the upstream provider
+    # supports (e.g. mp3); the wav/pcm restriction is a property of the LOCAL
+    # engine only and must not 400 a request the cloud could serve.
+    cloud_target = None
+    if (cfg.get("cloud_forwarding") or {}).get("enabled", False) and str(body.get("model") or ""):
+        cloud_target = _cloud_tts_target(str(body["model"]))
+
+    speed = body.get("speed")
+    if speed is not None and (
+        not isinstance(speed, (int, float)) or isinstance(speed, bool) or not (0.25 <= speed <= 4.0)
+    ):
+        # OpenAI /audio/speech contract (0.25-4.0). Validating early gives the
+        # client a clear 400 instead of a burned cloud attempt followed by an
+        # opaque upstream 4xx; the local engine ignores it but must not become
+        # the excuse for passing garbage upstream.
+        raise HTTPException(status_code=400, detail="'speed' must be a number between 0.25 and 4.0")
+
+    if response_format not in ("wav", "pcm") and cloud_target is None:
         raise HTTPException(
             status_code=400,
             detail=(
@@ -177,14 +196,12 @@ async def handle_audio_speech(request: Request, client_id: str) -> Response:
     # cloud-only deployment is possible while default deployments are
     # unaffected.
     cloud_attempted = False
-    if (cfg.get("cloud_forwarding") or {}).get("enabled", False) and str(body.get("model") or ""):
-        target = _cloud_tts_target(str(body["model"]))
-        if target is not None:
-            cloud_attempted = True
-            result = await _try_cloud_backend(target, body, response_format, client_id, timeout_s)
-            if isinstance(result, Response):
-                return result
-            failures.append(result)
+    if cloud_target is not None:
+        cloud_attempted = True
+        result = await _try_cloud_backend(cloud_target, body, response_format, client_id, timeout_s)
+        if isinstance(result, Response):
+            return result
+        failures.append(result)
 
     backends = _tts_backends(cfg)
     if not backends and not cloud_attempted:

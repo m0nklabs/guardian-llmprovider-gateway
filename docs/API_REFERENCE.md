@@ -369,6 +369,13 @@ local engine chain; any cloud failure falls through to the local engines
 unchanged. With the switch off (default) or no `model` field, behavior is
 identical to the pre-forwarding route.
 
+Validation split for cloud-routed requests: the local `wav`/`pcm`-only
+`response_format` restriction does not apply — the requested format passes
+verbatim to the upstream provider (e.g. `mp3`); if the cloud attempt fails and
+the local engines take over, an unservable format surfaces as part of the `502`
+detail. `speed` is validated early (number 0.25-4.0, OpenAI contract) for both
+routes so the client gets a clear `400` instead of a burned cloud attempt.
+
 ### Speech-to-text (STT) endpoint
 
 | Method | Path | Queued | Purpose |
