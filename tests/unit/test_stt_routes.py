@@ -109,11 +109,12 @@ def _patch_client(monkeypatch, handler):
 
 def test_parse_accepts_guardian_prefix_and_bare_form():
     parse_speech_model = sr.parse_speech_model
+    # the upstream id is everything after the provider segment, verbatim
     assert parse_speech_model("guardian/windows-gpu-local/qwen/qwen3-asr-sherpa") == ("windows-gpu-local", "qwen/qwen3-asr-sherpa")
-    assert parse_speech_model("groq/groq/whisper-large-v3") == ("groq", "groq/whisper-large-v3")
+    assert parse_speech_model("guardian/groq/whisper-large-v3") == ("groq", "whisper-large-v3")
+    assert parse_speech_model("groq/canopylabs/orpheus-v1-english") == ("groq", "canopylabs/orpheus-v1-english")
     assert parse_speech_model("guardian/openrouter/x-ai/grok-stt-1.0") == ("openrouter", "x-ai/grok-stt-1.0")
-    assert parse_speech_model("qwen3-asr") is None              # not an address
-    assert parse_speech_model("guardian/groq/whisper") is None  # too few segments
+    assert parse_speech_model("qwen3-asr") is None  # a bare name is not an address
     assert parse_speech_model("") is None
 
 
@@ -167,7 +168,9 @@ async def test_cloud_route_failure_is_exact_no_local_fallback(monkeypatch):
 async def test_unknown_provider_returns_404_model_not_served(monkeypatch):
     _patch(monkeypatch)
     _patch_client(monkeypatch, lambda url, j, c, p, h, f=None, d=None: httpx.Response(200, json={}))
-    for bad in ("guardian/nosuchprovider/brand/model", "guardian/openrouter/only-two"):
+    # two-segment addresses (provider + bare id) are valid now; unknown
+    # PROVIDERS still 404 regardless of upstream-id shape
+    for bad in ("guardian/nosuchprovider/brand/model", "guardian/nosuchprovider/whisper-large-v3"):
         with pytest.raises(HTTPException) as excinfo:
             await stt_mod.handle_audio_transcriptions(
                 _FakeRequest({"file": _Upload(), "model": bad}), "dsh")

@@ -160,10 +160,11 @@ async def test_cloud_route_failure_is_exact_no_local_fallback(monkeypatch):
 async def test_unknown_provider_returns_404_model_not_served(monkeypatch):
     _patch(monkeypatch)
     _patch_client(monkeypatch, lambda url, j, c, p, h, f=None, d=None: httpx.Response(200, content=b"x"))
-    with pytest.raises(HTTPException) as excinfo:
-        await tts_mod.handle_audio_speech(_FakeRequest(_body(model="guardian/nosuch/brand/model")), "dsh")
-    assert excinfo.value.status_code == 404
-    assert "model_not_served" in str(excinfo.value.detail)
+    for bad in ("guardian/nosuch/brand/model", "guardian/nosuch/whisper-large-v3"):
+        with pytest.raises(HTTPException) as excinfo:
+            await tts_mod.handle_audio_speech(_FakeRequest(_body(model=bad)), "dsh")
+        assert excinfo.value.status_code == 404
+        assert "model_not_served" in str(excinfo.value.detail)
 
 
 @pytest.mark.asyncio
