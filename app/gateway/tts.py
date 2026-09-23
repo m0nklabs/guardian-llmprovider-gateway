@@ -24,19 +24,18 @@ Config (``tts:`` section, read at request time so POST /api/config/reload
 applies without a restart): ``enabled`` / ``providers`` / ``timeout_seconds`` /
 ``ensure_timeout_seconds`` / ``default_instruct``.
 
-Cloud forwarding (opt-in twice, 2026-09-22 — mirrors app/gateway/stt.py): when
-``tts.cloud_forwarding.enabled`` is set AND the requested ``model`` maps to a
-provider that declares ``cloud_tts: true`` (plus ``base_url`` + ``api_key``),
-the request is forwarded to that provider's OpenAI-compatible
-``/audio/speech`` endpoint. The upstream model id is the final path segment of
-the requested name (``cloudtts/cloudtts/orpheus-v1-english`` ->
-``orpheus-v1-english``); the forwarded payload is the canonical OpenAI shape
-(``model``/``input``/``voice``/``response_format``[/``speed``]) — the local
-engine's clone passthroughs (``ref_audio``/``ref_text``/``zero_shot``) and
-``instruct`` are NOT forwarded. A cloud attempt runs before the local engine
-chain; any cloud failure falls through to the local engines unchanged. With
-the switch off (default) or no ``model`` field, behavior is identical to the
-pre-forwarding route.
+Speech model addresses (2026-09-23, route-oriented — no opt-in switches):
+a requested ``model`` shaped ``[guardian/]{provider}/{brand}/{model}`` resolves
+through the provider file ALONE (see app/gateway/speech_routing.py):
+``tts_url`` -> that provider's local engine, ``base_url`` + ``api_key`` -> its
+OpenAI-compatible ``/audio/speech`` (upstream id = ``{brand}/{model}``, e.g.
+``guardian/groq/canopylabs/orpheus-v1-english``). An explicit address is EXACT
+— failures surface honestly for that route and never fall back to a different
+provider. Without an addressable ``model`` field the default local chain
+(``tts.providers``) serves, unchanged. The forwarded payload is the canonical
+OpenAI shape (``model``/``input``/``voice``/``response_format``[/``speed``]);
+the local engine's clone passthroughs (``ref_audio``/``ref_text``/``zero_shot``)
+and ``instruct`` do NOT travel to cloud providers.
 """
 
 from __future__ import annotations
@@ -50,6 +49,7 @@ import httpx
 from fastapi import HTTPException, Request, Response
 
 from app.config_loader import CONFIG, load_tts_config
+from app.gateway.speech_routing import address_intent, parse_speech_model, resolve_speech_route
 from app.proxy.providers import _expand_env
 
 logger = logging.getLogger("Guardian.TTS")
@@ -160,13 +160,19 @@ async def handle_audio_speech(request: Request, client_id: str) -> Response:
 
     response_format = str(body.get("response_format", "wav") or "wav").lower()
 
-    # Cloud target resolution happens BEFORE response-format validation: a
-    # cloud-routed request may request any format the upstream provider
-    # supports (e.g. mp3); the wav/pcm restriction is a property of the LOCAL
-    # engine only and must not 400 a request the cloud could serve.
+    # Route resolution happens BEFORE response-format validation: a routed
+    # request may request any format the upstream provider supports (e.g.
+    # mp3); the wav/pcm restriction is a property of the LOCAL engine only and
+    # must not 400 a request the route could serve. guardian/-prefixed values
+    # always intend to be addresses — malformed or unknown ones 404 here.
+    requested_model = str(body.get("model") or "")
     cloud_target = None
-    if (cfg.get("cloud_forwarding") or {}).get("enabled", False) and str(body.get("model") or ""):
-        cloud_target = _cloud_tts_target(str(body["model"]))
+    if requested_model and (address_intent(requested_model) or parse_speech_model(requested_model)):
+        if not parse_speech_model(requested_model):
+            raise HTTPException(status_code=404, detail="model_not_served")
+        cloud_target = resolve_speech_route(requested_model, "tts_url")
+        if cloud_target is None:
+            raise HTTPException(status_code=404, detail="model_not_served")
 
     speed = body.get("speed")
     if speed is not None and (
@@ -190,21 +196,32 @@ async def handle_audio_speech(request: Request, client_id: str) -> Response:
     payload = _build_engine_payload(body, cfg)
     failures: list[str] = []
 
-    # Cloud forwarding (opt-in): a cloud attempt runs before the local engine
-    # chain and never blocks local failover on failure. The backends-empty 503
-    # is only raised when the cloud path did not attempt/serve, so a
-    # cloud-only deployment is possible while default deployments are
-    # unaffected.
-    cloud_attempted = False
+    # Route-oriented resolution: an addressable model is EXACT (no silent
+    # fallback to another provider); only the default path (no address) uses
+    # the configured failover chain. The backends-empty 503 is only raised on
+    # the default path, so a cloud-only deployment stays possible.
     if cloud_target is not None:
-        cloud_attempted = True
-        result = await _try_cloud_backend(cloud_target, body, response_format, client_id, timeout_s)
+        if cloud_target["kind"] == "cloud":
+            result = await _try_cloud_backend(cloud_target, body, response_format, client_id, timeout_s)
+            if isinstance(result, Response):
+                return result
+            logger.warning(
+                "TTS: exact route '%s' failed for client '%s': %s",
+                _clean_log(requested_model, 96), _clean_log(client_id, 64), _clean_log(result),
+            )
+            raise HTTPException(status_code=502, detail=result)
+        # explicit local route: this provider's engine only
+        result = await _try_backend(
+            {"name": cloud_target["provider"], "tts_url": cloud_target["tts_url"],
+             "management_url": cloud_target["management_url"], "key": cloud_target["management_key"]},
+            payload, client_id, timeout_s, ensure_timeout_s,
+        )
         if isinstance(result, Response):
             return result
-        failures.append(result)
+        raise HTTPException(status_code=502, detail=result)
 
     backends = _tts_backends(cfg)
-    if not backends and not cloud_attempted:
+    if not backends:
         raise HTTPException(status_code=503, detail="no provider declares a TTS engine (tts_url)")
 
     for backend in backends:
@@ -219,35 +236,8 @@ async def handle_audio_speech(request: Request, client_id: str) -> Response:
     raise HTTPException(status_code=502, detail="; ".join(failures))
 
 
-def _cloud_tts_target(model: str) -> dict[str, str] | None:
-    """Resolve a cloud TTS target from the requested ``model`` body field.
-
-    Returns ``{"name", "base_url", "api_key", "model"}`` when the provider
-    (first path segment of the requested name) opted into cloud TTS via
-    ``cloud_tts: true`` in its provider file and exposes ``base_url`` +
-    ``api_key``; None otherwise, so the request falls through to the local
-    engine chain unchanged.
-    """
-    if not model or "/" not in model:
-        return None
-    provider_name = model.split("/", 1)[0].strip().lower()
-    doc = (CONFIG.get("providers") or {}).get(provider_name)
-    if not isinstance(doc, dict) or not doc.get("cloud_tts"):
-        return None
-    base_url = _expand_env(str(doc.get("base_url") or "")).rstrip("/")
-    api_key = _expand_env(str(doc.get("api_key") or ""))
-    if not base_url or not api_key:
-        return None
-    return {
-        "name": provider_name,
-        "base_url": base_url,
-        "api_key": api_key,
-        "model": model.split("/")[-1].strip(),
-    }
-
-
 async def _try_cloud_backend(
-    target: dict[str, str],
+    route: dict[str, Any],
     body: dict[str, Any],
     response_format: str,
     client_id: str,
@@ -258,10 +248,10 @@ async def _try_cloud_backend(
     failover log — the local engines still get a chance afterwards. The
     forwarded payload is the canonical OpenAI shape; the local engine's clone
     passthroughs and ``instruct`` do not travel to cloud providers."""
-    name = target["name"]
+    name = route["provider"]
     started = time.monotonic()
     payload: dict[str, Any] = {
-        "model": target["model"],
+        "model": route["upstream_model"],
         "input": body["input"],
         "response_format": response_format,
     }
@@ -273,9 +263,9 @@ async def _try_cloud_backend(
     try:
         async with httpx.AsyncClient(timeout=timeout_s) as client:
             resp = await client.post(
-                f"{target['base_url']}/audio/speech",
+                f"{route['base_url']}/audio/speech",
                 json=payload,
-                headers={"Authorization": f"Bearer {target['api_key']}"},
+                headers={"Authorization": f"Bearer {route['api_key']}"},
             )
     except httpx.HTTPError as exc:
         logger.warning(
@@ -294,7 +284,7 @@ async def _try_cloud_backend(
     duration_ms = (time.monotonic() - started) * 1000
     logger.info(
         "🔊 TTS: client '%s' served by cloud '%s' (%s) -> %s bytes %s in %.1fs",
-        _clean_log(client_id, 64), _clean_log(name, 64), _clean_log(target["model"], 64),
+        _clean_log(client_id, 64), _clean_log(name, 64), _clean_log(route["upstream_model"], 64),
         len(resp.content), resp.headers.get("content-type", "audio/wav"), duration_ms / 1000,
     )
     return Response(
