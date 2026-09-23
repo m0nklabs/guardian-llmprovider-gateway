@@ -356,6 +356,19 @@ Errors: `404` when disabled, `503` when no provider declares `tts_url`, `400`
 for empty `input`/bad format, `502` when all configured providers fail (detail
 lists the per-provider reasons, e.g. insufficient VRAM).
 
+Cloud forwarding (2026-09-22, opt-in twice): when `tts.cloud_forwarding.enabled`
+is set in `global.settings.yaml` AND the requested `model` maps to a provider
+that declares `cloud_tts: true` (plus `base_url` + `api_key`) in its provider
+file, the request is forwarded to that provider's OpenAI-compatible
+`/audio/speech` endpoint — e.g. `model=cloudtts/cloudtts/orpheus-v1-english`
+(upstream model id = final path segment). The forwarded payload is the
+canonical OpenAI shape (`model`/`input`/`voice`/`response_format` [/`speed`]);
+the local engine's clone passthroughs (`ref_audio`/`ref_text`/`zero_shot`) and
+`instruct` do NOT travel to cloud providers. A cloud attempt runs before the
+local engine chain; any cloud failure falls through to the local engines
+unchanged. With the switch off (default) or no `model` field, behavior is
+identical to the pre-forwarding route.
+
 ### Speech-to-text (STT) endpoint
 
 | Method | Path | Queued | Purpose |
