@@ -192,3 +192,29 @@ JOURNAL 38,6 kB → dit (~8 kB); verbatim → `docs/AGENT_JOURNAL_ARCHIVE.md` Ba
   samengestelde woorden → de test-audio was de confounder, niet de engine;
   echte mic-audio presteert beter dan de benchmark suggereerde. Cloud-forwarding
   maakt A/B-testen op echte Discord-clips nu zero-config mogelijk.
+
+## 2026-09-22 (II) — TTS cloud forwarding (mirror of STT) — DSH agent (openrouter/z-ai/glm-5.3-flash)
+
+- **Change**: `app/gateway/tts.py` — zelfde dubbele opt-in als STT
+  (`tts.cloud_forwarding.enabled` + per-provider `cloud_tts: true`);
+  `model=cloudtts/cloudtts/orpheus-v1-english` → provider's OpenAI-compatibele
+  `/audio/speech` (upstream id = laatste segment). Doorgestuurde payload =
+  canonieke OpenAI-shape (model/input/voice/response_format[/speed]); de
+  lokale clone-passthroughs (ref_audio/ref_text/zero_shot) en `instruct`
+  reizen NIET mee naar cloud. Cloud vóór lokaal; failures vallen door;
+  default OFF.
+- **Review-fixes gespiegeld** (van de gemergde STT-review): `_clean_log`
+  log-injectie-guard, structured client-facing failure details (geen upstream
+  bodies/hosts in 502-details; volledige tekst alleen in de guarded log),
+  exact-host match in test-fixtures, geneutraliseerde fixture-naming
+  (`cloudtts` / `tts.cloudtest.invalid`).
+- **Micro-afwijking (gedocumenteerd)**: de backends-503 verschuift ná de
+  body-parse/cloud-poging — cloud-only deployments kunnen; bij switch-uit
+  blijft zichtbaar gedrag voor bestaande clients identiek.
+- **Verification**: `tests/unit/test_tts_cloud_forwarding.py` 8 pinnen +
+  hele speech-suite 45/45 + pre_restart_check ALL GATES.
+- **Pitfall (cherry-pick)**: `git status --short | head -6` knipte de
+  conflictenlijst af — twee conflicterende TTS-files losten "op" tot niets en
+  de commit verloor de edits stilletjes (grep-check achteraf ving het).
+  Daarna handmatig her-geappliceerd vanaf origin/main. Les: bij conflicten
+  ALTIJD de volledige statuslijst lezen en de commit `--stat` verifiëren.
