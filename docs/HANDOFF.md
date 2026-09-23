@@ -186,3 +186,21 @@ een cloud-GPU-box):
   (3) enablement via hot-reload: `stt.cloud_forwarding.enabled: true` +
   `cloud_stt: true` in `config/providers/groq.settings.yaml` (GEEN restart
   nodig); (4) Sjonnie-client zet `STT_MODEL=groq/groq/whisper-large-v3`.
+
+## 2026-09-23 — TTS cloud forwarding MERGED + beide cloud-routes live — DSH agent (openrouter/z-ai/glm-5.3-flash)
+
+- **PR #23 gemerged** (715021f) + operator-restart. Live-geverifieerd (5/5):
+  STT `model=groq/groq/whisper-large-v3` → Groq (0,4 s); TTS
+  `model=groq/canopylabs/orpheus-v1-english` (voice `tara`) → 223 kB 24 kHz
+  WAV via Groq; geen-model → lokale engines (beide); ongeldige modelnaam →
+  automatische fallback naar lokaal.
+- **Enablement is LIVE maar bewust NIET gecommit**: de review heeft beide
+  repo-defaults op OFF gezet ("enablement is per-deployment operator
+  decision, hot-reloadable"). De productie-checkout draait met
+  `cloud_forwarding.enabled: true` (stt + tts) en `cloud_stt: true` +
+  `cloud_tts: true` op de groq-provider als lokale, niet-gecommitte
+  deploy-state — bewust, zodat de repo de veilige default bewaart.
+- **Sjonnie** (discord_ai_person): STT via guardian → Groq whisper-large-v3
+  (`STT_MODEL=groq/groq/whisper-large-v3`); TTS default lokaal Trump-clone.
+  Orpheus-voice `tara` geverifieerd; opt-in via
+  `TTS_MODEL=groq/canopylabs/orpheus-v1-english` + preset voice.
