@@ -379,6 +379,14 @@ format passes verbatim to the route's provider (e.g. `mp3`). `speed` is
 validated early (number 0.25-4.0, OpenAI contract) for both routes so the
 client gets a clear `400` instead of a failed upstream call.
 
+Cloud TTS routes carry provider-specific requirements verbatim: `voice` is
+mandatory for some providers and its valid values are the model's
+`supported_voices` (OpenRouter models API), and the accepted `response_format`
+values are provider-defined (OpenRouter: `mp3`/`pcm`; the local engine: `wav`).
+A mismatch surfaces as an honest `502` with the upstream reason. Cloud STT
+routes accept the same multipart shape as OpenAI clients (OpenRouter:
+`model`/`file`/`language`), with `language` passed through verbatim.
+
 ### Speech-to-text (STT) endpoint
 
 | Method | Path | Queued | Purpose |
