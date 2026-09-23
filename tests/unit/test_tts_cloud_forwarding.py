@@ -11,7 +11,6 @@ the pre-forwarding route."""
 
 import httpx
 import pytest
-from fastapi import HTTPException
 from urllib.parse import urlparse
 from types import SimpleNamespace
 
