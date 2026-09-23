@@ -76,8 +76,10 @@ stt:
   # segment matches a provider with cloud_stt: true is forwarded to that
   # provider's OpenAI-compatible /audio/transcriptions. Failures fall back to
   # the local engines above. See docs/API_REFERENCE.md § STT.
+  # Enablement is a per-deployment operator decision (hot-reloadable) — the
+  # repo default stays OFF per the documented rollout contract.
   cloud_forwarding:
-    enabled: true
+    enabled: false
 
 timeouts:
   tiers:
@@ -229,6 +231,14 @@ failover_groups:
 # qwen3tts-http engine on the Windows host (always-on NSSM service, keyless,
 # LAN-firewall-covered). Read at request time — hot-reloadable.
 tts:
+  # Cloud TTS forwarding (2026-09-23): a requested model whose first path
+  # segment matches a provider with cloud_tts: true is forwarded to that
+  # provider's OpenAI-compatible /audio/speech. Failures fall back to the
+  # local engines. See docs/API_REFERENCE.md § Text-to-speech.
+  # Enablement is a per-deployment operator decision (hot-reloadable) — the
+  # repo default stays OFF per the documented rollout contract.
+  cloud_forwarding:
+    enabled: false
   enabled: true
   timeout_seconds: 120
   # The caretaker blocks on cold start (model load) and can wait for VRAM to
