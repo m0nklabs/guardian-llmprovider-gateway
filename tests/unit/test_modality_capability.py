@@ -6,7 +6,6 @@ consult it for candidates whose config does not declare modalities.  Explicit
 config always wins.
 """
 
-import httpx
 import json
 import pytest
 

@@ -18,11 +18,23 @@ Config (``stt:`` section, read at request time so POST /api/config/reload
 applies without a restart): ``enabled`` / ``providers`` / ``timeout_seconds`` /
 ``ensure_timeout_seconds`` (same arithmetic as TTS: must cover the caretaker's
 ``CARETAKER_STT_START_TIMEOUT`` + ``CARETAKER_STT_VRAM_WAIT_SECONDS``).
+
+Cloud forwarding (opt-in twice, 2026-09-22): when ``stt.cloud_forwarding.enabled``
+is set AND the requested ``model`` maps to a provider that declares
+``cloud_stt: true`` (plus ``base_url`` + ``api_key``), the upload is forwarded
+to that provider's OpenAI-compatible ``/audio/transcriptions`` endpoint. The
+upstream model id is the final path segment of the requested name
+(``cloudstt/cloudstt/whisper-large-v3`` -> ``whisper-large-v3``). A cloud
+attempt runs
+before the local engine chain; any cloud failure falls through to the local
+engines unchanged, so disabling the switch (or omitting the model field)
+restores the pre-forwarding behavior exactly.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any
 
@@ -33,6 +45,16 @@ from app.config_loader import CONFIG, load_stt_config
 from app.proxy.providers import _expand_env
 
 logger = logging.getLogger("Guardian.STT")
+
+_LOG_UNSAFE = re.compile(r"[\r\n\t\x00-\x1f]+")
+
+
+def _clean_log(value: Any, limit: int = 160) -> str:
+    """Log-injection guard: collapse control characters (fake log lines via
+    user-provided model ids, upstream response bodies, exception texts) and
+    cap the length.  Response-bodies-in-502-details are JSON-escaped by
+    FastAPI; only log sinks need this."""
+    return _LOG_UNSAFE.sub(" ", str(value)).strip()[:limit]
 
 # OpenAI ISO-639-1 codes -> the language names Qwen3-ASR understands (it is a
 # decoder prompt, not a tag; the example uses names like "Korean", "English").
@@ -69,6 +91,33 @@ def _stt_backends(cfg: dict[str, Any]) -> list[dict[str, str]]:
     return backends
 
 
+def _cloud_stt_target(model: str) -> dict[str, str] | None:
+    """Resolve a cloud STT target from the requested ``model`` form field.
+
+    Returns ``{"name", "base_url", "api_key", "model"}`` when the provider
+    (first path segment of the requested name) opted into cloud STT via
+    ``cloud_stt: true`` in its provider file and exposes ``base_url`` +
+    ``api_key``; None otherwise, so the request falls through to the local
+    engine chain unchanged.
+    """
+    if not model or "/" not in model:
+        return None
+    provider_name = model.split("/", 1)[0].strip().lower()
+    doc = (CONFIG.get("providers") or {}).get(provider_name)
+    if not isinstance(doc, dict) or not doc.get("cloud_stt"):
+        return None
+    base_url = _expand_env(str(doc.get("base_url") or "")).rstrip("/")
+    api_key = _expand_env(str(doc.get("api_key") or ""))
+    if not base_url or not api_key:
+        return None
+    return {
+        "name": provider_name,
+        "base_url": base_url,
+        "api_key": api_key,
+        "model": model.split("/")[-1].strip(),
+    }
+
+
 async def handle_audio_transcriptions(request: Request, client_id: str) -> Response:
     """POST /v1/audio/transcriptions — OpenAI-compatible STT with failover."""
     cfg = load_stt_config()
@@ -93,15 +142,90 @@ async def handle_audio_transcriptions(request: Request, client_id: str) -> Respo
         raise HTTPException(status_code=400, detail="'file' contains no audio bytes")
     audio_content_type = upload.content_type or "audio/wav"
 
-    language = _qwen_language(str(form.get("language") or "") or None)
+    raw_language = str(form.get("language") or "") or None
+    language = _qwen_language(raw_language)
+    requested_model = str(form.get("model") or "") or None
     failures: list[str] = []
+
+    # Cloud forwarding (opt-in): a cloud attempt runs before the local engine
+    # chain and never blocks local failover on failure.
+    if (cfg.get("cloud_forwarding") or {}).get("enabled", False) and requested_model:
+        target = _cloud_stt_target(requested_model)
+        if target is not None:
+            result = await _try_cloud_backend(
+                target, audio_bytes, audio_content_type, raw_language,
+                getattr(upload, "filename", None), client_id, timeout_s,
+            )
+            if isinstance(result, Response):
+                return result
+            failures.append(result)
+
     for backend in backends:
         result = await _try_backend(backend, audio_bytes, audio_content_type, language, client_id, timeout_s, ensure_timeout_s)
         if isinstance(result, Response):
             return result
         failures.append(result)
-    logger.warning("STT: all providers failed for client '%s': %s", client_id, "; ".join(failures))
+    logger.warning(
+        "STT: all providers failed for client '%s': %s",
+        _clean_log(client_id, 64), _clean_log("; ".join(failures)),
+    )
     raise HTTPException(status_code=502, detail="; ".join(failures))
+
+
+async def _try_cloud_backend(
+    target: dict[str, str],
+    audio_bytes: bytes,
+    audio_content_type: str,
+    language: str | None,
+    upload_filename: str | None,
+    client_id: str,
+    timeout_s: float,
+) -> Response | str:
+    """Forward the upload to a cloud OpenAI-compatible transcription endpoint
+    (any OpenAI-compatible endpoint). Returns a Response on success or a
+    failure string for the
+    failover log — the local engines still get a chance afterwards. The
+    ``language`` value is passed through verbatim (ISO-639-1); the Qwen name
+    mapping is engine-specific and does not apply here."""
+    name = target["name"]
+    started = time.monotonic()
+    files = {"file": (upload_filename or "audio.wav", audio_bytes, audio_content_type)}
+    data: dict[str, str] = {"model": target["model"]}
+    if language:
+        data["language"] = language
+    try:
+        async with httpx.AsyncClient(timeout=timeout_s) as client:
+            resp = await client.post(
+                f"{target['base_url']}/audio/transcriptions",
+                headers={"Authorization": f"Bearer {target['api_key']}"},
+                files=files,
+                data=data,
+            )
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "STT cloud provider '%s' unreachable: %s", _clean_log(name), _clean_log(exc)
+        )
+        # Client detail is structured-only: the exception text may carry
+        # internal hosts/proxy details — the guarded log line keeps the full
+        # message for the operator.
+        return f"{name}: unreachable ({type(exc).__name__})"
+    if resp.status_code != 200:
+        logger.warning(
+            "STT cloud provider '%s' HTTP %s: %s",
+            _clean_log(name), resp.status_code, _clean_log(resp.text),
+        )
+        return f"{name}: cloud HTTP {resp.status_code}"
+    duration_ms = (time.monotonic() - started) * 1000
+    try:
+        text_len = len(resp.json().get("text") or "")
+    except Exception:  # noqa: BLE001 — non-JSON body is still passed through
+        text_len = -1
+    logger.info(
+        "🎙 STT: client '%s' served by cloud '%s' (%s) -> %s chars in %.1fs",
+        _clean_log(client_id, 64), _clean_log(name, 64), _clean_log(target["model"], 64),
+        text_len, duration_ms / 1000,
+    )
+    return Response(content=resp.content, status_code=200, media_type="application/json")
 
 
 async def _try_backend(
@@ -130,7 +254,7 @@ async def _try_backend(
             pass
         if ensure_resp.status_code != 200 or ensure_body.get("ok") is False:
             reason = str(ensure_body.get("reason") or ensure_resp.text)[:160]
-            return f"{name}: ensure failed (HTTP {ensure_resp.status_code}): {reason}"
+            return f"{name}: ensure failed (HTTP {ensure_resp.status_code}): {_clean_log(reason)}"
         logger.info("🎙 STT ensure via %s: cold_start=%s", name, ensure_body.get("cold_start", False))
 
         forward_headers = dict(headers)
@@ -145,7 +269,10 @@ async def _try_backend(
                 headers=forward_headers,
             )
         if resp.status_code != 200:
-            return f"{name}: engine HTTP {resp.status_code}: {resp.text[:120]}"
+            logger.warning(
+                "STT engine '%s' HTTP %s: %s", _clean_log(name), resp.status_code, _clean_log(resp.text)
+            )
+            return f"{name}: engine HTTP {resp.status_code}"
         duration_ms = (time.monotonic() - started) * 1000
         body = resp.json()
         logger.info(
@@ -158,5 +285,5 @@ async def _try_backend(
             media_type="application/json",
         )
     except httpx.HTTPError as exc:
-        logger.warning("STT provider '%s' unreachable: %s", name, exc)
-        return f"{name}: unreachable ({exc})"
+        logger.warning("STT provider '%s' unreachable: %s", _clean_log(name), _clean_log(exc))
+        return f"{name}: unreachable ({type(exc).__name__})"

@@ -200,7 +200,7 @@ class TestSchemaField:
         )
 
     def test_completed_event_carries_cutoff_flag(self, base_ctx, capture_config):
-        from app.capture.schema import SCHEMA_VERSION, build_request_completed_event
+        from app.capture.schema import build_request_completed_event
 
         event = build_request_completed_event(
             capture_config, base_ctx,
@@ -226,7 +226,6 @@ class TestCloudStreamCutoff:
         """Full wiring pin: a looping upstream SSE stream gets cut and closed
         with a synthesized finish_reason "length" chunk + [DONE], and the
         capture event carries degeneration_cutoff=True."""
-        import asyncio
         import types
 
         from app.cloud_inference import forwarding
