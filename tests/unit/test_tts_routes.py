@@ -256,3 +256,55 @@ async def test_explicit_local_route_keeps_format_400(monkeypatch):
             model="guardian/windows-gpu-local/qwen/qwen3-tts", response_format="mp3")), "dsh")
     assert excinfo.value.status_code == 400
     assert "response_format" in str(excinfo.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_fish_adapter_translates_tts_dialect(monkeypatch):
+    """fish.audio is not OpenAI-shaped: the client's OpenAI speech request is
+    translated to POST /v1/tts (text/reference_id/format) and the audio bytes
+    pass through unchanged. voice wins over the route's upstream id."""
+    docs = _provider_docs()
+    docs["providers"]["fishtts"] = {
+        "base_url": "https://tts.cloudtest.invalid",
+        "api_key": "${CLOUD_TTS_API_KEY}",
+        "speech_adapter": "fish",
+    }
+    _patch(monkeypatch, docs=docs)
+
+    def handler(url, j, c, p, h, f=None, d=None):
+        assert url.endswith("/v1/tts")
+        return httpx.Response(200, content=b"fishaudio", headers={"content-type": "audio/mpeg"})
+
+    calls = _patch_client(monkeypatch, handler)
+    resp = await tts_mod.handle_audio_speech(_FakeRequest(_body(
+        model="fishtts/voice-model-123", voice="alloy", response_format="wav")), "dsh")
+    assert resp.status_code == 200
+    assert resp.body == b"fishaudio"
+    call = calls[0]
+    assert call["json"] == {
+        "text": "Believe me, this is a tremendous test.",
+        "reference_id": "alloy",           # client voice -> fish reference_id
+        "format": "wav",                    # verbatim (fish supports wav)
+    }
+    assert call["headers"]["Authorization"] == "Bearer ctts_test"
+
+
+@pytest.mark.asyncio
+async def test_fish_adapter_uses_route_id_when_no_voice(monkeypatch):
+    """Without a voice field the route's upstream id IS the fish reference."""
+    docs = _provider_docs()
+    docs["providers"]["fishtts"] = {
+        "base_url": "https://tts.cloudtest.invalid",
+        "api_key": "${CLOUD_TTS_API_KEY}",
+        "speech_adapter": "fish",
+    }
+    _patch(monkeypatch, docs=docs)
+
+    def handler(url, j, c, p, h, f=None, d=None):
+        return httpx.Response(200, content=b"a", headers={"content-type": "audio/mpeg"})
+
+    calls = _patch_client(monkeypatch, handler)
+    resp = await tts_mod.handle_audio_speech(_FakeRequest(_body(
+        model="fishtts/voice-model-123")), "dsh")
+    assert resp.status_code == 200
+    assert calls[0]["json"]["reference_id"] == "voice-model-123"

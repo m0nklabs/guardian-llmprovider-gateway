@@ -254,6 +254,8 @@ async def _try_cloud_backend(
     passthroughs and ``instruct`` do not travel to cloud providers."""
     name = route["provider"]
     started = time.monotonic()
+    if route.get("speech_adapter") == "fish":
+        return await _try_fish_tts(route, body, response_format, client_id, timeout_s)
     payload: dict[str, Any] = {
         "model": route["upstream_model"],
         "input": body["input"],
@@ -295,6 +297,60 @@ async def _try_cloud_backend(
         content=resp.content,
         status_code=200,
         media_type=resp.headers.get("content-type", "audio/wav"),
+    )
+
+
+async def _try_fish_tts(
+    route: dict[str, Any],
+    body: dict[str, Any],
+    response_format: str,
+    client_id: str,
+    timeout_s: float,
+) -> Response | str:
+    """Fish Audio native TTS (POST /v1/tts, JSON): ``text`` required,
+    ``reference_id`` selects the voice/model (the client's ``voice`` field, or
+    the route's upstream id when no voice is given), ``format`` = the
+    response_format (fish: wav/pcm/mp3/opus). Response: raw audio bytes — the
+    same passthrough shape as the OpenAI-compatible path."""
+    name = route["provider"]
+    started = time.monotonic()
+    voice = str(body.get("voice") or "").strip() or route["upstream_model"]
+    payload: dict[str, Any] = {
+        "text": str(body.get("input", "")),
+        "reference_id": voice,
+        "format": response_format,
+    }
+    speed = body.get("speed")
+    if speed is not None:
+        payload["speed"] = speed
+    try:
+        async with httpx.AsyncClient(timeout=timeout_s) as client:
+            resp = await client.post(
+                f"{route['base_url']}/v1/tts",
+                json=payload,
+                headers={"Authorization": f"Bearer {route['api_key']}"},
+            )
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "TTS cloud provider '%s' unreachable: %s", _clean_log(name), _clean_log(exc)
+        )
+        return f"{name}: unreachable ({type(exc).__name__})"
+    if resp.status_code != 200:
+        logger.warning(
+            "TTS cloud provider '%s' HTTP %s: %s",
+            _clean_log(name), resp.status_code, _clean_log(resp.text),
+        )
+        return f"{name}: cloud HTTP {resp.status_code}"
+    duration_ms = (time.monotonic() - started) * 1000
+    logger.info(
+        "🔊 TTS: client '%s' served by cloud '%s' (%s, fish) -> %s bytes %s in %.1fs",
+        _clean_log(client_id, 64), _clean_log(name, 64), _clean_log(route["upstream_model"], 64),
+        len(resp.content), resp.headers.get("content-type", "audio/mpeg"), duration_ms / 1000,
+    )
+    return Response(
+        content=resp.content,
+        status_code=200,
+        media_type=resp.headers.get("content-type", "audio/mpeg"),
     )
 
 

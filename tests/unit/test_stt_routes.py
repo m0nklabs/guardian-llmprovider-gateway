@@ -245,3 +245,31 @@ async def test_default_chain_without_stt_capable_provider_returns_503(monkeypatc
     with pytest.raises(HTTPException) as excinfo:
         await stt_mod.handle_audio_transcriptions(_FakeRequest({"file": _Upload()}), "dsh")
     assert excinfo.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_fish_adapter_transcribes_native_dialect(monkeypatch):
+    """fish.audio ASR: POST /v1/asr with the multipart field named "audio" (no
+    model field) and the language hint — response JSON passes through."""
+    docs = _provider_docs()
+    docs["providers"]["fishstt"] = {
+        "base_url": "https://stt.cloudtest.invalid",
+        "api_key": "${CLOUD_STT_API_KEY}",
+        "speech_adapter": "fish",
+    }
+    _patch(monkeypatch, docs=docs)
+
+    def handler(url, j, c, p, h, f=None, d=None):
+        assert url.endswith("/v1/asr")
+        return httpx.Response(200, json={"text": "gevist", "duration": 3.0})
+
+    calls = _patch_client(monkeypatch, handler)
+    resp = await stt_mod.handle_audio_transcriptions(
+        _FakeRequest({"file": _Upload(b"RIFF", "audio/wav"), "language": "nl",
+                      "model": "fishstt/anything"}), "dsh")
+    assert resp.status_code == 200
+    assert b"gevist" in resp.body
+    call = [c for c in calls if c["url"].endswith("/v1/asr")][0]
+    assert set(call["files"].keys()) == {"audio"}          # fish field name
+    assert call["data"] == {"language": "nl"}              # hint only, no model field
+    assert call["headers"]["Authorization"] == "Bearer stt_test_key"

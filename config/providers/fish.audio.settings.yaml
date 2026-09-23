@@ -1,0 +1,9 @@
+# Fish Audio (fish.audio) — native speech API, proxied via the fish adapter.
+# TTS: POST {base_url}/v1/tts (JSON: text/reference_id/format) -> audio bytes
+# STT: POST {base_url}/v1/asr (multipart: audio/language) -> JSON {text, ...}
+# The OpenAI-shaped client request is translated by Guardian (speech_adapter).
+enabled: true
+base_url: https://api.fish.audio
+api_key: ${FISH_AUDIO_API_KEY}
+speech_adapter: fish
+timeout_seconds: 300
