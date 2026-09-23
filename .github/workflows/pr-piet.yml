@@ -12,9 +12,14 @@ permissions:
   issues: write
   pull-requests: write
 
-# Eén review tegelijk per PR: nieuwe run cancelt de lopende.
+# Eén commando-review tegelijk per PR: een nieuwe /commando-run cancelt de
+# lopende (versere analyse wint). Comments ZONDER commando (bot-audits,
+# status-updates) krijgen een unieke groep zodat ze de lopende review NIET
+# cancellen — de cmdguard skipt ze toch; voorheen moordden ze de review
+# tijdens de concurrency-claim (guardian PR #22, 09-22 23:15).
 concurrency:
-  group: pr-piet-${{ github.event.pull_request.number || github.event.issue.number }}
+  group: >-
+    pr-piet-${{ github.event.pull_request.number || github.event.issue.number }}-${{ github.event_name }}${{ github.event_name == 'issue_comment' && !startsWith(github.event.comment.body, '/') && format('-nc-{0}', github.event.comment.id) || '' }}
   cancel-in-progress: true
 
 jobs:
