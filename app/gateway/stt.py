@@ -19,16 +19,15 @@ applies without a restart): ``enabled`` / ``providers`` / ``timeout_seconds`` /
 ``ensure_timeout_seconds`` (same arithmetic as TTS: must cover the caretaker's
 ``CARETAKER_STT_START_TIMEOUT`` + ``CARETAKER_STT_VRAM_WAIT_SECONDS``).
 
-Cloud forwarding (opt-in twice, 2026-09-22): when ``stt.cloud_forwarding.enabled``
-is set AND the requested ``model`` maps to a provider that declares
-``cloud_stt: true`` (plus ``base_url`` + ``api_key``), the upload is forwarded
-to that provider's OpenAI-compatible ``/audio/transcriptions`` endpoint. The
-upstream model id is the final path segment of the requested name
-(``cloudstt/cloudstt/whisper-large-v3`` -> ``whisper-large-v3``). A cloud
-attempt runs
-before the local engine chain; any cloud failure falls through to the local
-engines unchanged, so disabling the switch (or omitting the model field)
-restores the pre-forwarding behavior exactly.
+Speech model addresses (2026-09-23, route-oriented — no opt-in switches):
+a requested ``model`` shaped ``[guardian/]{provider}/{brand}/{model}`` resolves
+through the provider file ALONE (see app/gateway/speech_routing.py):
+``stt_url`` -> that provider's local engine, ``base_url`` + ``api_key`` -> its
+OpenAI-compatible ``/audio/transcriptions`` (upstream id = ``{brand}/{model}``,
+e.g. ``guardian/groq/canopylabs/orpheus-v1-english``). An explicit address is
+EXACT — failures surface honestly for that route and never fall back to a
+different provider. Without an addressable ``model`` field the default local
+chain (``stt.providers``) serves, unchanged.
 """
 
 from __future__ import annotations
@@ -42,6 +41,7 @@ import httpx
 from fastapi import HTTPException, Request, Response
 
 from app.config_loader import CONFIG, load_stt_config
+from app.gateway.speech_routing import address_intent, parse_speech_model, resolve_speech_route
 from app.proxy.providers import _expand_env
 
 logger = logging.getLogger("Guardian.STT")
@@ -91,33 +91,6 @@ def _stt_backends(cfg: dict[str, Any]) -> list[dict[str, str]]:
     return backends
 
 
-def _cloud_stt_target(model: str) -> dict[str, str] | None:
-    """Resolve a cloud STT target from the requested ``model`` form field.
-
-    Returns ``{"name", "base_url", "api_key", "model"}`` when the provider
-    (first path segment of the requested name) opted into cloud STT via
-    ``cloud_stt: true`` in its provider file and exposes ``base_url`` +
-    ``api_key``; None otherwise, so the request falls through to the local
-    engine chain unchanged.
-    """
-    if not model or "/" not in model:
-        return None
-    provider_name = model.split("/", 1)[0].strip().lower()
-    doc = (CONFIG.get("providers") or {}).get(provider_name)
-    if not isinstance(doc, dict) or not doc.get("cloud_stt"):
-        return None
-    base_url = _expand_env(str(doc.get("base_url") or "")).rstrip("/")
-    api_key = _expand_env(str(doc.get("api_key") or ""))
-    if not base_url or not api_key:
-        return None
-    return {
-        "name": provider_name,
-        "base_url": base_url,
-        "api_key": api_key,
-        "model": model.split("/")[-1].strip(),
-    }
-
-
 async def handle_audio_transcriptions(request: Request, client_id: str) -> Response:
     """POST /v1/audio/transcriptions — OpenAI-compatible STT with failover."""
     cfg = load_stt_config()
@@ -147,18 +120,38 @@ async def handle_audio_transcriptions(request: Request, client_id: str) -> Respo
     requested_model = str(form.get("model") or "") or None
     failures: list[str] = []
 
-    # Cloud forwarding (opt-in): a cloud attempt runs before the local engine
-    # chain and never blocks local failover on failure.
-    if (cfg.get("cloud_forwarding") or {}).get("enabled", False) and requested_model:
-        target = _cloud_stt_target(requested_model)
-        if target is not None:
+    # Route-oriented resolution: an address is EXACT (no silent fallback to
+    # another provider); only the default path (no address) uses the
+    # configured failover chain. guardian/-prefixed values always intend to be
+    # addresses — malformed ones 404 instead of falling through.
+    if requested_model and (address_intent(requested_model) or parse_speech_model(requested_model)):
+        if not parse_speech_model(requested_model):
+            raise HTTPException(status_code=404, detail="model_not_served")
+        route = resolve_speech_route(requested_model, "stt_url")
+        if route is None:
+            raise HTTPException(status_code=404, detail="model_not_served")
+        if route["kind"] == "cloud":
             result = await _try_cloud_backend(
-                target, audio_bytes, audio_content_type, raw_language,
+                route, audio_bytes, audio_content_type, raw_language,
                 getattr(upload, "filename", None), client_id, timeout_s,
             )
             if isinstance(result, Response):
                 return result
-            failures.append(result)
+            logger.warning(
+                "STT: exact route '%s' failed for client '%s': %s",
+                _clean_log(requested_model, 96), _clean_log(client_id, 64),
+                _clean_log(result),
+            )
+            raise HTTPException(status_code=502, detail=result)
+        # explicit local route: this provider's engine only
+        result = await _try_backend(
+            {"name": route["provider"], "stt_url": route["stt_url"],
+             "management_url": route["management_url"], "key": route["management_key"]},
+            audio_bytes, audio_content_type, language, client_id, timeout_s, ensure_timeout_s,
+        )
+        if isinstance(result, Response):
+            return result
+        raise HTTPException(status_code=502, detail=result)
 
     for backend in backends:
         result = await _try_backend(backend, audio_bytes, audio_content_type, language, client_id, timeout_s, ensure_timeout_s)
@@ -173,7 +166,7 @@ async def handle_audio_transcriptions(request: Request, client_id: str) -> Respo
 
 
 async def _try_cloud_backend(
-    target: dict[str, str],
+    route: dict[str, Any],
     audio_bytes: bytes,
     audio_content_type: str,
     language: str | None,
@@ -187,17 +180,17 @@ async def _try_cloud_backend(
     failover log — the local engines still get a chance afterwards. The
     ``language`` value is passed through verbatim (ISO-639-1); the Qwen name
     mapping is engine-specific and does not apply here."""
-    name = target["name"]
+    name = route["provider"]
     started = time.monotonic()
     files = {"file": (upload_filename or "audio.wav", audio_bytes, audio_content_type)}
-    data: dict[str, str] = {"model": target["model"]}
+    data: dict[str, str] = {"model": route["upstream_model"]}
     if language:
         data["language"] = language
     try:
         async with httpx.AsyncClient(timeout=timeout_s) as client:
             resp = await client.post(
-                f"{target['base_url']}/audio/transcriptions",
-                headers={"Authorization": f"Bearer {target['api_key']}"},
+                f"{route['base_url']}/audio/transcriptions",
+                headers={"Authorization": f"Bearer {route['api_key']}"},
                 files=files,
                 data=data,
             )
@@ -222,7 +215,7 @@ async def _try_cloud_backend(
         text_len = -1
     logger.info(
         "🎙 STT: client '%s' served by cloud '%s' (%s) -> %s chars in %.1fs",
-        _clean_log(client_id, 64), _clean_log(name, 64), _clean_log(target["model"], 64),
+        _clean_log(client_id, 64), _clean_log(name, 64), _clean_log(route["upstream_model"], 64),
         text_len, duration_ms / 1000,
     )
     return Response(content=resp.content, status_code=200, media_type="application/json")

@@ -356,25 +356,26 @@ Errors: `404` when disabled, `503` when no provider declares `tts_url`, `400`
 for empty `input`/bad format, `502` when all configured providers fail (detail
 lists the per-provider reasons, e.g. insufficient VRAM).
 
-Cloud forwarding (2026-09-22, opt-in twice): when `tts.cloud_forwarding.enabled`
-is set in `global.settings.yaml` AND the requested `model` maps to a provider
-that declares `cloud_tts: true` (plus `base_url` + `api_key`) in its provider
-file, the request is forwarded to that provider's OpenAI-compatible
-`/audio/speech` endpoint — e.g. `model=cloudtts/cloudtts/orpheus-v1-english`
-(upstream model id = final path segment). The forwarded payload is the
-canonical OpenAI shape (`model`/`input`/`voice`/`response_format` [/`speed`]);
-the local engine's clone passthroughs (`ref_audio`/`ref_text`/`zero_shot`) and
-`instruct` do NOT travel to cloud providers. A cloud attempt runs before the
-local engine chain; any cloud failure falls through to the local engines
-unchanged. With the switch off (default) or no `model` field, behavior is
-identical to the pre-forwarding route.
+Speech model routing (2026-09-23, route-oriented — no opt-in switches): the
+`model` field is an ADDRESS, `[guardian/]{provider}/{brand}/{model}`, resolved
+through the provider file alone (`app/gateway/speech_routing.py`). A provider
+declaring `tts_url` (+ `management_url`) serves the request with its LOCAL
+engine (caretaker-managed lifecycle); one declaring `base_url` + `api_key`
+serves it from its OpenAI-compatible cloud endpoint; the upstream model id is
+`{brand}/{model}` (e.g. `guardian/groq/canopylabs/orpheus-v1-english` →
+`canopylabs/orpheus-v1-english`). An explicit address is EXACT — a failure
+surfaces honestly for that route (`502` with the route name) and never falls
+back to a different provider. Without an addressable `model` field the default
+local failover chain (`tts.providers`) serves. Unknown or malformed addresses
+return `404 model_not_served` (the chat routing contract). The forwarded
+cloud payload is the canonical OpenAI shape; the local engine's clone
+passthroughs and `instruct` do not travel to cloud providers.
 
-Validation split for cloud-routed requests: the local `wav`/`pcm`-only
-`response_format` restriction does not apply — the requested format passes
-verbatim to the upstream provider (e.g. `mp3`); if the cloud attempt fails and
-the local engines take over, an unservable format surfaces as part of the `502`
-detail. `speed` is validated early (number 0.25-4.0, OpenAI contract) for both
-routes so the client gets a clear `400` instead of a burned cloud attempt.
+Validation split for routed requests: the local `wav`/`pcm`-only
+`response_format` restriction does not apply to an address — the requested
+format passes verbatim to the route's provider (e.g. `mp3`). `speed` is
+validated early (number 0.25-4.0, OpenAI contract) for both routes so the
+client gets a clear `400` instead of a failed upstream call.
 
 ### Speech-to-text (STT) endpoint
 
@@ -382,11 +383,12 @@ routes so the client gets a clear `400` instead of a burned cloud attempt.
 | --- | --- | --- | --- |
 | `POST` | `/v1/audio/transcriptions` | No (blocks up to `stt.ensure_timeout_seconds`) | OpenAI Whisper-compatible transcription via provider-declared STT engines |
 
-Provider-driven routing (2026-09-19, mirrors the TTS section): a host
-participates when its provider file declares `stt_url` (the qwen3-asr
-sidecar on :11451) plus `management_url` + `management_key`; the caretaker
-runs the same on-demand lifecycle (`POST {management_url}/stt/ensure`).
-`stt.providers` in `global.settings.yaml` is the failover order.
+Provider-driven routing (2026-09-19; route-oriented 2026-09-23): an
+addressable `model` (`[guardian/]{provider}/{brand}/{model}`) resolves through
+the provider file alone — `stt_url` serves with that provider's local engine
+(caretaker `POST {management_url}/stt/ensure`), `base_url` + `api_key` serves
+from its OpenAI-compatible cloud endpoint (upstream id = `{brand}/{model}`).
+`stt.providers` is the failover order for the DEFAULT path (no address).
 
 Request: multipart/form-data — `file` (raw audio bytes; wav 16-bit PCM mono
 preferred, sample rate arbitrary), optional `model`, optional `language` as an

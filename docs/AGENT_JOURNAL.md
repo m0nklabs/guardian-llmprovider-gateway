@@ -218,3 +218,12 @@ JOURNAL 38,6 kB → dit (~8 kB); verbatim → `docs/AGENT_JOURNAL_ARCHIVE.md` Ba
   de commit verloor de edits stilletjes (grep-check achteraf ving het).
   Daarna handmatig her-geappliceerd vanaf origin/main. Les: bij conflicten
   ALTIJD de volledige statuslijst lezen en de commit `--stat` verifiëren.
+
+## 2026-09-23 — Speech-routing route-georiënteerd (operator-mandaat): opt-in switches geschrapt — DSH agent (glm-5.3-flash) — OPEN
+
+- **Operator-oordeel:** de dubbele opt-in (`stt/tts.cloud_forwarding.enabled` + `cloud_stt/cloud_tts`) dwaalt af naar een local/cloud-verdeling en niet-uniform gedrag. Speech moet routegericht zijn, net als chat.
+- **Nieuw contract** (`app/gateway/speech_routing.py`, gedeeld door stt.py + tts.py): `model` = adres `[guardian/]{provider}/{brand}/{model}`; het providerbestand beslist alleen — `tts_url`/`stt_url` + management = lokale engine (caretaker-lifecycle), `base_url` + `api_key` = OpenAI-compatibel cloud-endpoint; beide → LAN-first. Upstream-id = `{brand}/{model}` (de #22/#23-vorm met alleen het laatste segment was feitelijk fout voor echte model-ids als `canopylabs/orpheus-v1-english`).
+- **Exact-routes:** een expliciet adres levert exact dat resultaat — falen = eerlijke 502 met de routenaam, géén stille fallback naar een andere provider (zelfde principe als de chat-routering). Zonder adres = de bestaande lokale failover-keten. Onbekend/malformed adres = `404 model_not_served` (chat-contract).
+- **Switches weg:** `cloud_forwarding`-blokken uit global.settings.yaml, `cloud_stt/cloud_tts` uit de providerbestanden — capability IS configuratie.
+- **Pin-val:** mijn eerste handler-versie gaf een kale modelnaam (`qwen3-asr`) ten onrechte 404 en liet de format-400 vóór de route-404 gaan — de pinnen vingen het; `address_intent()` maakt guardian/-voorvoegsels altijd adres-intentie (malformed → 404) terwijl korte kale namen naar de default-keten vallen.
+- 21 routepinnen (10 STT + 11 TTS) + de bestaande routepinnen; gate 5/5.
