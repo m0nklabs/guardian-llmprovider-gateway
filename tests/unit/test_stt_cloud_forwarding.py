@@ -10,9 +10,16 @@ failure falls through to the local engine chain unchanged; with the switch off
 
 import httpx
 import pytest
+from urllib.parse import urlparse
 from types import SimpleNamespace
 
 from app.gateway import stt as stt_mod
+
+
+def _is_groq(url: str) -> bool:
+    """Exact-host match — startswith would also match
+    https://api.groq.com.evil.com/ (CodeQL incomplete-URL-substring)."""
+    return urlparse(url).hostname == "api.groq.com"
 
 
 def _provider_docs(**groq_overrides):
@@ -140,7 +147,7 @@ async def test_disabled_switch_keeps_local_only(monkeypatch):
         _fake_request({"file": _Upload(), "model": "groq/groq/whisper-large-v3"}), "dsh"
     )
     assert resp.status_code == 200
-    assert not any(c["url"].startswith("https://api.groq.com") for c in calls)
+    assert not any(_is_groq(c["url"]) for c in calls)
     assert any(c["url"].endswith("/transcriptions") for c in calls)
 
 
@@ -163,7 +170,7 @@ async def test_cloud_success_serves_request_without_local_engines(monkeypatch):
     )
     assert resp.status_code == 200
     assert b"cloud transcript" in resp.body
-    cloud_calls = [c for c in calls if c["url"].startswith("https://api.groq.com")]
+    cloud_calls = [c for c in calls if _is_groq(c["url"])]
     assert len(cloud_calls) == 1
     part = cloud_calls[0]["files"]["file"]
     assert part[0] == "clip.wav" and part[1] == b"RIFFaudio" and part[2] == "audio/wav"
@@ -176,7 +183,7 @@ async def test_cloud_failure_falls_through_to_local_engine(monkeypatch):
     _patch_config(monkeypatch)
 
     def handler(url, json, content, params, headers, files, data):
-        if url.startswith("https://api.groq.com"):
+        if _is_groq(url):
             return httpx.Response(503, content=b"rate limited")
         if url.endswith("/stt/ensure"):
             return httpx.Response(200, json={"ok": True})
@@ -205,7 +212,7 @@ async def test_no_matching_cloud_model_keeps_local_flow(monkeypatch):
         _fake_request({"file": _Upload(), "model": "qwen3-asr"}), "dsh"
     )
     assert resp.status_code == 200
-    assert not any(c["url"].startswith("https://api.groq.com") for c in calls)
+    assert not any(_is_groq(c["url"]) for c in calls)
 
 
 @pytest.mark.asyncio
@@ -213,7 +220,7 @@ async def test_cloud_unreachable_falls_through(monkeypatch):
     _patch_config(monkeypatch)
 
     def handler(url, json, content, params, headers, files, data):
-        if url.startswith("https://api.groq.com"):
+        if _is_groq(url):
             raise httpx.ConnectError("DNS fail")
         if url.endswith("/stt/ensure"):
             return httpx.Response(200, json={"ok": True})

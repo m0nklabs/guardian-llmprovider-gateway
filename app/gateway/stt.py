@@ -33,6 +33,7 @@ restores the pre-forwarding behavior exactly.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any
 
@@ -43,6 +44,16 @@ from app.config_loader import CONFIG, load_stt_config
 from app.proxy.providers import _expand_env
 
 logger = logging.getLogger("Guardian.STT")
+
+_LOG_UNSAFE = re.compile(r"[\r\n\t\x00-\x1f]+")
+
+
+def _clean_log(value: Any, limit: int = 160) -> str:
+    """Log-injection guard: collapse control characters (fake log lines via
+    user-provided model ids, upstream response bodies, exception texts) and
+    cap the length.  Response-bodies-in-502-details are JSON-escaped by
+    FastAPI; only log sinks need this."""
+    return _LOG_UNSAFE.sub(" ", str(value)).strip()[:limit]
 
 # OpenAI ISO-639-1 codes -> the language names Qwen3-ASR understands (it is a
 # decoder prompt, not a tag; the example uses names like "Korean", "English").
@@ -153,7 +164,10 @@ async def handle_audio_transcriptions(request: Request, client_id: str) -> Respo
         if isinstance(result, Response):
             return result
         failures.append(result)
-    logger.warning("STT: all providers failed for client '%s': %s", client_id, "; ".join(failures))
+    logger.warning(
+        "STT: all providers failed for client '%s': %s",
+        _clean_log(client_id, 64), _clean_log("; ".join(failures)),
+    )
     raise HTTPException(status_code=502, detail="; ".join(failures))
 
 
@@ -186,7 +200,7 @@ async def _try_cloud_backend(
                 data=data,
             )
     except httpx.HTTPError as exc:
-        logger.warning("STT cloud provider '%s' unreachable: %s", name, exc)
+        logger.warning("STT cloud provider '%s' unreachable: %s", _clean_log(name), _clean_log(exc))
         return f"{name}: unreachable ({exc})"
     if resp.status_code != 200:
         return f"{name}: cloud HTTP {resp.status_code}: {resp.text[:120]}"
@@ -197,7 +211,8 @@ async def _try_cloud_backend(
         text_len = -1
     logger.info(
         "🎙 STT: client '%s' served by cloud '%s' (%s) -> %s chars in %.1fs",
-        client_id, name, target["model"], text_len, duration_ms / 1000,
+        _clean_log(client_id, 64), _clean_log(name, 64), _clean_log(target["model"], 64),
+        text_len, duration_ms / 1000,
     )
     return Response(content=resp.content, status_code=200, media_type="application/json")
 
