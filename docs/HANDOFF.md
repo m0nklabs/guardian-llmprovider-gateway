@@ -46,6 +46,8 @@ een cloud-GPU-box):
   guardian 14 (suite 1419) / caretaker 20 (suite 132); gates 5/5. Commits:
   guardian `ec1d4df`, caretaker `e1f9d48`.
 
+### ACTUEEL (2026-09-23): speech-routing route-georiënteerd herontworpen (operator-mandaat) — opt-in switches geschrapt; adres = `[guardian/]{provider}/{brand}/{model}`, providerbestand beslist (tts_url/stt_url = lokaal, base_url+api_key = cloud), upstream-id = brand/model, expliciete route = exact (geen fallback). Zie journal + `app/gateway/speech_routing.py`.
+
 ### OPDRACHT AFGEROND (2026-09-19) — Route 1: STT live (voltekst hieronder bewaard tot de volgende compaction)
 
 > Operator-verzoek: "bericht achterlaten voor de guardian agent dat hij route 1
