@@ -162,3 +162,27 @@ een cloud-GPU-box):
   chat-paths vereist `choices`; embedded `choices[0].error` = invalid.
 - **Failover-groep `failover/free` live end-to-end** (09-09): 2
   admission/routing-gaps gefixt; groepen zijn globaal (settings.yaml).
+
+## 2026-09-22 — STT cloud forwarding (feat/cloud-stt-forwarding) — DSH agent (openrouter/z-ai/glm-5.3-flash) — OPEN
+
+- **Wat**: `/v1/audio/transcriptions` kan nu (opt-in) forwarden naar cloud-STT.
+  Dubbele opt-in: `stt.cloud_forwarding.enabled` (global.settings.yaml) +
+  `cloud_stt: true` in het providerbestand.
+  `model=cloudstt/cloudstt/whisper-large-v3` → de provider's OpenAI-compatibele
+  `/audio/transcriptions` (upstream model-id =
+  laatste padsegment; `language` verbatim ISO-639-1 — de Qwen-naammapping is
+  engine-specifiek). Cloud loopt vóór de lokale keten; elke cloud-fout valt
+  terug op lokaal, ongewijzigd. Default OFF = gedrag byte-identiek aan voor.
+- **Motivatie**: Sjonnie (discord_ai_person) wil whisper-large-v3 voor
+  Nederlands; guardian blijft het enige controlepunt (provider-switch zonder
+  de bot aan te raken).
+- **Bewijs**: `tests/unit/test_stt_cloud_forwarding.py` 7 pinnen + oude
+  STT-pinnen 9/9 + pre_restart_check ALL GATES (1438 passed; één flaky
+  lifespan-run, bekende timing-gevoeligheid). API_REFERENCE § STT bijgewerkt.
+- **Tevens gecommit**: de 2026-09-21 TTS clone passthrough WIP (verbatim, met
+  pins + journal) — draaide al in productie maar was nog niet vastgelegd.
+- **OPEN / operator**: (1) PR `feat/cloud-stt-forwarding` → /review-cyclus;
+  (2) `sudo systemctl restart llama-guardian` (operator, snijdt agent-traffic);
+  (3) enablement via hot-reload: `stt.cloud_forwarding.enabled: true` +
+  `cloud_stt: true` in `config/providers/groq.settings.yaml` (GEEN restart
+  nodig); (4) Sjonnie-client zet `STT_MODEL=groq/groq/whisper-large-v3`.

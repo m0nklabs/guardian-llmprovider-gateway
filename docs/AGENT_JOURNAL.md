@@ -142,3 +142,53 @@ JOURNAL 38,6 kB → dit (~8 kB); verbatim → `docs/AGENT_JOURNAL_ARCHIVE.md` Ba
   4. `sherpa_onnx.OfflineStream` heeft géén `accept_waveform_done()` — direct `decode_stream` na accept.
   5. Qwen3-ASR taalforcering = een decode-prompt met de TAALNAAM ("Dutch", niet "nl"); auto-detect is onbetrouwbaar op synthetische audio — forceer per verzoek vanaf de client.
   6. De `tail`-pipe in de gate-chain at de exit-code — de gate kan je restart NIET blokkeren als je `cmd | tail` koppelt aan `&&`. Gebruik PIPESTATUS of laat de gate direct lopen.
+
+## 2026-09-21 — TTS clone passthrough (council v2 integration) — DSH agent (openrouter/z-ai/glm-5.3-flash)
+
+- **Change**: `app/gateway/tts.py` `_build_engine_payload` now passes `ref_audio`, `ref_text`
+  and `language` through to the qwen3-tts engine (clone mode: voice anchor from a reference
+  sample in the engine's `voice_samples/` dir). Additive only; design-mode clients (RimTalk,
+  council design voices) are unaffected. Empty-string values are dropped.
+- **Companion change (Qwen3-TTS-GGUF repo)**: `tts_http_wrapper.py` gained clone mode —
+  `ref_audio` (filename, resolved inside `TTS_SAMPLES_DIR`, traversal-safe), optional
+  `ref_text`, `language` (clone default `english`); `set_voice(sample)` + `clone()` instead
+  of `design()`. `resolve_ref_audio` logic unit-checked (6/6); wrapper py_compile OK.
+- **Verification**: focused pytest `tests/unit/test_tts_engine_payload.py` (3 passed) +
+  full `scripts/pre_restart_check.py` ALL GATES PASSED (first run had one flaky
+  test_server.py::test_lifespan_does_not_wait_for_startup_check failure — passes in
+  isolation and in the full rerun; timing-sensitive test, not related to this change).
+- **PENDING**: `sudo systemctl restart llama-guardian` — operator must run it (agent
+  traffic routes through Guardian). Until then, clone-mode requests via
+  `/v1/audio/speech` are accepted by Guardian? NO — the passthrough is in the working
+  tree but NOT live until restart; clone voices fall back… they don't: Guardian live
+  code strips `ref_audio` (unknown field) → engine gets design-mode request → wrong
+  voice until restart. Council app handles this gracefully (tts_error surfaced).
+- Consumer: `councelofdicksv2` council app — voices library `config/voices/*.json`,
+  samples upload endpoint, per-participant `voice_id`, celebrity presets.
+
+## 2026-09-22 — STT cloud forwarding + 2026-09-21 WIP rescue — DSH agent (openrouter/z-ai/glm-5.3-flash)
+
+- **Change**: `app/gateway/stt.py` — opt-in cloud forwarding op
+  `/v1/audio/transcriptions`. Dubbele opt-in (`stt.cloud_forwarding.enabled` +
+  per-provider `cloud_stt: true`); model-routing via eerste padsegment
+  (`groq/groq/whisper-large-v3` → provider `groq`, upstream id = laatste
+  segment); `language` verbatim door (ISO-639-1, géén Qwen-mapping — die is
+  engine-specifiek); cloud vóór lokaal, failures vallen door. Default OFF.
+- **Verification**: `tests/unit/test_stt_cloud_forwarding.py` 7 pinnen; hele
+  STT-suite 16/16; `scripts/pre_restart_check.py` ALL GATES (1438 passed, 20
+  deselected). Let op: de gate liep één keer vast op de bekende flaky
+  `test_lifespan_does_not_wait_for_startup_check` (timing) — herstart van de
+  gate zelf was groen, geen code-oorzaak.
+- **Pitfall**: `_cloud_stt_target` leest de module-global `CONFIG` — unit-tests
+  moeten `stt_mod.CONFIG`/`load_stt_config` patchen vóór een directe aanroep;
+  de eerste run las de échte config en faalde op de lege
+  `${GROQ_API_KEY}`-expansie (geen key in het pytest-proces).
+- **Rescue**: de 2026-09-21 TTS clone passthrough (`tts.py` + pins + journal)
+  draaide al in productie maar was nooit gecommit — verbatim als eigen commit
+  vastgelegd vóór de feature-commit, zodat een clean checkout de clone-voices
+  (Sjonnie/council) behoudt.
+- **STT-kwaliteitscontext**: eigen benchmark (qwen3tts-NL audio) toonde dat
+  qwen3-asr en Groq whisper-large-v3-turbo identieke fouten maken op
+  samengestelde woorden → de test-audio was de confounder, niet de engine;
+  echte mic-audio presteert beter dan de benchmark suggereerde. Cloud-forwarding
+  maakt A/B-testen op echte Discord-clips nu zero-config mogelijk.

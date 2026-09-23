@@ -19,15 +19,8 @@ import httpx
 import pytest
 
 from app.cloud_inference import forwarding, routing
-from app.cloud_inference.routing import (
-    extract_cloud_finish_reason,
-    extract_cloud_reasoning_content,
-    extract_cloud_response_content,
-)
 from tests.unit.test_cloud_forwarding import (
     _FakeNonStreamClient,
-    _FakeRateLimiter,
-    _FakeHealthTracker,
     _patch_nonstream_common,
 )
 

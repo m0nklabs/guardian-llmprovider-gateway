@@ -108,7 +108,6 @@ from app.proxy.failover import (
 from app.proxy.metrics import (
     get_metrics_output,
     update_capture_metrics,
-    update_gpu_metrics,
     update_gpu_metrics_cached,
     update_queue_metrics,
     update_system_metrics,
