@@ -202,10 +202,19 @@ async def _try_cloud_backend(
                 data=data,
             )
     except httpx.HTTPError as exc:
-        logger.warning("STT cloud provider '%s' unreachable: %s", _clean_log(name), _clean_log(exc))
-        return f"{name}: unreachable ({exc})"
+        logger.warning(
+            "STT cloud provider '%s' unreachable: %s", _clean_log(name), _clean_log(exc)
+        )
+        # Client detail is structured-only: the exception text may carry
+        # internal hosts/proxy details — the guarded log line keeps the full
+        # message for the operator.
+        return f"{name}: unreachable ({type(exc).__name__})"
     if resp.status_code != 200:
-        return f"{name}: cloud HTTP {resp.status_code}: {resp.text[:120]}"
+        logger.warning(
+            "STT cloud provider '%s' HTTP %s: %s",
+            _clean_log(name), resp.status_code, _clean_log(resp.text),
+        )
+        return f"{name}: cloud HTTP {resp.status_code}"
     duration_ms = (time.monotonic() - started) * 1000
     try:
         text_len = len(resp.json().get("text") or "")
@@ -245,7 +254,7 @@ async def _try_backend(
             pass
         if ensure_resp.status_code != 200 or ensure_body.get("ok") is False:
             reason = str(ensure_body.get("reason") or ensure_resp.text)[:160]
-            return f"{name}: ensure failed (HTTP {ensure_resp.status_code}): {reason}"
+            return f"{name}: ensure failed (HTTP {ensure_resp.status_code}): {_clean_log(reason)}"
         logger.info("🎙 STT ensure via %s: cold_start=%s", name, ensure_body.get("cold_start", False))
 
         forward_headers = dict(headers)
@@ -260,7 +269,10 @@ async def _try_backend(
                 headers=forward_headers,
             )
         if resp.status_code != 200:
-            return f"{name}: engine HTTP {resp.status_code}: {resp.text[:120]}"
+            logger.warning(
+                "STT engine '%s' HTTP %s: %s", _clean_log(name), resp.status_code, _clean_log(resp.text)
+            )
+            return f"{name}: engine HTTP {resp.status_code}"
         duration_ms = (time.monotonic() - started) * 1000
         body = resp.json()
         logger.info(
@@ -273,5 +285,5 @@ async def _try_backend(
             media_type="application/json",
         )
     except httpx.HTTPError as exc:
-        logger.warning("STT provider '%s' unreachable: %s", name, exc)
-        return f"{name}: unreachable ({exc})"
+        logger.warning("STT provider '%s' unreachable: %s", _clean_log(name), _clean_log(exc))
+        return f"{name}: unreachable ({type(exc).__name__})"

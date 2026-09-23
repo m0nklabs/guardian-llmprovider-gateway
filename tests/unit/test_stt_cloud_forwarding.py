@@ -10,6 +10,7 @@ failure falls through to the local engine chain unchanged; with the switch off
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from urllib.parse import urlparse
 from types import SimpleNamespace
 
@@ -257,3 +258,32 @@ async def test_cloud_language_passes_verbatim_iso(monkeypatch):
     cloud_call = [c for c in calls if c["url"].endswith("/audio/transcriptions")][0]
     assert cloud_call["data"]["language"] == "nl"
     assert cloud_call["data"]["model"] == "whisper-large-v3"  # final path segment
+
+
+async def test_cloud_error_body_never_reaches_client_detail(monkeypatch):
+    """Info-exposure contract: the 502 detail carries the provider name and the
+    HTTP status only — an upstream error body (which may contain internal
+    infrastructure details from a misconfigured base_url) goes to the guarded
+    log, never to the client."""
+    _patch_config(monkeypatch)
+
+    def handler(url, json, content, params, headers, files=None, data=None):
+        if _is_cloud_host(url):
+            return httpx.Response(
+                500, content=b'{"error":"internal detail http://10.0.0.12:9200/_cluster"}'
+            )
+        if url.endswith("/stt/ensure"):
+            return httpx.Response(200, json={"ok": False, "reason": "insufficient VRAM free"})
+        return httpx.Response(500, content=b"engine down")
+
+    _patch_client(monkeypatch, handler)
+    with pytest.raises(HTTPException) as excinfo:
+        await stt_mod.handle_audio_transcriptions(
+            _fake_request({"file": _Upload(), "model": "cloudstt/cloudstt/whisper-large-v3"}),
+            "dsh",
+        )
+    detail = str(excinfo.value.detail)
+    assert "cloud HTTP 500" in detail
+    assert "10.0.0.12" not in detail and "_cluster" not in detail
+    # the local chain still ran and reports its own honest reason
+    assert "insufficient VRAM" in detail
