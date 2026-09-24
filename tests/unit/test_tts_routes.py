@@ -308,3 +308,25 @@ async def test_fish_adapter_uses_route_id_when_no_voice(monkeypatch):
         model="fishtts/voice-model-123")), "dsh")
     assert resp.status_code == 200
     assert calls[0]["json"]["reference_id"] == "voice-model-123"
+
+
+@pytest.mark.asyncio
+async def test_fish_upstream_content_type_sanitized(monkeypatch):
+    """The upstream content-type reaches the log and the client response
+    header — control characters from a hostile upstream must not survive."""
+    docs = _provider_docs()
+    docs["providers"]["fishtts"] = {
+        "base_url": "https://tts.cloudtest.invalid",
+        "api_key": "${CLOUD_TTS_API_KEY}",
+        "speech_adapter": "fish",
+    }
+    _patch(monkeypatch, docs=docs)
+    # httpx rejects raw CRLF headers itself; the sanitizer is the second
+    # layer — pin it directly on a hostile token value.
+    assert tts_mod._clean_log("audio/mpeg\r\nX-Injected: yes", 64) == "audio/mpeg X-Injected: yes"
+    _patch_client(monkeypatch, lambda url, j, c, p, h, f=None, d=None: httpx.Response(
+        200, content=b"x", headers={"content-type": "audio/mpeg; boundary=weird"}))
+    resp = await tts_mod.handle_audio_speech(_FakeRequest(_body(
+        model="fishtts/voice-1", voice="alloy")), "dsh")
+    assert resp.status_code == 200
+    assert resp.media_type == "audio/mpeg; boundary=weird"

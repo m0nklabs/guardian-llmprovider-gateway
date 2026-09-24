@@ -323,12 +323,19 @@ async def _try_fish_tts(
     speed = body.get("speed")
     if speed is not None:
         payload["speed"] = speed
+    # fish selects its engine via a `model` request header (e.g.
+    # `s2.1-pro-free`, the free tier); the client supplies it as the optional
+    # `fish_model` body field and Guardian forwards it verbatim.
+    fish_model = str(body.get("fish_model") or "").strip()
+    fish_headers = {"Authorization": f"Bearer {route['api_key']}"}
+    if fish_model:
+        fish_headers["model"] = fish_model
     try:
         async with httpx.AsyncClient(timeout=timeout_s) as client:
             resp = await client.post(
                 f"{route['base_url']}/v1/tts",
                 json=payload,
-                headers={"Authorization": f"Bearer {route['api_key']}"},
+                headers=fish_headers,
             )
     except httpx.HTTPError as exc:
         logger.warning(
