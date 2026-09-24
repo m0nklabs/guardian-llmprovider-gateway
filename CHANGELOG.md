@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+- History scrub (2026-09-24, operator-mandated): real LAN IPs and internal
+  hostnames replaced with obvious per-machine placeholders across all 645
+  commits; the hardware-based and VM-based provider names were renamed to
+  `windows-gpu-local` / `ai-node-local`, and provider settings files were
+  renamed accordingly. Old values are intentionally absent from this repo.
+  Config values are now placeholders — re-enter real deployment values before
+  deploying (see `docs/HANDOFF.md`).
+
 ### Fixed
 - Prevented cloud streaming requests from returning HTTP 500 when capture is
   enabled. The cloud response assembler is now wired correctly:

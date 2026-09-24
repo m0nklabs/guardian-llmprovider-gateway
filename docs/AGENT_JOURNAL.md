@@ -22,20 +22,20 @@ Gedistilleerd (les → waar hij nu leeft):
 
 - **model-mismatch contract (09-01):** nooit stil substitueren op het lokale pad — mismatch → expliciete fout/geplande switch, geen zwijgende vervanging.
 - **launcher split-brain + fail-open verificatie (09-01):** operator-melding → 3 fixes; verificatie faalt open, niet stil.
-- **G3 bare-name routing hijack (09-02, pr-piet v3):** root cause + catalog-gestuurde fix (`7d5d32f`).
+- **G3 bare-name routing hijack (09-02, pr-piet v3):** root cause + catalog-gestuurde fix (`3f981e4`).
 
 ## Batch 2 gearchiveerd (2026-09-15, onderhoudspass: 38,6 kB → dit) — voltekst in `docs/AGENT_JOURNAL_ARCHIVE.md`
 
 Gedistilleerde lessen uit de gearchiveerde entries (les → waar hij nu leeft):
-- **Namespace-prefixes zijn claims, geen garanties** (G3, `7d5d32f`): gedeelde brands tussen providers → resolutie op positief catalog-bewijs, niet op declaratievolgorde; bij config-splits de semantiek van elke resolver-regel herchecken.
+- **Namespace-prefixes zijn claims, geen garanties** (G3, `3f981e4`): gedeelde brands tussen providers → resolutie op positief catalog-bewijs, niet op declaratievolgorde; bij config-splits de semantiek van elke resolver-regel herchecken.
 - **BaseHTTPMiddleware breekt `is_disconnected()`** (G2): disconnect-detectie via raw ASGI receive (werkt door de middleware heen); watcher stoppen vóór response-send; `Task.result()` op een pending task gooit direct `InvalidStateError` — `await` de task.
 - **Persist-functie met expliciete veld-lijst valt stilletjes nieuw-geadditieve velden weg** (trap-2 live-bug): persist→read roundtrip-pin is het contract.
-- **Migreren vóór verwijderen** (legacy-cleanup, `038382b`): cloud_keys.json leek dood maar was de actieve failover-bron — blinde rm had de capaciteit gebroken.
+- **Migreren vóór verwijderen** (legacy-cleanup, `aec0f7d`): cloud_keys.json leek dood maar was de actieve failover-bron — blinde rm had de capaciteit gebroken.
 - **Contract-drift-tests door de ÉCHTE keten** (capture-regressie 09-11): dispatch→controller→event, niet de monkeypatch-laag; todo-lijsten verouderen — check eerst de repo-docs/verdict-tabellen (C2/C7-les).
 - **Gate-hygiëne:** gate-exitcode via `${PIPESTATUS[0]}`, niet `| tail`-ketens; TOML `addopts` = gequote string; default-deselect van live integration-tests voorkomt dat de gate productie raakt (09-02).
 - **Degeneratie-guard (09-02):** altijd de fundamentele (kleinste) period q bepalen — een period-p-loop is óók een 2p/3p-loop; q < 6 vrijgesteld; letter-level (q=1) bewust vrijgesteld; marker-injectie + capture-veld `degeneration_cutoff` (schema 1.2.0).
-- **Restart-baseline:** na `systemctl restart` altijd MainPID == :11435-listener verifiëren (restart-race, `ec1211e`); streaming-baseline (09-02-meting): TTFT ~1 s, inter-chunk p95 < 30 ms, maxGap < 400 ms — afwijkingen zijn de actionable maatstaf.
-- **Nemotron-adapter (09-10, `3c0edb4`):** client-intent → provider-dialect (openrouter: unified `reasoning.enabled=false`; nvidia-direct: `chat_template_kwargs.enable_thinking=false`); "crap"-signatuur = length-cut in thinking → vLLM-parser dupliceert thinking in content. Open optimalisatie: metadata-gedreven verfijning via `supported_efforts` (lightning exposeert géén efforts; super/ultra wel).
+- **Restart-baseline:** na `systemctl restart` altijd MainPID == :11435-listener verifiëren (restart-race, `29953e1`); streaming-baseline (09-02-meting): TTFT ~1 s, inter-chunk p95 < 30 ms, maxGap < 400 ms — afwijkingen zijn de actionable maatstaf.
+- **Nemotron-adapter (09-10, `ed3344f`):** client-intent → provider-dialect (openrouter: unified `reasoning.enabled=false`; nvidia-direct: `chat_template_kwargs.enable_thinking=false`); "crap"-signatuur = length-cut in thinking → vLLM-parser dupliceert thinking in content. Open optimalisatie: metadata-gedreven verfijning via `supported_efforts` (lightning exposeert géén efforts; super/ultra wel).
 - **Live-feiten verifiëren vóór adviseren** (09-11): PR #12/#13/#14 waren al gemerged terwijl de hot-file ze nog als open zette — GitHub-API-check vóór statusclaims; hot-file-regel gecorrigeerd in deze pass.
 
 ## 2026-09-11 — Wakeguard-alarmen gediagnosticeerd (advies uitgebracht, geen code)
@@ -45,7 +45,7 @@ Gedistilleerde lessen uit de gearchiveerde entries (les → waar hij nu leeft):
 - **Advies:** wakeguard proeft via Guardian :11434 (auto-reload) i.p.v. :11440; agent31 client-timeout ≥ 60s en via Guardian routen. Optioneel vervolg: ensure-timeout-tuning (config, PR #14) dempt de transport-error-warnings bij cold start.
 - Zij-notitie: AAL toont "redacted" voor workspace/project door de agentlog-privacy-redaction — het project heet dus niet echt "redacted".
 
-## 2026-09-11 — Terminal-capture regressie gefixt (agent31 setup-session vond hem) (5446949)
+## 2026-09-11 — Terminal-capture regressie gefixt (agent31 setup-session vond hem) (58db7a8)
 
 - **Defect (gemeld via docs/HANDOFF.md door de Copilot setup-session — correct kanaal, correcte bevinding):** `dispatch_capture_request_completed` gaf `degeneration_cutoff=...` door aan `CaptureController.capture_request_completed`, dat de parameter niet aannam → TypeError → stil ingeslikt door de fail-open except → **alle terminal-capture events weg sinds de degeneratie-deploy**. Hard bewijs: huidige capture = 48 request_received, 0 completed/failed.
 - **Waarom de gate het miste:** de degeneratie-pinnen monkeypatchten de dispatch-laag; geen test ging door de ÉCHTE controller-signature. Les: contract-drift-tests moeten de echte keten nemen (dispatch → controller → event), niet de geschminkte laag.

@@ -310,7 +310,7 @@
 - **TLS identity:** `deploy/tls/guardian-192.168.1.G.crt` is the TLS *certificate* identity for host `guardian-192.168.1.G.crt`; its filename must **not** be renamed to the service name.
 - **`llama-server`** is a separate backend service (llama.cpp) and is distinct from `guardian-llmprovider-gateway` — references to it stay untouched.
 - **Gitignored / not tracked:** `.env`, `config/guardian.keys.yaml`, `data/`, `venv/`, `.scratch/`, logs, caches. Secrets are never committed.
-- **Tracked count:** `git ls-files` = **194 files** at the time of this draft (F1; 199 by commit `dce7b87`), **219 at F7-closure** (199 + 23 additions − 3 deletions since `dce7b87`). The delta register below lists files the F1 tables did not yet cover — including F1-era files (root/meta, CI workflows), not only post-F1 additions.
+- **Tracked count:** `git ls-files` = **194 files** at the time of this draft (F1; 199 by commit `ca2a63b`), **219 at F7-closure** (199 + 23 additions − 3 deletions since `ca2a63b`). The delta register below lists files the F1 tables did not yet cover — including F1-era files (root/meta, CI workflows), not only post-F1 additions.
 
 _End of draft. This register is a living document; update it as files are added/removed/renamed._
 

@@ -9,6 +9,37 @@
 > gesloten secties + oude one-liners verbatim gearchiveerd, sectie
 > "gearchiveerd 2026-09-19").
 
+## History-scrub 2026-09-24 (operator-mandate) — PROD-REDEPLOY NODIG
+
+Volledige git-history herschreven (645 commits, filter-repo): echte LAN-IP's en
+interne hostnamen → unieke letter-placeholders, repo blijft publiek. De oude
+waarden staan bewust NERGENS meer in deze repo (ook niet in deze sectie).
+Placeholder-rollen: `.W` = Windows-GPU-host, `.G` = gateway-host zelf, `.K`,
+`.M`, `.N`, `.F` = overige LAN-machines. Providernamen: de op hardware gebaseerde
+naam → `windows-gpu-local`, de op VM-naam gebaseerde naam → `ai-node-local`, de
+SSH-alias van de windows-host → `windows-host`. Provider-bestanden hernoemd
+(`windows-gpu-local.settings.yaml`, `ai-node-local.settings.yaml`). Bewust
+behouden: `192.168.1.1` (generieke router), `10.0.0.x` + `172.16.254.1`
+(testfixtures/Python-docs-voorbeeld).
+
+**Prod-redeploy (operator, buiten agent-sessie):**
+1. Bewaar EERST de echte waarden uit de huidige prod-config
+   (`/home/flip/guardian-llmprovider-gateway/config/`) — die staan na de scrub
+   nergens meer in git.
+2. Re-clone (de history divergeert; force-push is uitgevoerd).
+3. Zet de echte waarden terug op de placeholder-posities in
+   `config/global.settings.yaml` + `config/providers/*.settings.yaml` — of
+   breid `_expand_env` uit naar `base_url`/`*_url` en zet ze in `.env`.
+4. `sudo systemctl restart llama-guardian` — knipt agent-verkeer; herstel is
+   niet self-healing. Prod draait nu de fish-audio-branch (PR#27): na re-clone
+   eerst #27 landen of die branch opnieuw uitchecken.
+
+**Residu:** GitHub houdt pre-rewrite SHAs bereikbaar via PR-commitlijsten (incl.
+de PR#26-dump) tot GitHub GC of support-purge — dat kan niet zelf. Alle
+SHA-verwijzingen in `docs/*.md` zijn geremapt naar de nieuwe historie (65 refs,
+0 oude SHAs resterend).
+
+
 ## Actuele status — speech (TTS) chain LIVE (2026-09-16→19, operator-directed)
 
 De volledige spraakketen draait in productie; **capaciteiten zijn puur
@@ -44,7 +75,7 @@ een cloud-GPU-box):
   `PYTHONUTF8=1` (cp1252-redirect crashte de model-load middenin).
 - **Bewijs:** koude start 18–20 s (incl. llama-yield), warm 3,5 s; pinnen
   guardian 14 (suite 1419) / caretaker 20 (suite 132); gates 5/5. Commits:
-  guardian `ec1d4df`, caretaker `e1f9d48`.
+  guardian `1614c89`, caretaker `e1f9d48`.
 
 ### ACTUEEL (2026-09-23): speech-routing route-georiënteerd herontworpen (operator-mandaat) — opt-in switches geschrapt; adres = `[guardian/]{provider}/{brand}/{model}`, providerbestand beslist (tts_url/stt_url = lokaal, base_url+api_key = cloud), upstream-id = brand/model, expliciete route = exact (geen fallback). Zie journal + `app/gateway/speech_routing.py`.
 
@@ -148,19 +179,19 @@ een cloud-GPU-box):
 ## Afgerond (carry-forward one-liners; voltekst → `docs/ARCHIVED_HANDOFFS.md`)
 
 - **Speech/TTS-chain live: provider-driven, platform-pariteit, Windows
-  TTS-first** (09-16→19, guardian `ec1d4df`, caretaker `e1f9d48`) — zie
+  TTS-first** (09-16→19, guardian `1614c89`, caretaker `e1f9d48`) — zie
   "Actuele status" hierboven. Kernlessen in het journal: UTF-8 spawn-env
   (cp1252-crash), ensure-timeout-aritmetiek, ensure-lock, deterministische
   llama-yield, nooit handmatig llama-server killen (stale manager-state).
-- **Terminal-capture contract-drift gefixt** (09-11, `5446949`) — verbatim
+- **Terminal-capture contract-drift gefixt** (09-11, `58db7a8`) — verbatim
   gearchiveerd 09-19.
 - **Nemotron "crap-outputs" verklaard + canonieke reasoning-adapter** (09-10,
-  `3c0edb4`): adapter vertaalt reasoning-intent → provider-dialect (openrouter
+  `ed3344f`): adapter vertaalt reasoning-intent → provider-dialect (openrouter
   `reasoning.enabled=false` / nvidia-direct `enable_thinking=false`); 12 pins.
 - **Legacy-config volledig opgeruimd + test-lekkage gefixt** (09-09,
-  `038382b`): cloud_keys.json bleek de actieve failover-bron — gemigreerd
+  `aec0f7d`): cloud_keys.json bleek de actieve failover-bron — gemigreerd
   (failover_groups → global.settings.yaml) toen pas verwijderd.
-- **HTTP 200-garbage surfacet als 502** (09-09, `2e51140`): 200-body op
+- **HTTP 200-garbage surfacet als 502** (09-09, `a09c4e3`): 200-body op
   chat-paths vereist `choices`; embedded `choices[0].error` = invalid.
 - **Failover-groep `failover/free` live end-to-end** (09-09): 2
   admission/routing-gaps gefixt; groepen zijn globaal (settings.yaml).
@@ -191,7 +222,7 @@ een cloud-GPU-box):
 
 ## 2026-09-23 — TTS cloud forwarding MERGED + beide cloud-routes live — DSH agent (openrouter/z-ai/glm-5.3-flash)
 
-- **PR #23 gemerged** (715021f) + operator-restart. Live-geverifieerd (5/5):
+- **PR #23 gemerged** (6799f5b) + operator-restart. Live-geverifieerd (5/5):
   STT `model=groq/groq/whisper-large-v3` → Groq (0,4 s); TTS
   `model=groq/canopylabs/orpheus-v1-english` (voice `tara`) → 223 kB 24 kHz
   WAV via Groq; geen-model → lokale engines (beide); ongeldige modelnaam →

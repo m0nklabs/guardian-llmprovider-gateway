@@ -423,7 +423,7 @@ These are intentional or current-state limits that docs should not overclaim:
 
 - Guardian runs one inference slot at a time by design.
 - There is no built-in token-bucket or per-client rate limiter.
-- The dashboard is auth-gated and bound to `127.0.0.1` (commit `7472d61`).
+- The dashboard is auth-gated and bound to `127.0.0.1` (commit `6b46f46`).
 - ComfyUI integration is cooperative VRAM release, not full cross-service job
   orchestration.
 - Historical benchmark helpers still exist, but they are not the live runtime

@@ -436,5 +436,5 @@ class TestCanaryNoFalseNegatives:
         assert len(findings) > 0
 
     def test_scanner_detects_raw_ip(self):
-        findings = scan_for_secrets("192.168.1.N")
+        findings = scan_for_secrets("192.0.2.1")  # RFC 5737 documentation address
         assert len(findings) > 0

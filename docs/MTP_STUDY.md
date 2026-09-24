@@ -1,6 +1,6 @@
 # MTP / Speculative-Decoding Study — Qwen Family (2026-08-15)
 
-Benchmark session `20260815_bench` follow-up. Code-fix: commit `c67845b` (spec_type
+Benchmark session `20260815_bench` follow-up. Code-fix: commit `1169080` (spec_type
 without `draft_model_path`). All measurements via Guardian `/v1/chat/completions`
 (streaming), bench script `scripts/bench_all_models.py`, single GPU pair
 (3060 + 5060 Ti), model-switch queue, 3 runs per model, median gen t/s.
@@ -32,7 +32,7 @@ three distinct mechanisms that llama-server exposes via `--spec-type`:
 - **N-gram lookup is the fallback** for models without MTP layers (qwen3.6, qwen3.5):
   no draft model, no architectural requirement, but its hits depend on the output
   repeating text from the prompt/context.
-- **Code-fix (commit `c67845b`, `app/engine/manager.py` `_build_args_string`):**
+- **Code-fix (commit `1169080`, `app/engine/manager.py` `_build_args_string`):**
   previously `--spec-type` was only emitted inside the `if draft_model_path:`
   block, so `draft-mtp` and `ngram-*` could not be used at all. The fix emits
   `--spec-type <type>` **without** `--model-draft` for these no-draft modes
@@ -175,7 +175,7 @@ Operator action if enabled: re-add the desired variant entry to
 
 ## 6. Provenance / cleanup
 
-- Code-fix: commit `c67845b` (manager.py `_build_args_string`), 7 regression tests
+- Code-fix: commit `1169080` (manager.py `_build_args_string`), 7 regression tests
   in `tests/unit/test_manager.py`, full suite 949 passed / 3 skipped.
 - The 4 temporary variant entries were removed from `config/models.yaml` and
   `data/bench-models/state.json` after this study (variants are invisible next
