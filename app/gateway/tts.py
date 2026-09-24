@@ -308,28 +308,29 @@ async def _try_fish_tts(
     timeout_s: float,
 ) -> Response | str:
     """Fish Audio native TTS (POST /v1/tts, JSON): ``text`` required,
-    ``reference_id`` selects the voice/model (the client's ``voice`` field, or
-    the route's upstream id when no voice is given), ``format`` = the
-    response_format (fish: wav/pcm/mp3/opus). Response: raw audio bytes — the
-    same passthrough shape as the OpenAI-compatible path."""
+    ``format`` = the response_format (fish: wav/pcm/mp3/opus). Fish selects
+    the engine via the ``model`` request header — the client's optional
+    ``fish_model`` field wins, otherwise the route's upstream id IS the model
+    (e.g. ``s2.1-pro-free``, the free tier). ``reference_id`` (the client's
+    ``voice`` field) selects the fish reference voice. Response: raw audio
+    bytes — the same passthrough shape as the OpenAI-compatible path."""
     name = route["provider"]
     started = time.monotonic()
-    voice = str(body.get("voice") or "").strip() or route["upstream_model"]
     payload: dict[str, Any] = {
         "text": str(body.get("input", "")),
-        "reference_id": voice,
         "format": response_format,
     }
+    voice = str(body.get("voice") or "").strip()
+    if voice:
+        payload["reference_id"] = voice
     speed = body.get("speed")
     if speed is not None:
         payload["speed"] = speed
-    # fish selects its engine via a `model` request header (e.g.
-    # `s2.1-pro-free`, the free tier); the client supplies it as the optional
-    # `fish_model` body field and Guardian forwards it verbatim.
-    fish_model = str(body.get("fish_model") or "").strip()
-    fish_headers = {"Authorization": f"Bearer {route['api_key']}"}
-    if fish_model:
-        fish_headers["model"] = fish_model
+    fish_model = str(body.get("fish_model") or "").strip() or route["upstream_model"]
+    fish_headers = {
+        "Authorization": f"Bearer {route['api_key']}",
+        "model": fish_model,
+    }
     try:
         async with httpx.AsyncClient(timeout=timeout_s) as client:
             resp = await client.post(

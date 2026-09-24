@@ -191,17 +191,24 @@ async def _try_cloud_backend(
         if language:
             data["language"] = language
         endpoint = f"{route['base_url']}/v1/asr"
+        # fish selects the ASR model via the "model" HTTP header
+        # (e.g. transcribe-1); the route's upstream id feeds it.
+        request_headers = {
+            "Authorization": f"Bearer {route['api_key']}",
+            "model": route["upstream_model"],
+        }
     else:
         files = {"file": (upload_filename or "audio.wav", audio_bytes, audio_content_type)}
         data = {"model": route["upstream_model"]}
         if language:
             data["language"] = language
         endpoint = f"{route['base_url']}/audio/transcriptions"
+        request_headers = {"Authorization": f"Bearer {route['api_key']}"}
     try:
         async with httpx.AsyncClient(timeout=timeout_s) as client:
             resp = await client.post(
                 endpoint,
-                headers={"Authorization": f"Bearer {route['api_key']}"},
+                headers=request_headers,
                 files=files,
                 data=data,
             )

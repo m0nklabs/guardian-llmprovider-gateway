@@ -264,3 +264,9 @@ JOURNAL 38,6 kB → dit (~8 kB); verbatim → `docs/AGENT_JOURNAL_ARCHIVE.md` Ba
 - **Config:** `failover.remote_ensure_timeout_seconds` in global.settings.yaml (default 120 s, bounded 30-600 s, hot-reloadable — moet een cold load op de traagste host overleven; niet verwarren met de 30 s caretaker client-timeout).
 - **Pinnen:** 8 nieuwe tests in `test_cross_host_failover.py` (remote-ensure vóór forward met bare id + Bearer; fall-through; 503 op laatste attempt; cloud zonder management_url slaat ensure over; 404/503-mapping; timeout-bounds). Bestaande fall-through-test gepind op caretaker-loze passive providers (expliciete CONFIG-stub — de echte config heeft wél een management_url). Full gate: 1462 passed.
 - **Nog te doen na operator-restart** (code-restart, geen hot reload): live verificatie dat `failover/qwen35-abliterated` de windows-fallback remote-ensure't wanneer kvm2 niet kan leveren, en dat qwen35's windows-first candidate de ensure fast-path (al geladen) neemt.
+
+## 2026-09-24 — Fish free-tier via model-header (operator had wederom gelijk) — DSH agent (glm-5.3-flash)
+
+- **402-correctie:** de "Insufficient API credit"-probe gebruikte de betaalde default. Fish selecteert het model via de **`model` HTTP-header** — met `model: s2.1-pro-free` ($0.00/M bytes, het gratis model) → **HTTP 200, 62 kB mp3** met dezelfde key. Geen bijladen nodig.
+- **Contract-implimentatie:** het route's upstream-id ÍS het model-header (client-`fish_model`-veld wint expliciet); `voice` → `reference_id` alleen als opgegeven. ASR heeft géén gratis variant (`transcribe-1` $0.36/uur) — fish-STT-routes leveren een eerlijke 502 tot er credit is.
+- Pinnen bijgewerkt op het model-header-contract (24/24).

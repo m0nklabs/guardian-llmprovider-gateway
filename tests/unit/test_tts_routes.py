@@ -277,7 +277,7 @@ async def test_fish_adapter_translates_tts_dialect(monkeypatch):
 
     calls = _patch_client(monkeypatch, handler)
     resp = await tts_mod.handle_audio_speech(_FakeRequest(_body(
-        model="fishtts/voice-model-123", voice="alloy", response_format="wav")), "dsh")
+        model="fishtts/s2.1-pro-free", voice="alloy", response_format="wav")), "dsh")
     assert resp.status_code == 200
     assert resp.body == b"fishaudio"
     call = calls[0]
@@ -286,6 +286,8 @@ async def test_fish_adapter_translates_tts_dialect(monkeypatch):
         "reference_id": "alloy",           # client voice -> fish reference_id
         "format": "wav",                    # verbatim (fish supports wav)
     }
+    # fish selects the ENGINE via the model header: the route's upstream id
+    assert call["headers"]["model"] == "s2.1-pro-free"
     assert call["headers"]["Authorization"] == "Bearer ctts_test"
 
 
@@ -305,9 +307,11 @@ async def test_fish_adapter_uses_route_id_when_no_voice(monkeypatch):
 
     calls = _patch_client(monkeypatch, handler)
     resp = await tts_mod.handle_audio_speech(_FakeRequest(_body(
-        model="fishtts/voice-model-123")), "dsh")
+        model="fishtts/s2.1-pro-free")), "dsh")
     assert resp.status_code == 200
-    assert calls[0]["json"]["reference_id"] == "voice-model-123"
+    # no voice -> no reference_id (the model header carries the route id)
+    assert "reference_id" not in calls[0]["json"]
+    assert calls[0]["headers"]["model"] == "s2.1-pro-free"
 
 
 @pytest.mark.asyncio

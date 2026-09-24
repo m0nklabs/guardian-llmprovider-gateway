@@ -272,4 +272,6 @@ async def test_fish_adapter_transcribes_native_dialect(monkeypatch):
     call = [c for c in calls if c["url"].endswith("/v1/asr")][0]
     assert set(call["files"].keys()) == {"audio"}          # fish field name
     assert call["data"] == {"language": "nl"}              # hint only, no model field
+    # fish selects the ASR model via the model header (route upstream id)
+    assert call["headers"]["model"] == "anything"
     assert call["headers"]["Authorization"] == "Bearer stt_test_key"
