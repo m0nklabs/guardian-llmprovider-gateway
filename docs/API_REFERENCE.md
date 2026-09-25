@@ -379,6 +379,13 @@ format passes verbatim to the route's provider (e.g. `mp3`). `speed` is
 validated early (number 0.25-4.0, OpenAI contract) for both routes so the
 client gets a clear `400` instead of a failed upstream call.
 
+Non-OpenAI-shaped speech APIs are bridged by a per-provider dialect adapter
+(``speech_adapter`` in the provider file; default `openai`): `fish` translates
+the OpenAI-shaped request to fish.audio's native `/v1/tts` (`voice` →
+`reference_id`, falling back to the route's upstream id; `response_format` →
+`format`: wav/pcm/mp3/opus) and `/v1/asr` (multipart field `audio`; `language`
+is a hint — fish auto-detects and returns `language_code`).
+
 Cloud TTS routes carry provider-specific requirements verbatim: `voice` is
 mandatory for some providers and its valid values are the model's
 `supported_voices` (OpenRouter models API), and the accepted `response_format`

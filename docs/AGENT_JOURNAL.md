@@ -248,3 +248,17 @@ JOURNAL 38,6 kB → dit (~8 kB); verbatim → `docs/AGENT_JOURNAL_ARCHIVE.md` Ba
 - **De windows-deploy-les (volledig in de caretaker-journal):** NSSM AppEnvironmentExtra = altijd de volledige lijst expliciet (de get-based read-modify-write verloor de env 1×); de service-python (LocalSystem) ziet de --user-site van onyou niet → de deps in `.deps` + PYTHONPATH; LLAMA_SERVER_BINARY + CARETAKER_LLAMA_SLOTS_DIR-overrides hersteld; de comfy-stop = de poort-kill (schtasks /End laat het comfy-child leven); de comfy-start = GPU-first (de llama + de engines wijken).
 - **TTS/STT-integriteit na de env-reconstructie:** de ensure-cycli ✓ (de TTS already_running, de STT cold_start + pid) — de gereconstrueerde commands werken.
 - De comfy-startup hangt SOMETIEMS bij de herstart onder VRAM-druk (de 119k-regel-spam, de python dood) — met de GPU-vrijheid start hij schoon. Volgup-kandidaat: de comfy-start-herhaaltjes monitoren; indien structureel → de comfy-versie/de bat-lus onderzoeken.
+
+## 2026-09-23 — Fish Audio provider (fish.audio) via speech_adapter — DSH agent (glm-5.3-flash) — OPEN
+
+- **Operator-vraag**: de Fish Audio API-key beschikbaar maken via guardian, "puur API proxyen", route `guardian/fish.audio/`.
+- **Fish is géén OpenAI-vorm** — het OpenAPI-schema (api.fish.audio/openapi.json) definieert `/v1/tts` (JSON: `text`*, `reference_id`, `format` wav/pcm/mp3/opus) → audio-bytes en `/v1/asr` (multipart: `audio`, `language`-hint) → JSON `{text, duration, segments}`; Bearer-auth.
+- **Adapter, geen vork**: `speech_adapter: fish` in het providerbestand; `speech_routing` geeft hem door en de cloud-forward vertaalt per dialect — client blijft OpenAI-vorm sturen (zoals de chat-routering al doet voor nemotron-dialecten). `voice` → `reference_id` (of het route-id als er geen voice is); `response_format` → `format` verbatim (fish ondersteunt wél wav, anders dan openrouter); STT: multipart-veld heet `audio` (niet `file`) en er is geen modelveld.
+- **Key-hygiëne**: key in `.env` (`FISH_AUDIO_API_KEY`), providerbestand referenceert `${FISH_AUDIO_API_KEY}` — niets secrets in de repo.
+- **Live probe**: auth OK, maar **402 Insufficient API credit** — Fish rekent API-credit apart van platform-credit; operator moet bijladen op fish.audio/app/developers. Vorm- en auth-bewijs op unit-niveau (23/23 routepinnen incl. 3 fish-pinnen).
+
+## 2026-09-24 — Fish free-tier via model-header (operator had wederom gelijk) — DSH agent (glm-5.3-flash)
+
+- **402-correctie:** de "Insufficient API credit"-probe gebruikte de betaalde default. Fish selecteert het model via de **`model` HTTP-header** — met `model: s2.1-pro-free` ($0.00/M bytes, het gratis model) → **HTTP 200, 62 kB mp3** met dezelfde key. Geen bijladen nodig.
+- **Contract-implimentatie:** het route's upstream-id ÍS het model-header (client-`fish_model`-veld wint expliciet); `voice` → `reference_id` alleen als opgegeven. ASR heeft géén gratis variant (`transcribe-1` $0.36/uur) — fish-STT-routes leveren een eerlijke 502 tot er credit is.
+- Pinnen bijgewerkt op het model-header-contract (24/24).

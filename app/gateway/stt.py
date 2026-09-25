@@ -182,15 +182,33 @@ async def _try_cloud_backend(
     mapping is engine-specific and does not apply here."""
     name = route["provider"]
     started = time.monotonic()
-    files = {"file": (upload_filename or "audio.wav", audio_bytes, audio_content_type)}
-    data: dict[str, str] = {"model": route["upstream_model"]}
-    if language:
-        data["language"] = language
+    if route.get("speech_adapter") == "fish":
+        # Fish Audio native ASR (POST /v1/asr, multipart): the audio field is
+        # named "audio" and there is no model field (one hosted model);
+        # language is an optional hint — auto-detect always runs.
+        files = {"audio": (upload_filename or "audio.wav", audio_bytes, audio_content_type)}
+        data: dict[str, str] = {}
+        if language:
+            data["language"] = language
+        endpoint = f"{route['base_url']}/v1/asr"
+        # fish selects the ASR model via the "model" HTTP header
+        # (e.g. transcribe-1); the route's upstream id feeds it.
+        request_headers = {
+            "Authorization": f"Bearer {route['api_key']}",
+            "model": route["upstream_model"],
+        }
+    else:
+        files = {"file": (upload_filename or "audio.wav", audio_bytes, audio_content_type)}
+        data = {"model": route["upstream_model"]}
+        if language:
+            data["language"] = language
+        endpoint = f"{route['base_url']}/audio/transcriptions"
+        request_headers = {"Authorization": f"Bearer {route['api_key']}"}
     try:
         async with httpx.AsyncClient(timeout=timeout_s) as client:
             resp = await client.post(
-                f"{route['base_url']}/audio/transcriptions",
-                headers={"Authorization": f"Bearer {route['api_key']}"},
+                endpoint,
+                headers=request_headers,
                 files=files,
                 data=data,
             )

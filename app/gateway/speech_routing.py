@@ -107,5 +107,9 @@ def resolve_speech_route(model: str, local_capability: str) -> dict[str, Any] | 
             "upstream_model": upstream_model,
             "base_url": base_url,
             "api_key": api_key,
+            # Dialect adapter for non-OpenAI-shaped speech APIs (e.g. fish =
+            # fish.audio's native /v1/tts + /v1/asr). Default: the
+            # OpenAI-compatible shape (groq, openrouter, ...).
+            "speech_adapter": (str(doc.get("speech_adapter") or "openai").strip().lower()),
         }
     return None
