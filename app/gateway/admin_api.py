@@ -16,6 +16,9 @@ from typing import Any
 import httpx
 from fastapi import HTTPException, Request
 
+from app.gateway.context_metadata import enrich_model_context_metadata
+from app.gateway.metadata_enrichment import attach_parity_metadata
+
 logger = logging.getLogger("Guardian")
 
 
@@ -50,6 +53,8 @@ _run_guardian_operation = None
 _reload_settings_config = None  # callable() -> reloaded settings dict
 _failover_registry = None
 _failover_health = None
+# Cross-provider metadata reference catalog (OpenRouter-parity enrichment).
+_reference_catalog = None
 
 
 def init(
@@ -82,6 +87,7 @@ def init(
     _reload_settings_config=None,
     _failover_registry=None,
     _failover_health=None,
+    _reference_catalog=None,
 ) -> None:
     """Inject all dependencies. Called once at startup."""
     globals().update({k: v for k, v in locals().items() if k != "_init"})
@@ -121,6 +127,38 @@ async def create_api_key(request: Request, client_id: str) -> Any:
 
 
 
+async def _build_catalog_entry(full_id: str, provider_name: str) -> dict[str, Any]:
+    """Build one OpenRouter-parity cloud entry for the admin/dashboard surface.
+
+    Mirrors the enrichment ``/v1/models`` applies so the dashboard presents the
+    same metadata the public discovery endpoint returns — including values
+    filled in from the cross-provider reference catalog.  Fail-open: a metadata
+    lookup failure still yields a renderable entry.
+    """
+    entry = _provider_registry.build_model_metadata_entry(full_id)
+    if entry is None:
+        entry = {
+            "id": full_id,
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": provider_name,
+            "permission": [],
+            "served_by": "cloud",
+            "provider": provider_name,
+        }
+    try:
+        entry = await enrich_model_context_metadata(entry)
+    except Exception as exc:  # fail-open: the dashboard must still render
+        logger.debug("Context enrichment failed for %s: %s", full_id, exc)
+    attach_parity_metadata(
+        entry,
+        catalog=_cloud_catalog,
+        reference_catalog=_reference_catalog,
+        provider_name=provider_name,
+    )
+    return entry
+
+
 async def list_cloud_catalog(client_id: str) -> Any:
     """Return the current dynamic cloud catalog state (per provider).
 
@@ -128,6 +166,12 @@ async def list_cloud_catalog(client_id: str) -> Any:
     per-key credential/link model listings. Per provider it reports the
     model count, the full ``{provider}/{brand}/{model}`` addresses, and the
     last successful fetch time (``None`` when not yet fetched).
+
+    Since the OpenRouter-parity work each provider also carries a ``models``
+    array with the fully enriched entries, so the dashboard can present
+    architecture, pricing, supported parameters and provenance instead of a
+    flat list of address strings.  ``addresses`` is retained unchanged for
+    clients that only need the identifiers.
     """
     providers = []
     for p in _provider_registry.get_enabled_providers():
@@ -136,6 +180,8 @@ async def list_cloud_catalog(client_id: str) -> Any:
         if isinstance(data, dict) and data.get("fetched_at"):
             fetched_at = data["fetched_at"]
         catalog = _cloud_catalog.get_models_for_provider(p.name)
+        addresses = [f"{p.name}/{normalized}" for normalized in catalog]
+        models = [await _build_catalog_entry(address, p.name) for address in addresses]
         providers.append({
             "name": p.name,
             "configured": p.is_configured,
@@ -144,15 +190,27 @@ async def list_cloud_catalog(client_id: str) -> Any:
                 ("ok" if p.is_configured else "unconfigured")
             ),
             "model_count": len(catalog),
-            "addresses": [f"{p.name}/{normalized}" for normalized in catalog],
+            "addresses": addresses,
+            "models": models,
             "last_fetch": fetched_at,
         })
     return {"catalog": providers}
 
 
 async def refresh_cloud_catalog(client_id: str) -> Any:
-    """Force a background-fresh fetch of every configured provider's catalog."""
+    """Force a background-fresh fetch of every configured provider's catalog.
+
+    Also forces the cross-provider reference catalog, so a manual refresh makes
+    the metadata gap filling immediately visible instead of waiting out its own
+    (longer) TTL.  Reference refresh failures are swallowed — reference data is
+    optional and must never fail the provider catalog refresh.
+    """
     await _cloud_catalog.refresh_all()
+    if _reference_catalog is not None:
+        try:
+            await _reference_catalog.refresh_all()
+        except Exception as exc:  # fail-open
+            logger.warning("📚 Reference catalog refresh failed: %s", exc)
     providers = []
     for p in _provider_registry.get_enabled_providers():
         data = _cloud_catalog._catalogs.get(p.name)
@@ -215,19 +273,7 @@ async def list_cloud_models(request: Request, client_id: str) -> Any:
         if not catalog:
             catalog = {m: m for m in p.models}
         for normalized in catalog:
-            full_id = f"{p.name}/{normalized}"
-            entry = _provider_registry.build_model_metadata_entry(full_id)
-            if entry is None:
-                entry = {
-                    "id": full_id,
-                    "object": "model",
-                    "created": int(time.time()),
-                    "owned_by": p.name,
-                    "permission": [],
-                    "served_by": "cloud",
-                    "provider": p.name,
-                }
-            models.append(entry)
+            models.append(await _build_catalog_entry(f"{p.name}/{normalized}", p.name))
     return {"models": models}
 
 
@@ -378,6 +424,18 @@ async def reload_config(client_id: str) -> Any:
     except Exception as exc:  # pragma: no cover - defensive
         errors.append(f"cloud_catalog: {exc}")
         not_reloaded.append("cloud_catalog")
+
+    # 4b. Cross-provider reference catalog: re-reads the `reference_catalog`
+    #     sources from provider settings and re-checks its disk cache, so a
+    #     hot config reload picks up an added/changed/removed reference source
+    #     without a restart (fail-open — reference data is optional).
+    if _reference_catalog is not None:
+        try:
+            _reference_catalog.reload()
+            reloaded.append("reference_catalog")
+        except Exception as exc:  # pragma: no cover - defensive
+            errors.append(f"reference_catalog: {exc}")
+            not_reloaded.append("reference_catalog")
 
     # 5. Capture controller + WAL writer (settings.yaml capture block)
     try:

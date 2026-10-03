@@ -19,6 +19,7 @@ if _ENV_FILE.exists():
     _ENV_FILE.chmod(0o600)
 load_dotenv(_ENV_FILE)
 
+from app.gateway import admin_api as _admin_api
 from app.proxy.auth import (
     _token_fingerprint,
     generate_api_key,
@@ -29,7 +30,6 @@ from app.proxy.server import (
     app as proxy_app,
 )
 from app.proxy.server import (
-    cloud_catalog,
     cloud_rate_limiter,
     get_gpu_metrics,
     get_model_size,
@@ -287,29 +287,29 @@ async def list_providers_ui(_client_id: str = Depends(verify_api_key)):
 
 @app.get("/api/cloud/catalog")
 async def list_cloud_catalog_ui(_client_id: str = Depends(verify_api_key)):
-    """Return the current dynamic cloud catalog state (per provider)."""
-    entries = []
-    for p in provider_registry.get_enabled_providers():
-        data = cloud_catalog._catalogs.get(p.name)
-        fetched_at = None
-        if isinstance(data, dict) and data.get("fetched_at"):
-            fetched_at = data["fetched_at"]
-        catalog = cloud_catalog.get_models_for_provider(p.name)
-        entries.append({
-            "name": p.name,
-            "configured": p.is_configured,
-            "model_count": len(catalog),
-            "addresses": [f"{p.name}/{n}" for n in catalog],
-            "last_fetch": fetched_at,
-        })
-    return {"catalog": entries}
+    """Return the current dynamic cloud catalog state (per provider).
+
+    Delegates to :func:`app.gateway.admin_api.list_cloud_catalog` — the single
+    implementation of this payload.  The dashboard UI is served by THIS app
+    (port 11437) while the API is served by ``app.proxy.server`` (11436), so a
+    local copy here silently diverged: it kept returning only
+    ``name/configured/model_count/addresses/last_fetch`` and the model catalog
+    view never received the enriched ``models`` array it renders.  One
+    implementation, one payload, both ports.
+    """
+    return await _admin_api.list_cloud_catalog(_client_id)
 
 
 @app.post("/api/cloud/catalog/refresh")
 async def refresh_cloud_catalog_ui(_client_id: str = Depends(verify_api_key)):
-    """Force a refresh of every configured provider's dynamic cloud catalog."""
-    await cloud_catalog.refresh_all()
-    return {"status": "refreshed"}
+    """Force a refresh of every configured provider's dynamic cloud catalog.
+
+    Delegates to :func:`app.gateway.admin_api.refresh_cloud_catalog` for the same
+    reason as the listing route above: one implementation, and it also refreshes
+    the cross-provider reference catalog so a manual refresh makes the metadata
+    gap filling immediately visible.
+    """
+    return await _admin_api.refresh_cloud_catalog(_client_id)
 
 
 class GuardianService:

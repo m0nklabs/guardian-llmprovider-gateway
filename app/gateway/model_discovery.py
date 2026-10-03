@@ -20,6 +20,8 @@ from typing import Any
 
 from fastapi import HTTPException, Request
 
+from app.gateway.metadata_enrichment import attach_parity_metadata
+
 logger = logging.getLogger("Guardian")
 
 
@@ -27,6 +29,7 @@ logger = logging.getLogger("Guardian")
 _model_manager = None
 _provider_registry = None
 _cloud_catalog = None
+_reference_catalog = None
 _failover_registry = None
 _get_request_auth_context = None
 resolve_cloud_attempts = None
@@ -51,11 +54,13 @@ def init(
     _enrich_model_context_metadata,
     _resolve_context_window,
     _get_model_size,
+    _reference_catalog=None,
 ) -> None:
     """Inject all dependencies. Called once at startup."""
     globals()["_model_manager"] = _model_manager
     globals()["_provider_registry"] = _provider_registry
     globals()["_cloud_catalog"] = _cloud_catalog
+    globals()["_reference_catalog"] = _reference_catalog
     globals()["_failover_registry"] = _failover_registry
     globals()["_get_request_auth_context"] = _get_request_auth_context
     globals()["resolve_cloud_attempts"] = _resolve_cloud_attempts
@@ -107,6 +112,12 @@ async def _build_cloud_entry(full_id: str, provider_name: str) -> dict[str, Any]
         }
     entry = await enrich_model_context_metadata(entry)
     _attach_reasoning_metadata(entry, provider_name)
+    attach_parity_metadata(
+        entry,
+        catalog=_cloud_catalog,
+        reference_catalog=_reference_catalog,
+        provider_name=provider_name,
+    )
     return entry
 
 
@@ -287,6 +298,12 @@ async def model_metadata(model_id: str, request: Request, client_id: str) -> dic
             entry = await enrich_model_context_metadata(entry, cloud_attempts=cloud_attempts)
             provider_name = entry.get("provider") or model_id.partition("/")[0]
             _attach_reasoning_metadata(entry, provider_name)
+            attach_parity_metadata(
+                entry,
+                catalog=_cloud_catalog,
+                reference_catalog=_reference_catalog,
+                provider_name=provider_name,
+            )
             return entry
 
     public_models = _model_manager.get_public_model_map()

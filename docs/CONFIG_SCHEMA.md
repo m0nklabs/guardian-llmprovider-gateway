@@ -97,6 +97,36 @@ providers:
 
 `app/proxy/cloud_catalog.py`: `url = f"{provider.base_url}{provider.catalog_url or '/models'}"`.
 
+### 4b. Reference catalog sources (OpenRouter-parity metadata)
+
+A provider file may additionally declare cross-provider **reference** sources.
+These are metadata-only: they are fetched independently of `catalog_url` and
+never change which models are advertised, routed or allowlisted.
+
+```yaml
+# config/providers/openrouter.settings.yaml
+reference_catalog:
+  sources:
+    - name: openrouter
+      url: https://openrouter.ai/api/v1/models
+      enabled: true
+      ttl_seconds: 86400
+      send_api_key: false
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `name` | provider name | Source label reported in `metadata_sources` as `reference:<name>` |
+| `url` | — | Reference catalog endpoint (required for the source to be used) |
+| `enabled` | `true` | Set `false` to keep the block but stop fetching |
+| `ttl_seconds` | `86400` | Refresh TTL; a fresh catalog costs zero network traffic |
+| `send_api_key` | `false` | Send the declaring provider's API key with the request |
+
+Reader: `app/proxy/openrouter_reference.py` (`ModelReferenceCatalog`). Sources
+are re-read by `POST /api/config/reload`; the cache lives at
+`data/model_reference_catalog.json` (`app/paths.py:model_reference_catalog_file`).
+Full field contract: `@docs/OPENROUTER_PARITY.md` §2.
+
 ## 5. Wie leest de huidige settings.yaml (consumers-impact)
 
 | Key | Reader |

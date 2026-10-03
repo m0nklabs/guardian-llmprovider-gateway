@@ -84,6 +84,11 @@ class TestEnsureAllFresh:
         mock_catalog = AsyncMock()
         mock_catalog.ensure_all_fresh = AsyncMock(side_effect=[None, RuntimeError("boom"), None, None])
         monkeypatch.setattr(lifespan_mod, "_cloud_catalog", mock_catalog)
+        # Isolate the reference catalog: another test session may already have
+        # imported app.proxy.server, which injects the real ModelReferenceCatalog
+        # here.  Left in place it would do a real TTL-gated network fetch inside
+        # this loop and make the timing assertion below depend on run order.
+        monkeypatch.setattr(lifespan_mod, "_reference_catalog", None)
         monkeypatch.setattr(lifespan_mod, "_catalog_refresh_interval_s", 0.01)
 
         task = asyncio.create_task(lifespan_mod._catalog_refresh_loop())
@@ -94,5 +99,46 @@ class TestEnsureAllFresh:
 
         assert mock_catalog.ensure_all_fresh.await_count >= 3, (
             "a raising pass must not stop the loop"
+        )
+
+    @pytest.mark.asyncio
+    async def test_loop_also_refreshes_the_reference_catalog(self, monkeypatch):
+        """The cross-provider reference catalog rides the same TTL-gated pass."""
+        mock_cloud = AsyncMock()
+        mock_cloud.ensure_all_fresh = AsyncMock(return_value=None)
+        mock_reference = AsyncMock()
+        mock_reference.ensure_all_fresh = AsyncMock(return_value=None)
+        monkeypatch.setattr(lifespan_mod, "_cloud_catalog", mock_cloud)
+        monkeypatch.setattr(lifespan_mod, "_reference_catalog", mock_reference)
+        monkeypatch.setattr(lifespan_mod, "_catalog_refresh_interval_s", 0.01)
+
+        task = asyncio.create_task(lifespan_mod._catalog_refresh_loop())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+        assert mock_reference.ensure_all_fresh.await_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_a_failing_reference_catalog_never_stops_the_loop(self, monkeypatch):
+        """Reference data is optional: its failure must not take down the
+        provider catalog refresher."""
+        mock_cloud = AsyncMock()
+        mock_cloud.ensure_all_fresh = AsyncMock(return_value=None)
+        mock_reference = AsyncMock()
+        mock_reference.ensure_all_fresh = AsyncMock(side_effect=RuntimeError("reference down"))
+        monkeypatch.setattr(lifespan_mod, "_cloud_catalog", mock_cloud)
+        monkeypatch.setattr(lifespan_mod, "_reference_catalog", mock_reference)
+        monkeypatch.setattr(lifespan_mod, "_catalog_refresh_interval_s", 0.01)
+
+        task = asyncio.create_task(lifespan_mod._catalog_refresh_loop())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+        assert mock_cloud.ensure_all_fresh.await_count >= 2, (
+            "a raising reference pass must not stop the provider refresh loop"
         )
 

@@ -41,3 +41,20 @@ models:
     seed: 42
     temperature: 1
     top_p: 1
+# Reference catalog (docs/OPENROUTER_PARITY.md §2): cross-provider model
+# metadata gap filling. This is deliberately NOT the discovery endpoint — the
+# public /models list is fetched purely as reference data (architecture,
+# pricing, top_provider, supported_parameters, …) for models another provider
+# actually serves. It never changes which models Guardian advertises: the
+# account-scoped `catalog_url: /models/user` above stays authoritative for
+# discovery, routing and allowlists.
+reference_catalog:
+  sources:
+    # Public OpenRouter catalog (~460 models): fills the gaps left by upstreams
+    # whose own /v1/models advertises almost nothing (e.g. OpenAI says nothing
+    # about tools or reasoning). No API key is needed or sent.
+    - name: openrouter
+      url: https://openrouter.ai/api/v1/models
+      enabled: true
+      ttl_seconds: 86400
+      send_api_key: false
