@@ -109,9 +109,10 @@ STATUS_RATE_LIMITED = 2  # provider answered 429 and is in its cooldown window
 LOCAL_PRICING_KEYS: tuple[str, ...] = (
     "prompt",
     "completion",
-    "request",
-    "image",
+    "web_search",
     "input_cache_read",
+    "input_cache_write",
+    "input_cache_write_1h",
 )
 
 #: Metadata-presentation modules (the frozen interface of the parity feature).
@@ -688,9 +689,23 @@ def _fallback_local_facts(canonical_name: str | None) -> dict[str, Any]:
     model_type = _as_str(config.get("model_type"))
     if model_type:
         facts["model_type"] = model_type
-    for key in ("grammar_decoding", "tool_profile"):
-        if isinstance(config.get(key), bool):
-            facts[key] = config[key]
+    else:
+        # Mirror ``metadata_enrichment.local_model_facts``: a model launched with
+        # llama-server's ``--embedding`` flag is an embedding model even when the
+        # config omits ``model_type``, and without it the presentation layer
+        # would default the modality to ``text->text``.
+        extra_args = config.get("extra_args")
+        if isinstance(extra_args, str) and "--embedding" in extra_args.split():
+            facts["model_type"] = "embedding"
+    if isinstance(config.get("grammar_decoding"), bool):
+        facts["grammar_decoding"] = config["grammar_decoding"]
+    # ``tool_profile`` is the config's declared tool-support switch; the
+    # presentation layer consumes it as ``tool_support`` and advertises
+    # tools/tool_choice only on that key. Emitting the config name here meant a
+    # local model that declares tool support silently lost the capability when
+    # this fallback ran.
+    if isinstance(config.get("tool_profile"), bool):
+        facts["tool_support"] = config["tool_profile"]
     max_tokens = _as_positive_int(config.get("max_tokens"))
     if max_tokens is not None:
         facts["max_tokens"] = max_tokens

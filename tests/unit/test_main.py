@@ -143,19 +143,25 @@ async def test_both_surfaces_serve_the_same_catalog_payload():
     """Regression guard for the drift above: whatever the API app returns, the
     dashboard app returns the same document.
 
-    Deliberately hermetic — it asserts the *delegation*, not the content of the
-    catalogue. An earlier version of this test also asserted that the payload
-    carried enriched models, which passed locally (real cached catalogues) and
-    failed in CI, where no catalogue cache and no provider credentials exist and
-    every provider legitimately reports zero models. Enrichment is covered
-    deterministically by the test below.
+    ``created`` is ``int(time.time())`` at build time, so two calls that straddle
+    a second boundary legitimately differ; it is excluded rather than compared.
+    The delegation is what this test pins, not the clock. Everything else must be
+    byte-identical, which is the property that breaks if the two apps ever grow
+    separate implementations again.
     """
     from app.gateway import admin_api
+
+    def without_created(node):
+        if isinstance(node, dict):
+            return {k: without_created(v) for k, v in node.items() if k != "created"}
+        if isinstance(node, list):
+            return [without_created(v) for v in node]
+        return node
 
     dashboard = await main.list_cloud_catalog_ui("client")
     api = await admin_api.list_cloud_catalog("client")
 
-    assert dashboard == api
+    assert without_created(dashboard) == without_created(api)
 
 
 @pytest.mark.asyncio

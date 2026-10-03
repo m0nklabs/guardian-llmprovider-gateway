@@ -564,12 +564,67 @@ def test_local_pricing_rejects_a_cloud_passthrough_block():
     assert me._local_pricing({"prompt": "0.0000025", "completion": "0.00001"}) == {
         "prompt": "0",
         "completion": "0",
-        "request": "0",
-        "image": "0",
+        "web_search": "0",
         "input_cache_read": "0",
+        "input_cache_write": "0",
+        "input_cache_write_1h": "0",
         "local": "true",
     }
     assert me._local_pricing({"prompt": "0", "local": "true"}) == {"prompt": "0", "local": "true"}
+
+
+def test_local_pricing_key_set_matches_the_presentation_layer():
+    """Both modules claim to implement §3.2. If their key sets drift, the shape a
+    client sees for the same local route depends on which module happened to be
+    importable. Pin them together, and keep the OpenRouter modality add-on keys
+    out: zeroing `image` would assert a price for a capability the local route
+    does not have."""
+    from app.gateway import model_metadata_presentation as presentation
+
+    assert me.LOCAL_PRICING_KEYS == presentation.LOCAL_PRICING_KEYS
+    assert "image" not in me.LOCAL_PRICING_KEYS
+
+
+def test_fallback_local_facts_publish_tool_support_not_the_config_key(monkeypatch):
+    """The presentation layer advertises ``tools``/``tool_choice`` only when the
+    facts carry ``tool_support is True``. This fallback used to copy the config's
+    own ``tool_profile`` name, so a local model that declares tool support
+    silently lost the capability whenever the fallback ran — which is exactly the
+    case the fallback exists for."""
+    monkeypatch.setattr(
+        me,
+        "_local_config",
+        lambda name: {"tool_profile": True, "grammar_decoding": True},
+    )
+    facts = me._fallback_local_facts("some-model")
+
+    assert facts["tool_support"] is True
+    assert "tool_profile" not in facts
+    assert facts["grammar_decoding"] is True
+
+
+def test_fallback_local_facts_match_the_enrichment_module(monkeypatch):
+    """The fallback must stay behaviourally identical to the primary path."""
+    from app.gateway.metadata_enrichment import local_model_facts
+
+    config = {"extra_args": "--embedding --reasoning off", "tool_profile": True, "max_tokens": 4096}
+    monkeypatch.setattr(me, "_local_config", lambda name: dict(config))
+    monkeypatch.setattr(me, "_model_manager", None)
+
+    fallback = me._fallback_local_facts("m")
+
+    class _Manager:
+        models = {"m": config}
+
+        def get_vision_capability(self, name):
+            return {"configured": False, "status": "text_only", "validated": False}
+
+    primary = local_model_facts(_Manager(), "m")
+
+    assert fallback["model_type"] == "embedding"
+    assert fallback["tool_support"] is True
+    assert primary["tool_support"] is True
+    assert fallback["max_tokens"] == primary["max_tokens"] == 4096
 
 
 # ── (e) the frozen §4 key list, with nulls where ungrounded ─────────
