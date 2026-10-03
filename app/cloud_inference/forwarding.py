@@ -27,13 +27,20 @@ from fastapi.responses import StreamingResponse
 from app.capture.policy import PolicyResult
 from app.capture.schema import BuildContext
 from app.capture.stream_assembler import StreamResponseAssembler
+from app.config_loader import CONFIG
+from app.gateway.caretaker_client import (
+    CaretakerModelLoadFailed,
+    CaretakerModelNotFound,
+    CaretakerUnavailable,
+    CaretakerVramExceeded,
+)
 from app.gateway.queue_helpers import (
     request_cancel_http_exception,
     stop_background_task,
     watch_client_disconnect,
 )
 from app.gateway.streaming import StreamProgressWatchdog
-from app.proxy.providers import ProviderRegistry
+from app.proxy.providers import ProviderRegistry, _expand_env
 
 logger = logging.getLogger("Guardian")
 
@@ -163,6 +170,118 @@ def init(
     _grammar_enabled = grammar_enabled
     _grammar_cloud_auto_convert_json = grammar_cloud_auto_convert_json
     _grammar_cloud_strict_mode = grammar_cloud_strict_mode
+
+
+# ── Remote caretaker ensure for passive failover candidates (F6) ─────────
+# A failover candidate whose provider declares ``management_url`` runs its
+# ensure through THAT host's caretaker before the forward — otherwise
+# llama-server silently serves whatever model happens to be loaded there (it
+# ignores the request's model name; the 2026-09-01 mismatch incident class,
+# observed live 2026-09-23: a windows/qwen35-abliterated fallback answered
+# with its loaded qwen3.5-9b).  The remote caretaker is the same daemon
+# contract as the local one (NSSM on Windows vs systemd here), so this
+# mirrors the TTS/STT remote-ensure pattern (speech_routing +
+# ``tts._try_backend``), including the provider-file ``management_key`` over
+# LAN http (firewall-restricted LAN, established F6 practice; the
+# cleartext-key refusal in ``caretaker_client.build_caretaker_client`` is a
+# CARETAKER_KEY local-lifecycle rule and does not apply here).
+
+_REMOTE_ENSURE_TIMEOUT_DEFAULT_S = 120.0
+_REMOTE_ENSURE_TIMEOUT_MIN_S = 30.0
+_REMOTE_ENSURE_TIMEOUT_MAX_S = 600.0
+
+
+def _remote_ensure_timeout_s() -> float:
+    """Configured remote-ensure window (hot-reloadable, bounded).
+
+    Reads ``failover.remote_ensure_timeout_seconds`` from global settings; a
+    fresh cold load on the Windows host can take ~30-60 s, so the default
+    (120 s) must exceed the local daemon ``client_timeout_seconds`` ceiling.
+    Invalid/missing values fall back to the default; out-of-bounds values are
+    clamped (fail-safe: a config typo cannot turn the ensure into an
+    unbounded hang or an always-timed-out probe).
+    """
+    section = CONFIG.get("failover") if isinstance(CONFIG, dict) else None
+    raw = section.get("remote_ensure_timeout_seconds") if isinstance(section, dict) else None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return _REMOTE_ENSURE_TIMEOUT_DEFAULT_S
+    return min(max(value, _REMOTE_ENSURE_TIMEOUT_MIN_S), _REMOTE_ENSURE_TIMEOUT_MAX_S)
+
+
+def _candidate_remote_management(provider_name: str) -> tuple[str, str] | None:
+    """``(management_url, management_key)`` for a passive candidate whose
+    provider doc declares ``management_url``; ``None`` otherwise.
+
+    Mirrors ``speech_routing.resolve_speech_route``: raw provider docs from
+    CONFIG, ``${VAR}``-expanded, ``management_key`` falling back to
+    ``api_key``.  Cloud providers declare no ``management_url`` and therefore
+    never get an ensure attempt.
+    """
+    doc = (CONFIG.get("providers") or {}).get(provider_name) if isinstance(CONFIG, dict) else None
+    if not isinstance(doc, dict):
+        return None
+    mgmt_url = _expand_env(str(doc.get("management_url") or "")).rstrip("/")
+    if not mgmt_url:
+        return None
+    return mgmt_url, _expand_env(str(doc.get("management_key") or doc.get("api_key") or ""))
+
+
+async def _ensure_remote_candidate(
+    provider_name: str, model: str, *, _transport: httpx.AsyncBaseTransport | None = None
+) -> dict:
+    """POST ``/ensure`` on a passive candidate's own caretaker (remote host).
+
+    ``model`` arrives in the failover-group form, brand-prefixed
+    (``windows/<model>``); the caretaker knows the BARE model id, so the
+    provider's ``brand`` prefix is stripped before the call.  Raises the same
+    error taxonomy as the local caretaker client on any failure so the
+    failover loop skips to the next candidate — never silently forwards to a
+    host that serves a different model.  ``_transport`` is a test-only
+    override (httpx.MockTransport), not part of the public contract.
+    """
+    resolved = _candidate_remote_management(provider_name)
+    if resolved is None:  # defensive: the loop gates on this before calling
+        raise CaretakerUnavailable(f"provider '{provider_name}' declares no management_url")
+    mgmt_url, key = resolved
+    doc = (CONFIG.get("providers") or {}).get(provider_name) or {}
+    brand = str(doc.get("brand") or "")
+    bare_model = model
+    if brand and bare_model.startswith(f"{brand}/"):
+        bare_model = bare_model[len(brand) + 1:]
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    try:
+        async with httpx.AsyncClient(
+            timeout=_remote_ensure_timeout_s(), transport=_transport
+        ) as client:
+            resp = await client.post(
+                f"{mgmt_url}/ensure", json={"model": bare_model}, headers=headers
+            )
+    except httpx.HTTPError as exc:
+        raise CaretakerUnavailable(mgmt_url) from exc
+    if resp.status_code == 200:
+        try:
+            body = resp.json()
+        except ValueError:
+            body = {}
+        if isinstance(body, dict) and body.get("ok") is False:
+            raise CaretakerModelLoadFailed(
+                bare_model, str(body.get("reason") or body)[:160]
+            )
+        return body if isinstance(body, dict) else {}
+    if resp.status_code == 404:
+        raise CaretakerModelNotFound(bare_model)
+    if resp.status_code == 503:
+        try:
+            body = resp.json()
+        except ValueError:
+            body = {}
+        body = body if isinstance(body, dict) else {}
+        if body.get("error") == "vram_limit_exceeded":
+            raise CaretakerVramExceeded(bare_model)
+        raise CaretakerModelLoadFailed(bare_model, body.get("crash_details"))
+    raise CaretakerUnavailable(mgmt_url, status_code=resp.status_code)
 
 
 def _derive_response_format_from_grammar(grammar: Any, json_schema: Any) -> dict[str, Any] | None:
@@ -382,15 +501,22 @@ async def forward_to_cloud_provider(
     for attempt_index, (provider, upstream_model) in enumerate(attempts):
         is_last_attempt = attempt_index == len(attempts) - 1
 
-        # ── Local failover candidate (F6 cross-host): a managed provider in a
-        # failover group is THIS gateway's own llama-server — its lifecycle
-        # must run before the forward, or the backend may silently serve a
-        # DIFFERENT loaded model (llama-server ignores the request model name;
-        # the 2026-09-01 mismatch incident class).  ensure_backend is
-        # idempotent (no-op fast-path when the backend already serves the
-        # model, remote-first via the caretaker) and raises on load failure —
-        # treat that as a failed attempt and fall through to the next
-        # candidate, exactly like a failed cloud send.
+        # ── Failover-candidate lifecycle (F6 cross-host) ────────────────────
+        # A candidate's backend must actually serve the requested model BEFORE
+        # the forward, or llama-server silently serves whatever model happens
+        # to be loaded there (it ignores the request's model name; the
+        # 2026-09-01 mismatch incident class).
+        #
+        # - managed candidate: THIS gateway's own llama-server — its lifecycle
+        #   runs via the local caretaker first (ensure_backend is idempotent:
+        #   no-op fast-path when the backend already serves the model, and
+        #   raises on load failure).
+        # - passive candidate whose provider declares management_url: the SAME
+        #   caretaker daemon contract on that host — remote ensure via
+        #   ``_ensure_remote_candidate`` (Windows NSSM caretaker, F6).
+        # Either failure skips to the next candidate exactly like a failed
+        # cloud send; on the last attempt it surfaces 503 (model_load_failed).
+        ensure_error: Exception | None = None
         if getattr(provider, "managed", False):
             from app.gateway import caretaker_runtime
 
@@ -400,27 +526,36 @@ async def forward_to_cloud_provider(
                     local_fallback=lambda: _model_manager.switch_model(upstream_model),
                 )
             except Exception as exc:
-                logger.warning(
-                    "🔀 Failover: local candidate '%s/%s' could not be ensured (%s) — next candidate",
-                    provider.name, upstream_model, exc,
-                )
-                if not is_last_attempt:
-                    continue
-                _finish_live_request_usage(request, status_code=503, response_bytes=0)
-                _dispatch_capture_request_failed(
-                    capture_ctx,
-                    error_code="model_load_failed",
-                    http_status=503,
-                    sanitized_message=f"local failover candidate failed to load: {upstream_model}",
-                    queue_wait_ms=0,
-                    duration_ms=(time.monotonic() - cloud_capture_start_time) * 1000 if cloud_capture_start_time else None,
-                    attempts=attempt_index + 1,
-                    policy_result=capture_policy_result,
-                ) if capture_ctx is not None else None
-                raise HTTPException(
-                    status_code=503,
-                    detail=f"Local failover candidate '{upstream_model}' failed to load: {exc}",
-                )
+                ensure_error = exc
+        elif _candidate_remote_management(provider.name) is not None:
+            try:
+                await _ensure_remote_candidate(provider.name, upstream_model)
+            except Exception as exc:
+                ensure_error = exc
+
+        if ensure_error is not None:
+            logger.warning(
+                "🔀 Failover: %s candidate '%s/%s' could not be ensured (%s) — next candidate",
+                "local" if getattr(provider, "managed", False) else "remote",
+                provider.name, upstream_model, ensure_error,
+            )
+            if not is_last_attempt:
+                continue
+            _finish_live_request_usage(request, status_code=503, response_bytes=0)
+            _dispatch_capture_request_failed(
+                capture_ctx,
+                error_code="model_load_failed",
+                http_status=503,
+                sanitized_message=f"failover candidate failed to load: {upstream_model}",
+                queue_wait_ms=0,
+                duration_ms=(time.monotonic() - cloud_capture_start_time) * 1000 if cloud_capture_start_time else None,
+                attempts=attempt_index + 1,
+                policy_result=capture_policy_result,
+            ) if capture_ctx is not None else None
+            raise HTTPException(
+                status_code=503,
+                detail=f"Failover candidate '{upstream_model}' failed to load: {ensure_error}",
+            )
 
         # Capture: record the resolved provider on the capture context (C11)
         # so every terminal event for this request reports which provider

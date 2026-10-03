@@ -71,7 +71,7 @@ stt:
   # Provider-driven failover order — only providers that declare stt_url
   # participate (mirrors tts.providers; see docs/API_REFERENCE.md).
   providers:
-    - windows-gpu-local
+    - 14700k-local
 timeouts:
   tiers:
     tier_70b:
@@ -190,6 +190,15 @@ degeneration:
 # skips candidates in failure cooldown, so single-model provider capacity
 # windows (nemotron lightning 200+null+500, poolside request_failed — capture
 # evidence 09-09) no longer strand a caller.
+# Remote-ensure window for PASSIVE failover candidates (windows): before
+# forwarding, the gateway ensures the model on that host's caretaker (same
+# daemon contract as the local one; fixes the silent wrong-model serve when
+# the fallback model is not loaded).  A fresh cold load on the Windows host
+# can take ~30-60 s, so this must exceed the caretaker client timeout.
+# Hot-reloadable; bounded to 30-600 s.
+failover:
+  remote_ensure_timeout_seconds: 120
+
 failover_groups:
   # F6 cross-host failover (plan §F6): qwen3.5-9b op beide LAN-GPU's.
   # Windows eerst (dedicated GPU, altijd geladen via boot-ensure); de lokale
@@ -198,8 +207,17 @@ failover_groups:
   # geladen workload; daarom alleen als fallback).
   qwen35:
     candidates:
-      - {provider: windows-gpu-local, model: windows/qwen3.5-9b}
-      - {provider: ai-node-local, model: qwen3.5-9b}
+      - {provider: 14700k-local, model: windows/qwen3.5-9b}
+      - {provider: ai-kvm2-local, model: qwen3.5-9b}
+
+  # Operator request 2026-09-23: Huihui-Qwen3.5-9B-abliterated (Q4_K_M) on both
+  # LAN GPU hosts, kvm2 FIRST (explicit operator order — the local ensure model-
+  # switch is accepted here, unlike the qwen35 group above). Windows as fallback
+  # when kvm2 is busy (own workload loaded / capacity).
+  qwen35-abliterated:
+    candidates:
+      - {provider: ai-kvm2-local, model: Huihui-Qwen3.5-9B-abliterated}
+      - {provider: 14700k-local, model: windows/Huihui-Qwen3.5-9B-abliterated}
 
   free:
     candidates:
@@ -227,7 +245,7 @@ tts:
   # The caretaker blocks on cold start (model load) and can wait for VRAM to
   # free up; this must stay above CARETAKER_TTS_START_TIMEOUT +
   # CARETAKER_TTS_VRAM_WAIT_SECONDS of the slowest configured host
-  # (ai-node: 240 + 120 = 360).
+  # (ai-kvm2: 240 + 120 = 360).
   ensure_timeout_seconds: 420
   default_instruct: ""
   # Provider-driven speech routing (NO cloud/local distinction — the caretaker
@@ -235,5 +253,5 @@ tts:
   # Each provider declares tts_url + management_url + management_key in its own
   # file; the order below is the failover order (first = primary).
   providers:
-    - windows-gpu-local
-    - ai-node-local
+    - 14700k-local
+    - ai-kvm2-local

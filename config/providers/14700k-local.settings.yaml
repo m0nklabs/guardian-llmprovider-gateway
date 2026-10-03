@@ -1,0 +1,32 @@
+# F6: the 14700K Windows GPU as a passive LAN provider (docs/IMPLEMENTATION_PLAN.md
+# §F6 + docs/LAN_GPU_BACKENDS.md step 2).  The host runs its own llama-server +
+# caretaker (operator-managed, NSSM service on Windows); Guardian only forwards
+# traffic — NO lifecycle / idle-unload / VRAM scheduler / auto-switch for this GPU.
+#
+# ACTIVATED 2026-09-11 (guardian session): host 192.168.1.245, caretaker live on
+# :11441 (NSSM), llama-server b10964 CUDA 13.3 on :11440, model qwen3.5-9b
+# (ngl 24, 16k ctx — display-GPU VRAM-realistic, see the Windows models file).
+local: false
+enabled: true
+base_url: http://192.168.1.245:11440/v1
+api_key: ${WINDOWS_LAN_KEY}
+brand: windows
+# llama-server advertises /v1/models (OpenAI-compatible); bare model ids are
+# normalized to windows/<model> by the catalog (brand above).  catalog_url is
+# APPENDED to base_url (which already ends in /v1) — /models → /v1/models.
+catalog_url: /models
+management_url: http://192.168.1.245:11441
+management_key: ${WINDOWS_LAN_KEY}
+# TTS engine (qwen3tts-http, caretaker-managed on-demand lifecycle)
+tts_url: http://192.168.1.245:11450
+# STT engine (Qwen3-ASR via sherpa-onnx, caretaker-managed on-demand lifecycle)
+stt_url: http://192.168.1.245:11451
+# llama-server reports no context_length: per-model overrides (brand-normalized
+# windows/<model> ids).
+models:
+  "14700k-local/windows/qwen3.5-9b":
+    context_window: 16384
+    benchmark_context_limit: 131072
+  "14700k-local/windows/Huihui-Qwen3.5-9B-abliterated":
+    context_window: 16384
+    benchmark_context_limit: 131072
