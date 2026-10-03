@@ -141,14 +141,88 @@ async def test_dashboard_cloud_catalog_refresh_delegates(monkeypatch):
 @pytest.mark.asyncio
 async def test_both_surfaces_serve_the_same_catalog_payload():
     """Regression guard for the drift above: whatever the API app returns, the
-    dashboard app returns the same document, including the ``models`` array the
-    catalogue view renders."""
+    dashboard app returns the same document.
+
+    Deliberately hermetic — it asserts the *delegation*, not the content of the
+    catalogue. An earlier version of this test also asserted that the payload
+    carried enriched models, which passed locally (real cached catalogues) and
+    failed in CI, where no catalogue cache and no provider credentials exist and
+    every provider legitimately reports zero models. Enrichment is covered
+    deterministically by the test below.
+    """
     from app.gateway import admin_api
 
     dashboard = await main.list_cloud_catalog_ui("client")
     api = await admin_api.list_cloud_catalog("client")
 
     assert dashboard == api
-    assert any(p.get("models") for p in dashboard["catalog"]), (
-        "the dashboard payload must carry enriched models, not just addresses"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_catalog_carries_enriched_models(monkeypatch):
+    """The dashboard payload must carry ``models``, not just bare addresses —
+    that is what the catalogue view renders. Uses fakes so the result does not
+    depend on runtime catalogues or credentials."""
+    from app.gateway import admin_api
+
+    provider = SimpleNamespace(name="openrouter", is_configured=True, managed=False)
+    captured = {
+        "openai/gpt-4o": {
+            "name": "OpenAI: GPT-4o",
+            "architecture": {
+                "modality": "text+image->text",
+                "input_modalities": ["text", "image"],
+                "output_modalities": ["text"],
+                "tokenizer": "GPT",
+                "instruct_type": None,
+            },
+            "pricing": {"prompt": "0.0000025"},
+            "supported_parameters": ["tools"],
+        }
+    }
+
+    class _Catalog:
+        _catalogs = {"openrouter": {"fetched_at": 1.0}}
+
+        def get_models_for_provider(self, name):
+            return {"openai/gpt-4o": "gpt-4o"}
+
+        def get_model_metadata(self, provider_name, identity):
+            return dict(captured.get(identity, {}))
+
+        def get_model_overrides(self, identity, provider_name=""):
+            return {}
+
+        def is_auth_error(self, name):
+            return False
+
+    monkeypatch.setattr(
+        admin_api,
+        "_provider_registry",
+        SimpleNamespace(
+            get_enabled_providers=lambda: [provider],
+            build_model_metadata_entry=lambda full_id: {
+                "id": full_id,
+                "object": "model",
+                "created": 1,
+                "owned_by": "openrouter",
+                "permission": [],
+                "served_by": "cloud",
+                "provider": "openrouter",
+            },
+        ),
     )
+    monkeypatch.setattr(admin_api, "_cloud_catalog", _Catalog())
+    monkeypatch.setattr(admin_api, "_reference_catalog", None)
+
+    result = await main.list_cloud_catalog_ui("client")
+    entry = result["catalog"][0]
+
+    assert entry["addresses"] == ["openrouter/openai/gpt-4o"]
+    assert len(entry["models"]) == 1
+    model = entry["models"][0]
+    assert model["id"] == "openrouter/openai/gpt-4o"
+    assert model["architecture"]["input_modalities"] == ["text", "image"]
+    assert model["supported_parameters"] == ["tools"]
+    assert "metadata_sources" in model
+
