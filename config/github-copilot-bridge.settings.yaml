@@ -1,0 +1,10 @@
+# Dynamic protocol adapter; no per-model aliases or model allowlist.
+upstream_url: http://127.0.0.1:4141/v1
+upstream_key_env: COPILOT_GATEWAY_KEY
+client_key_env: GITHUB_API_KEY
+refresh_seconds: 300
+catalog_timeout_seconds: 30
+timeout_seconds: 1200
+max_body_bytes: 16777216
+listen_host: 127.0.0.1
+listen_port: 4142

@@ -1,0 +1,18 @@
+[Unit]
+Description=Guardian dynamic GitHub Copilot catalog and protocol adapter
+After=network-online.target copilot-api.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h/guardian-llmprovider-gateway
+EnvironmentFile=%h/.dsh/.env
+EnvironmentFile=%h/guardian-llmprovider-gateway/.env
+Environment=GUARDIAN_COPILOT_BRIDGE_CONFIG=%h/guardian-llmprovider-gateway/config/github-copilot-bridge.settings.yaml
+ExecStart=%h/.venvs/litellm/bin/python3.12 %h/guardian-llmprovider-gateway/scripts/start_copilot_bridge.py
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

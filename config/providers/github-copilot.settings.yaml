@@ -1,0 +1,19 @@
+# GitHub Copilot subscription models through the local LiteLLM Responses bridge.
+# Public addresses: github-copilot/{brand}/{service}.
+# The bridge receives brand/service IDs and forwards to copilot-api.
+enabled: true
+base_url: http://127.0.0.1:4000/v1
+api_key: ${GITHUB_API_KEY}
+timeout_seconds: 1200
+# This bridge also serves unrelated Claude Code aliases. Advertise and route
+# only the explicitly onboarded Copilot models, not the bridge's entire catalog.
+catalog_allowlist:
+- openai/gpt-6.1-sol
+- openai/gpt-6-astra
+models:
+  openai/gpt-6.1-sol:
+    context_window: 1050000
+    max_tokens: 128000
+  openai/gpt-6-astra:
+    context_window: 1050000
+    max_tokens: 128000
