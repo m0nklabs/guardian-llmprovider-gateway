@@ -96,43 +96,78 @@ Notes:
 | --- | --- | --- | --- |
 | `GET` | `/v1/models` | No | List configured canonical models and aliases |
 | `GET` | `/v1/models/{model_id}` | No | Return metadata for one model or alias |
+| `GET` | `/v1/models/{model_id}/endpoints` | No | Return the serving routes for one model (OpenRouter-style) |
 | `GET` | `/api/tags` | No | Ollama-compatible model list |
 | `POST` | `/api/show` | No | Ollama-compatible metadata for one model |
 | `GET` | `/api/version` | No | Ollama-compatible version endpoint |
 
 #### `GET /v1/models`
 
-Returns OpenAI-style model entries enriched with Guardian-specific metadata.
+Returns OpenAI-style model entries enriched with Guardian-specific metadata and
+OpenRouter-parity model metadata.
 
 Representative item:
 
 ```json
 {
-  "id": "qwen3.6-35b-uncensored",
+  "id": "openrouter/anthropic/claude-sonnet-4.6",
   "object": "model",
-  "created": 1716650000,
-  "owned_by": "organization-owner",
+  "created": 1771342990,
+  "owned_by": "openrouter",
   "permission": [],
-  "max_context": 262144,
-  "benchmark_context_limit": 262144,
-  "context": 262144,
-  "context_length": 262144,
-  "max_input_tokens": 262144,
-  "meta": {"n_ctx": 262144},
-  "advertised_context": 258048,
-  "input_modalities": ["text", "image"],
-  "configured_input_modalities": ["text", "image"],
-  "vision": {
-    "configured": true,
-    "status": "supported",
-    "validated": true
+  "served_by": "cloud",
+  "provider": "openrouter",
+  "max_context": 1000000,
+  "benchmark_context_limit": 1000000,
+  "context": 1000000,
+  "context_length": 1000000,
+  "max_input_tokens": 1000000,
+  "meta": {"n_ctx": 1000000},
+  "name": "Anthropic: Claude Sonnet 4.6",
+  "description": "Sonnet 4.6 is Anthropic's most capable Sonnet-class model yet, ...",
+  "canonical_slug": "anthropic/claude-4.6-sonnet-20260217",
+  "hugging_face_id": null,
+  "architecture": {
+    "modality": "text+image+file->text",
+    "input_modalities": ["text", "image", "file"],
+    "output_modalities": ["text"],
+    "tokenizer": "Claude",
+    "instruct_type": null
   },
+  "pricing": {
+    "prompt": "0.000003",
+    "completion": "0.000015",
+    "input_cache_read": "0.0000003",
+    "input_cache_write": "0.00000375"
+  },
+  "top_provider": {
+    "context_length": 1000000,
+    "max_completion_tokens": 128000,
+    "is_moderated": true
+  },
+  "per_request_limits": null,
+  "supported_parameters": [
+    "include_reasoning", "max_tokens", "reasoning", "reasoning_effort",
+    "response_format", "stop", "structured_outputs", "temperature",
+    "tool_choice", "tools", "top_k", "top_p"
+  ],
+  "default_parameters": {},
+  "knowledge_cutoff": null,
+  "expiration_date": null,
+  "links": {"details": "/v1/models/openrouter/anthropic/claude-sonnet-4.6/endpoints"},
   "reasoning": {
-    "supported_efforts": ["max", "high", "low"],
-    "default_effort": "high",
+    "supported_efforts": ["max", "high", "medium", "low"],
+    "default_effort": "medium",
     "mandatory": false,
     "default_enabled": true
-  }
+  },
+  "metadata_sources": {
+    "architecture": "reference:openrouter",
+    "supported_parameters": "upstream"
+  },
+  "input_modalities": ["text", "image"],
+  "configured_input_modalities": ["text", "image"],
+  "vision": {"configured": true, "status": "supported", "validated": true}
 }
 ```
 
@@ -145,8 +180,9 @@ Notes:
   presence of an `mmproj` path.
 - Every entry has a positive `context_length`, `meta.n_ctx`, and
   `max_input_tokens`. Guardian resolves manual `context_overrides`, then a
-  cached cloud catalog or the active local backend's `/props`, before using a
-  conservative `131072` fallback.
+  cached cloud catalog or the active local backend's `/props`, then the
+  cross-provider reference catalog, before using a conservative `131072`
+  fallback.
 - `reasoning` (optional, cloud models only): present when the upstream provider
   catalog advertises reasoning-effort information (currently OpenRouter).
   `supported_efforts` lists the advertised effort levels, `default_effort` the
@@ -159,6 +195,120 @@ Notes:
 - Since the cloud-access redesign, `/v1/models` also lists cloud models from
   the dynamic catalog (`{provider}/{brand}/{model}` addresses); local models
   and aliases always appear. See `@docs/LLM_ROUTER.md`.
+
+##### OpenRouter-parity metadata
+
+`/v1/models` and `/v1/models/{model_id}` additionally carry the model metadata
+OpenRouter publishes, using OpenRouter's own field names and conventions. The
+full contract lives in `@docs/OPENROUTER_PARITY.md`; the essentials:
+
+- **Unknown is `null`, never absent.** Every parity key is present on every
+  entry, and `null` means "unknown". This is OpenRouter's own convention and it
+  lets a client render a field without a presence check.
+- **Precedence per field**: the operator's per-model config override, then this
+  route's own upstream catalog advertisement, then the cross-provider
+  *reference catalog*, then a grounded synthesis for locally served models.
+- **Nothing is fabricated.** `pricing` is `null` for a cloud model whose
+  upstream advertises no price — Guardian never borrows another provider's
+  price. `tokenizer`, `instruct_type`, `is_moderated` and `knowledge_cutoff`
+  stay `null` when unknown. Locally served models report grounded zero pricing
+  (`"0"`), because local inference genuinely costs nothing.
+- **`metadata_sources`** reports provenance per section: `upstream`,
+  `override`, `reference:<name>`, `local` or `derived`. A section absent from
+  the map came from the route's own upstream advertisement, so an operator can
+  always tell an upstream fact from a cross-provider gap fill.
+- **`supported_parameters`** is passed through verbatim when the upstream
+  advertises it and filled from the reference catalog when it does not. For
+  locally served models it lists only what Guardian's local path genuinely
+  forwards, so a capability Guardian would drop is never advertised.
+- **Additive contract.** No existing key changes name, type or meaning, and
+  cloud access gating is unchanged.
+
+##### Cross-provider reference catalog
+
+Some providers advertise almost nothing in their own `/v1/models` — OpenAI,
+Google and NVIDIA return little more than model ids — while another provider's
+catalog describes the same model in detail. A provider may therefore declare
+reference sources in its provider settings file:
+
+```yaml
+reference_catalog:
+  sources:
+    - name: openrouter
+      url: https://openrouter.ai/api/v1/models
+      enabled: true
+      ttl_seconds: 86400
+      send_api_key: false
+```
+
+Reference sources are keyed on the **identity key** — the `{brand}/{model}`
+part of a `{provider}/{brand}/{model}` address — so two providers serving the
+same model share metadata. A reference source is fetched independently of
+`catalog_url` and **never** affects which models are advertised, routed or
+allowlisted; it only fills gaps. Fetches are fail-open: on error the last
+successful reference catalog is kept.
+
+#### `GET /v1/models/{model_id}/endpoints`
+
+Returns OpenRouter's endpoint shape for one model, filled with the routes
+Guardian can actually use:
+
+```json
+{
+  "data": {
+    "id": "openrouter/anthropic/claude-sonnet-4.6",
+    "name": "Anthropic: Claude Sonnet 4.6",
+    "created": 1771342990,
+    "description": "...",
+    "architecture": {"modality": "text+image+file->text", "...": "..."},
+    "endpoints": [
+      {
+        "name": "openrouter | anthropic/claude-sonnet-4.6",
+        "model_id": "anthropic/claude-sonnet-4.6",
+        "model_name": "Anthropic: Claude Sonnet 4.6",
+        "context_length": 1000000,
+        "pricing": {"prompt": "0.000003", "completion": "0.000015"},
+        "provider_name": "openrouter",
+        "tag": "openrouter",
+        "quantization": null,
+        "max_completion_tokens": 128000,
+        "max_prompt_tokens": null,
+        "supported_parameters": ["tools", "reasoning", "response_format"],
+        "supports_tool_choice": {"none": true, "auto": true, "required": true, "function": true},
+        "native_tools": null,
+        "supports_implicit_caching": null,
+        "supports_image_reference": null,
+        "status": null,
+        "uptime_last_30m": null,
+        "uptime_last_5m": null,
+        "uptime_last_1d": null,
+        "latency_last_30m": null,
+        "throughput_last_30m": null
+      }
+    ]
+  }
+}
+```
+
+Behaviour:
+
+- A cloud model yields one endpoint per enabled and configured provider whose
+  catalog genuinely contains the same identity key, plus a local backend
+  endpoint when a local provider serves it.
+- A `failover/{group}` address yields one endpoint per configured candidate,
+  with the group name in `tag`.
+- A locally served model yields its local backend endpoint.
+- `status` is `0` when the route is known healthy and non-zero when Guardian
+  knows it is degraded; it is `null` when Guardian has no health signal for that
+  route. Uptime, latency and throughput are `null`: Guardian does not collect
+  per-route time series, and reporting a plausible-looking number instead would
+  be a fabrication.
+- Unknown model → `404`. A key without `cloud_gateway_access` → `403` and no
+  cloud endpoints.
+- Route registration note: this route is declared *before* the greedy
+  `/v1/models/{model_id:path}` catch-all. A model id that literally ends in
+  `/endpoints` is therefore interpreted as an endpoints request, matching
+  OpenRouter's own ambiguity.
 
 #### `GET /api/tags`
 

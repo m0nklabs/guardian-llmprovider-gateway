@@ -269,3 +269,182 @@ Carry-forward per gearchiveerd milestone (essentie + bewijs → voltekst in `doc
 - **Untracked note:** `docs/ROADMAP.md`, new provider file and test are
   uncommitted, consistent with the preserved pre-existing dirty tree; no
   commit/push authorized this task.
+
+## 2026-10-03 — OpenRouter-parity model metadata for Guardian's discovery API — DSH agent (deepseek-v4.1-flash)
+
+- **Goal (operator):** Guardian's `/v1/models` returned a thin entry (`id`,
+  `object`, `created`, `owned_by`, `permission`, `served_by`, `provider` plus
+  context fields) while OpenRouter publishes `architecture`, `pricing`,
+  `top_provider`, `supported_parameters`, `name`/`description`,
+  `knowledge_cutoff`, … Guardian should answer the same information in the
+  same style, **including for providers whose own `/v1/models` advertises
+  almost nothing** — filled in from another provider's catalog for the same
+  model. Contract: `docs/OPENROUTER_PARITY.md` (new).
+- **Delivered:** per-model metadata capture in `CloudModelCatalog` (trap 3:
+  added to **both** `_persist_cache` and `_load_disk_cache`); new
+  `ModelReferenceCatalog` (`app/proxy/openrouter_reference.py`) + path helper;
+  new pure `app/gateway/model_metadata_presentation.py`; new
+  `app/gateway/metadata_enrichment.py` merge layer; new
+  `GET /v1/models/{model_id}/endpoints` (`app/gateway/model_endpoints.py`,
+  registered before the greedy `{model_id:path}` catch-all); dashboard catalog
+  view in `app/ui/index.html`; `reference_catalog.sources` config block on the
+  openrouter provider file (`catalog_url: /models/user` deliberately untouched,
+  so discovery still advertises only account-reachable models while the public
+  466-model list is used purely as reference data).
+- **Decision worth replaying — model-shaped vs route-shaped metadata.**
+  `architecture`, `supported_parameters`, `name`, `description` and
+  `top_provider.context_length` may be filled from the reference catalog because
+  they describe the *model*. `pricing` and `top_provider.is_moderated` may
+  **not**: they describe the *route*. OpenRouter charges $2.50/M for
+  `openai/gpt-4o`; NVIDIA serves it free. A borrowed price would state something
+  false in a gateway that bills real traffic, so a cloud route with no price of
+  its own reports `"pricing": null`. Operator was told this is a deliberate
+  choice, not an omission, and can override it.
+- **Verified (observed, in-process ASGI app + real config, no service restart):**
+  `/v1/models` → 288 entries / 242 cloud, 285 with `metadata_sources`;
+  `openai/openai/gpt-4.1-nano` and `openai/openai/gpt-4-turbo` receive name,
+  architecture, `supported_parameters` and the true `context_length`
+  (1047576 / 128000) from `reference:openrouter`, while
+  `openai/openai/gpt-5.4-mini-2026-03-17` — which OpenRouter also lacks — stays
+  honestly all-`null`/`derived`; local models report grounded zero pricing, a
+  vision model `text+image->text` and an embedding model `text->embedding`;
+  `failover/free` → 7 endpoints, `failover/qwen35` → 2 local machines;
+  `cloud_gateway_access: false` → 0 cloud entries, local models still visible,
+  `/endpoints` returns 403. Suite: **1669 passed, 0 failed**.
+- **Bug found and fixed in my own wiring — the dashboard was a second app.**
+  `app/main.py` serves the dashboard (port 11437) and `app/proxy/server.py`
+  serves the API (11436); they are two FastAPI apps, and `main.py` carried its
+  **own copy** of `/api/cloud/catalog` that returned only
+  `name/configured/model_count/addresses/last_fetch`. The enrichment went into
+  `app.gateway.admin_api`, reachable only through the API app — so the
+  dashboard's new catalog view could never have rendered in production, it would
+  have stayed on the legacy address pills forever. Every in-process check I had
+  run used `server.app`, which is exactly why it was missed; the dashboard's own
+  `/api/*` surface had no coverage from my side. Fixed by delegating both
+  dashboard catalog routes to `app.gateway.admin_api` (one implementation, one
+  payload, both ports) and pinned with a test asserting the two surfaces return
+  the **same document**, plus an explicit delegation test. `tests/unit/test_main.py`
+  had pinned the *local* shape instead — which is what let the copy survive — so
+  those two tests were rewritten to pin the delegation.
+- **Dashboard verified in a browser against the real payload.** Served the new
+  `app.main` on a spare port with a temporary harness that let the page seed its
+  own key (the Guardian key never entered the transcript or a tool argument) and
+  drove it with Playwright. Observed: toolbar and grid visible, legacy pill list
+  hidden, 60 cards rendered with 182 provenance badges, 25 of them showing
+  `⇄ ref:openrouter`. Card for `github-copilot/openai/gpt-6.1-sol`:
+  `file image text` modality, `tools tool_choice reasoning reasoning_effort
+  structured_outputs response_format` capabilities, `reasoning forced`, all
+  `ref:openrouter`, with `ctx 1,050,000 ★ override`. Harness and spare port
+  removed afterwards; production service never touched (`systemctl is-active`
+  checked before and after).
+  Note: the dashboard catalog covers *cloud providers* only — its
+  `/api/cloud/catalog` never carried the local aliases that appear on
+  `/v1/models`, so `free (local)` pricing is legitimately absent there.
+- **Live HTTP verification achieved without touching the production process.**
+  The operator restart had not happened, and it was not needed to obtain real
+  HTTP evidence: `uvicorn app.proxy.server:app --port 11445 --lifespan off`
+  serves the real API app over real HTTP while skipping startup entirely — no
+  PID-file write, no caretaker calls, no catalog loop. A wrapper loaded `.env`
+  first, because `app/proxy/server.py` does not (only `app/main.py` does for the
+  production process) and without it every provider looks unconfigured, which
+  silently yields "0 cloud models" and made the first attempt look like a bug.
+  Verified against that instance: `/v1/models` → **273 entries / 227 cloud**,
+  270 with `metadata_sources`, 126 with architecture; gap fill confirmed on
+  `github-copilot/openai/gpt-6.1-sol` (`context_length: override` = the
+  operator's 1050000, everything else `reference:openrouter`) and
+  `google/google/gemini-2.5-flash` (all `reference:openrouter`);
+  `/v1/models/{id}/endpoints` → 1 endpoint with `status=0` resolved from the
+  live health tracker; unknown addresses → 404 on both routes. Production
+  checked before and after (`guardian.pid` identical, service active, spare port
+  released).
+- **Full app audit after the round-3 miss.** With three FastAPI apps in the tree
+  (`app/proxy/server.py`, `app/main.py`, `app/copilot_bridge.py`), every surface
+  that emits an OpenAI-style model list was enumerated: only
+  `model_discovery.list_models` and the copilot bridge. The bridge is a
+  **deliberate non-goal** — it is the internal LiteLLM↔copilot-api protocol
+  translator, its `/v1/models` is consumed by LiteLLM, and Guardian's own
+  provider config explicitly says to advertise only an allowlisted subset rather
+  than the bridge's whole catalog. Guardian's public surface covers those models
+  richly (`github-copilot/openai/gpt-6.1-sol` carries `reference:openrouter`
+  metadata). No other surface needs enrichment.
+- **Contract narrowed for one honest exception.** Live output showed exactly 3 of
+  288 `/v1/models` entries lacking parity keys, all `failover/*`. That was the
+  deliberate round-1 choice, but spec §3 literally promised the keys on *every*
+  entry, so the spec was wrong, not the code. A failover group is a route
+  spanning providers: no single upstream advertisement, price or context window
+  to report, and a fifteen-`null` skeleton would say nothing. §3 now states the
+  carve-out and points at `/v1/models/failover/{group}/endpoints`, where each
+  candidate is described properly.
+- **POST-RESTART PRODUCTION CONFIRMATION (2026-10-03 18:50-18:52 UTC).** The
+  operator restarted `llama-guardian`; the production process now serves the
+  parity surface. Before the restart the live service was measured missing
+  **every** parity field (`architecture` 0, `pricing` 0, `metadata_sources` 0)
+  and `/v1/models/{id}/endpoints` did not exist. After it, against
+  `http://127.0.0.1:11436`: `/v1/models` → **288 entries / 242 cloud**, **285 with
+  `metadata_sources`**, **141 with architecture**; gap fill live on
+  `github-copilot/openai/gpt-6.1-sol` (`context_length: override` = the
+  operator's 1050000, everything else `reference:openrouter`) and
+  `google/google/gemini-2.5-flash` (all `reference:openrouter`, ctx 1048576);
+  `openai/openai/gpt-4o` carries the full architecture incl. `tokenizer: GPT` and
+  `pricing: null`; `/v1/models/openai/openai/gpt-4o/endpoints` → 1 endpoint with
+  `ctx=128000 status=0`; unknown addresses → 404 on both routes. The dashboard
+  port `:11437` now returns the **same document** as the API port (12 providers,
+  244 enriched models) — the round-3 duplication fix confirmed in production.
+  Service health after the restart: log clean of errors, port listening,
+  `/api/status` reports the loaded model, and a live 16-token completion returned
+  `finish_reason: length` with usage accounting intact.
+- **Performance (measured, because the payload grows a lot).** Direct handler
+  timing, best-of-N, A/B against enrichment disabled by patching
+  `attach_parity_metadata` to a no-op: `/v1/models` **97.6 ms / 381,914 bytes**
+  enriched vs **94.5 ms** unenriched — the whole parity layer costs
+  **+3.1 ms (~3%)**; the pre-existing ~95 ms is other work (local-model
+  resolution, context). `/api/cloud/catalog` is **13.4 ms / ~284 KB** (10.5 KB of
+  bare addresses before, so 27× the bytes for the dashboard's richer payload; the
+  dashboard calls it on load and on the refresh button, not on a poll).
+  Two measurement traps worth remembering: a `TestClient` request costs ~50-80 ms
+  of anyio thread-portal overhead that swamps the real handler cost — an earlier
+  HTTP-level comparison wrongly suggested an ~80 ms regression that does not
+  exist. And 382 KB across 288 models is ~1.3 KB/model against OpenRouter's own
+  ~2.8 KB/model for 466 entries, so the size is inherent to the feature and
+  Guardian is still the leaner of the two.
+- **Production damage found and repaired — cloud catalog disk cache.** A
+  subagent's ad-hoc script built a `CloudModelCatalog` on the **default** cache
+  path (its own scratch provider registry, no `cache_file` override), refreshed
+  a single provider, and `_persist_cache` rewrote the whole document from that
+  instance's nearly-empty `_catalogs`. It recurred during the session — ten
+  providers / 308 models collapsed to one or two providers, and further rounds
+  left an `openrouter` entry carrying a scratch registry's single model and a
+  mismatched endpoint signature (`|/models` vs the configured `|/models/user`),
+  which the reader drops — OpenRouter contributed 0 models until repaired. The
+  running service was never affected (in-memory catalog
+  intact); each time the disk cache was restored with a real
+  `POST /api/cloud/catalog/refresh`. `_persist_cache` is now **purely additive**
+  and never prunes: pruning is unnecessary because `_load_disk_cache` already
+  ignores entries that are no longer enabled or whose stored `source` no longer
+  matches the config. Regression coverage in
+  `tests/unit/test_cloud_catalog_metadata.py`. Residual risk recorded below.
+- **Residual risk (not fixed, deliberately):** the last writer still wins for a
+  provider *both* processes know under the same name. A scratch process with
+  scratch settings can therefore still overwrite that one provider's entry with
+  a mismatched `source` (harmless beyond a failed cold start, since the reader
+  drops it and the next real fetch repairs it). The alternative rule — never
+  overwrite on a `source` mismatch — would let a stale entry be resurrected
+  after the operator changes `catalog_url` back, which is the worse failure.
+  Mitigation is process discipline: ad-hoc scripts must pass an explicit
+  `cache_file` under `/tmp` and never write under the repo's `data/`.
+- **Pre-existing flakes in the pre-restart gate (independent evidence, not
+  caused by this work):**
+  (a) `tests/unit/test_lifespan_does_not_wait_for_startup_check` fails on a clean
+  `main` checkout and passes isolated;
+  (b) `tests/unit/test_capture_wal_writer.py::TestWALWriterLegacyMigration::test_legacy_active_seq_persisted`
+  leans on `asyncio.sleep(0.2)` as a flush deadline and failed once under load
+  while passing 54/54 in isolation — worth converting to a bounded
+  wait-until-flushed loop;
+  (c) **order-dependent test isolation**: `app/main.py` calls `load_dotenv`
+  (present at `HEAD`, untouched here), which puts real API keys into
+  `os.environ`. Running `pytest tests/unit/test_main.py tests/unit/test_server.py`
+  therefore fails `test_v1_post_cloud_model_without_api_key_returns_503` — that
+  test expects an *unconfigured* provider, and the import of `app.main` has just
+  configured it. Reversed order passes (142 passed), as does the test alone and
+  as does the full suite. Only subset runs in that specific order are affected,
+  but it is a trap worth knowing before blaming a change.

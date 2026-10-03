@@ -19,6 +19,8 @@ from typing import Any
 import httpx
 
 from app.proxy.providers import CloudProvider
+from app.gateway.metadata_enrichment import attach_parity_metadata, local_model_facts
+from app.gateway.model_metadata_presentation import split_identity
 
 logger = logging.getLogger("Guardian")
 
@@ -41,15 +43,26 @@ _model_manager = None  # ModelManager instance
 _provider_registry = None  # ProviderRegistry instance
 _failover_registry = None  # FailoverRegistry instance
 _cloud_catalog = None  # CloudModelCatalog instance
+_reference_catalog = None  # ModelReferenceCatalog instance (cross-provider metadata)
 
 
-def init(model_manager, provider_registry, failover_registry, *, llama_server_url=None, cloud_catalog=None) -> None:
+def init(
+    model_manager,
+    provider_registry,
+    failover_registry,
+    *,
+    llama_server_url=None,
+    cloud_catalog=None,
+    reference_catalog=None,
+) -> None:
     """Inject the singleton dependencies.  Called once at startup."""
-    global _model_manager, _provider_registry, _failover_registry, LLAMA_SERVER_URL, _cloud_catalog
+    global _model_manager, _provider_registry, _failover_registry, LLAMA_SERVER_URL
+    global _cloud_catalog, _reference_catalog
     _model_manager = model_manager
     _provider_registry = provider_registry
     _failover_registry = failover_registry
     _cloud_catalog = cloud_catalog
+    _reference_catalog = reference_catalog
     LLAMA_SERVER_URL = llama_server_url
 
 
@@ -140,6 +153,10 @@ async def resolve_context_window(
                         provider=provider,
                     )
                 if candidate_context is None:
+                    candidate_context = _reference_context_window(
+                        f"{provider.name}/{upstream_model}"
+                    )
+                if candidate_context is None:
                     warn_context_fallback(f"{provider.name}/{upstream_model}")
                     candidate_context = DEFAULT_CONTEXT_WINDOW
                 attempt_contexts.append(candidate_context)
@@ -159,6 +176,10 @@ async def resolve_context_window(
                             f"{candidate.provider}/{candidate.model}"
                         )
                     if candidate_context is None:
+                        candidate_context = _reference_context_window(
+                            f"{candidate.provider}/{candidate.model}"
+                        )
+                    if candidate_context is None:
                         warn_context_fallback(f"{candidate.provider}/{candidate.model}")
                         candidate_context = DEFAULT_CONTEXT_WINDOW
                     candidate_contexts.append(candidate_context)
@@ -167,6 +188,17 @@ async def resolve_context_window(
         cloud_context = await _provider_registry.get_cloud_context_window(public_name)
         if cloud_context is not None:
             return cloud_context
+
+        # Last grounded source before the blind fallback: the cross-provider
+        # reference catalog.  Providers such as openai, google and nvidia do not
+        # advertise a context window in their own /v1/models, so without this
+        # every one of those models fell back to DEFAULT_CONTEXT_WINDOW even
+        # though another provider's catalog knows the real value for the same
+        # model.  Reference data only fills a gap — it never overrides a value
+        # Guardian could already resolve.
+        reference_context = _reference_context_window(public_name)
+        if reference_context is not None:
+            return reference_context
 
     warn_context_fallback(canonical_name or public_name)
     return DEFAULT_CONTEXT_WINDOW
@@ -193,6 +225,29 @@ def _cloud_context_override(upstream_model: str, provider_name: str) -> int | No
         cw = override.get("context_window")
         if isinstance(cw, int) and not isinstance(cw, bool) and cw > 0:
             return cw
+    return None
+
+
+def _reference_context_window(model_name: str) -> int | None:
+    """Return the cross-provider reference context window for an address, or None.
+
+    The reference catalog is keyed on the *identity key* — the
+    ``{brand}/{model}`` part of a ``{provider}/{brand}/{model}`` address — so a
+    model reachable through one provider can borrow the context window another
+    provider advertises for the same model.
+    """
+    if _reference_catalog is None:
+        return None
+    try:
+        reference = _reference_catalog.metadata(split_identity(model_name))
+    except Exception as exc:  # fail-open: reference data never breaks discovery
+        logger.debug("Reference context lookup failed for %s: %s", model_name, exc)
+        return None
+    if not isinstance(reference, dict):
+        return None
+    cw = reference.get("context_length")
+    if isinstance(cw, int) and not isinstance(cw, bool) and cw > 0:
+        return cw
     return None
 
 
@@ -267,4 +322,16 @@ async def build_model_metadata_entry(public_name: str, canonical_name: str, clie
         if benchmark_context_limit is not None:
             model_entry["benchmark_context_limit"] = benchmark_context_limit
         model_entry["max_context"] = advertised_context
-    return await enrich_model_context_metadata(model_entry, canonical_name)
+    model_entry = await enrich_model_context_metadata(model_entry, canonical_name)
+    # OpenRouter-parity metadata for locally served models.  Local inference is
+    # genuinely free and the capability flags are declared in the model config,
+    # so these are grounded facts rather than guesses; everything unknown is
+    # reported as None by the presentation layer.
+    attach_parity_metadata(
+        model_entry,
+        catalog=_cloud_catalog,
+        reference_catalog=_reference_catalog,
+        provider_name=None,
+        local=local_model_facts(_model_manager, canonical_name),
+    )
+    return model_entry

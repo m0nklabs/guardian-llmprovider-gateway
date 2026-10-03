@@ -35,6 +35,7 @@ _run_startup_check_in_background = None
 _set_startup_check_task = None
 _cancel_startup_check_task = None
 _cloud_catalog = None
+_reference_catalog = None
 _catalog_refresh_interval_s = 60.0
 _model_manager = None
 _capture_controller = None
@@ -65,6 +66,7 @@ def init(
     inference_queue,
     caretaker_client=None,
     cloud_catalog=None,
+    reference_catalog=None,
     catalog_refresh_interval_s: float = 60.0,
 ) -> None:
     """Inject all dependencies. Called once at startup."""
@@ -87,6 +89,7 @@ def init(
     globals()["_inference_queue"] = inference_queue
     globals()["_caretaker_client"] = caretaker_client
     globals()["_cloud_catalog"] = cloud_catalog
+    globals()["_reference_catalog"] = reference_catalog
     globals()["_catalog_refresh_interval_s"] = float(catalog_refresh_interval_s)
 
 
@@ -98,12 +101,21 @@ async def _catalog_refresh_loop() -> None:
     self-heals without operator action. Any pass failure is logged and the
     loop continues — a broken provider catalog must never take the refresher
     down.
+
+    The cross-provider reference catalog rides along on the same pass.  It is
+    TTL-gated the same way and fail-open by construction, so a reference source
+    that is down simply leaves the last successful catalog in place.
     """
     while True:
         try:
             await _cloud_catalog.ensure_all_fresh()
         except Exception as exc:  # noqa: BLE001 — the loop must survive anything
             logger.warning("☁️  Catalog refresh pass failed: %s", exc)
+        if _reference_catalog is not None:
+            try:
+                await _reference_catalog.ensure_all_fresh()
+            except Exception as exc:  # noqa: BLE001 — reference data is optional
+                logger.warning("📚 Reference catalog refresh pass failed: %s", exc)
         await asyncio.sleep(_catalog_refresh_interval_s)
 
 

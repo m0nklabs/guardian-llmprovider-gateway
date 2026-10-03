@@ -12,6 +12,18 @@
   deploying (see `docs/HANDOFF.md`).
 
 ### Fixed
+- Cloud-catalog disk-cache writes are now **additive**: `_persist_cache` keeps
+  every entry already on the file and overwrites only the providers the writing
+  instance actually holds data for. Previously the whole document was rewritten
+  from that instance's in-memory `_catalogs`, so any process built on the default
+  cache path — including a scratch or maintenance script carrying its own
+  provider registry — replaced the entire cold-start cache with whatever it had
+  fetched. This was observed twice in production on 2026-10-03 (ten providers /
+  308 models collapsing to one or two providers), degrading cold-start discovery
+  for every other provider until its next successful fetch. Pruning is
+  unnecessary: the reader already ignores entries that are no longer enabled or
+  whose stored endpoint signature no longer matches the config. Regression
+  coverage in `tests/unit/test_cloud_catalog_metadata.py`.
 - Prevented cloud streaming requests from returning HTTP 500 when capture is
   enabled. The cloud response assembler is now wired correctly:
   `StreamResponseAssembler()` (no kwargs) + `add_sse_line(raw_line)` on both
@@ -28,6 +40,33 @@
   caused the 500 before it can ship again.
 
 ### Added
+- **OpenRouter-parity model metadata.** `/v1/models` and `/v1/models/{model_id}`
+  now carry the metadata OpenRouter publishes, using its field names and its
+  conventions: `name`, `description`, `canonical_slug`, `architecture`
+  (`modality`, `input_modalities`, `output_modalities`, `tokenizer`,
+  `instruct_type`), `pricing`, `top_provider`, `supported_parameters`,
+  `default_parameters`, `per_request_limits`, `knowledge_cutoff`,
+  `expiration_date`, `links`, and a `metadata_sources` provenance map. Unknown
+  values are `null` rather than absent keys. Purely additive — no existing key
+  changed name, type or meaning, and cloud-access gating is unchanged.
+- **Cross-provider metadata gap filling.** A provider may declare
+  `reference_catalog.sources` in its provider settings; providers whose own
+  `/v1/models` advertises almost nothing (OpenAI, Google, NVIDIA) are then
+  completed from another provider's catalog for the same model, joined on the
+  `{brand}/{model}` identity key. Reference data never affects which models are
+  advertised, routed or allowlisted — the account-scoped `catalog_url` stays
+  authoritative for discovery. It also serves as the last grounded source for a
+  model's context window before the conservative fallback.
+- **`GET /v1/models/{model_id}/endpoints`**, mirroring OpenRouter's endpoint
+  shape with the routes Guardian can actually use: one per provider whose
+  catalog contains the same model, one per candidate for a `failover/{group}`
+  address, and the local backend for locally served models. Fields Guardian
+  cannot ground honestly — uptime, latency, throughput, `native_tools` — are
+  reported as `null` rather than fabricated.
+- Dashboard: the flat "Available Cloud Models" pill list is now a filterable
+  model catalog showing architecture, readable per-million-token pricing,
+  capability badges, and per-field provenance, degrading to the previous pill
+  list when the backend payload carries no metadata.
 - Capture-feedback batch (2026-08-30, items C1-C11 from the first external
   capture-analysis session): `started_at_utc`/`completed_at_utc` timestamps on
   capture events (C1); `finish_reason` always emitted on completed events plus

@@ -172,6 +172,18 @@ def local_models_file() -> "Path":
     )
 
 
+def model_reference_catalog_file() -> "Path":
+    """Return the runtime cache path of the cross-provider reference catalog.
+
+    Reference metadata (``docs/OPENROUTER_PARITY.md`` §2) is *runtime* cache
+    data, not configuration: it lives in ``data/`` next to the cloud catalog
+    cache so a cold start can serve the last successful fetch before the first
+    refresh.  The cached file is written only by
+    :class:`app.proxy.openrouter_reference.ModelReferenceCatalog`.
+    """
+    return DATA_DIR / "model_reference_catalog.json"
+
+
 def guardian_apikeys_file() -> "Path":
     """Resolve the Guardian API key store path (new name first, legacy alias)."""
     return resolve_config_file("guardian.keys.yaml", "guardian_apikeys.yaml", "api_keys.json")

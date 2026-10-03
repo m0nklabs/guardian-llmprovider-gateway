@@ -1559,6 +1559,11 @@ async def test_resolve_context_uses_safe_minimum_for_failover_candidates():
         patch.object(server.provider_registry, "get_context_override", return_value=None),
         patch.object(server.failover_registry, "get_group", return_value=group),
         patch.object(server.cloud_catalog, "get_override", return_value=None),
+        # Pin the cross-provider reference catalog out of the chain so this test
+        # stays hermetic: with the real one injected, a candidate whose provider
+        # advertises nothing is legitimately filled from the reference, and the
+        # assertion below would then depend on the runtime cache file.
+        patch.object(server._ctx_meta, "_reference_catalog", None),
         patch.object(
             server.provider_registry,
             "get_cloud_context_window",
@@ -1570,6 +1575,46 @@ async def test_resolve_context_uses_safe_minimum_for_failover_candidates():
     assert context_window == server.DEFAULT_CONTEXT_WINDOW
     assert context_mock.await_args_list[0].args == ("nvidia/moonshotai/kimi-k3",)
     assert context_mock.await_args_list[1].args == ("openrouter/moonshotai/kimi-k3",)
+
+
+@pytest.mark.asyncio
+async def test_resolve_context_fills_the_gap_from_the_cross_provider_reference():
+    """A route whose own provider advertises no context window borrows the value
+    another provider publishes for the same model.
+
+    This is the gap fill that fixes openai/google/nvidia models, whose own
+    ``/v1/models`` carries no context length, and which previously all reported
+    the conservative fallback.
+    """
+
+    class _Reference:
+        def metadata(self, identity_key):
+            return {"context_length": 128000} if identity_key == "openai/gpt-4o" else {}
+
+    with (
+        patch.object(server.provider_registry, "get_context_override", return_value=None),
+        patch.object(
+            server.provider_registry, "get_cloud_context_window", new=AsyncMock(return_value=None)
+        ),
+        patch.object(server._ctx_meta, "_reference_catalog", _Reference()),
+    ):
+        resolved = await server._resolve_context_window("openai/openai/gpt-4o")
+
+    assert resolved == 128000, "the reference value must be used, not the blind fallback"
+
+
+@pytest.mark.asyncio
+async def test_resolve_context_stays_on_the_safe_fallback_without_a_reference():
+    with (
+        patch.object(server.provider_registry, "get_context_override", return_value=None),
+        patch.object(
+            server.provider_registry, "get_cloud_context_window", new=AsyncMock(return_value=None)
+        ),
+        patch.object(server._ctx_meta, "_reference_catalog", None),
+    ):
+        resolved = await server._resolve_context_window("openai/openai/gpt-4o")
+
+    assert resolved == server.DEFAULT_CONTEXT_WINDOW
 
 
 @pytest.mark.asyncio
