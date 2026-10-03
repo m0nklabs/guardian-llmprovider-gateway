@@ -1,5 +1,78 @@
 # Guardian LLM Router — Cloud Provider Integration
 
+## Scope and current naming contract
+
+LLM routing is one capability of **Guardian — Policy and Traffic Gateway**,
+not the definition of the whole product. The general conceptual destination
+is `{provider}/{brand}/{service}`: provider identifies the specific serving
+operator/platform offering, brand identifies the product/model maker namespace,
+and service identifies the concrete application, API service or model. See the
+[product roadmap](ROADMAP.md) for the general naming convention and gateway
+responsibilities.
+
+For cloud LLMs, `{provider}/{brand}/{model}` is the existing specialization,
+for example `openrouter/anthropic/claude-3.5-sonnet`. Guardian mediates access
+above that namespace; `guardian/` is not a required cloud model prefix. API
+protocols, LLM capabilities, execution engines and protocol bridges are separate
+concerns, not alternative destination-name layers.
+
+This clarification does not change runtime routing, existing local aliases,
+upstream model IDs or the request field named `model`. Where an upstream ID
+has no brand namespace, preserve the adapter's existing address form rather
+than inventing a brand segment. Speech routing also accepts an optional
+`guardian/` prefix for compatibility; that is not a universal naming requirement.
+A general service registry/resolver and non-LLM HTTP/tool adapters remain planned.
+
+**Legacy documentation warning:** the per-key credential-link instructions,
+`cloud_keys.json` management examples and `guardian/{provider}/...` cloud route
+examples retained below describe an earlier design. They are not the current
+cloud onboarding or naming contract. Current cloud settings live in
+[per-provider files](CONFIG_PROVIDER_FILES.md), Guardian keys in
+`config/guardian.keys.yaml`, and cloud authorization uses `cloud_gateway_access`.
+The current discovery code advertises provider-prefixed model IDs. Full
+reconciliation of the historical sections is tracked in roadmap phase G0;
+do not follow their credential-management commands as current setup guidance.
+
+## GitHub Copilot provider and external bridge migration
+
+The selected canonical destinations are `github-copilot/openai/gpt-6-astra`
+and `github-copilot/openai/gpt-6.1-sol`: provider = `github-copilot`, brand =
+`openai`, service/model = `gpt-6-astra` or `gpt-6.1-sol`. The provider names
+GitHub's Copilot offering specifically, not other GitHub APIs. There is no
+separate `copilot` channel layer. The migration removes
+`github/copilot/gpt-6.1-sol`; only the two canonical destinations above are
+supported by the new contract, with no legacy Copilot aliases.
+
+**Integration target, not deployment evidence:** the new provider aliases point
+to an external LiteLLM bridge. Guardian uses its OpenAI-compatible Chat
+Completions forwarding; LiteLLM adapts those requests to the upstream Responses
+API for these Responses-only GPT models and translates responses/streaming back.
+A new public alias does not make the upstream model accept Chat Completions
+natively. The bridge is a transport/protocol concern, not a fourth namespace
+layer or a new generic Guardian resolver. Provider registration and LiteLLM
+alias/upstream mappings belong to the separate configuration implementation.
+
+Example client payloads for that integration, after the provider and bridge are
+configured (not live-tested requests):
+
+```json
+{"model":"github-copilot/openai/gpt-6-astra","messages":[{"role":"user","content":"Hello!"}],"stream":true}
+```
+
+```json
+{"model":"github-copilot/openai/gpt-6.1-sol","messages":[{"role":"user","content":"Hello!"}],"stream":true}
+```
+
+Send these payloads to Guardian's `/v1/chat/completions` with a Guardian Bearer
+key; keep upstream credentials server-side. Runtime activation is pending a
+bridge restart outside the active session. Discovery, cloud-access controls,
+bridge availability, streaming/error compatibility and rejection of the removed
+route require separate verification before reporting this migration as deployed.
+Unrelated existing local aliases and other adapter-specific names are not renamed
+here.
+
+## LLM capability overview
+
 Guardian acts as a **unified LLM router**: it serves local GPU-backed models via
 `llama-server` **and** transparently forwards requests for cloud-hosted models
 to upstream providers like **OpenRouter**, **NVIDIA NIM**, and **Poolside Platform**.
@@ -237,6 +310,29 @@ is returned only after the retry count or hold-time budget is exhausted. For
 `guardian/failover/{group}` routes, Guardian then tries the next configured
 provider before returning 429 to clients that do not implement retries. A 429
 does not trip cross-provider failover health.
+
+## Failover Candidate Lifecycle (managed and passive hosts)
+
+Before forwarding to a failover-group candidate, Guardian ensures the candidate
+backend actually serves the requested model — llama-server ignores the request's
+model name and otherwise silently serves whatever happens to be loaded (the
+2026-09-01 mismatch incident class):
+
+- **Managed candidates** (the gateway's own llama-server, e.g. `ai-kvm2-local`):
+  the local caretaker lifecycle runs first (`ensure_backend`, idempotent).
+- **Passive candidates whose provider declares `management_url`** (e.g.
+  `14700k-local`, the Windows NSSM caretaker): Guardian remote-ensures the model
+  on that host's caretaker — same `/ensure` daemon contract, authenticated with
+  the provider file's `management_key` (same pattern as the TTS/STT routes).
+  The brand prefix (`windows/<model>`) is stripped for the caretaker, which
+  knows bare model ids.
+
+An ensure failure (unknown model, load failure, VRAM limit, unreachable daemon)
+skips to the next candidate like any failed attempt; on the last attempt it
+surfaces `503 model_load_failed` — never a silent wrong-model answer. The
+remote-ensure window is `failover.remote_ensure_timeout_seconds` in
+`config/global.settings.yaml` (default 120 s, bounded 30-600 s, hot-reloadable);
+it must exceed a fresh cold load on the slowest candidate host.
 
 ## Vision-aware Cloud Routing
 

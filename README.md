@@ -1,13 +1,51 @@
-# Llama-CPP Guardian
+# Guardian
 
-> Hardware-aware queue manager and VRAM control plane for shared local LLM hosts.
+> Policy and traffic gateway for connected services: secure access, routing,
+> capacity control and observability.
 
-Llama-CPP Guardian sits in front of `llama-server` and turns a raw inference
-process into an operator-grade service. It serializes inference, owns backend
-reloads, cooperates with ComfyUI to free VRAM, protects model switching with
-auth and allowlists, and keeps a mixed 12 GB + 16 GB GPU host stable while
-large-context text and vision runtimes share the same machine with other GPU
-tenants.
+Guardian sits between clients and explicitly onboarded services. Its existing
+implementation routes local/cloud LLM requests and TTS/STT speech requests,
+with authentication, queueing, failover, streaming and capture mechanisms.
+The product direction expands that shared foundation to registered non-AI HTTP
+services and, later, tool endpoints; these extensions are planned, not already
+implemented. Generalized authorization and load balancing have explicit delivery
+gates rather than being inferred from today's keys and ordered failover.
+
+Guardian is the gateway above the conceptual **`{provider}/{brand}/{service}`**
+namespace: specific serving operator/platform offering, product or model maker
+namespace, and concrete application/API service/model. Existing cloud
+`{provider}/{brand}/{model}` addresses are its LLM specialization, with no
+mandatory `guardian/` prefix. APIs are interfaces, LLMs are capabilities, engines
+execute services, and bridges adapt protocols; these are not alternative address
+layers. Unrelated existing aliases and upstream IDs remain unchanged; the
+Copilot-specific migration below removes its old route. See the
+[canonical naming contract](docs/ROADMAP.md#service-naming-and-namespace-canonical-conceptual-contract)
+for compatibility boundaries and the unresolved policy for services without a
+natural brand namespace; this is not a runtime identifier migration or a generic
+resolver.
+
+Concrete Copilot destinations follow the same three layers:
+`github-copilot/openai/gpt-6-astra` and `github-copilot/openai/gpt-6.1-sol`.
+Here `github-copilot` identifies GitHub's Copilot offering, not every GitHub API;
+`openai` is the model brand. There is no separate `copilot` channel layer.
+The migration removes `github/copilot/gpt-6.1-sol`: only the two canonical
+Copilot destinations above remain, with no legacy Copilot aliases. They use an
+external LiteLLM bridge for Responses-only GPT models; see [the routing migration contract](docs/LLM_ROUTER.md#github-copilot-provider-and-external-bridge-migration).
+Runtime activation is pending a bridge restart outside the active session;
+these examples do not claim deployed or live-tested routes.
+
+Start with the [product roadmap](docs/ROADMAP.md) for scope, priorities,
+architecture boundaries and acceptance criteria. The
+[Guardian 2.0 implementation plan](docs/IMPLEMENTATION_PLAN.md) is the historical
+F0–F7 migration specification, not the current product roadmap.
+
+**Documentation caveat:** the operational sections below retain legacy
+single-host details and configuration examples. For current configuration and
+operations, use [the config schema](docs/CONFIG_SCHEMA.md),
+[provider files](docs/CONFIG_PROVIDER_FILES.md), [LLM routing](docs/LLM_ROUTER.md)
+and [the operator runbook](docs/skills/operator-runbook.md). Broader documentation
+reconciliation is tracked in roadmap phase G0; this update does not rename
+services, change runtime configuration or deploy new gateway capabilities.
 
 ## Why It Exists
 

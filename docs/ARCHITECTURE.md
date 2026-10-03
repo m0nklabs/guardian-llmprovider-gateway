@@ -1,6 +1,58 @@
-# Llama-CPP Guardian Architecture
+# Guardian Architecture
 
-## Overview
+## Current conceptual architecture
+
+Guardian is the security, policy and traffic gateway between clients and
+explicitly onboarded services, not only an LLM proxy or a single-host backend
+controller. All supported client traffic to an onboarded service crosses
+Guardian; this is not arbitrary URL forwarding or universal network interception.
+Backend isolation, credential ownership and client egress policy are also needed
+to prevent direct bypass.
+
+The shared gateway core mediates identity, authorization, admission, destination
+selection, resilience and observability; capability-specific adapters handle
+protocol and operation semantics. This describes the architectural responsibility,
+not a claim that every generalized policy mechanism is implemented. Existing
+local/cloud LLM and TTS/STT paths provide the current service foundation. General
+HTTP and tool/MCP adapters remain planned; service-wide policy and generalized
+load balancing are partial. Existing ordered failover is not load balancing.
+See the [roadmap baseline](ROADMAP.md#2-baseline-and-evidence) and delivery gates.
+
+```text
+Clients -> Guardian gateway -> capability/protocol adapter -> onboarded service
+                             +-> LLM: local/cloud inference [present]
+                             +-> speech: TTS/STT [present]
+                             +-> general HTTP service [planned]
+                             +-> tool/MCP endpoint [planned]
+```
+
+Guardian sits above the conceptual **`{provider}/{brand}/{service}`** namespace:
+`provider` is the serving operator/platform, `brand` is the product or model maker
+namespace, and `service` is the concrete application/API service/model. Existing
+cloud `{provider}/{brand}/{model}` addresses are the LLM specialization, without
+a mandatory `guardian/` prefix. An API is an interface/protocol; LLM is a
+capability; an engine is the execution implementation; a bridge is a protocol
+adapter. None is a competing address layer. The
+[canonical naming contract](ROADMAP.md#service-naming-and-namespace-canonical-conceptual-contract)
+preserves bare aliases, upstream IDs and adapter-specific forms and leaves
+brand-absence policy unresolved; it does not introduce a generic resolver.
+
+Guardian owns traffic policy; Caretaker owns backend lifecycle and execution.
+Legacy direct-management compatibility paths are not the general product
+boundary. Use [LLM routing](LLM_ROUTER.md) for current model-routing contracts
+and [the operator runbook](skills/operator-runbook.md) for deployment.
+
+## Historical single-host architecture
+
+> Legacy single-host architecture description. Several lifecycle, routing and
+> configuration details below predate provider unification and Caretaker wiring;
+> do not treat these sections as the current complete topology or full product
+> definition. See [the product roadmap](ROADMAP.md) for the target gateway
+> boundaries. Full reconciliation against code is tracked in roadmap phase G0.
+> Statements such as "current" or "today" below refer to this historical view,
+> not a freshly verified description of the broader gateway.
+
+### Legacy overview
 
 Guardian is not a thin API proxy. It is the control plane for a single shared
 `llama-server` backend on a host where multiple GPU-heavy tenants compete for

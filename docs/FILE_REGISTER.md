@@ -274,7 +274,8 @@
 | `docs/GCD_IMPLEMENTATION_SPEC.json` | GCD implementation JSON spec | `app/gateway/normalization.py` |
 | `docs/GUARDIAN_KEANU_CAPTURE_PLAN.json` | Capture contract between Guardian & Keanu | `app/capture/schema.py` |
 | `docs/HARDWARE_TUNING.md` | GPU/hardware tuning guide | `app/local_inference/models.py` |
-| `docs/IMPLEMENTATION_PLAN.md` | **Guardian 2.0 masterplan (F0-F7)** — do-not-touch plan text | GitHub issue #1 |
+| `docs/IMPLEMENTATION_PLAN.md` | **Historical Guardian 2.0 migration specification (F0-F7)** — preserved plan text | GitHub issue #1, `docs/ROADMAP.md` |
+| `docs/ROADMAP.md` | **Canonical product roadmap** — policy and traffic gateway, baseline, phased delivery and acceptance gates | `README.md`, `AGENTS.md`, `docs/IMPLEMENTATION_PLAN.md`, `docs/AGENT_JOURNAL.md` |
 | `docs/LAN_GPU_BACKENDS.md` | LAN GPU backends plan (F3/F6) | `app/engine/manager.py` |
 | `docs/LLM_ROUTER.md` | Model resolution / cloud routing doc | `app/proxy/providers.py`, `app/cloud_inference/*` |
 | `docs/LLM_TERMINOLOGY.md` | LLM terminology reference | — |

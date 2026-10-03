@@ -163,9 +163,12 @@ een cloud-GPU-box):
   bij de legacy-removal.
 - **CI-adoptie (open sinds 20260813_1):** `scripts/pre_restart_check.py` als
   GitHub Action nog niet opgepakt.
-- **F7 cut-over (masterplan):** F6 (Windows/homelab-provider incl. TTS) is nu
-  voltooid; F7 (formele cut-over) staat nog open in
-  `docs/IMPLEMENTATION_PLAN.md` / issue #1.
+- **Product roadmap:** `docs/ROADMAP.md` is the active policy/traffic-gateway
+  roadmap, expanding beyond LLMs. G0 runtime-baseline reconciliation and selection
+  of the first non-AI HTTP service remain open; no new runtime feature was deployed.
+  Historical F6/F7 are complete (journal Batch 3; active service WorkingDirectory
+  verified as the new checkout). The superseded F7-open entry is preserved
+  verbatim in `docs/ARCHIVED_HANDOFFS.md`, section 2026-10-02.
 - **Parked (operator-besluit 09-02, koelkast):** geheugen-idee (capture →
   agent-geheugen). Kruisbesmetting-over-projectgrenzen is dé eerste-klas eis
   in elke toekomstige uitwerking. Pas oppakken als de operator het weer op

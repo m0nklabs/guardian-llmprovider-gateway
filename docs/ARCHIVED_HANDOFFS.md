@@ -1,5 +1,18 @@
 # Archived Handoffs — gesloten DSH-sessies
 
+## 2026-10-02 — Superseded F7 open-item status (archived verbatim)
+
+Source: `docs/HANDOFF.md`, open-points list. Preserved before correcting the
+active entry. Closure evidence: `docs/AGENT_JOURNAL.md`, Batch 3 F6/F7
+carry-forward; the active service's `WorkingDirectory` was independently checked
+as `/home/flip/guardian-llmprovider-gateway` during the roadmap update.
+
+```text
+- **F7 cut-over (masterplan):** F6 (Windows/homelab-provider incl. TTS) is nu
+  voltooid; F7 (formele cut-over) staat nog open in
+  `docs/IMPLEMENTATION_PLAN.md` / issue #1.
+```
+
 > Gearchiveerd op 2026-08-26 uit de **Active Handoff** in `AGENTS.md`:
 > afgeronde sessies worden hierheen verplaatst zodat de Active Handoff
 > beknopt en actueel blijft. Volledige details blijven bewaard (dit

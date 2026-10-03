@@ -1,7 +1,22 @@
-# AGENTS.md — Guardian LLM Provider Gateway
+# AGENTS.md — Guardian Policy and Traffic Gateway
 
 > Canonical durable AI-agent context for this repo. Read targeted cold context only when the task requires it.
 > Claude Code: `CLAUDE.md` → here. Goose: `.goosehints` → here. Copilot: `.github/copilot-instructions.md` references this.
+
+## Product scope and naming
+
+Guardian is the policy and traffic gateway for explicitly onboarded services,
+not only an LLM proxy. It mediates client access, security, routing and capacity
+policy; generalized load balancing and non-LLM adapters retain the delivery
+status documented in `docs/ROADMAP.md`.
+
+The general conceptual address is `{provider}/{brand}/{service}` (application
+or service). Existing `{provider}/{brand}/{model}` cloud addresses are its
+LLM specialization, not a separate product hierarchy. Guardian sits above the
+namespace; API protocols, capabilities, engines and bridges are separate
+architecture concerns. Preserve existing aliases and adapter-specific address
+forms; this naming convention does not introduce a generic runtime resolver.
+See `docs/ROADMAP.md` for definitions and compatibility boundaries.
 
 ## Stack
 
@@ -70,8 +85,11 @@
   `docs/ANTHROPIC_BRIDGE.md`, `docs/API_REFERENCE.md`,
   `docs/CLIENT_INTEGRATION.md`, or `docs/ARCHITECTURE.md`.
 - **Deployment, TLS, or host operations:** read `docs/skills/operator-runbook.md`.
-- **Hardware tuning or the Guardian 2.0 roadmap:** read `docs/HARDWARE_TUNING.md`
-  or `docs/IMPLEMENTATION_PLAN.md`; consult `docs/HANDOFF.md` for current state.
+- **Product scope or roadmap:** read `docs/ROADMAP.md` (policy and traffic
+  gateway, including non-LLM services). `docs/IMPLEMENTATION_PLAN.md` is the
+  historical Guardian 2.0 F0–F7 migration specification, not the active roadmap.
+- **Hardware tuning:** read `docs/HARDWARE_TUNING.md`; consult
+  `docs/HANDOFF.md` for current operational state.
 
 ## Repository guide
 
