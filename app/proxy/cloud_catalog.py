@@ -20,6 +20,12 @@ For every *enabled and configured* provider this module:
   catalog at startup *before* the first fetch completes (cold-start fallback,
   reviewer #2) and keeps the last successful list on a failed refresh (like
   today's google fallback).
+- Curates the OpenRouter-parity metadata subset per model
+  (``architecture`` / ``pricing`` / ``top_provider`` / ``supported_parameters``
+  / ``reasoning`` / …, see :data:`METADATA_FIELDS` and
+  ``docs/OPENROUTER_PARITY.md`` §3) into the ``metadata`` map, so a client
+  asking Guardian about a model gets the information the upstream actually
+  advertises instead of the four fields the pre-parity catalog kept.
 
 The per-provider ``models:`` blocks in ``config/providers/*.settings.yaml``
 supply per-model **overrides** (context window, thinking capability, tool
@@ -51,6 +57,85 @@ logger = logging.getLogger("Guardian.CloudCatalog")
 
 #: Default in-memory/persisted-cache TTL before a background refresh is allowed.
 DEFAULT_TTL_SECONDS = 3600.0
+
+#: Curated OpenRouter-parity metadata keys captured per model from the
+#: provider's own ``/v1/models`` entry (``docs/OPENROUTER_PARITY.md`` §3).
+#: Every key is always present in a stored entry; ``None`` means the upstream
+#: did not advertise it (or advertised a value of the wrong type).
+METADATA_FIELDS: tuple[str, ...] = (
+    "canonical_slug",
+    "hugging_face_id",
+    "name",
+    "description",
+    "created",
+    "context_length",
+    "architecture",
+    "pricing",
+    "top_provider",
+    "per_request_limits",
+    "supported_parameters",
+    "default_parameters",
+    "knowledge_cutoff",
+    "expiration_date",
+    "reasoning",
+)
+
+#: Sub-keys always present in the ``architecture`` metadata block (§3.1).
+ARCHITECTURE_FIELDS: tuple[str, ...] = (
+    "modality",
+    "input_modalities",
+    "output_modalities",
+    "tokenizer",
+    "instruct_type",
+)
+
+#: Sub-keys always present in the ``top_provider`` metadata block (§3.3).
+TOP_PROVIDER_FIELDS: tuple[str, ...] = (
+    "context_length",
+    "max_completion_tokens",
+    "is_moderated",
+)
+
+
+# ── Defensive type coercion for upstream JSON ─────────────────────────
+# An upstream may send any JSON type for any key.  Only a value matching the
+# expected type is stored; everything else becomes ``None``.  ``bool`` is an
+# ``int`` subclass in Python, so every numeric coercion excludes it explicitly
+# — this repository has been bitten by ``isinstance(x, int)`` matching bools.
+# An empty dict/list counts as "not advertised": it carries no information and
+# would otherwise block cross-provider gap filling in the presentation layer.
+
+
+def _as_str(value: Any) -> str | None:
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _as_int(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _as_bool(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _as_dict(value: Any) -> dict[str, Any] | None:
+    """Return a shallow copy of a non-empty dict, else ``None``.
+
+    Values inside the dict are passed through verbatim (OpenRouter pricing
+    values are string decimals; Guardian never rewrites them).
+    """
+    return dict(value) if isinstance(value, dict) and value else None
+
+
+def _as_str_list(value: Any) -> list[str] | None:
+    """Return the non-empty strings of a list, else ``None``."""
+    if not isinstance(value, list):
+        return None
+    items = [item for item in value if isinstance(item, str) and item.strip()]
+    return items or None
+
 
 #: Default ``{brand}`` used when a provider's upstream model ids are bare.
 DEFAULT_BRAND_BY_PROVIDER: dict[str, str] = {
@@ -170,6 +255,13 @@ class CloudModelCatalog:
                 # it; the next refresh fills it).
                 if not isinstance(stored.get("modalities"), dict):
                     stored["modalities"] = {}
+                # Trap 3 (OpenRouter parity, 2026-09-22): the per-model
+                # OpenRouter-parity metadata map must be restored here too — a
+                # cold start that silently lost it would answer /v1/models with
+                # nulls for every model until the next refresh.  Older caches
+                # lack it, so normalise to {} exactly like the maps above.
+                if not isinstance(stored.get("metadata"), dict):
+                    stored["metadata"] = {}
                 self._catalogs[provider.name] = stored
             if self._catalogs:
                 logger.info(
@@ -188,24 +280,62 @@ class CloudModelCatalog:
         return f"{provider.base_url}|{provider.catalog_url or '/models'}"
 
     def _persist_cache(self) -> None:
+        """Rewrite the runtime catalog cache, additively.
+
+        This file is *shared runtime state*: more than one process (the service,
+        a config reload, a maintenance script) can touch it, and they do not
+        necessarily share a provider registry.  Rewriting the whole document
+        from this instance's ``_catalogs`` was destructive: a scratch process
+        built on the default cache path refreshed a single provider and replaced
+        the file with that one provider, silently degrading cold-start discovery
+        for every other provider until its next successful fetch.  Observed in
+        production 2026-10-03, twice: ten providers / 308 models collapsed to
+        one or two providers.
+
+        The write is therefore purely additive — every entry already on the file
+        is preserved, and only providers this instance actually holds catalog
+        data for are (over)written.  Nothing is pruned here, and nothing needs
+        to be: ``_load_disk_cache`` restores a provider only when it is still
+        enabled *and* its stored endpoint signature matches the current config,
+        so a stale or removed provider's entry is simply never read, and the
+        next successful fetch for that provider overwrites it in place.
+        """
         try:
             self._cache_file.parent.mkdir(parents=True, exist_ok=True)
             by_name = {p.name: p for p in self._registry.get_enabled_providers()}
-            payload = {
-                provider_name: {
+
+            payload: dict[str, Any] = {}
+            if self._cache_file.exists():
+                try:
+                    existing = json.loads(self._cache_file.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    existing = {}
+                if isinstance(existing, dict):
+                    payload = {
+                        name: stored
+                        for name, stored in existing.items()
+                        if isinstance(stored, dict)
+                    }
+
+            for provider_name, data in self._catalogs.items():
+                if not (isinstance(data, dict) and data.get("models")):
+                    continue
+                payload[provider_name] = {
                     "fetched_at": data["fetched_at"],
                     "models": data["models"],
                     "reasoning": data.get("reasoning") or {},
                     # Persist the consolidated maps too (context since trap 1,
-                    # modalities since trap 2) — a subset here would silently
+                    # modalities since trap 2, per-model OpenRouter-parity
+                    # metadata since trap 3) — a subset here would silently
                     # drop them on every restart.
                     "context": data.get("context") or {},
                     "modalities": data.get("modalities") or {},
+                    "metadata": data.get("metadata") or {},
                     "source": self._provider_endpoint_key(by_name.get(provider_name)),
                 }
-                for provider_name, data in self._catalogs.items()
-                if isinstance(data, dict) and data.get("models")
-            }
+
+            if not payload:
+                return
             with open(self._cache_file, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2)
         except Exception as e:
@@ -288,6 +418,66 @@ class CloudModelCatalog:
             result["default_enabled"] = raw["default_enabled"]
         return result
 
+    @staticmethod
+    def extract_model_metadata(entry: dict[str, Any]) -> dict[str, Any]:
+        """Curate the OpenRouter-parity metadata subset for one catalog entry.
+
+        Pre-parity the catalog kept only ``models`` / ``reasoning`` /
+        ``context`` / ``modalities`` and threw away everything else the
+        upstream advertised.  This extraction captures the full curated subset
+        defined by ``docs/OPENROUTER_PARITY.md`` §3 so ``/v1/models`` can
+        present the same information OpenRouter does.
+
+        Shape contract (also used by the reference catalog, so both sources can
+        be treated uniformly by the presentation layer):
+
+        - every key in :data:`METADATA_FIELDS` is always present;
+        - ``None`` means "the upstream did not advertise this" (or advertised a
+          wrongly-typed value — see the coercion helpers above);
+        - ``architecture`` and ``top_provider`` are always dicts carrying every
+          sub-key from :data:`ARCHITECTURE_FIELDS` /
+          :data:`TOP_PROVIDER_FIELDS`, ``None`` where unknown (§3.1 says an
+          entry with no modality information gets explicit nulls, never an
+          omitted key);
+        - ``reasoning`` is the *full* upstream block, unlike the reduced subset
+          :meth:`_extract_reasoning` produces for the legacy accessor.
+        """
+        if not isinstance(entry, dict):
+            entry = {}
+        architecture = entry.get("architecture")
+        if not isinstance(architecture, dict):
+            architecture = {}
+        top_provider = entry.get("top_provider")
+        if not isinstance(top_provider, dict):
+            top_provider = {}
+        return {
+            "canonical_slug": _as_str(entry.get("canonical_slug")),
+            "hugging_face_id": _as_str(entry.get("hugging_face_id")),
+            "name": _as_str(entry.get("name")),
+            "description": _as_str(entry.get("description")),
+            "created": _as_int(entry.get("created")),
+            "context_length": _as_int(entry.get("context_length")),
+            "architecture": {
+                "modality": _as_str(architecture.get("modality")),
+                "input_modalities": _as_str_list(architecture.get("input_modalities")),
+                "output_modalities": _as_str_list(architecture.get("output_modalities")),
+                "tokenizer": _as_str(architecture.get("tokenizer")),
+                "instruct_type": _as_str(architecture.get("instruct_type")),
+            },
+            "pricing": _as_dict(entry.get("pricing")),
+            "top_provider": {
+                "context_length": _as_int(top_provider.get("context_length")),
+                "max_completion_tokens": _as_int(top_provider.get("max_completion_tokens")),
+                "is_moderated": _as_bool(top_provider.get("is_moderated")),
+            },
+            "per_request_limits": _as_dict(entry.get("per_request_limits")),
+            "supported_parameters": _as_str_list(entry.get("supported_parameters")),
+            "default_parameters": _as_dict(entry.get("default_parameters")),
+            "knowledge_cutoff": _as_str(entry.get("knowledge_cutoff")),
+            "expiration_date": _as_str(entry.get("expiration_date")),
+            "reasoning": _as_dict(entry.get("reasoning")),
+        }
+
     # ── Fetching ──────────────────────────────────────────────────────
 
     def _set_auth_error(self, provider_name: str, value: bool) -> None:
@@ -348,6 +538,7 @@ class CloudModelCatalog:
         reasoning_by_model: dict[str, dict[str, Any]] = {}
         context_by_model: dict[str, int] = {}
         modalities_by_model: dict[str, dict[str, Any]] = {}
+        metadata_by_model: dict[str, dict[str, Any]] = {}
         entries = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(entries, list):
             self._set_auth_error(provider.name, False)
@@ -383,6 +574,10 @@ class CloudModelCatalog:
             mods = self._extract_modalities(entry)
             if mods:
                 modalities_by_model[norm] = mods
+            # OpenRouter parity (2026-09-22): capture the full curated metadata
+            # subset (architecture/pricing/top_provider/supported_parameters/…)
+            # keyed by the normalized id, alongside the reduced maps above.
+            metadata_by_model[norm] = self.extract_model_metadata(entry)
         if not normalized:
             self._set_auth_error(provider.name, False)
             logger.warning("⚠️  Provider '%s' /v1/models returned an empty catalog", provider.name)
@@ -394,6 +589,7 @@ class CloudModelCatalog:
             "reasoning": reasoning_by_model,
             "context": context_by_model,
             "modalities": modalities_by_model,
+            "metadata": metadata_by_model,
             "auth_error": False,
         }
         self._persist_cache()
@@ -432,6 +628,20 @@ class CloudModelCatalog:
         if data is None:
             return True
         return (time.time() - float(data.get("fetched_at", 0))) > self._ttl_seconds
+
+    def is_provider_catalog_known(self, provider_name: str) -> bool:
+        """True when the provider has catalog state: fetched, or restored from
+        the disk cache at cold start.
+
+        This is the 'do we know what this provider serves at all' signal — it
+        distinguishes 'not fetched yet' (the window in which a prefix match may
+        still be the only routing evidence) from 'fetched and the model is
+        absent', where absence is evidence the model is not served. An empty
+        models map with a fetch timestamp still counts as known: the fetch
+        happened and answered (possibly with nothing).
+        """
+        data = self._catalogs.get(provider_name)
+        return isinstance(data, dict) and bool(data.get("fetched_at"))
 
     async def ensure_fresh(self, provider_name: str) -> None:
         """Refresh a provider's catalog only when its TTL has elapsed."""
@@ -565,6 +775,29 @@ class CloudModelCatalog:
             return {}
         reasoning = data.get("reasoning") or {}
         raw = reasoning.get(normalized_id) if isinstance(reasoning, dict) else None
+        return dict(raw) if isinstance(raw, dict) else {}
+
+    def get_model_metadata(self, provider_name: str, normalized_id: str) -> dict[str, Any]:
+        """Return OpenRouter-parity metadata captured from this provider's own
+        /v1/models entry. Empty dict when absent or filtered by catalog_allowlist.
+
+        ``normalized_id`` is the catalog key space (``{brand}/{model}``).  The
+        returned dict has the shape produced by
+        :meth:`extract_model_metadata` — every key of :data:`METADATA_FIELDS`
+        present, ``None``/nulls where the upstream advertised nothing.
+        """
+        data = self._catalogs.get(provider_name)
+        if not isinstance(data, dict):
+            return {}
+        models = data.get("models", {})
+        if not isinstance(models, dict) or normalized_id not in models:
+            return {}
+        provider = self._registry._providers.get(provider_name)
+        allowlist = getattr(provider, "catalog_allowlist", None)
+        if allowlist and normalized_id not in allowlist:
+            return {}
+        metadata = data.get("metadata") or {}
+        raw = metadata.get(normalized_id) if isinstance(metadata, dict) else None
         return dict(raw) if isinstance(raw, dict) else {}
 
     def get_model_overrides(self, normalized_id: str, provider_name: str = "") -> dict[str, Any]:

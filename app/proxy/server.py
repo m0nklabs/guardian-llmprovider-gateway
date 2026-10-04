@@ -48,6 +48,9 @@ from app.gateway import context_metadata as _ctx_meta
 # ── Model discovery (Phase 5 extraction) ─────────────────────────────
 from app.gateway import model_discovery as _model_discovery
 
+# ── Model endpoints surface (OpenRouter-parity /v1/models/{id}/endpoints) ──
+from app.gateway import model_endpoints as _model_endpoints
+
 # ── Gateway normalization (Phase 5 extraction) ───────────────────────
 from app.gateway import normalization as _normalization
 
@@ -98,6 +101,7 @@ from app.proxy.auth import (
     verify_api_key,
 )
 from app.proxy.cloud_catalog import CloudModelCatalog
+from app.proxy.openrouter_reference import ModelReferenceCatalog
 from app.proxy.failover import (
     COOLDOWN_SECONDS,
     FAILURE_THRESHOLD,
@@ -142,6 +146,14 @@ cloud_catalog = CloudModelCatalog(provider_registry)
 # source for provider /models — bind it as the registry's context-window reader
 # (replaces the registry's own second HTTP fetch).
 provider_registry.set_context_catalog_lookup(cloud_catalog.get_context_window)
+
+# Cross-provider metadata reference catalog (OpenRouter-parity gap filling).
+# Some providers advertise almost nothing in their own /v1/models (openai,
+# google and nvidia return ids only), while another provider's catalog knows the
+# same model in detail.  This reference source is keyed on the model identity
+# ({brand}/{model}) and only ever FILLS a gap — it never changes which models are
+# advertised, routed or allowlisted.  See docs/OPENROUTER_PARITY.md §2.
+reference_catalog = ModelReferenceCatalog(provider_registry)
 
 
 # ── Bare-name catalog probe (G3, 2026-09-02) ────────────────────────────
@@ -778,6 +790,7 @@ _ctx_meta.init(
     failover_registry,
     llama_server_url=LLAMA_SERVER_URL,
     cloud_catalog=cloud_catalog,
+    reference_catalog=reference_catalog,
 )
 
 DEFAULT_CONTEXT_WINDOW = _ctx_meta.DEFAULT_CONTEXT_WINDOW
@@ -1085,6 +1098,7 @@ _lifespan.init(
     inference_queue=inference_queue,
     caretaker_client=caretaker_client,
     cloud_catalog=cloud_catalog,
+    reference_catalog=reference_catalog,
     catalog_refresh_interval_s=_get_catalog_refresh_interval_seconds(),
 )
 
@@ -1226,6 +1240,21 @@ async def _build_model_metadata_entry(public_name: str, canonical_name: str, cli
 async def list_models(request: Request, client_id: str = Depends(verify_api_key)):
     """List available models from config and cloud providers (Phase 5: delegated)."""
     return await _model_discovery.list_models(request, client_id)
+
+
+@app.get("/v1/models/{model_id:path}/endpoints")
+async def get_model_endpoints(
+    model_id: str,
+    request: Request,
+    client_id: str = Depends(verify_api_key),
+):
+    """Return OpenRouter-shaped serving endpoints for one model.
+
+    Registered BEFORE the ``/v1/models/{model_id:path}`` catch-all: the ``path``
+    converter is greedy, so the more specific ``/endpoints`` suffix must be
+    matched first.  See app/gateway/model_endpoints.py.
+    """
+    return await _model_endpoints.model_endpoints(model_id, request, client_id)
 
 
 @app.get("/v1/models/{model_id:path}")
@@ -1746,6 +1775,19 @@ _model_discovery.init(
     _enrich_model_context_metadata=_enrich_model_context_metadata,
     _resolve_context_window=_resolve_context_window,
     _get_model_size=get_model_size,
+    _reference_catalog=reference_catalog,
+)
+
+# Initialize the OpenRouter-parity endpoints surface
+# (/v1/models/{model_id}/endpoints).  Reuses the same singletons as discovery.
+_model_endpoints.init(
+    _provider_registry=provider_registry,
+    _cloud_catalog=cloud_catalog,
+    _reference_catalog=reference_catalog,
+    _failover_registry=failover_registry,
+    _model_manager=model_manager,
+    _resolve_cloud_attempts=_cloud_routing.resolve_cloud_attempts,
+    _resolve_context_window=_resolve_context_window,
 )
 
 # Initialize admin API with injected helpers (after all helpers are defined)
@@ -1778,6 +1820,7 @@ _admin_api.init(
     _reload_settings_config=_config_loader.reload_config,
     _failover_registry=failover_registry,
     _failover_health=failover_health,
+    _reference_catalog=reference_catalog,
 )
 
 async def start_proxy():

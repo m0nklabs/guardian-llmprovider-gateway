@@ -1,5 +1,4 @@
 """Dynamic catalog discovery, protocol selection and boundary tests."""
-import json
 from unittest.mock import AsyncMock
 
 import httpx

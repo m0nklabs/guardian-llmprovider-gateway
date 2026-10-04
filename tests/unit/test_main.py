@@ -3,7 +3,6 @@
 import logging
 from collections import defaultdict
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
@@ -100,34 +99,252 @@ async def test_get_stats_includes_api_usage(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_dashboard_cloud_catalog_lists_provider_state(monkeypatch):
-    fake_provider = SimpleNamespace(name="openrouter", is_configured=True)
-    fake_catalog = MagicMock()
-    fake_catalog._catalogs.get.return_value = {"fetched_at": 123.0}
-    fake_catalog.get_models_for_provider.return_value = {
-        "deepseek/deepseek-v4-flash-0731": "deepseek/deepseek-v4-flash-0731"
-    }
-    monkeypatch.setattr(
-        main, "provider_registry", SimpleNamespace(get_enabled_providers=lambda: [fake_provider])
-    )
-    monkeypatch.setattr(main, "cloud_catalog", fake_catalog)
+async def test_dashboard_cloud_catalog_delegates_to_the_shared_implementation(monkeypatch):
+    """The dashboard app (port 11437) and the API app (11436) are two separate
+    FastAPI apps, and this route used to hold its own hand-built copy of the
+    payload.  That copy silently drifted: it never returned the enriched
+    ``models`` array, so the dashboard's model catalog view could only ever show
+    the legacy address pills.  Pin the delegation instead of a local shape."""
+    enriched = [{"id": "openrouter/openai/gpt-4o", "name": "OpenAI: GPT-4o"}]
+    seen: list[str] = []
+
+    async def fake_list(client_id):
+        seen.append(client_id)
+        return {"catalog": [{"name": "openrouter", "addresses": [], "models": enriched}]}
+
+    monkeypatch.setattr(main._admin_api, "list_cloud_catalog", fake_list)
 
     result = await main.list_cloud_catalog_ui("client")
 
-    assert result["catalog"][0]["name"] == "openrouter"
-    assert result["catalog"][0]["configured"] is True
-    assert result["catalog"][0]["model_count"] == 1
-    assert result["catalog"][0]["addresses"] == ["openrouter/deepseek/deepseek-v4-flash-0731"]
-    assert result["catalog"][0]["last_fetch"] == 123.0
+    assert seen == ["client"], "the dashboard must call the shared implementation"
+    assert result["catalog"][0]["models"] == enriched
 
 
 @pytest.mark.asyncio
-async def test_dashboard_cloud_catalog_refresh(monkeypatch):
-    fake_catalog = MagicMock()
-    fake_catalog.refresh_all = AsyncMock()
-    monkeypatch.setattr(main, "cloud_catalog", fake_catalog)
+async def test_dashboard_cloud_catalog_refresh_delegates(monkeypatch):
+    """Refresh delegates too, so it also refreshes the reference catalog and
+    returns the refreshed payload rather than a bare status string."""
+    seen: list[str] = []
+
+    async def fake_refresh(client_id):
+        seen.append(client_id)
+        return {"status": "refreshed", "catalog": []}
+
+    monkeypatch.setattr(main._admin_api, "refresh_cloud_catalog", fake_refresh)
 
     result = await main.refresh_cloud_catalog_ui("client")
 
+    assert seen == ["client"]
     assert result["status"] == "refreshed"
-    fake_catalog.refresh_all.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_both_surfaces_serve_the_same_catalog_payload():
+    """Regression guard for the drift above: whatever the API app returns, the
+    dashboard app returns the same document.
+
+    ``created`` is ``int(time.time())`` at build time, so two calls that straddle
+    a second boundary legitimately differ; it is excluded rather than compared.
+    The delegation is what this test pins, not the clock. Everything else must be
+    byte-identical, which is the property that breaks if the two apps ever grow
+    separate implementations again.
+    """
+    from app.gateway import admin_api
+
+    def without_created(node):
+        if isinstance(node, dict):
+            return {k: without_created(v) for k, v in node.items() if k != "created"}
+        if isinstance(node, list):
+            return [without_created(v) for v in node]
+        return node
+
+    dashboard = await main.list_cloud_catalog_ui("client")
+    api = await admin_api.list_cloud_catalog("client")
+
+    assert without_created(dashboard) == without_created(api)
+
+
+@pytest.mark.asyncio
+async def test_dashboard_catalog_carries_enriched_models(monkeypatch):
+    """The dashboard payload must carry ``models``, not just bare addresses —
+    that is what the catalogue view renders. Uses fakes so the result does not
+    depend on runtime catalogues or credentials."""
+    from app.gateway import admin_api
+
+    provider = SimpleNamespace(name="openrouter", is_configured=True, managed=False)
+    captured = {
+        "openai/gpt-4o": {
+            "name": "OpenAI: GPT-4o",
+            "architecture": {
+                "modality": "text+image->text",
+                "input_modalities": ["text", "image"],
+                "output_modalities": ["text"],
+                "tokenizer": "GPT",
+                "instruct_type": None,
+            },
+            "pricing": {"prompt": "0.0000025"},
+            "supported_parameters": ["tools"],
+        }
+    }
+
+    class _Catalog:
+        _catalogs = {"openrouter": {"fetched_at": 1.0}}
+
+        def get_models_for_provider(self, name):
+            return {"openai/gpt-4o": "gpt-4o"}
+
+        def get_model_metadata(self, provider_name, identity):
+            return dict(captured.get(identity, {}))
+
+        def get_model_overrides(self, identity, provider_name=""):
+            return {}
+
+        def is_auth_error(self, name):
+            return False
+
+    monkeypatch.setattr(
+        admin_api,
+        "_provider_registry",
+        SimpleNamespace(
+            get_enabled_providers=lambda: [provider],
+            build_model_metadata_entry=lambda full_id: {
+                "id": full_id,
+                "object": "model",
+                "created": 1,
+                "owned_by": "openrouter",
+                "permission": [],
+                "served_by": "cloud",
+                "provider": "openrouter",
+            },
+        ),
+    )
+    monkeypatch.setattr(admin_api, "_cloud_catalog", _Catalog())
+    monkeypatch.setattr(admin_api, "_reference_catalog", None)
+
+    result = await main.list_cloud_catalog_ui("client")
+    entry = result["catalog"][0]
+
+    assert entry["addresses"] == ["openrouter/openai/gpt-4o"]
+    assert len(entry["models"]) == 1
+    model = entry["models"][0]
+    assert model["id"] == "openrouter/openai/gpt-4o"
+    assert model["architecture"]["input_modalities"] == ["text", "image"]
+    assert model["supported_parameters"] == ["tools"]
+    assert "metadata_sources" in model
+
+
+
+@pytest.mark.asyncio
+async def test_dashboard_catalog_survives_a_raising_registry_entry_builder(monkeypatch):
+    """``_build_catalog_entry`` is documented fail-open: one model whose
+    registry entry builder raises must degrade to its renderable fallback
+    entry, not 500 the whole dashboard catalog into a silent "Loading…"."""
+    from app.gateway import admin_api
+
+    provider = SimpleNamespace(name="openrouter", is_configured=True, managed=False)
+
+    class _Registry:
+        def get_enabled_providers(self):
+            return [provider]
+
+        def build_model_metadata_entry(self, full_id):
+            if full_id == "openrouter/openai/broken":
+                raise RuntimeError("inconsistent registry state")
+            return {
+                "id": full_id,
+                "object": "model",
+                "created": 1,
+                "owned_by": "openrouter",
+                "permission": [],
+                "served_by": "cloud",
+                "provider": "openrouter",
+            }
+
+    class _Catalog:
+        _catalogs = {"openrouter": {"fetched_at": 1.0}}
+
+        def get_models_for_provider(self, name):
+            return {"openai/gpt-4o": "gpt-4o", "openai/broken": "broken"}
+
+        def get_model_metadata(self, provider_name, identity):
+            return {}
+
+        def get_model_overrides(self, identity, provider_name=""):
+            return {}
+
+        def is_auth_error(self, name):
+            return False
+
+    monkeypatch.setattr(admin_api, "_provider_registry", _Registry())
+    monkeypatch.setattr(admin_api, "_cloud_catalog", _Catalog())
+    monkeypatch.setattr(admin_api, "_reference_catalog", None)
+
+    result = await main.list_cloud_catalog_ui("client")
+
+    models = {m["id"]: m for p in result["catalog"] for m in p["models"]}
+    assert set(models) == {"openrouter/openai/gpt-4o", "openrouter/openai/broken"}
+    # The broken model degrades to the minimal renderable entry.
+    assert models["openrouter/openai/broken"]["served_by"] == "cloud"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_catalog_enrichment_failure_log_is_sanitized(monkeypatch, caplog):
+    """The context-enrichment failure log in _build_catalog_entry must pass the
+    same log-safety guard as the registry-build log: upstream-derived model ids
+    and exception text are external data, and control characters must not be
+    able to forge log lines."""
+    import logging
+
+    from app.gateway import admin_api
+
+    async def broken(entry):
+        raise RuntimeError("enrich\nFORGED\rentry\x00")
+
+    monkeypatch.setattr(admin_api, "enrich_model_context_metadata", broken)
+    provider = SimpleNamespace(name="openrouter", is_configured=True, managed=False)
+
+    class _Registry:
+        def get_enabled_providers(self):
+            return [provider]
+
+        def build_model_metadata_entry(self, full_id):
+            return {
+                "id": full_id,
+                "object": "model",
+                "created": 1,
+                "owned_by": "openrouter",
+                "permission": [],
+                "served_by": "cloud",
+                "provider": "openrouter",
+            }
+
+    class _Catalog:
+        _catalogs = {"openrouter": {"fetched_at": 1.0}}
+
+        def get_models_for_provider(self, name):
+            return {"openai/broken": "broken"}
+
+        def get_model_metadata(self, provider_name, identity):
+            return {}
+
+        def get_model_overrides(self, identity, provider_name=""):
+            return {}
+
+        def is_auth_error(self, name):
+            return False
+
+    monkeypatch.setattr(admin_api, "_provider_registry", _Registry())
+    monkeypatch.setattr(admin_api, "_cloud_catalog", _Catalog())
+    monkeypatch.setattr(admin_api, "_reference_catalog", None)
+
+    with caplog.at_level(logging.DEBUG, logger="Guardian"):
+        result = await main.list_cloud_catalog_ui("client")
+
+    # The entry itself still renders (fail-open), and no log record carries a
+    # control character that could forge another log line.
+    assert result["catalog"][0]["models"][0]["id"] == "openrouter/openai/broken"
+    for record in caplog.records:
+        message = record.getMessage()
+        assert "\n" not in message
+        assert "\r" not in message
+        assert "\x00" not in message
