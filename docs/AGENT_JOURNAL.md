@@ -508,3 +508,9 @@ Carry-forward per gearchiveerd milestone (essentie + bewijs → voltekst in `doc
   `_as_model_data` omitted `metadata_sources` when empty, violating §5's
   always-present rule ({} never omitted) that `/v1/models` already follows —
   two tests re-pinned. CI green on the doc commit.
+- Review on `791a11e`: one robustness finding verified real —
+  `admin_api._build_catalog_entry` documented fail-open but left the first
+  registry call unguarded, so one bad model 500'd the whole
+  `/api/cloud/catalog` and the dashboard catalog stayed on "Loading…". The
+  registry build is now wrapped fail-open into the documented fallback entry,
+  with a red-first dashboard test asserting the other models still render.

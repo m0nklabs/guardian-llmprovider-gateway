@@ -232,3 +232,56 @@ async def test_dashboard_catalog_carries_enriched_models(monkeypatch):
     assert model["supported_parameters"] == ["tools"]
     assert "metadata_sources" in model
 
+
+
+@pytest.mark.asyncio
+async def test_dashboard_catalog_survives_a_raising_registry_entry_builder(monkeypatch):
+    """``_build_catalog_entry`` is documented fail-open: one model whose
+    registry entry builder raises must degrade to its renderable fallback
+    entry, not 500 the whole dashboard catalog into a silent "Loading…"."""
+    from app.gateway import admin_api
+
+    provider = SimpleNamespace(name="openrouter", is_configured=True, managed=False)
+
+    class _Registry:
+        def get_enabled_providers(self):
+            return [provider]
+
+        def build_model_metadata_entry(self, full_id):
+            if full_id == "openrouter/openai/broken":
+                raise RuntimeError("inconsistent registry state")
+            return {
+                "id": full_id,
+                "object": "model",
+                "created": 1,
+                "owned_by": "openrouter",
+                "permission": [],
+                "served_by": "cloud",
+                "provider": "openrouter",
+            }
+
+    class _Catalog:
+        _catalogs = {"openrouter": {"fetched_at": 1.0}}
+
+        def get_models_for_provider(self, name):
+            return {"openai/gpt-4o": "gpt-4o", "openai/broken": "broken"}
+
+        def get_model_metadata(self, provider_name, identity):
+            return {}
+
+        def get_model_overrides(self, identity, provider_name=""):
+            return {}
+
+        def is_auth_error(self, name):
+            return False
+
+    monkeypatch.setattr(admin_api, "_provider_registry", _Registry())
+    monkeypatch.setattr(admin_api, "_cloud_catalog", _Catalog())
+    monkeypatch.setattr(admin_api, "_reference_catalog", None)
+
+    result = await main.list_cloud_catalog_ui("client")
+
+    models = {m["id"]: m for p in result["catalog"] for m in p["models"]}
+    assert set(models) == {"openrouter/openai/gpt-4o", "openrouter/openai/broken"}
+    # The broken model degrades to the minimal renderable entry.
+    assert models["openrouter/openai/broken"]["served_by"] == "cloud"

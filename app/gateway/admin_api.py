@@ -18,6 +18,7 @@ from fastapi import HTTPException, Request
 
 from app.gateway.context_metadata import enrich_model_context_metadata
 from app.gateway.metadata_enrichment import attach_parity_metadata
+from app.log_safety import clean_log_value
 
 logger = logging.getLogger("Guardian")
 
@@ -135,7 +136,15 @@ async def _build_catalog_entry(full_id: str, provider_name: str) -> dict[str, An
     filled in from the cross-provider reference catalog.  Fail-open: a metadata
     lookup failure still yields a renderable entry.
     """
-    entry = _provider_registry.build_model_metadata_entry(full_id)
+    try:
+        entry = _provider_registry.build_model_metadata_entry(full_id)
+    except Exception as exc:  # fail-open: the dashboard must still render
+        logger.debug(
+            "Registry entry build failed for %s: %s",
+            clean_log_value(full_id),
+            clean_log_value(exc),
+        )
+        entry = None
     if entry is None:
         entry = {
             "id": full_id,
