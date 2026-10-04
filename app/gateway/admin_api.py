@@ -158,7 +158,11 @@ async def _build_catalog_entry(full_id: str, provider_name: str) -> dict[str, An
     try:
         entry = await enrich_model_context_metadata(entry)
     except Exception as exc:  # fail-open: the dashboard must still render
-        logger.debug("Context enrichment failed for %s: %s", full_id, exc)
+        logger.debug(
+            "Context enrichment failed for %s: %s",
+            clean_log_value(full_id),
+            clean_log_value(exc),
+        )
     attach_parity_metadata(
         entry,
         catalog=_cloud_catalog,

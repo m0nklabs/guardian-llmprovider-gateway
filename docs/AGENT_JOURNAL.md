@@ -514,3 +514,7 @@ Carry-forward per gearchiveerd milestone (essentie + bewijs → voltekst in `doc
   `/api/cloud/catalog` and the dashboard catalog stayed on "Loading…". The
   registry build is now wrapped fail-open into the documented fallback entry,
   with a red-first dashboard test asserting the other models still render.
+- Next review round on `bad28ae`: one minor log-injection gap — the
+  context-enrichment failure log in the same helper still passed `full_id` and
+  the exception raw, inconsistent with the PR's own `clean_log_value`
+  hardening. Fixed with the shared guard and a caplog regression test.

@@ -285,3 +285,66 @@ async def test_dashboard_catalog_survives_a_raising_registry_entry_builder(monke
     assert set(models) == {"openrouter/openai/gpt-4o", "openrouter/openai/broken"}
     # The broken model degrades to the minimal renderable entry.
     assert models["openrouter/openai/broken"]["served_by"] == "cloud"
+
+
+@pytest.mark.asyncio
+async def test_dashboard_catalog_enrichment_failure_log_is_sanitized(monkeypatch, caplog):
+    """The context-enrichment failure log in _build_catalog_entry must pass the
+    same log-safety guard as the registry-build log: upstream-derived model ids
+    and exception text are external data, and control characters must not be
+    able to forge log lines."""
+    import logging
+
+    from app.gateway import admin_api
+
+    async def broken(entry):
+        raise RuntimeError("enrich\nFORGED\rentry\x00")
+
+    monkeypatch.setattr(admin_api, "enrich_model_context_metadata", broken)
+    provider = SimpleNamespace(name="openrouter", is_configured=True, managed=False)
+
+    class _Registry:
+        def get_enabled_providers(self):
+            return [provider]
+
+        def build_model_metadata_entry(self, full_id):
+            return {
+                "id": full_id,
+                "object": "model",
+                "created": 1,
+                "owned_by": "openrouter",
+                "permission": [],
+                "served_by": "cloud",
+                "provider": "openrouter",
+            }
+
+    class _Catalog:
+        _catalogs = {"openrouter": {"fetched_at": 1.0}}
+
+        def get_models_for_provider(self, name):
+            return {"openai/broken": "broken"}
+
+        def get_model_metadata(self, provider_name, identity):
+            return {}
+
+        def get_model_overrides(self, identity, provider_name=""):
+            return {}
+
+        def is_auth_error(self, name):
+            return False
+
+    monkeypatch.setattr(admin_api, "_provider_registry", _Registry())
+    monkeypatch.setattr(admin_api, "_cloud_catalog", _Catalog())
+    monkeypatch.setattr(admin_api, "_reference_catalog", None)
+
+    with caplog.at_level(logging.DEBUG, logger="Guardian"):
+        result = await main.list_cloud_catalog_ui("client")
+
+    # The entry itself still renders (fail-open), and no log record carries a
+    # control character that could forge another log line.
+    assert result["catalog"][0]["models"][0]["id"] == "openrouter/openai/broken"
+    for record in caplog.records:
+        message = record.getMessage()
+        assert "\n" not in message
+        assert "\r" not in message
+        assert "\x00" not in message
