@@ -139,6 +139,43 @@ def test_derive_name_is_deterministic_and_empty_safe():
     assert derive_name(None) == ""  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    ("model_id", "expected"),
+    [
+        ("openai/gpt-4o", "OpenAI: GPT-4o"),
+        ("openrouter/openai/gpt-4o", "OpenAI: GPT-4o"),
+        ("failover/free", "Failover: Free"),
+        ("llama-3.2-3b-instruct", "llama-3.2-3b-instruct"),
+    ],
+)
+def test_resolved_name_preserves_bare_identity_and_strips_full_provider(
+    model_id, expected
+):
+    fields, sources = resolve_model_metadata(model_id)
+
+    assert fields["id"] == model_id
+    assert fields["name"] == expected
+    assert sources["name"] == "derived"
+
+
+@pytest.mark.parametrize("model_id", ["openai/gpt-4o", "openrouter/openai/gpt-4o"])
+@pytest.mark.parametrize("name_source", ["upstream", "reference"])
+def test_resolved_name_preserves_known_advertised_name(model_id, name_source):
+    advertised_name = "Advertised GPT-4o Name"
+    inputs = {name_source: subset(name=advertised_name)}
+    if name_source == "upstream":
+        inputs["reference"] = subset(name="Lower-priority Reference Name")
+    fields, sources = resolve_model_metadata(
+        model_id, reference_source="openrouter", **inputs
+    )
+
+    assert fields["name"] == advertised_name
+    if name_source == "upstream":
+        assert "name" not in sources
+    else:
+        assert sources["name"] == "reference:openrouter"
+
+
 # ── (a) null discipline ──────────────────────────────────────────────
 
 

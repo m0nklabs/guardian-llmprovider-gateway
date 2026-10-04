@@ -60,6 +60,8 @@ from typing import Any, Callable
 
 from fastapi import HTTPException, Request
 
+from app.log_safety import clean_log_value
+
 logger = logging.getLogger("Guardian")
 
 #: Frozen per-endpoint key list (``docs/OPENROUTER_PARITY.md`` §4).  Every key is
@@ -223,7 +225,12 @@ def failover_route_health(health_tracker: Any) -> Callable[[str, str], int | Non
             if health_tracker.is_rate_limited(provider_name, model_id):
                 return STATUS_RATE_LIMITED
         except Exception as exc:  # fail-open: discovery never breaks on health
-            logger.debug("Health lookup failed for %s/%s: %s", provider_name, model_id, exc)
+            logger.debug(
+                "Health lookup failed for %s/%s: %s",
+                clean_log_value(provider_name),
+                clean_log_value(model_id),
+                clean_log_value(exc),
+            )
             return None
         return STATUS_HEALTHY
 
@@ -274,7 +281,7 @@ def _safe_call(label: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) ->
     try:
         return fn(*args, **kwargs)
     except Exception as exc:
-        logger.debug("%s failed: %s", label, exc)
+        logger.debug("%s failed: %s", label, clean_log_value(exc))
         return None
 
 
@@ -316,7 +323,11 @@ def _presentation_candidates() -> tuple[Any, ...]:
             try:
                 module = importlib.import_module(module_name)
             except Exception as exc:
-                logger.debug("Metadata presentation module %s unavailable: %s", module_name, exc)
+                logger.debug(
+                    "Metadata presentation module %s unavailable: %s",
+                    module_name,
+                    clean_log_value(exc),
+                )
                 continue
             if module not in found:
                 found.append(module)
@@ -339,7 +350,7 @@ def _enrichment_module() -> Any | None:
         try:
             module = importlib.import_module("app.gateway.metadata_enrichment")
         except Exception as exc:
-            logger.debug("metadata_enrichment unavailable: %s", exc)
+            logger.debug("metadata_enrichment unavailable: %s", clean_log_value(exc))
             module = None
         _enrichment_modules = (module,) if module is not None else ()
     return _enrichment_modules[0] if _enrichment_modules else None
@@ -442,7 +453,11 @@ def _resolve_model_metadata(
             created=int(time.time()),
         )
     except Exception as exc:
-        logger.warning("⚠️  Model metadata resolution failed for %s: %s", model_id, exc)
+        logger.warning(
+            "⚠️  Model metadata resolution failed for %s: %s",
+            clean_log_value(model_id),
+            clean_log_value(exc),
+        )
         return _fallback_parity_fields(model_id), {}
     parity_fields = dict(parity) if isinstance(parity, dict) else {}
     metadata_sources = dict(sources) if isinstance(sources, dict) else {}
@@ -472,7 +487,7 @@ def _present_endpoint(fields: dict[str, Any]) -> dict[str, Any]:
         )
         return fields
     except Exception as exc:
-        logger.warning("⚠️  endpoint_entry_fields() failed: %s", exc)
+        logger.warning("⚠️  endpoint_entry_fields() failed: %s", clean_log_value(exc))
         return fields
     if not isinstance(presented, dict):
         return fields
@@ -643,8 +658,18 @@ def _route_status(provider_name: str | None, model_id: str | None, *, health_gov
         return None
     reader = _route_health_reader()
     if reader is not None:
-        value = _safe_call("Route health lookup", reader, provider_name, model_id)
-        return _as_int(value)
+        value = _as_int(_safe_call("Route health lookup", reader, provider_name, model_id))
+        if value == STATUS_HEALTHY:
+            provider = _provider_object(provider_name)
+            # Failover lists every candidate, but an untripped tracker alone
+            # cannot establish that an absent or unusable provider is healthy.
+            if (
+                provider is None
+                or not bool(getattr(provider, "enabled", False))
+                or not bool(getattr(provider, "is_configured", False))
+            ):
+                return None
+        return value
     # No tracker at all: the only positive degradation signal left is a provider
     # whose own catalog fetch was rejected (401/403).
     if _provider_auth_error(provider_name):
@@ -774,7 +799,7 @@ def _sibling_auth_context_reader() -> Callable[[Request], Any] | None:
     try:
         from app.gateway import model_discovery
     except Exception as exc:  # pragma: no cover - import failure is not fatal
-        logger.debug("Sibling model_discovery unavailable: %s", exc)
+        logger.debug("Sibling model_discovery unavailable: %s", clean_log_value(exc))
         return None
     reader = getattr(model_discovery, "_get_request_auth_context", None)
     return reader if callable(reader) else None
@@ -884,7 +909,7 @@ def _local_registry_provider_name() -> str | None:
 
         filename = local_models_file().name
     except Exception as exc:  # pragma: no cover - path helper is stable
-        logger.debug("Local model registry path unavailable: %s", exc)
+        logger.debug("Local model registry path unavailable: %s", clean_log_value(exc))
         return None
     return _as_str(filename.split(".settings")[0])
 
@@ -1115,7 +1140,11 @@ async def _resolved_context_window(
     try:
         value = await _maybe_await(_resolve_context_window(model_id, canonical, cloud_attempts))
     except Exception as exc:
-        logger.debug("Context resolution failed for %s: %s", model_id, exc)
+        logger.debug(
+            "Context resolution failed for %s: %s",
+            clean_log_value(model_id),
+            clean_log_value(exc),
+        )
         return None
     return _as_positive_int(value)
 
@@ -1137,10 +1166,18 @@ async def _cloud_attempts_for(
     except HTTPException as exc:
         if exc.status_code == 403:
             raise
-        logger.debug("Cloud attempt resolution refused for %s: %s", model_id, exc.detail)
+        logger.debug(
+            "Cloud attempt resolution refused for %s: %s",
+            clean_log_value(model_id),
+            clean_log_value(exc.detail),
+        )
         return None
     except Exception as exc:
-        logger.debug("Cloud attempt resolution failed for %s: %s", model_id, exc)
+        logger.debug(
+            "Cloud attempt resolution failed for %s: %s",
+            clean_log_value(model_id),
+            clean_log_value(exc),
+        )
         return None
     attempts = result[0] if isinstance(result, tuple) and result else result
     if isinstance(attempts, list) and attempts:

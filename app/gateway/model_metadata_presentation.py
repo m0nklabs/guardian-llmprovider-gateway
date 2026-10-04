@@ -1002,8 +1002,13 @@ def resolve_model_metadata(
     ref_label = _reference_label(reference_source)
     sources: dict[str, str] = {}
 
-    # -- identity -----------------------------------------------------
-    identity_key = split_identity(model_id)
+    # -- display identity ---------------------------------------------
+    # Two segments are ambiguous (brand/model or legacy provider/model).
+    # Preserve both for display; only full provider/brand/model loses its prefix.
+    # Keep split_identity's legacy contract unchanged for other callers.
+    identity_key = _clean_str(model_id) or ""
+    if identity_key.count("/") >= 2:
+        identity_key = split_identity(identity_key)
     served_by = _clean_str(loc.get("served_by"))
     if served_by is None and loc:
         served_by = _LOCAL

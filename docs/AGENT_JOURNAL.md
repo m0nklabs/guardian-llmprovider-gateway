@@ -448,3 +448,29 @@ Carry-forward per gearchiveerd milestone (essentie + bewijs → voltekst in `doc
   configured it. Reversed order passes (142 passed), as does the test alone and
   as does the full suite. Only subset runs in that specific order are affected,
   but it is a trap worth knowing before blaming a change.
+
+## 2026-10-04 — PR #28 review follow-up — DSH agent (gpt-6.1-sol)
+
+- Scope: review on head `3b3a31c`, two blocking PR-Piet findings and one
+  uncertain signature finding; six existing CodeQL log-injection threads.
+- Confirmed and fixed: an empty health tracker labeled absent, disabled or
+  unconfigured failover providers healthy. Only the unsupported healthy claim
+  is now suppressed; candidates remain listed, and explicit degraded,
+  rate-limited and authentication-error signals remain intact. Fifteen
+  provider-state/health/authentication regression cases pin this distinction.
+- Confirmed and fixed: display-name derivation stripped the brand from bare
+  two-segment addresses. Bare and full OpenAI addresses now derive the same
+  name, and `failover/free` retains its prefix. Existing `split_identity`
+  behavior and advertised-name precedence are preserved.
+- Refuted with real-class regression: `CloudModelCatalog.get_model_overrides`
+  accepts `(identity, provider_name="")`, so both existing call forms work.
+  No speculative TypeError retry was added; temporary test paths avoid live
+  runtime caches.
+- CodeQL findings addressed with a shared diagnostic-only control-character
+  sanitizer and length limit. Regression tests cover identifiers, exceptions,
+  HTTP error details and failed collaborator paths without mutating requests.
+- Verification: 178 targeted tests passed; both child diffs were reviewed by
+  the parent. First full gate: one known lifespan timing failure, 1712 passed.
+  The failing test passed in isolation; the subsequent complete gate passed
+  all checks with 1713 tests passed and 20 deselected. Ruff and diff checks
+  passed. No production restart or deliberate live-cache mutation.

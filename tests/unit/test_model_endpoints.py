@@ -981,6 +981,62 @@ async def test_status_from_the_failover_health_tracker(tmp_path):
     ]
 
 
+@pytest.mark.parametrize("provider_state", ["unknown", "disabled", "unconfigured", "reachable"])
+@pytest.mark.parametrize(
+    "health_status", [me.STATUS_HEALTHY, me.STATUS_DEGRADED, me.STATUS_RATE_LIMITED]
+)
+async def test_failover_status_requires_a_usable_provider_only_for_healthy(
+    tmp_path, provider_state, health_status
+):
+    world = _build_world(tmp_path)
+    provider = world.registry._providers["groq"]
+    if provider_state == "unknown":
+        del world.registry._providers["groq"]
+    elif provider_state == "disabled":
+        provider.enabled = False
+    elif provider_state == "unconfigured":
+        provider.api_key = ""
+    tracker = ProviderHealthTracker(failure_threshold=1, cooldown_seconds=60.0)
+    if health_status == me.STATUS_DEGRADED:
+        tracker.record_failure("groq", "openai/gpt-4o")
+    elif health_status == me.STATUS_RATE_LIMITED:
+        tracker.record_rate_limited("groq", "openai/gpt-4o")
+    me.attach(route_health=me.failover_route_health(tracker))
+
+    payload = await world.endpoints("failover/free")
+
+    # Every configured candidate remains visible, including absent providers.
+    assert world.names(payload) == ["openrouter", "groq", "ghost"]
+    by_provider = {e["provider_name"]: e for e in payload["data"]["endpoints"]}
+    expected = health_status
+    if provider_state != "reachable" and health_status == me.STATUS_HEALTHY:
+        expected = None
+    assert by_provider["groq"]["status"] == expected
+    assert by_provider["openrouter"]["status"] == me.STATUS_HEALTHY
+    assert by_provider["ghost"]["status"] is None
+
+
+@pytest.mark.parametrize("provider_state", ["unknown", "disabled", "unconfigured"])
+async def test_failover_unusable_provider_preserves_catalog_auth_error(tmp_path, provider_state):
+    catalogs = dict(DEFAULT_CATALOGS)
+    catalogs["groq"] = {**DEFAULT_CATALOGS["groq"], "auth_error": True}
+    world = _build_world(tmp_path, catalogs=catalogs)
+    provider = world.registry._providers["groq"]
+    if provider_state == "unknown":
+        del world.registry._providers["groq"]
+    elif provider_state == "disabled":
+        provider.enabled = False
+    else:
+        provider.api_key = ""
+
+    payload = await world.endpoints("failover/free")
+
+    assert world.names(payload) == ["openrouter", "groq", "ghost"]
+    by_provider = {e["provider_name"]: e for e in payload["data"]["endpoints"]}
+    assert by_provider["groq"]["status"] == me.STATUS_DEGRADED
+    assert by_provider["ghost"]["status"] is None
+
+
 async def test_status_reports_broken_credentials_without_a_tracker(tmp_path):
     catalogs = dict(DEFAULT_CATALOGS)
     catalogs["openrouter"] = {**DEFAULT_CATALOGS["openrouter"], "auth_error": True}
@@ -1000,6 +1056,60 @@ async def test_local_route_never_reports_a_status(tmp_path):
     payload = await world.endpoints("llama3.2-3b")
 
     assert payload["data"]["endpoints"][0]["status"] is None
+
+
+@pytest.mark.parametrize(
+    "failure_path",
+    ["metadata", "context", "cloud_refused", "cloud_failed", "health", "endpoint", "safe_call"],
+)
+async def test_failure_logs_sanitize_untrusted_values(monkeypatch, caplog, failure_path):
+    raw_model = "model\r\n\x00\x1b\x85FORGED" + "m" * 200
+    raw_error = "error\r\n\x00\x1b\x85FORGED" + "e" * 200
+    received = []
+
+    def fail(model_id, *args, **kwargs):
+        received.append(model_id)
+        if failure_path == "cloud_refused":
+            raise HTTPException(status_code=404, detail=raw_error)
+        raise RuntimeError(raw_error)
+
+    with caplog.at_level("DEBUG", logger="Guardian"):
+        if failure_path == "metadata":
+            me.attach(presentation=_make_presentation(resolve_model_metadata=fail))
+            fields, sources = me._resolve_model_metadata(
+                raw_model, upstream=None, reference=None, reference_source=None,
+                overrides=None, local=None, context_length=None,
+            )
+            assert fields["id"] == raw_model
+            assert sources == {}
+        elif failure_path == "context":
+            monkeypatch.setattr(me, "_resolve_context_window", fail)
+            assert await me._resolved_context_window(raw_model, None, None) is None
+        elif failure_path in {"cloud_refused", "cloud_failed"}:
+            monkeypatch.setattr(me, "_resolve_cloud_attempts", fail)
+            assert await me._cloud_attempts_for(raw_model, SimpleNamespace(), "tester") is None
+        elif failure_path == "health":
+            tracker = SimpleNamespace(is_tripped=lambda provider, model: fail(model))
+            assert me.failover_route_health(tracker)(raw_model, raw_model) is None
+        elif failure_path == "endpoint":
+            def fail_endpoint(**fields):
+                return fail(fields["model_id"])
+
+            me.attach(presentation=_make_presentation(endpoint_entry_fields=fail_endpoint))
+            fields = {"model_id": raw_model}
+            assert me._present_endpoint(fields) is fields
+        else:
+            assert me._safe_call("Test lookup", fail, raw_model) is None
+
+    # Sanitization is diagnostic-only: collaborators still receive exact values.
+    assert received == [raw_model]
+    records = [record for record in caplog.records if record.name == "Guardian"]
+    assert len(records) == 1
+    for value in records[0].args:
+        assert isinstance(value, str)
+        assert len(value) <= 160
+        assert not any(ord(char) < 32 or 127 <= ord(char) <= 159 for char in value)
+    assert "error     FORGED" in records[0].getMessage()
 
 
 # ── model-level response shape ──────────────────────────────────────

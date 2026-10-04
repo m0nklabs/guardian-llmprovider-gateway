@@ -22,6 +22,7 @@ import logging
 from typing import Any
 
 from app.gateway.model_metadata_presentation import resolve_model_metadata, split_identity
+from app.log_safety import clean_log_value
 
 logger = logging.getLogger("Guardian.MetadataEnrichment")
 
@@ -87,7 +88,7 @@ def _safe_metadata(catalog: Any, provider_name: str | None, identity: str) -> di
     try:
         raw = catalog.get_model_metadata(provider_name, identity)
     except Exception as exc:  # fail-open: metadata never breaks discovery
-        logger.debug("Catalog metadata lookup failed for %s/%s: %s", provider_name, identity, exc)
+        logger.debug("Catalog metadata lookup failed for %s/%s: %s", clean_log_value(provider_name), clean_log_value(identity), clean_log_value(exc))
         return None
     return raw if isinstance(raw, dict) and raw else None
 
@@ -100,7 +101,7 @@ def _safe_reference(reference_catalog: Any, identity: str) -> tuple[dict[str, An
         raw = reference_catalog.metadata(identity)
         source = reference_catalog.source_name(identity)
     except Exception as exc:  # fail-open
-        logger.debug("Reference metadata lookup failed for %s: %s", identity, exc)
+        logger.debug("Reference metadata lookup failed for %s: %s", clean_log_value(identity), clean_log_value(exc))
         return None, None
     return (raw if isinstance(raw, dict) and raw else None), source
 
@@ -112,7 +113,7 @@ def _safe_overrides(catalog: Any, provider_name: str | None, identity: str) -> d
     try:
         raw = catalog.get_model_overrides(identity, provider_name)
     except Exception as exc:  # fail-open
-        logger.debug("Override lookup failed for %s/%s: %s", provider_name, identity, exc)
+        logger.debug("Override lookup failed for %s/%s: %s", clean_log_value(provider_name), clean_log_value(identity), clean_log_value(exc))
         return None
     return raw if isinstance(raw, dict) and raw else None
 
@@ -173,7 +174,7 @@ def attach_parity_metadata(
             created=model_entry.get("created"),
         )
     except Exception as exc:  # fail-open: metadata never breaks discovery
-        logger.warning("⚠️  Parity metadata failed for %s: %s", full_id, exc)
+        logger.warning("⚠️  Parity metadata failed for %s: %s", clean_log_value(full_id), clean_log_value(exc))
         return model_entry
 
     for key, value in parity.items():
@@ -217,7 +218,7 @@ def local_model_facts(model_manager: Any, canonical_name: str) -> dict[str, Any]
             if isinstance(candidate, dict):
                 config = candidate
     except Exception as exc:  # fail-open
-        logger.debug("Local model config lookup failed for %s: %s", canonical_name, exc)
+        logger.debug("Local model config lookup failed for %s: %s", clean_log_value(canonical_name), clean_log_value(exc))
 
     model_type = config.get("model_type")
     if isinstance(model_type, str) and model_type:
@@ -245,5 +246,5 @@ def local_model_facts(model_manager: Any, canonical_name: str) -> dict[str, Any]
     try:
         facts["vision"] = model_manager.get_vision_capability(canonical_name)
     except Exception as exc:  # fail-open
-        logger.debug("Vision capability lookup failed for %s: %s", canonical_name, exc)
+        logger.debug("Vision capability lookup failed for %s: %s", clean_log_value(canonical_name), clean_log_value(exc))
     return facts

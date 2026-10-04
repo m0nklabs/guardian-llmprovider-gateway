@@ -439,3 +439,51 @@ def test_reference_context_window_fails_open(clean_context_metadata):
 def test_reference_context_window_is_skipped_without_a_catalog(clean_context_metadata):
     context_metadata._reference_catalog = None
     assert context_metadata._reference_context_window("openai/openai/gpt-4o") is None
+
+
+def test_real_catalog_override_signature_accepts_both_surfaces(tmp_path):
+    """Both call forms work on the real class; no TypeError compatibility retry."""
+    from app.gateway.metadata_enrichment import _safe_overrides
+    from app.gateway.model_endpoints import _catalog_overrides
+    from app.gateway import model_endpoints
+    from app.proxy.cloud_catalog import CloudModelCatalog
+    from app.proxy.providers import ProviderRegistry
+    from unittest.mock import patch
+
+    settings = tmp_path / "settings.yaml"
+    settings.write_text("providers: {}\n", encoding="utf-8")
+    overrides = tmp_path / "overrides.yaml"
+    overrides.write_text("openai/gpt-4o:\n  max_tokens: 4096\n", encoding="utf-8")
+    catalog = CloudModelCatalog(
+        ProviderRegistry(settings_path=settings),
+        cache_file=tmp_path / "catalog.json",
+        overrides_file=overrides,
+    )
+    expected = {"max_tokens": 4096}
+    assert catalog.get_model_overrides("openai/gpt-4o") == expected
+    assert catalog.get_model_overrides("openai/gpt-4o", "openai") == expected
+    assert _safe_overrides(catalog, "openai", "openai/gpt-4o") == expected
+    with patch.object(model_endpoints, "_cloud_catalog", catalog):
+        assert _catalog_overrides("openai/gpt-4o") == expected
+
+
+def test_metadata_failure_logs_cannot_inject_another_line(caplog):
+    import logging
+    from app.gateway.metadata_enrichment import _safe_metadata, _safe_overrides
+
+    class BrokenCatalog:
+        def get_model_metadata(self, *args):
+            raise RuntimeError("upstream\nFORGED\rentry\x00")
+
+        def get_model_overrides(self, *args):
+            raise RuntimeError("override\nFORGED\rentry\x00")
+
+    with caplog.at_level(logging.DEBUG, logger="Guardian.MetadataEnrichment"):
+        assert _safe_metadata(BrokenCatalog(), "provider\nFORGED", "model\rFORGED") is None
+        assert _safe_overrides(BrokenCatalog(), "provider\nFORGED", "model\rFORGED") is None
+    assert len(caplog.records) == 2
+    for record in caplog.records:
+        message = record.getMessage()
+        assert "\n" not in message
+        assert "\r" not in message
+        assert "\x00" not in message
