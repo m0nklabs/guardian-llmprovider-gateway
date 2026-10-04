@@ -518,3 +518,15 @@ Carry-forward per gearchiveerd milestone (essentie + bewijs → voltekst in `doc
   context-enrichment failure log in the same helper still passed `full_id` and
   the exception raw, inconsistent with the PR's own `clean_log_value`
   hardening. Fixed with the shared guard and a caplog regression test.
+- Review via the operator's `/review2` (formal review posted on `aeec8f0`): one
+  non-blocking XSS finding verified worse than UNCERTAIN — in a real browser
+  the legacy address pill's inline `onclick="copyToClipboard('${escapeHtml(id)}')"`
+  executed an injected id, and the copied value was even truncated at the
+  injected quote: escapeHtml cannot protect a JS-string context because the
+  HTML parser decodes entities in the attribute before the JS engine parses
+  the string. Fixed by moving the id into `data-model-copy` on the pill and
+  delegating clicks on the static `#model-cards` container to the same
+  `handleModelCatalogClick` the catalog grid uses (guarded against
+  double-binding). Browser red/green evidence captured with the QA hook and a
+  canary `alert`; committed guard: `tests/unit/test_dashboard_ui_safety.py`
+  (no `${` in any inline `onclick`; delegated copy wiring present).

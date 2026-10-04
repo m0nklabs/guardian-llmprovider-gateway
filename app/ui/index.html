@@ -1998,11 +1998,17 @@
                 </div>`;
         }
 
-        // Address pill — kept byte-for-byte compatible with the pre-catalog UI.
+        // Address pill — kept byte-for-byte compatible with the pre-catalog UI,
+        // except for the copy trigger: an upstream-supplied id must never be
+        // interpolated into an inline onclick JS string. escapeHtml cannot
+        // protect that context — the HTML parser decodes entities in the
+        // attribute value *before* the JS engine parses the string, so a
+        // decoded quote still terminates it and executes the rest as script.
+        // The id travels in a data attribute read by the delegated handler.
         function renderAddressPill(entry) {
             const prov = entry.provider || '?';
             const provClass = prov === 'nvidia' ? 'bg-green-900 text-white' : 'bg-purple-900 text-white';
-            return `<div class="px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 cursor-pointer hover:border-cyan-500 transition-all" onclick="copyToClipboard('${escapeHtml(entry.id)}', 'Copied: ${escapeHtml(entry.id)}')">
+            return `<div class="px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 cursor-pointer hover:border-cyan-500 transition-all" data-model-copy="${escapeHtml(entry.id)}" title="Copy this address">
                 <span class="pill ${provClass} mr-2">${escapeHtml(prov)}</span>
                 <span class="text-sm font-mono text-cyan-300">${escapeHtml(entry.id)}</span>
             </div>`;
@@ -2543,6 +2549,14 @@
                 selectModel(event.target.closest('[data-model-id]').getAttribute('data-model-id'));
             });
             document.getElementById('model-detail-panel')?.addEventListener('click', handleModelCatalogClick);
+            // The legacy address-pill container is static in the DOM, so the
+            // delegated copy handler can be wired once and survives every
+            // innerHTML re-render of the pills themselves.
+            const legacyCards = document.getElementById('model-cards');
+            if (legacyCards && !legacyCards.dataset.delegatedCopy) {
+                legacyCards.dataset.delegatedCopy = 'true';
+                legacyCards.addEventListener('click', handleModelCatalogClick);
+            }
         }
 
         // QA/console hook: lets a browser session render a catalog payload without a
