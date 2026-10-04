@@ -162,8 +162,7 @@ Representative item:
     "default_enabled": true
   },
   "metadata_sources": {
-    "architecture": "reference:openrouter",
-    "supported_parameters": "upstream"
+    "architecture": "reference:openrouter"
   },
   "input_modalities": ["text", "image"],
   "configured_input_modalities": ["text", "image"],
@@ -173,6 +172,10 @@ Representative item:
 
 Notes:
 
+- `metadata_sources` lists only the sections whose value did **not** come from
+  the route's own upstream advertisement — an upstream-served section is the
+  default and deliberately carries no provenance entry, so `upstream` never
+  appears as a value.
 - `max_context` is normally the benchmark ceiling.
 - for `client_id == claudecode`, Guardian may return the safer
   `advertised_context` value as `max_context` so Claude compacts earlier.
