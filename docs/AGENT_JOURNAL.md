@@ -474,3 +474,13 @@ Carry-forward per gearchiveerd milestone (essentie + bewijs → voltekst in `doc
   The failing test passed in isolation; the subsequent complete gate passed
   all checks with 1713 tests passed and 20 deselected. Ruff and diff checks
   passed. No production restart or deliberate live-cache mutation.
+- Re-review on `4766567` (operator `/review` as `m0nk111`): two new findings,
+  both reproduced red-first. The endpoints call passed its own request-time
+  ``created`` into the presentation layer, whose caller-first priority buried
+  the upstream timestamp forever (spec §3 row says upstream → reference →
+  request time); the existing test missed it because the test stub orders
+  upstream first. Fixed by omitting the argument; a second ``or
+  int(time.time())`` in response assembly ate a legitimate ``created: 0``,
+  replaced with an explicit ``is not None`` check. 186 parity-adjacent tests
+  pass; full gate green. The `/v1/models` path is untouched: spec §6
+  deliberately keeps the discovery entry's own ``created``.

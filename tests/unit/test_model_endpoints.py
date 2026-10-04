@@ -1153,6 +1153,37 @@ async def test_model_level_metadata_comes_from_the_routes_own_upstream(tmp_path)
     assert data["architecture"]["modality"] == "text+image->text"
 
 
+async def test_endpoint_created_prefers_the_upstream_timestamp_over_request_time(monkeypatch):
+    """§4's ``created`` row is ``upstream -> reference -> request time``.
+
+    The caller must not supply its own ``created``: the presentation layer
+    reserves the highest priority for it, so passing the request time silently
+    buried the upstream timestamp. The stub module cannot catch this drift
+    because it orders upstream first, so this test exercises the real module.
+    """
+    monkeypatch.setattr(me, "_presentation_modules", None)
+
+    parity, _ = me._resolve_model_metadata(
+        "openai/gpt-4o",
+        upstream={"created": 1715367049},
+        reference=None,
+        reference_source=None,
+        overrides={},
+        local=None,
+        context_length=None,
+    )
+
+    assert parity["created"] == 1715367049
+
+
+async def test_zero_created_timestamp_is_not_replaced_by_request_time():
+    """A legitimate ``created: 0`` must survive; ``or int(time.time())`` treated
+    it as missing and substituted the request time."""
+    data = me._as_model_data("openai/gpt-4o", {"created": 0}, [], {})
+
+    assert data["created"] == 0
+
+
 async def test_metadata_sources_is_omitted_when_empty(tmp_path):
     world = _build_world(tmp_path)
 

@@ -450,7 +450,10 @@ def _resolve_model_metadata(
             overrides=overrides,
             local=local,
             context_length=context_length,
-            created=int(time.time()),
+            # ``created`` is deliberately absent: §4 resolves it
+            # ``upstream -> reference -> request time``, and the presentation
+            # layer gives a caller-supplied value the highest priority. Passing
+            # the request time here buried the upstream timestamp forever.
         )
     except Exception as exc:
         logger.warning(
@@ -1114,10 +1117,13 @@ def _as_model_data(
 ) -> dict[str, Any]:
     """Assemble the ``data`` object of the §4 response."""
     architecture = _as_dict(parity.get("architecture")) or _empty_architecture()
+    resolved_created = _as_int(parity.get("created"))
     data: dict[str, Any] = {
         "id": model_id,
         "name": _as_str(parity.get("name")) or _derived_name(_split_identity(model_id)),
-        "created": _as_int(parity.get("created")) or int(time.time()),
+        # An explicit None check, not ``or``: a resolved ``created`` of ``0`` is
+        # a real value, not a missing one, and must not become the request time.
+        "created": int(time.time()) if resolved_created is None else resolved_created,
         "description": _as_str(parity.get("description")),
         "architecture": architecture,
         "endpoints": endpoints,
