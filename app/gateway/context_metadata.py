@@ -19,8 +19,7 @@ from typing import Any
 import httpx
 
 from app.proxy.providers import CloudProvider
-from app.gateway.metadata_enrichment import attach_parity_metadata, local_model_facts
-from app.gateway.model_metadata_presentation import split_identity
+from app.gateway.metadata_enrichment import attach_parity_metadata, identity_key, local_model_facts
 
 logger = logging.getLogger("Guardian")
 
@@ -154,7 +153,7 @@ async def resolve_context_window(
                     )
                 if candidate_context is None:
                     candidate_context = _reference_context_window(
-                        f"{provider.name}/{upstream_model}"
+                        f"{provider.name}/{upstream_model}", provider.name
                     )
                 if candidate_context is None:
                     warn_context_fallback(f"{provider.name}/{upstream_model}")
@@ -177,7 +176,7 @@ async def resolve_context_window(
                         )
                     if candidate_context is None:
                         candidate_context = _reference_context_window(
-                            f"{candidate.provider}/{candidate.model}"
+                            f"{candidate.provider}/{candidate.model}", candidate.provider
                         )
                     if candidate_context is None:
                         warn_context_fallback(f"{candidate.provider}/{candidate.model}")
@@ -195,8 +194,12 @@ async def resolve_context_window(
         # every one of those models fell back to DEFAULT_CONTEXT_WINDOW even
         # though another provider's catalog knows the real value for the same
         # model.  Reference data only fills a gap — it never overrides a value
-        # Guardian could already resolve.
-        reference_context = _reference_context_window(public_name)
+        # Guardian could already resolve.  In this cloud branch the first
+        # segment of the address is the provider, so it disambiguates a
+        # two-segment address's identity key.
+        reference_context = _reference_context_window(
+            public_name, public_name.partition("/")[0]
+        )
         if reference_context is not None:
             return reference_context
 
@@ -228,18 +231,27 @@ def _cloud_context_override(upstream_model: str, provider_name: str) -> int | No
     return None
 
 
-def _reference_context_window(model_name: str) -> int | None:
+def _reference_context_window(
+    model_name: str, provider_name: str | None = None
+) -> int | None:
     """Return the cross-provider reference context window for an address, or None.
 
     The reference catalog is keyed on the *identity key* — the
     ``{brand}/{model}`` part of a ``{provider}/{brand}/{model}`` address — so a
     model reachable through one provider can borrow the context window another
     provider advertises for the same model.
+
+    ``identity_key`` (not the pure ``split_identity``) resolves the join: for a
+    two-segment address such as ``openai/gpt-4o`` — what the cloud-attempt and
+    failover-candidate paths build from a 1-segment upstream id — the key is the
+    full address, and only the caller knows which segment is the provider.
+    Without it the lookup silently missed and the route fell back to
+    ``DEFAULT_CONTEXT_WINDOW`` even though the reference catalog knew better.
     """
     if _reference_catalog is None:
         return None
     try:
-        reference = _reference_catalog.metadata(split_identity(model_name))
+        reference = _reference_catalog.metadata(identity_key(model_name, provider_name))
     except Exception as exc:  # fail-open: reference data never breaks discovery
         logger.debug("Reference context lookup failed for %s: %s", model_name, exc)
         return None

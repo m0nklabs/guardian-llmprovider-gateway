@@ -484,3 +484,15 @@ Carry-forward per gearchiveerd milestone (essentie + bewijs → voltekst in `doc
   replaced with an explicit ``is not None`` check. 186 parity-adjacent tests
   pass; full gate green. The `/v1/models` path is untouched: spec §6
   deliberately keeps the discovery entry's own ``created``.
+- The first four deep `/review` runs on `5de2200` failed with no verdict:
+  tier-1's model returned empty content with `finish_reason: length` on the
+  ~9,800-line diff (documented on the PR). A later retry succeeded (0
+  blocking). Its non-blocking finding was verified real and fixed: the
+  reference-context join used the pure `split_identity`, which strips the
+  brand from the two-segment `{provider}/{upstream_model}` addresses built in
+  the cloud-attempt and failover-candidate paths — for providers whose own
+  `/v1/models` advertises no context (openai, google, nvidia) the
+  cross-provider fill silently missed and the route fell back to
+  DEFAULT_CONTEXT_WINDOW. Now uses the shared `identity_key` with the known
+  provider at all three call sites; red-first tests cover the seam and the
+  end-to-end cloud-attempt path (128000 instead of the 131072 fallback).

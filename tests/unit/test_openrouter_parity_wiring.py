@@ -441,6 +441,47 @@ def test_reference_context_window_is_skipped_without_a_catalog(clean_context_met
     assert context_metadata._reference_context_window("openai/openai/gpt-4o") is None
 
 
+def test_two_segment_reference_context_lookup_keeps_the_brand(clean_context_metadata):
+    """§1: a two-segment cloud address is the provider-branded bare upstream id,
+    so its identity key is the *full* address. ``split_identity`` never sees the
+    provider and stripped the brand, so the reference lookup silently missed and
+    the route lost its cross-provider context fill."""
+    context_metadata._reference_catalog = _FakeReference({
+        "openai/gpt-4o": {"context_length": 128000},
+    })
+    assert context_metadata._reference_context_window(
+        "openai/gpt-4o", provider_name="openai"
+    ) == 128000
+    assert context_metadata._reference_context_window(
+        "openai/gpt-4o"
+    ) is None  # no provider -> ambiguity stands -> no guess
+
+
+async def test_cloud_attempt_context_fills_from_the_reference_catalog(clean_context_metadata):
+    """End to end: a provider whose own /v1/models advertises no context window
+    (openai, google, nvidia style, 1-segment upstream ids) still gets the
+    cross-provider fill on the ``{provider}/{upstream_model}`` cloud attempt."""
+    from types import SimpleNamespace
+
+    class _Registry:
+        def get_context_override(self, name):
+            return None
+
+        async def get_cloud_context_window(self, name, provider=None):
+            return None
+
+    context_metadata._provider_registry = _Registry()
+    context_metadata._reference_catalog = _FakeReference({
+        "openai/gpt-4o": {"context_length": 128000},
+    })
+
+    context = await context_metadata.resolve_context_window(
+        "openai/gpt-4o", None, [(SimpleNamespace(name="openai"), "gpt-4o")]
+    )
+
+    assert context == 128000
+
+
 def test_real_catalog_override_signature_accepts_both_surfaces(tmp_path):
     """Both call forms work on the real class; no TypeError compatibility retry."""
     from app.gateway.metadata_enrichment import _safe_overrides
