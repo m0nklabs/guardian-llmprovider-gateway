@@ -496,3 +496,15 @@ Carry-forward per gearchiveerd milestone (essentie + bewijs → voltekst in `doc
   DEFAULT_CONTEXT_WINDOW. Now uses the shared `identity_key` with the known
   provider at all three call sites; red-first tests cover the seam and the
   end-to-end cloud-attempt path (128000 instead of the 131072 fallback).
+- Review on `1fd56bd`: one blocking doc finding (API_REFERENCE example showed
+  `metadata_sources` value `upstream`, which the presentation layer never
+  records) — fixed doc-only, hunk-staged because the working tree carries
+  unrelated in-progress edits from another stream. Next review round (still on
+  the unreviewed `5de2200` diff, three duplicate thread instances of the same
+  reference finding) led to two more verified fixes on `4df297c`'s predecessor:
+  (a) the endpoints cold-start fallback could fabricate an endpoint for a model
+  absent from every fetched catalog — guarded now with a new
+  `CloudModelCatalog.is_provider_catalog_known` fetch-state signal; (b)
+  `_as_model_data` omitted `metadata_sources` when empty, violating §5's
+  always-present rule ({} never omitted) that `/v1/models` already follows —
+  two tests re-pinned. CI green on the doc commit.

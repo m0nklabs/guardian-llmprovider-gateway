@@ -901,8 +901,25 @@ def _cloud_routes(model_id: str, identity: str) -> list[dict[str, Any]]:
     allowlist = getattr(fallback, "catalog_allowlist", None)
     if allowlist and identity not in allowlist:
         return []
+    # Cold-start guard: this prefix fallback exists for the window before the
+    # provider's own catalog exists. Once that catalog has been fetched or
+    # restored from disk — which, with routes empty, means it lacks the
+    # identity — the model is genuinely unserved, and a prefix match alone must
+    # not fabricate an endpoint for it.
+    if _catalog_has_state(name):
+        return []
     upstream = _catalog_models(name).get(identity) or identity
     return [{"provider": fallback, "model": upstream}]
+
+
+def _catalog_has_state(provider_name: str) -> bool:
+    """True when *provider_name*'s catalog has been fetched or restored from disk.
+
+    Distinguishes 'not fetched yet' — the window the cold-start fallback exists
+    for — from 'fetched and the model is absent', where absence is evidence.
+    """
+    getter = getattr(_cloud_catalog, "is_provider_catalog_known", None)
+    return bool(_safe_call("Catalog state lookup", getter, provider_name))
 
 
 def _local_registry_provider_name() -> str | None:
@@ -1128,10 +1145,13 @@ def _as_model_data(
         "architecture": architecture,
         "endpoints": endpoints,
     }
-    if metadata_sources:
-        # §5 provenance is additive (§6) and is what lets an operator tell an
-        # upstream fact from a cross-provider fill on this surface too.
-        data["metadata_sources"] = metadata_sources
+    # §5 provenance is additive (§6) and *always present*: an empty map is the
+    # statement "nothing was filled in", never an omitted key. The /v1/models
+    # path always writes the key (including {}), so omitting it here would let
+    # the same model carry {} on one surface and no key on the other.
+    data["metadata_sources"] = (
+        dict(metadata_sources) if isinstance(metadata_sources, dict) else {}
+    )
     return data
 
 

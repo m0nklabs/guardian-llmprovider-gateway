@@ -629,6 +629,20 @@ class CloudModelCatalog:
             return True
         return (time.time() - float(data.get("fetched_at", 0))) > self._ttl_seconds
 
+    def is_provider_catalog_known(self, provider_name: str) -> bool:
+        """True when the provider has catalog state: fetched, or restored from
+        the disk cache at cold start.
+
+        This is the 'do we know what this provider serves at all' signal — it
+        distinguishes 'not fetched yet' (the window in which a prefix match may
+        still be the only routing evidence) from 'fetched and the model is
+        absent', where absence is evidence the model is not served. An empty
+        models map with a fetch timestamp still counts as known: the fetch
+        happened and answered (possibly with nothing).
+        """
+        data = self._catalogs.get(provider_name)
+        return isinstance(data, dict) and bool(data.get("fetched_at"))
+
     async def ensure_fresh(self, provider_name: str) -> None:
         """Refresh a provider's catalog only when its TTL has elapsed."""
         provider = self._registry._providers.get(provider_name)

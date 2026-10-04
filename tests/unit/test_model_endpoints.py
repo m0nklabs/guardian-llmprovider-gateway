@@ -462,6 +462,17 @@ async def test_cloud_route_falls_back_to_the_registry_when_no_catalog_exists(tmp
     assert payload["data"]["endpoints"][0]["model_id"] == "openai/gpt-4o"
 
 
+async def test_unserved_model_gets_no_fabricated_endpoint(tmp_path):
+    """Steady state: every relevant catalog is fetched and none contains the
+    model. A prefix match alone must not fabricate an endpoint for it — the
+    cold-start fallback exists for 'not fetched yet', not for 'absent'."""
+    world = _build_world(tmp_path)
+
+    payload = await world.endpoints("openrouter/openai/gpt-99")
+
+    assert payload["data"]["endpoints"] == []
+
+
 # ── (c) failover groups ─────────────────────────────────────────────
 
 
@@ -1184,12 +1195,15 @@ async def test_zero_created_timestamp_is_not_replaced_by_request_time():
     assert data["created"] == 0
 
 
-async def test_metadata_sources_is_omitted_when_empty(tmp_path):
+async def test_metadata_sources_is_always_present_even_when_empty(tmp_path):
+    """§5: ``metadata_sources`` is always present — an empty map is the
+    statement 'nothing was filled in', never an omitted key. The same model
+    must not carry ``{}`` on one surface and no key on the other."""
     world = _build_world(tmp_path)
 
     payload = await world.endpoints("openai/gpt-4o")
 
-    assert "metadata_sources" not in payload["data"]
+    assert payload["data"]["metadata_sources"] == {}
 
 
 async def test_route_metadata_is_used_per_route(tmp_path):
@@ -1279,7 +1293,9 @@ async def test_resolve_model_metadata_failure_falls_back(tmp_path, monkeypatch):
         "tokenizer": None,
         "instruct_type": None,
     }
-    assert "metadata_sources" not in payload["data"]
+    # §5: the provenance key is always present, even when the fallback filled
+    # nothing in — {} is a statement, never an omitted key.
+    assert payload["data"]["metadata_sources"] == {}
 
 
 async def test_missing_presentation_module_still_serves_the_route(tmp_path, monkeypatch):
