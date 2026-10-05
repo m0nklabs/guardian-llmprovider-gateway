@@ -986,6 +986,50 @@ class TestCaptureDispatchExtractionC4C5C6:
         assert kwargs["app_title"] == "Probe App"
         assert kwargs["app_referer"] == "https://probe.example"
 
+    def test_received_responses_text_format_sets_grammar_flag(self, monkeypatch):
+        """Responses ``text.format`` (json_schema/json_object) is the
+        Responses equivalent of a grammar request → presence flag True."""
+        from types import SimpleNamespace
+
+        from app.gateway import capture_dispatch
+
+        stub = _StubCaptureController()
+        monkeypatch.setattr(capture_dispatch, "get_capture_controller", lambda: stub)
+        request = SimpleNamespace(headers={})
+        capture_dispatch.dispatch_capture_request_received(
+            request, "cli",
+            request_id="req-dispatch-8",
+            endpoint="/v1/responses",
+            ingress_protocol=PROTOCOL_OPENAI,
+            route_type=ROUTE_LOCAL,
+            requested_model="llama3.2-3b",
+            request_parameters={
+                "text": {"format": {"type": "json_schema", "schema": {"x": 1}}},
+            },
+        )
+        kwargs = stub.received_kwargs
+        assert kwargs["grammar_present"] is True
+        assert kwargs["response_format_present"] is False
+
+    def test_received_responses_plain_text_format_sets_no_grammar_flag(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from app.gateway import capture_dispatch
+
+        stub = _StubCaptureController()
+        monkeypatch.setattr(capture_dispatch, "get_capture_controller", lambda: stub)
+        request = SimpleNamespace(headers={})
+        capture_dispatch.dispatch_capture_request_received(
+            request, "cli",
+            request_id="req-dispatch-9",
+            endpoint="/v1/responses",
+            ingress_protocol=PROTOCOL_OPENAI,
+            route_type=ROUTE_LOCAL,
+            requested_model="llama3.2-3b",
+            request_parameters={"text": {"format": {"type": "text"}}},
+        )
+        assert stub.received_kwargs["grammar_present"] is False
+
     def test_received_second_correlation_header_used_when_first_absent(
         self, monkeypatch
     ):

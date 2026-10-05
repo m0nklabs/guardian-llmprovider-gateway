@@ -6,6 +6,8 @@ import json
 import pytest
 
 from app.capture.redactor import (
+    completions_capture_request,
+    embeddings_capture_request,
     redact_authorization_header,
     redact_image_blocks,
     redact_reasoning_content,
@@ -564,3 +566,114 @@ class TestAnthropicTranslation:
         from app.capture.redactor import anthropic_messages_to_openai
         result = anthropic_messages_to_openai([])
         assert result == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Legacy completions / embeddings request normalization tests
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestCompletionsCaptureRequest:
+    def test_string_prompt_becomes_user_message(self):
+        messages, params = completions_capture_request(
+            {"model": "m", "prompt": "hello", "max_tokens": 8}
+        )
+        assert messages == [{"role": "user", "content": "hello"}]
+        assert params == {"model": "m", "max_tokens": 8}
+
+    def test_prompt_list_becomes_one_message_per_element(self):
+        messages, params = completions_capture_request(
+            {"model": "m", "prompt": ["one", "two"]}
+        )
+        assert messages == [
+            {"role": "user", "content": "one"},
+            {"role": "user", "content": "two"},
+        ]
+        assert params == {"model": "m"}
+
+    def test_token_array_prompt_skipped_but_params_kept(self):
+        """Legacy integer token prompts carry no text — skipped, params stay."""
+        messages, params = completions_capture_request(
+            {"model": "m", "prompt": [123, 456], "temperature": 0.2}
+        )
+        assert messages == []
+        assert params == {"model": "m", "temperature": 0.2}
+
+    def test_never_raises_on_oddball_shapes(self):
+        assert completions_capture_request("nope") == (None, None)  # type: ignore[arg-type]
+        messages, params = completions_capture_request({"prompt": {"weird": True}})
+        assert messages == []
+        assert params == {}
+
+
+class TestEmbeddingsCaptureRequest:
+    def test_string_input_becomes_user_message(self):
+        messages, params = embeddings_capture_request(
+            {"model": "m", "input": "hello world"}
+        )
+        assert messages == [{"role": "user", "content": "hello world"}]
+        assert params == {"model": "m"}
+
+    def test_input_list_becomes_one_message_per_element(self):
+        messages, _ = embeddings_capture_request(
+            {"model": "m", "input": ["first", "second"]}
+        )
+        assert messages == [
+            {"role": "user", "content": "first"},
+            {"role": "user", "content": "second"},
+        ]
+
+    def test_token_array_input_skipped(self):
+        """Integer token arrays carry no text — no messages, params stay."""
+        messages, params = embeddings_capture_request(
+            {"model": "m", "input": [1, 2, 3], "encoding_format": "float"}
+        )
+        assert messages == []
+        assert params == {"model": "m", "encoding_format": "float"}
+
+    def test_mixed_list_keeps_only_string_elements(self):
+        messages, _ = embeddings_capture_request(
+            {"model": "m", "input": ["text", 5]}
+        )
+        assert messages == [{"role": "user", "content": "text"}]
+
+    def test_never_raises_on_oddball_shapes(self):
+        assert embeddings_capture_request(42) == (None, None)  # type: ignore[arg-type]
+
+
+class TestResponsesTextParamStrip:
+    """Responses ``text`` param (text.format = the Responses equivalent of
+    chat ``response_format``) must be stripped under the structured_output
+    policy — same rule as response_format, no content discrimination."""
+
+    def test_text_format_json_schema_stripped(self):
+        params = {
+            "model": "m",
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "name": "answer",
+                    "schema": {"type": "object", "properties": {"a": {"type": "number"}}},
+                }
+            },
+        }
+        result = redact_request_parameters(params)
+        assert result["text"] == "[REDACTED]"
+        dumped = json.dumps(result)
+        assert "properties" not in dumped and "answer" not in dumped
+        assert result["model"] == "m"
+
+    def test_plain_text_type_also_stripped(self):
+        """Same rule, no content discrimination: even {type: 'text'} is
+        stripped under the strip policy."""
+        params = {"text": {"format": {"type": "text"}}}
+        result = redact_request_parameters(params)
+        assert result["text"] == "[REDACTED]"
+
+    def test_capture_policy_keeps_text_param(self):
+        """When the structured_output policy is 'capture', content stays."""
+        params = {"text": {"format": {"type": "json_object"}}}
+        result = redact_request_parameters(
+            params, {"structured_output": "capture"}
+        )
+        assert result["text"] == {"format": {"type": "json_object"}}

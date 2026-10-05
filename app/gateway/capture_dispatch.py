@@ -28,6 +28,7 @@ from app.capture.config import (
     PROTOCOL_OPENAI,
 )
 from app.capture.integration import get_capture_controller
+from app.capture.responses_format import extract_responses_semantics
 from app.capture.schema import BuildContext
 from app.capture.stream_assembler import StreamResponseAssembler
 
@@ -165,11 +166,21 @@ def dispatch_capture_request_received(
         # stripped by `redact_request_parameters` before storage.
         options_fmt = params.get("options")
         options_dict = options_fmt if isinstance(options_fmt, dict) else {}
+        # OpenAI Responses API: ``text.format`` (json_schema / json_object)
+        # is the Responses equivalent of chat ``response_format`` — presence
+        # flag only, the schema content itself is stripped before storage.
+        text_param = params.get("text")
+        text_dict = text_param if isinstance(text_param, dict) else {}
+        text_format = text_dict.get("format")
+        text_format_type = (
+            text_format.get("type") if isinstance(text_format, dict) else None
+        )
         grammar_present = bool(
             "grammar" in params
             or "json_schema" in params
             or "response_format" in params
             or "format" in options_dict
+            or text_format_type in ("json_schema", "json_object")
         )
         response_format_present = bool("response_format" in params)
         # Caller correlation + app origin (C5/C6): read ONLY the configured
@@ -420,8 +431,33 @@ def dispatch_capture_nonstream_completed(
             reported_provider = payload.get("provider")
             if isinstance(reported_provider, str) and reported_provider:
                 provider_name = reported_provider
+            # OpenAI Responses API object: carries an ``output`` item list
+            # (message / function_call / reasoning) instead of ``choices``
+            # or a raw Anthropic-style ``content`` array.
+            if ("output" in payload
+                    and "choices" not in payload
+                    and "content" not in payload):
+                semantics = extract_responses_semantics(payload)
+                response_content = semantics.get("response_content")
+                tool_calls = semantics.get("tool_calls")
+                captured_reasoning = semantics.get("reasoning_content")
+                finish_reason = semantics.get("finish_reason")
+                usage = semantics.get("usage")
+                if isinstance(usage, dict):
+                    prompt_tokens = _coerce_usage_int(usage.get("input_tokens", 0))
+                    completion_tokens = _coerce_usage_int(usage.get("output_tokens", 0))
+                    # Rich usage mirror: Responses reports the reasoning
+                    # token breakdown under ``output_tokens_details`` —
+                    # map it onto the chat ``completion_tokens_details`` key
+                    # so native reasoning tokens land in the mirror.
+                    mirror = dict(usage)
+                    output_details = usage.get("output_tokens_details")
+                    if (isinstance(output_details, dict) and output_details
+                            and "completion_tokens_details" not in mirror):
+                        mirror["completion_tokens_details"] = output_details
+                    _accept_usage_mirror(mirror)
             # Check if this is an Anthropic-style response (has 'content' array, not 'choices')
-            if "choices" not in payload and "content" in payload:
+            elif "choices" not in payload and "content" in payload:
                 # Anthropic /v1/messages response format
                 response_content_parts: list[str] = []
                 content_blocks = payload.get("content", [])
@@ -498,6 +534,11 @@ def dispatch_capture_nonstream_completed(
                         content = delta.get("content")
                         if isinstance(content, str) and not response_content:
                             response_content = content
+                    # Legacy /v1/completions: choices carry plain ``text``
+                    # (no message/delta nesting) — capture it as content.
+                    text = first.get("text")
+                    if isinstance(text, str) and text and response_content is None:
+                        response_content = text
 
                 usage = payload.get("usage")
                 if isinstance(usage, dict):

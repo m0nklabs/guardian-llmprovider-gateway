@@ -21,7 +21,11 @@ from fastapi.responses import StreamingResponse
 
 from app.capture.config import PROTOCOL_ANTHROPIC, PROTOCOL_OPENAI, ROUTE_LOCAL
 from app.capture.policy import PolicyResult
-from app.capture.redactor import anthropic_messages_to_openai
+from app.capture.redactor import (
+    anthropic_messages_to_openai,
+    completions_capture_request,
+    embeddings_capture_request,
+)
 from app.capture.schema import BuildContext, _utc_now_iso
 from app.capture.stream_assembler import StreamResponseAssembler
 from app.engine.manager import ModelLoadError
@@ -29,6 +33,10 @@ from app.gateway import caretaker_runtime as _caretaker_runtime
 from app.gateway.normalization import openai_error_response
 from app.gateway.streaming import StreamProgressWatchdog
 from app.proxy.anthropic_bridge import _format_sse_event
+from app.proxy.responses_bridge import (
+    responses_capture_request,
+    responses_contains_image_input,
+)
 
 logger = logging.getLogger("Guardian")
 
@@ -233,7 +241,11 @@ async def route_v1_post(path: str, request: Request, client_id: str):
         )
 
     # Only queue inference endpoints; everything else passes through directly
-    is_inference = path in ("chat/completions", "completions", "embeddings", "messages")
+    # ("responses" = OpenAI Responses API — llama.cpp implements it natively,
+    # so it takes the same queue/model-routing pipeline as chat/completions).
+    is_inference = path in (
+        "chat/completions", "completions", "embeddings", "messages", "responses",
+    )
 
     if not is_inference:
         timeout = httpx.Timeout(600.0, connect=10.0)
@@ -301,6 +313,8 @@ async def route_v1_post(path: str, request: Request, client_id: str):
     has_image_inputs = False
     if path in ("chat/completions", "messages"):
         has_image_inputs = _messages_contain_image_input(json_body.get("messages", []))
+    elif path == "responses":
+        has_image_inputs = responses_contains_image_input(json_body.get("input"))
 
     # ── Cloud LLM router: forward to OpenRouter / NVIDIA / … ─────────
     # Cloud models bypass the VRAM scheduler, model switch logic, and inference
@@ -379,6 +393,11 @@ async def route_v1_post(path: str, request: Request, client_id: str):
     if not _grammar_enabled:
         json_body.pop("grammar", None)
         json_body.pop("json_schema", None)
+        if path == "responses":
+            # Responses structured output (text.format) is a GCD vector too:
+            # llama.cpp applies it as a grammar, so the kill-switch must
+            # strip it as well when grammar is disabled.
+            json_body.pop("text", None)
     # Optional GBNF pre-validation (fail-open, off by default).
     _grammar_error = None
     if _validate_grammar_field is not None:
@@ -445,10 +464,25 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                 if k not in ("messages", "system")
             }
         else:
-            _capture_request_messages = json_body.get("messages")
-            _capture_request_params = {
-                k: v for k, v in json_body.items() if k != "messages"
-            }
+            # Non-chat OpenAI-protocol endpoints normalize their own request
+            # shape for capture (all normalize to OpenAI-style messages).
+            if _capture_endpoint == "/v1/responses":
+                _capture_request_messages, _capture_request_params = (
+                    responses_capture_request(json_body)
+                )
+            elif _capture_endpoint == "/v1/completions":
+                _capture_request_messages, _capture_request_params = (
+                    completions_capture_request(json_body)
+                )
+            elif _capture_endpoint == "/v1/embeddings":
+                _capture_request_messages, _capture_request_params = (
+                    embeddings_capture_request(json_body)
+                )
+            else:
+                _capture_request_messages = json_body.get("messages")
+                _capture_request_params = {
+                    k: v for k, v in json_body.items() if k != "messages"
+                }
 
     _capture_policy_result = _dispatch_capture_request_received(
         request, client_id,
@@ -539,7 +573,7 @@ async def route_v1_post(path: str, request: Request, client_id: str):
         _model_manager.active_requests += 1
 
         # Auto-switch logic for GPU-backed inference routes (with concurrency lock)
-        if path in ("chat/completions", "messages", "completions", "embeddings"):
+        if path in ("chat/completions", "messages", "completions", "embeddings", "responses"):
             try:
                 current_model = await _model_manager.get_current_model()
                 desired_model = requested_model or current_model
@@ -684,7 +718,7 @@ async def route_v1_post(path: str, request: Request, client_id: str):
 
         active_model_for_request = requested_model or await _model_manager.get_current_model()
         _set_request_usage_metadata(request, model=active_model_for_request)
-        if path in ("chat/completions", "messages") and has_image_inputs:
+        if path in ("chat/completions", "messages", "responses") and has_image_inputs:
             queue_wait_ms = _inference_queue.get_queue_wait_ms(request_id)
             preflight_error = await _preflight_multimodal_request(
                 active_model_for_request,
@@ -699,15 +733,16 @@ async def route_v1_post(path: str, request: Request, client_id: str):
         timeout = httpx.Timeout(timeout_sec, connect=10.0)
         logger.info(f"OpenAI-compat request from client '{client_id}': POST /v1/{path}")
 
-        # Detect streaming requests for chat/completions and messages — must proxy SSE in real-time
+        # Detect streaming requests — must proxy SSE in real-time. Applies to
+        # chat/completions, messages, and responses (all use "stream": true).
         is_stream = False
-        if path in ("chat/completions", "messages"):
-            try:
-                json_body = json.loads(body)
-                is_stream = json_body.get("stream", False)
+        try:
+            json_body = json.loads(body)
+            is_stream = json_body.get("stream", False)
+            if path in ("chat/completions", "messages"):
                 # WORKAROUND: llama.cpp "Assistant response prefill is incompatible with enable_thinking"
                 msgs = json_body.get("messages", [])
-                
+
                 # Consolidate ALL trailing assistant messages
                 trailing_assistant_contents = []
                 while len(msgs) > 0 and msgs[-1].get("role") == "assistant":
@@ -716,17 +751,17 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                     if content:
                         # Handle both string content and Anthropic content blocks
                         trailing_assistant_contents.insert(0, _stringify_message_content(content))
-                        
+
                 if trailing_assistant_contents and len(msgs) >= 1:
                     combined_prefill = "\\n".join(trailing_assistant_contents)
-                    
+
                     # Find the last user message and append the prefill instruction
                     last_user_idx = -1
                     for i in range(len(msgs)-1, -1, -1):
                         if msgs[i].get("role") == "user":
                             last_user_idx = i
                             break
-                            
+
                     if last_user_idx != -1:
                         user_content = _stringify_message_content(msgs[last_user_idx].get("content", ""))
                         msgs[last_user_idx]["content"] = user_content + f"\n\n[System directive: Please start your response exactly with the following text: {combined_prefill}]"
@@ -735,8 +770,8 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                     else:
                         import logging
                         logging.getLogger("uvicorn.error").warning("Found trailing assistant messages but no user message to attach to.")
-            except (json.JSONDecodeError, Exception):
-                pass
+        except (json.JSONDecodeError, Exception):
+            pass
 
         if is_stream:
             _set_request_usage_metadata(request, streamed=True)
@@ -903,6 +938,10 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                             try:
                                 data = json.loads(line[6:])
                                 usage = data.get("usage") or {}
+                                if not usage and isinstance(data.get("response"), dict):
+                                    # Responses SSE (e.g. response.completed): usage
+                                    # is nested under the response object.
+                                    usage = data["response"].get("usage") or {}
                                 output_chars_delta = 0
                                 if isinstance(usage, dict):
                                     usage_totals["prompt_tokens"] = max(
@@ -919,6 +958,10 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                                     delta = data["choices"][0].get("delta", {})
                                     if isinstance(delta, dict):
                                         output_chars_delta = len(_extract_assistant_delta_text(delta))
+                                elif data.get("type") == "response.output_text.delta" and isinstance(data.get("delta"), str):
+                                    # Responses SSE text delta — count it toward
+                                    # the live output-chars metric.
+                                    output_chars_delta = len(data["delta"])
                                 encoded_line = (line + "\n").encode("utf-8")
                                 _update_live_request_usage(
                                     request,
@@ -1041,14 +1084,14 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                 _model_manager.active_requests = max(0, _model_manager.active_requests - 1)
                 _model_manager.last_request_time = time.time()
                 queue_wait_ms = _inference_queue.get_queue_wait_ms(request_id)
-                if path in ("chat/completions", "completions", "embeddings", "messages"):
+                if path in ("chat/completions", "completions", "embeddings", "messages", "responses"):
                     try:
                         payload = resp.json()
                     except (TypeError, ValueError, json.JSONDecodeError):
                         payload = None
                     _record_usage_from_payload(client_id, f"/v1/{path}", active_model_for_request, payload, request=request)
                 # ── Capture: request_completed (non-streaming) ──
-                if path in ("chat/completions", "messages") and not capture_dispatched:
+                if path in ("chat/completions", "messages", "responses", "completions", "embeddings") and not capture_dispatched:
                     _dispatch_capture_nonstream_completed(
                         request, request_id, client_id,
                         active_model_for_request, _capture_ctx,

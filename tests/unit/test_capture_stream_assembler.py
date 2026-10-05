@@ -87,6 +87,16 @@ class TestStreamAssemblerOpenAI:
         result = asm.assemble()
         assert result["reasoning_content"] == "A"
 
+    def test_accumulates_legacy_completions_text_deltas(self):
+        """Legacy /v1/completions chunks carry ``delta.text`` (no content)."""
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"choices":[{"delta":{"text":"Once "}}]}')
+        asm.add_sse_line('data: {"choices":[{"delta":{"text":"upon a time"}}]}')
+        asm.add_sse_line('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}')
+        result = asm.assemble()
+        assert result["content"] == "Once upon a time"
+        assert result["finish_reason"] == "stop"
+
 
 class TestStreamAssemblerAnthropic:
     def test_accumulates_anthropic_deltas(self):
@@ -238,3 +248,94 @@ class TestStreamAssemblerUsageMirror:
         asm.add_sse_line('data: {"provider":"B","choices":[{"delta":{},"finish_reason":"stop"}]}')
         result = asm.assemble()
         assert result["provider_name"] == "B"
+
+
+class TestStreamAssemblerResponses:
+    """OpenAI Responses SSE events (llama.cpp /v1/responses stream)."""
+
+    def test_output_text_deltas_accumulate(self):
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"type":"response.created","response":{"id":"r1"}}')
+        asm.add_sse_line('data: {"type":"response.output_text.delta","delta":"Hello"}')
+        asm.add_sse_line('data: {"type":"response.output_text.delta","delta":" world"}')
+        result = asm.assemble()
+        assert result["content"] == "Hello world"
+        assert result["incomplete"] is True  # no terminal event yet
+
+    def test_reasoning_text_deltas_accumulate(self):
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"type":"response.reasoning_text.delta","delta":"Thinking"}')
+        asm.add_sse_line('data: {"type":"response.reasoning_text.delta","delta":" hard"}')
+        asm.add_sse_line('data: {"type":"response.output_text.delta","delta":"Answer"}')
+        result = asm.assemble()
+        assert result["content"] == "Answer"
+        assert result["reasoning_content"] == "Thinking hard"
+
+    def test_function_call_output_item_done_lands_in_tool_calls(self):
+        asm = StreamResponseAssembler()
+        asm.add_sse_line(
+            'data: {"type":"response.output_item.done","output_index":1,'
+            '"item":{"type":"function_call","call_id":"call_9","name":"get_weather",'
+            '"arguments":"{\\"city\\":\\"Boston\\"}","status":"completed"}}'
+        )
+        result = asm.assemble()
+        assert result["tool_calls"] is not None
+        assert len(result["tool_calls"]) == 1
+        tc = result["tool_calls"][0]
+        assert tc["id"] == "call_9"
+        assert tc["type"] == "function"
+        assert tc["function"]["name"] == "get_weather"
+        assert tc["function"]["arguments"] == '{"city":"Boston"}'
+
+    def test_response_completed_sets_usage_and_stop_finish(self):
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"type":"response.output_text.delta","delta":"Hi"}')
+        asm.add_sse_line(
+            'data: {"type":"response.completed",'
+            '"response":{"status":"completed","usage":{"input_tokens":7,'
+            '"output_tokens":3,"total_tokens":10}}}'
+        )
+        result = asm.assemble()
+        assert result["prompt_tokens"] == 7
+        assert result["completion_tokens"] == 3
+        assert result["finish_reason"] == "stop"
+        assert result["incomplete"] is False
+
+    def test_response_incomplete_max_output_tokens_maps_to_length(self):
+        asm = StreamResponseAssembler()
+        asm.add_sse_line(
+            'data: {"type":"response.incomplete",'
+            '"response":{"status":"incomplete",'
+            '"incomplete_details":{"reason":"max_output_tokens"},'
+            '"usage":{"input_tokens":7,"output_tokens":3}}}'
+        )
+        result = asm.assemble()
+        assert result["finish_reason"] == "length"
+        assert result["completion_tokens"] == 3
+
+    def test_response_completed_maps_output_tokens_details_mirror(self):
+        asm = StreamResponseAssembler()
+        asm.add_sse_line(
+            'data: {"type":"response.completed",'
+            '"response":{"status":"completed","usage":{"input_tokens":7,'
+            '"output_tokens":3,"output_tokens_details":{"reasoning_tokens":2}}}}'
+        )
+        result = asm.assemble()
+        assert result["completion_tokens_details"] == {"reasoning_tokens": 2}
+
+    def test_non_terminal_responses_events_do_not_set_finish_reason(self):
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"type":"response.in_progress","response":{"status":"in_progress"}}')
+        result = asm.assemble()
+        assert result["finish_reason"] is None
+        assert result["content"] == ""
+
+    def test_chat_behavior_unchanged_alongside_responses_events(self):
+        """A Responses event must not corrupt a chat-completions stream."""
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"choices":[{"delta":{"content":"A"}}]}')
+        asm.add_sse_line('data: {"type":"response.output_text.delta","delta":"B"}')
+        asm.add_sse_line('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}')
+        result = asm.assemble()
+        assert result["content"] == "AB"
+        assert result["finish_reason"] == "stop"

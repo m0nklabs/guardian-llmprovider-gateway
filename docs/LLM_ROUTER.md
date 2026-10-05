@@ -349,6 +349,72 @@ Guardian forwards image requests only to image-capable candidates. It does not
 start a local vision runtime merely because an image is present. Restart
 `guardian-llmprovider-gateway.service` after changing this capability configuration.
 
+## Responses-API Ingress (`POST /v1/responses`)
+
+Clients may address any route with the OpenAI Responses API
+(`POST /v1/responses`, used by the OpenAI SDK `client.responses.create` and
+Codex CLI). The router treats it as a first-class inference path:
+
+- **Local models** are served by llama.cpp's native `/v1/responses`
+  implementation (the backend converts internally to chat completions and
+  emits Responses SSE events). Guardian passes the request through its
+  normal pipeline: queue admission, model resolution/auto-switch, vision
+  preflight (image detection understands `input_image` parts), usage
+  tracking (usage arrives in the `response.completed` event).
+- **Cloud models** are served through the Responses⇄chat-completions
+  translation in `app/proxy/responses_bridge.py`: the request is converted
+  before upstream forwarding (`prepare_cloud_candidate_request` sets
+  `effective_path = "chat/completions"`), and the upstream response, SSE
+  stream and errors are converted back to Responses format in
+  `forward_to_cloud_provider`. Cloud translation is unconditional in this
+  slice: OpenRouter exposes a native `/v1/responses` route (probed
+  2026-10-04), but its feature depth is unverified and failover groups can
+  mix providers, so every cloud candidate gets the same translated
+  chat/completions contract. `provider_needs_responses_translation()` is
+  the single gate to change when a provider's native support is verified.
+
+Failover, rate limiting, vision-aware routing, and degeneration guarding
+operate on the translated (chat/completions) upstream request, so they apply
+unchanged to Responses-ingress traffic.
+
+## Service Tiers (OpenRouter)
+
+OpenRouter sells the same model at several grades of capacity — `default`
+(standard), `flex` (cheaper, higher latency), `priority`/`fast` (faster,
+higher cost) and, on select OpenAI models, `ultrafast`. Guardian passes
+tier selection through on every cloud ingress:
+
+- **`service_tier` parameter** — accepted as a top-level body parameter on
+  chat/completions, Anthropic Messages, and Responses ingress. On chat and
+  Messages ingress it rides through candidate preparation unchanged; on
+  Responses ingress the bridge translates it into the chat request
+  (`translate_responses_request_to_chat` passes it through).
+- **`service_tier` in the response** — reported to the client on every
+  shape: chat and Messages streams/non-stream bodies pass the upstream
+  field through untouched; the Responses bridge reports the tier that
+  actually served the request (from the upstream chat payload), falling
+  back to the requested tier when upstream does not report one.
+- **Model variants** — `:nitro` (admit priority-tier endpoints into a
+  throughput sort) and `:floor` (admit flex endpoints into a price sort)
+  are model-ID suffixes and survive model resolution and failover
+  unchanged.
+- **Default tier via configuration** — the provider settings file accepts a
+  top-level `service_tier` key (one of `default`/`flex`/`priority`/`fast`/
+  `ultrafast`, invalid values are ignored with a warning). Guardian injects
+  it into every cloud request that does not carry a tier; precedence is
+  client value > per-model default (`models:` block) > provider default.
+  The shipped default pins `flex` on the OpenRouter provider
+  (`config/providers/openrouter.settings.yaml`) — cost first, per operator
+  decision 2026-10-04. Hot-reloadable.
+- `speed: "fast"` (Anthropic's native priority-tier parameter) needs no
+  gateway handling on OpenRouter's native Messages passthrough; the
+  Anthropic→chat bridge does not map it (Anthropic fast mode has no chat
+  equivalent on non-Anthropic providers).
+
+See [OpenRouter service tiers](https://openrouter.ai/docs/guides/features/service-tiers)
+for the upstream semantics (fallback behavior, billing at the served tier,
+and the ultrafast eligibility caveats).
+
 ## Configuration
 
 Cloud providers are configured in [`config/settings.yaml`](../config/settings.yaml)
