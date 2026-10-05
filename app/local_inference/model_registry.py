@@ -492,6 +492,39 @@ class ModelRegistry:
 
         return public_models
 
+    def get_model_brand(self, name: str) -> str | None:
+        """Return the model-maker brand of a canonical model entry, or None.
+
+        The brand is the per-model ``brand:`` field in the local registry
+        (unified provider model, phase A): the ``{brand}`` segment of the
+        namespaced local address ``{local-provider}/{brand}/{model}``. Values
+        are lowercased single namespace segments; anything else is ignored.
+        """
+        self._refresh_model_registry()
+        entry = self.models.get(name)
+        if isinstance(entry, dict):
+            brand = entry.get("brand")
+            if isinstance(brand, str):
+                brand = brand.strip().lower()
+                if brand and "/" not in brand:
+                    return brand
+        return None
+
+    def namespaced_addresses(self, local_provider_name: str) -> dict[str, str]:
+        """Return ``{provider}/{brand}/{model}`` addresses for branded models.
+
+        Keyed by the namespaced address, valued by the canonical model name.
+        Only models with a valid ``brand:`` field are listed; the alias map
+        stays untouched (bare aliases remain the compat surface).
+        """
+        self._refresh_model_registry()
+        addresses: dict[str, str] = {}
+        for model_name in self.models:
+            brand = self.get_model_brand(model_name)
+            if brand:
+                addresses[f"{local_provider_name}/{brand}/{model_name}"] = model_name
+        return addresses
+
     def _vision_signature(self, config: dict) -> tuple[str, str]:
         return (
             str(config.get("path", "")).strip(),

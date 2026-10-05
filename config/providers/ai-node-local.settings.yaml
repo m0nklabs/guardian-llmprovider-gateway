@@ -8,6 +8,7 @@ local: true
 models:
   llama3.2-3b:
     path: /home/flip/models/llama3.2-3b.gguf
+    brand: llama
     total_layers: 28
     benchmark_context_limit: 131072
     context: 131072
@@ -16,6 +17,7 @@ models:
     grammar_decoding: true
   nomic-embed-text-v2-moe.f16:
     path: /home/flip/models/nomic-embed-text-v2-moe.f16.gguf
+    brand: nomic
     model_type: embedding
     default_enable_thinking: false
     total_layers: 12
@@ -25,6 +27,7 @@ models:
     extra_args: --embedding --reasoning off
   nomic-embed-text-cpu:
     path: /home/flip/models/nomic-embed-text-cpu.gguf
+    brand: nomic
     model_type: embedding
     default_enable_thinking: false
     total_layers: 12
@@ -34,6 +37,7 @@ models:
     extra_args: --embedding --reasoning off
   Phi-4-reasoning-plus:
     path: /home/flip/models/Phi-4-reasoning-plus-Q8_0.gguf
+    brand: phi
     total_layers: 40
     benchmark_context_limit: 32768
     context: 32768
@@ -42,6 +46,7 @@ models:
     tensor_split: 0.45,0.55
   Huihui-gemma-4-26B-A4B-it-abliterated:
     path: /home/flip/models/gemma-4-26B-A4B.unsloth-imatrix-UD-Q4_K_XL.gguf
+    brand: gemma
     total_layers: 30
     benchmark_context_limit: 262144
     context: 262144
@@ -53,6 +58,7 @@ models:
       64
   Huihui-gemma-4-26B-A4B-it-abliterated-Q8KV:
     path: /home/flip/models/gemma-4-26B-A4B.unsloth-imatrix-UD-Q4_K_XL.gguf
+    brand: gemma
     total_layers: 30
     benchmark_context_limit: 262144
     context: 262144
@@ -67,6 +73,7 @@ models:
     vision_tensor_split: 0.36,0.64
   unsloth-gemma-4-26B-A4B-it-qat-UD-Q4_K_XL-Q8KV:
     path: /home/flip/models/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
+    brand: gemma
     total_layers: 30
     benchmark_context_limit: 262144
     context: 262144
@@ -81,6 +88,7 @@ models:
     vision_tensor_split: 0.36,0.64
   gemma-4-E4B-it-uncensored:
     path: /home/flip/models/gemma-4-E4B-it-uncensored-Q4_K_M.gguf
+    brand: gemma
     total_layers: 42
     benchmark_context_limit: 131072
     context: 131072
@@ -92,6 +100,7 @@ models:
       256 --temp 1.0 --top-p 0.95 --top-k 64
   Qwen3.6-35B-A3B-HauhauCS-Aggressive:
     path: /home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf
+    brand: qwen
     total_layers: 40
     benchmark_context_limit: 262144
     context: 262144
@@ -107,6 +116,7 @@ models:
       1.0
   Qwen3.6-35B-A3B-HauhauCS-Aggressive-Turbo4:
     path: /home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf
+    brand: qwen
     total_layers: 40
     benchmark_context_limit: 262144
     context: 393216
@@ -124,6 +134,7 @@ models:
       --presence-penalty 0.0 --repeat-penalty 1.0
   Qwen3.6-35B-A3B-HauhauCS-Aggressive-Q8KV:
     path: /home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf
+    brand: qwen
     total_layers: 40
     benchmark_context_limit: 262144
     context: 262144
@@ -139,6 +150,7 @@ models:
       1.0
   Qwen3.6-35B-A3B-HauhauCS-Aggressive-DFlash-Turbo4:
     path: /home/flip/models/Qwen3.6-35B-A3B-Uncensored-Aggressive.i1-Q4_K_M.gguf
+    brand: qwen
     total_layers: 40
     benchmark_context_limit: 262144
     context: 262144
@@ -160,6 +172,7 @@ models:
       --top-k 20 --min-p 0.0 --presence-penalty 0.0 --repeat-penalty 1.0
   granite-4.1-8b:
     path: /home/flip/models/granite-4.1-8b-UD-Q8_K_XL.gguf
+    brand: granite
     total_layers: 40
     benchmark_context_limit: 131072
     context: 131072
@@ -168,6 +181,7 @@ models:
     extra_args: --jinja
   qwen3.8-27b:
     path: /home/flip/models/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_XL.gguf
+    brand: qwen
     total_layers: 65
     benchmark_context_limit: 262144
     context: 262144
@@ -180,6 +194,7 @@ models:
       0.0 --repeat-penalty 1.0
   qwen3.8-27b-q8kv:
     path: /home/flip/models/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_XL.gguf
+    brand: qwen
     total_layers: 65
     benchmark_context_limit: 262144
     context: 220000
@@ -195,6 +210,7 @@ models:
       0.0 --repeat-penalty 1.0
   qwen3.8-27b-instruct:
     path: /home/flip/models/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_XL.gguf
+    brand: qwen
     total_layers: 65
     benchmark_context_limit: 262144
     context: 262144
@@ -207,6 +223,7 @@ models:
       0.0 --presence-penalty 1.5 --repeat-penalty 1.0
   qwen3.8-27b-mtp:
     path: /home/flip/models/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_XL.gguf
+    brand: qwen
     total_layers: 65
     benchmark_context_limit: 262144
     context: 242144
@@ -220,6 +237,7 @@ models:
       0.0 --repeat-penalty 1.0
   qwen3.8-27b-uncensored-ymq:
     path: /home/flip/models/qwen3.8-27b-uncensored-ymq/Qwen3.8-27B-Uncensored-YMQ-XL.gguf
+    brand: qwen
     total_layers: 65
     benchmark_context_limit: 262144
     context: 150000
@@ -240,6 +258,7 @@ models:
   # the other Qwen3.8 local entries. Added 2026-10-04 (Sam Witteveen video).
   qwen3.8-27b-pi:
     path: /home/flip/models/qwen3.8-27b-pi/Qwen3.8-27B-pi-Q4_K_M.gguf
+    brand: qwen
     total_layers: 65
     benchmark_context_limit: 262144
     context: 150000
@@ -265,6 +284,7 @@ models:
   # ships in the GGUF repo (mirror the ymq draft-mtp shape). Added 2026-10-04.
   qwen3.8-27b-swift15:
     path: /home/flip/models/qwen3.8-27b-swift/Swift-1.5-Qwen3.8-27B-Q4_K_M.gguf
+    brand: qwen
     total_layers: 65
     benchmark_context_limit: 262144
     context: 150000
@@ -281,6 +301,7 @@ models:
       0.0 --repeat-penalty 1.0
   qwen3.5-9b:
     path: /home/flip/models/qwen3.5-9b/Qwen3.5-9B-UD-Q8_K_XL.gguf
+    brand: qwen
     total_layers: 32
     benchmark_context_limit: 262144
     context: 262144
@@ -293,6 +314,7 @@ models:
       1.5 --repeat-penalty 1.0
   qwen3.5-9b-coder:
     path: /home/flip/models/qwen3.5-9b/Qwen3.5-9B-UD-Q8_K_XL.gguf
+    brand: qwen
     total_layers: 32
     benchmark_context_limit: 262144
     context: 262144
@@ -305,6 +327,7 @@ models:
       0.0 --repeat-penalty 1.0
   qwen3.5-9b-instruct:
     path: /home/flip/models/qwen3.5-9b/Qwen3.5-9B-UD-Q8_K_XL.gguf
+    brand: qwen
     total_layers: 32
     benchmark_context_limit: 262144
     context: 262144
@@ -317,6 +340,7 @@ models:
       0.0 --presence-penalty 1.5 --repeat-penalty 1.0
   qwen3.5-9b-reasoner:
     path: /home/flip/models/qwen3.5-9b/Qwen3.5-9B-UD-Q8_K_XL.gguf
+    brand: qwen
     total_layers: 32
     benchmark_context_limit: 262144
     context: 262144
