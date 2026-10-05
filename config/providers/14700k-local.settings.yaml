@@ -10,9 +10,12 @@ local: false
 enabled: true
 base_url: http://192.168.1.245:11440/v1
 api_key: ${WINDOWS_LAN_KEY}
-brand: windows
+# Namespace brand for the host's bare llama-server ids: the models are Qwen
+# makers, so they surface as 14700k-local/qwen/<model> (provider/brand/model),
+# NOT 14700k-local/14700k-local/<model> (the pre-brand-key doubled form).
+brand: qwen
 # llama-server advertises /v1/models (OpenAI-compatible); bare model ids are
-# normalized to windows/<model> by the catalog (brand above).  catalog_url is
+# normalized to qwen/<model> by the catalog (brand above).  catalog_url is
 # APPENDED to base_url (which already ends in /v1) — /models → /v1/models.
 catalog_url: /models
 management_url: http://192.168.1.245:11441
@@ -22,11 +25,12 @@ tts_url: http://192.168.1.245:11450
 # STT engine (Qwen3-ASR via sherpa-onnx, caretaker-managed on-demand lifecycle)
 stt_url: http://192.168.1.245:11451
 # llama-server reports no context_length: per-model overrides (brand-normalized
-# windows/<model> ids).
+# qwen/<model> ids — the keys the catalog and context resolver actually look up;
+# the earlier provider-prefixed windows/... keys never matched and were dead).
 models:
-  "14700k-local/windows/qwen3.5-9b":
+  "qwen/qwen3.5-9b":
     context_window: 16384
     benchmark_context_limit: 131072
-  "14700k-local/windows/Huihui-Qwen3.5-9B-abliterated":
+  "qwen/Huihui-Qwen3.5-9B-abliterated":
     context_window: 16384
     benchmark_context_limit: 131072

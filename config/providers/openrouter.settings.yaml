@@ -5,6 +5,10 @@ enabled: true
 base_url: https://openrouter.ai/api/v1
 api_key: ${OPENROUTER_API_KEY}
 timeout_seconds: 1200
+# Default service tier for requests that don't pin one (OpenRouter service
+# tiers): flex = cheaper, higher latency/lower availability. Operator default
+# (2026-10-04): cost first. Precedence: client value > model default > this.
+service_tier: flex
 model_prefixes:
 - anthropic/
 - openai/

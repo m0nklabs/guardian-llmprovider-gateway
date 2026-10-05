@@ -2187,6 +2187,86 @@ def test_prepare_cloud_candidate_injects_user_for_openrouter():
     assert json_body["model"] == "z-ai/glm-5.2"
 
 
+def test_prepare_cloud_candidate_passes_service_tier_and_model_variants():
+    """OpenRouter service-tier selection must ride through candidate prep:
+    the ``service_tier`` parameter and ``:nitro``/``:floor`` model-variant
+    suffixes survive unchanged (no metadata-key stripping, no rewrite)."""
+    provider = CloudProvider(
+        name="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-or-test",
+        models=["openai/gpt-5"],
+    )
+    base_body = {
+        "model": "openrouter/openai/gpt-5:nitro",
+        "messages": [{"role": "user", "content": "hi"}],
+        "service_tier": "flex",
+    }
+    effective_path, json_body, _body, _needs_tr = server._prepare_cloud_candidate_request(
+        provider, "openai/gpt-5:nitro", "chat/completions", base_body,
+    )
+    assert effective_path == "chat/completions"
+    assert json_body["model"] == "openai/gpt-5:nitro"
+    assert json_body["service_tier"] == "flex"
+
+
+def test_prepare_cloud_candidate_injects_provider_default_service_tier():
+    """A provider-level default service tier is injected when the client did
+    not pin one (operator default: openrouter → flex)."""
+    provider = CloudProvider(
+        name="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-or-test",
+        models=["openai/gpt-5"],
+        service_tier="flex",
+    )
+    base_body = {"model": "openrouter/openai/gpt-5", "messages": [{"role": "user", "content": "hi"}]}
+    _path, json_body, _body, _needs_tr = server._prepare_cloud_candidate_request(
+        provider, "openai/gpt-5", "chat/completions", base_body,
+    )
+    assert json_body["service_tier"] == "flex"
+
+
+def test_prepare_cloud_candidate_client_service_tier_wins_over_provider_default():
+    provider = CloudProvider(
+        name="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-or-test",
+        models=["openai/gpt-5"],
+        service_tier="flex",
+    )
+    base_body = {
+        "model": "openrouter/openai/gpt-5",
+        "messages": [{"role": "user", "content": "hi"}],
+        "service_tier": "priority",
+    }
+    _path, json_body, _body, _needs_tr = server._prepare_cloud_candidate_request(
+        provider, "openai/gpt-5", "chat/completions", base_body,
+    )
+    assert json_body["service_tier"] == "priority"
+
+
+def test_prepare_cloud_candidate_model_default_service_tier_wins_over_provider():
+    """Model defaults are more specific than the provider default: when the
+    model's ``models:`` block pins a tier, it wins over the provider one."""
+    provider = CloudProvider(
+        name="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-or-test",
+        models=["openai/gpt-5"],
+        service_tier="flex",
+    )
+    base_body = {"model": "openrouter/openai/gpt-5", "messages": [{"role": "user", "content": "hi"}]}
+    with patch.object(
+        server.cloud_catalog, "get_override",
+        return_value={"service_tier": "default"},
+    ):
+        _path, json_body, _body, _needs_tr = server._prepare_cloud_candidate_request(
+            provider, "openai/gpt-5", "chat/completions", base_body,
+        )
+    assert json_body["service_tier"] == "default"
+
+
 def test_prepare_cloud_candidate_no_user_for_nvidia():
     """Non-OpenRouter providers must NOT get a ``user`` field injected."""
     provider = CloudProvider(
