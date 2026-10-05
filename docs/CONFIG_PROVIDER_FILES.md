@@ -54,6 +54,7 @@ enabled: true
 base_url: https://openrouter.ai/api/v1
 api_key: ${OPENROUTER_API_KEY}
 timeout_seconds: 1200
+service_tier: flex         # default tier (OpenRouter) voor verzoeken zonder eigen service_tier
 model_prefixes: [anthropic/, openai/, …]
 catalog_url: /models/user
 models:                       # per-model overrides (was models.cloud.overrides.yaml)

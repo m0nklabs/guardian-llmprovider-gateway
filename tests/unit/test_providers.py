@@ -15,6 +15,7 @@ import pytest
 
 from app.proxy.cloud_catalog import CloudModelCatalog
 from app.proxy.providers import (
+    VALID_SERVICE_TIERS,
     CloudProvider,
     ProviderRegistry,
     _expand_env,
@@ -799,3 +800,55 @@ class TestEmptyConfig:
         reg = ProviderRegistry(settings_path=tmp_path / "nonexistent.yaml")
         assert reg.get_all_cloud_models() == []
         assert not reg.is_cloud_model("any/model")
+
+
+# ── Provider-level default service tier ────────────────────────────────
+
+
+SERVICE_TIER_PROVIDER_YAML = """\
+providers:
+  openrouter:
+    enabled: true
+    base_url: https://openrouter.ai/api/v1
+    api_key: sk-or-key
+    service_tier: FLEX
+    models:
+      - openai/gpt-4o
+  nvidia:
+    enabled: true
+    base_url: https://integrate.api.nvidia.com/v1
+    api_key: nvapi-key
+    models:
+      - nvidia/llama-3.1-nemotron-70b-instruct
+  bogus:
+    enabled: true
+    base_url: https://example.com/v1
+    api_key: some-key
+    service_tier: turbo-max
+    models:
+      - example/model
+"""
+
+
+class TestProviderServiceTierDefault:
+    def _registry(self, tmp_path: Path) -> ProviderRegistry:
+        settings = _write_settings(tmp_path, SERVICE_TIER_PROVIDER_YAML)
+        return ProviderRegistry(settings_path=settings)
+
+    def test_valid_value_normalized_lowercase(self, tmp_path: Path):
+        reg = self._registry(tmp_path)
+        provider = reg._providers["openrouter"]
+        assert provider.service_tier == "flex"
+
+    def test_absent_value_is_none(self, tmp_path: Path):
+        reg = self._registry(tmp_path)
+        assert reg._providers["nvidia"].service_tier is None
+
+    def test_invalid_value_ignored(self, tmp_path: Path):
+        reg = self._registry(tmp_path)
+        assert reg._providers["bogus"].service_tier is None
+
+    def test_class_constant_covers_all_documented_tiers(self):
+        assert VALID_SERVICE_TIERS == frozenset(
+            {"default", "flex", "priority", "fast", "ultrafast"}
+        )

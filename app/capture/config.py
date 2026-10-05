@@ -42,6 +42,8 @@ MAX_CORRELATION_HEADERS = 8
 MAX_HEADER_NAME_LEN = 128
 
 # Excluded endpoints — never captured regardless of policy.
+# (/v1/embeddings is NOT excluded since the text-endpoint coverage slice:
+#  it is captureable input-text-only, gated by the normal endpoint allowlist.)
 EXCLUDED_PATH_PREFIXES: tuple[str, ...] = (
     "/healthz",
     "/metrics",
@@ -50,7 +52,6 @@ EXCLUDED_PATH_PREFIXES: tuple[str, ...] = (
     "/admin/",
     "/api/session/",
     "/v1/models",
-    "/v1/embeddings",
     "/v1/files",
 )
 

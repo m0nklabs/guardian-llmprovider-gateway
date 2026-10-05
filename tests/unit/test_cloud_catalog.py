@@ -98,6 +98,63 @@ class TestBrandNormalization:
         assert CloudModelCatalog._normalize_upstream_id(None, "google") == ""
 
 
+BRAND_SETTINGS = """\
+providers:
+  lan-host:
+    enabled: true
+    local: false
+    base_url: http://192.168.1.245:11440/v1
+    api_key: sk-lan-test-key
+    brand: qwen
+"""
+
+FALLBACK_SETTINGS = """\
+providers:
+  bare-host:
+    enabled: true
+    local: false
+    base_url: http://192.168.1.245:11440/v1
+    api_key: sk-lan-test-key
+"""
+
+
+class TestProviderBrandConfig:
+    """Provider-file ``brand:`` key drives bare-id normalization (2026-10-04).
+
+    The 14700k LAN host advertises bare llama-server ids; before the brand
+    key was honored its models doubled to ``14700k-local/14700k-local/<model>``
+    (brand fell back to the provider name).
+    """
+
+    def _catalog(self, tmp_path: Path, settings: str) -> tuple[CloudModelCatalog, ProviderRegistry]:
+        registry = ProviderRegistry(settings_path=_write_settings(tmp_path, settings))
+        catalog = CloudModelCatalog(
+            provider_registry=registry,
+            cache_file=tmp_path / "cache.json",
+            overrides_file=tmp_path / "overrides.yaml",
+        )
+        return catalog, registry
+
+    def test_provider_file_brand_wins(self, tmp_path: Path):
+        catalog, registry = self._catalog(tmp_path, BRAND_SETTINGS)
+        provider = registry._providers["lan-host"]
+        assert provider.brand == "qwen"
+        assert catalog._default_brand(provider) == "qwen"
+        assert catalog._normalize_upstream_id("qwen3.5-9b", catalog._default_brand(provider)) == "qwen/qwen3.5-9b"
+
+    def test_no_brand_key_falls_back_to_provider_name(self, tmp_path: Path):
+        catalog, registry = self._catalog(tmp_path, FALLBACK_SETTINGS)
+        provider = registry._providers["bare-host"]
+        assert provider.brand is None
+        assert catalog._default_brand(provider) == "bare-host"
+
+    def test_invalid_brand_segment_ignored(self, tmp_path: Path):
+        catalog, registry = self._catalog(tmp_path, BRAND_SETTINGS.replace("brand: qwen", "brand: qwen/x"))
+        provider = registry._providers["lan-host"]
+        assert provider.brand is None
+        assert catalog._default_brand(provider) == "lan-host"
+
+
 # ── resolve_cloud_target ─────────────────────────────────────────────
 
 

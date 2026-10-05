@@ -194,6 +194,10 @@ def prepare_cloud_candidate_request(
         provider_needs_anthropic_translation,
         translate_anthropic_request_to_openai,
     )
+    from app.proxy.responses_bridge import (
+        provider_needs_responses_translation,
+        translate_responses_request_to_chat,
+    )
 
     candidate_json_body = {**base_json_body, "model": upstream_model}
 
@@ -202,7 +206,14 @@ def prepare_cloud_candidate_request(
 
     needs_translation = provider_needs_anthropic_translation(provider.name, path)
     effective_path = path
-    if needs_translation:
+    if provider_needs_responses_translation(provider.name, path):
+        # Responses ingress → chat completions upstream (cloud providers do
+        # not speak Responses natively).  Mutually exclusive with the
+        # Anthropic branch: needs_anthropic_translation is False for
+        # path == "responses" by definition.
+        candidate_json_body = translate_responses_request_to_chat(candidate_json_body)
+        effective_path = "chat/completions"
+    elif needs_translation:
         candidate_json_body = translate_anthropic_request_to_openai(candidate_json_body)
         effective_path = "chat/completions"
 
@@ -232,6 +243,13 @@ def prepare_cloud_candidate_request(
         if missing:
             candidate_json_body = {**candidate_json_body, **missing}
             logger.info("☁️  Applied model defaults for '%s': %s", upstream_model, missing)
+
+    # Provider-level default service tier (e.g. openrouter: flex). Applied
+    # AFTER the model defaults so precedence is: client value > model
+    # default > provider default.
+    provider_tier = getattr(provider, "service_tier", None)
+    if provider_tier and "service_tier" not in candidate_json_body:
+        candidate_json_body["service_tier"] = provider_tier
 
     candidate_json_body = _adapt_openai_reasoning_params(
         provider, upstream_model, candidate_json_body
@@ -445,8 +463,13 @@ def setup_cloud_capture(
     """
     from app.capture.config import PROTOCOL_ANTHROPIC, PROTOCOL_OLLAMA, PROTOCOL_OPENAI
     from app.capture.integration import get_capture_controller
-    from app.capture.redactor import anthropic_messages_to_openai
+    from app.capture.redactor import (
+        anthropic_messages_to_openai,
+        completions_capture_request,
+        embeddings_capture_request,
+    )
     from app.capture.schema import BuildContext
+    from app.proxy.responses_bridge import responses_capture_request
 
     try:
         controller = get_capture_controller()
@@ -473,6 +496,14 @@ def setup_cloud_capture(
                     k: v for k, v in json_body.items()
                     if k not in ("messages", "system")
                 }
+            elif endpoint == "/v1/responses":
+                # Non-chat OpenAI-protocol endpoints normalize their own
+                # request shape for capture (all → OpenAI-style messages).
+                capture_messages, capture_params = responses_capture_request(json_body)
+            elif endpoint == "/v1/completions":
+                capture_messages, capture_params = completions_capture_request(json_body)
+            elif endpoint == "/v1/embeddings":
+                capture_messages, capture_params = embeddings_capture_request(json_body)
             else:
                 capture_messages = json_body.get("messages")
                 capture_params = {

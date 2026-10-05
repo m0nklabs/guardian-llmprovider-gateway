@@ -234,6 +234,51 @@ models:
     spec_type: draft-mtp
     extra_args: --jinja --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty
       0.0 --repeat-penalty 1.0
+  # QwenPi (bytkim/Qwen3.8-27B-pi, apache-2.0): token-efficiency agent-loop
+  # fine-tune. Card quickstart: Q4_K_M main + separate MTP head Q4_0
+  # (draft-3 = +50-58% decode) + own mmproj; thinking sampling identical to
+  # the other Qwen3.8 local entries. Added 2026-10-04 (Sam Witteveen video).
+  qwen3.8-27b-pi:
+    path: /home/flip/models/qwen3.8-27b-pi/Qwen3.8-27B-pi-Q4_K_M.gguf
+    total_layers: 65
+    benchmark_context_limit: 262144
+    context: 150000
+    ngl: 99
+    kv_type: turbo4
+    tensor_split: 0.42,0.58
+    mmproj: /home/flip/models/qwen3.8-27b-pi/mmproj-Qwen3.8-27B-pi-BF16.gguf
+    vision_context: 155000
+    vision_ngl: 99
+    vision_tensor_split: 0.37,0.63
+    default_enable_thinking: true
+    spec_type: draft-mtp
+    spec_draft_n_max: 3
+    spec_draft_n_min: 1
+    draft_model_path: /home/flip/models/qwen3.8-27b-pi/mtp/mtp-Qwen3.8-27B-pi-Q4_0.gguf
+    draft_cache_type_k: f16
+    draft_cache_type_v: f16
+    extra_args: --jinja --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty
+      0.0 --repeat-penalty 1.0
+  # Swift 1.5 (ukisai/Swift-1.5-Qwen3.8-27B, Swift Open License v1.0: free
+  # commercial use under $1M gross revenue): token-efficiency fine-tune,
+  # -58.5% thinking tokens at +0.35 GPQA vs base; no separate draft file
+  # ships in the GGUF repo (mirror the ymq draft-mtp shape). Added 2026-10-04.
+  qwen3.8-27b-swift15:
+    path: /home/flip/models/qwen3.8-27b-swift/Swift-1.5-Qwen3.8-27B-Q4_K_M.gguf
+    total_layers: 65
+    benchmark_context_limit: 262144
+    context: 150000
+    ngl: 99
+    kv_type: turbo4
+    tensor_split: 0.42,0.58
+    mmproj: /home/flip/models/qwen3.8-27b-swift/mmproj-Swift-1.5-Qwen3.8-27B-F16.gguf
+    vision_context: 155000
+    vision_ngl: 99
+    vision_tensor_split: 0.37,0.63
+    default_enable_thinking: true
+    spec_type: draft-mtp
+    extra_args: --jinja --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty
+      0.0 --repeat-penalty 1.0
   qwen3.5-9b:
     path: /home/flip/models/qwen3.5-9b/Qwen3.5-9B-UD-Q8_K_XL.gguf
     total_layers: 32
@@ -301,6 +346,8 @@ aliases:
   qwen3.8-q8kv: qwen3.8-27b-q8kv
   qwen3.8-uncensored: qwen3.8-27b-uncensored-ymq
   qwen3.8-ymq: qwen3.8-27b-uncensored-ymq
+  qwen3.8-pi: qwen3.8-27b-pi
+  qwen3.8-swift: qwen3.8-27b-swift15
   qwen3.5-coder: qwen3.5-9b-coder
   qwen3.5-instruct: qwen3.5-9b-instruct
   qwen3.5-reasoner: qwen3.5-9b-reasoner

@@ -314,6 +314,20 @@ def redact_request_parameters(
             safe_params[key] = redacted_options
             continue
 
+        # Responses API structured output: the ``text`` param carries
+        # ``text.format`` (json_schema / json_object) — the Responses
+        # equivalent of chat ``response_format``.  Same rule, no content
+        # discrimination: the whole ``text`` value is stripped under the
+        # structured_output policy.  Presence flags are computed from the
+        # raw params at dispatch time, BEFORE this redaction runs.
+        if (
+            key_lower == "text"
+            and isinstance(value, dict)
+            and structured_policy == "strip"
+        ):
+            safe_params[key] = "[REDACTED]"
+            continue
+
         # Redact secrets in string values
         if isinstance(value, str):
             safe_params[key] = _redact_secrets_in_text(value)
@@ -708,3 +722,69 @@ def anthropic_messages_to_openai(
             openai_messages.append({"role": role, "content": str(content)})
 
     return openai_messages
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Legacy completions / embeddings → OpenAI message normalization (for capture)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def completions_capture_request(
+    body: dict[str, Any],
+) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None]:
+    """Normalize a legacy ``/v1/completions`` request to OpenAI-style
+    messages for capture.
+
+    A string ``prompt`` becomes a single user message; a prompt list
+    becomes one user message per string element (non-string elements are
+    skipped — e.g. legacy integer token prompts).  ``params`` is the body
+    minus ``prompt``.  Fail-open: never raises; a conversion error yields
+    ``(None, params)`` so capture skips the messages instead of breaking
+    inference.
+    """
+    params: dict[str, Any] | None = None
+    try:
+        if not isinstance(body, dict):
+            return None, None
+        params = {k: v for k, v in body.items() if k != "prompt"}
+        prompt = body.get("prompt")
+        messages: list[dict[str, Any]] = []
+        if isinstance(prompt, str):
+            messages.append({"role": "user", "content": prompt})
+        elif isinstance(prompt, list):
+            for element in prompt:
+                if isinstance(element, str):
+                    messages.append({"role": "user", "content": element})
+        return messages, params
+    except Exception:
+        return None, params
+
+
+def embeddings_capture_request(
+    body: dict[str, Any],
+) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None]:
+    """Normalize an ``/v1/embeddings`` request to OpenAI-style messages
+    for capture (input text only — the response carries vectors, no text).
+
+    A string ``input`` becomes a single user message; a list input
+    becomes one user message per string element.  Integer token arrays
+    (a list of ints) carry no text and are skipped.  ``params`` is the
+    body minus ``input``.  Fail-open: never raises; a conversion error
+    yields ``(None, params)``.
+    """
+    params: dict[str, Any] | None = None
+    try:
+        if not isinstance(body, dict):
+            return None, None
+        params = {k: v for k, v in body.items() if k != "input"}
+        input_value = body.get("input")
+        messages: list[dict[str, Any]] = []
+        if isinstance(input_value, str):
+            messages.append({"role": "user", "content": input_value})
+        elif isinstance(input_value, list):
+            for element in input_value:
+                if isinstance(element, str):
+                    messages.append({"role": "user", "content": element})
+        return messages, params
+    except Exception:
+        return None, params

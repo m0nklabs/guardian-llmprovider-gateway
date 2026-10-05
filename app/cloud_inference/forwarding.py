@@ -72,6 +72,9 @@ _iter_sse_lines_with_watchdog = None
 _translate_openai_error_to_anthropic = None
 _translate_openai_response_to_anthropic = None
 _translate_openai_stream_to_anthropic = None
+_translate_chat_error_to_responses = None
+_translate_chat_response_to_responses = None
+_translate_openai_stream_to_responses = None
 cloud_rate_limiter = None
 failover_health = None
 _GuardianRequestCancelled = None
@@ -109,6 +112,9 @@ def init(
     translate_openai_error_to_anthropic,
     translate_openai_response_to_anthropic,
     translate_openai_stream_to_anthropic,
+    translate_chat_error_to_responses,
+    translate_chat_response_to_responses,
+    translate_openai_stream_to_responses,
     rate_limiter,
     health_tracker,
     guardian_request_cancelled,
@@ -132,6 +138,8 @@ def init(
     global _model_manager
     global _translate_openai_error_to_anthropic, _translate_openai_response_to_anthropic
     global _translate_openai_stream_to_anthropic
+    global _translate_chat_error_to_responses, _translate_chat_response_to_responses
+    global _translate_openai_stream_to_responses
     global cloud_rate_limiter, failover_health, _GuardianRequestCancelled
     global STREAM_HEARTBEAT_INTERVAL_S
     global _grammar_cloud_auto_convert_json, _grammar_cloud_strict_mode, _grammar_enabled
@@ -163,6 +171,9 @@ def init(
     _translate_openai_error_to_anthropic = translate_openai_error_to_anthropic
     _translate_openai_response_to_anthropic = translate_openai_response_to_anthropic
     _translate_openai_stream_to_anthropic = translate_openai_stream_to_anthropic
+    _translate_chat_error_to_responses = translate_chat_error_to_responses
+    _translate_chat_response_to_responses = translate_chat_response_to_responses
+    _translate_openai_stream_to_responses = translate_openai_stream_to_responses
     cloud_rate_limiter = rate_limiter
     failover_health = health_tracker
     _GuardianRequestCancelled = guardian_request_cancelled
@@ -395,7 +406,13 @@ class _CloudClientDisconnected(Exception):
 
 #: Endpoints whose successful responses must contain a ``choices`` list.
 #: ``embeddings`` answers with a ``data`` list — different contract, excluded.
-_CHOICES_REQUIRED_PATHS = frozenset({"chat/completions", "completions", "messages"})
+#: ``responses`` ingress is translated to chat/completions upstream, so the
+#: upstream answer still carries ``choices``.
+_CHOICES_REQUIRED_PATHS = frozenset({"chat/completions", "completions", "messages", "responses"})
+
+#: Terminal Responses SSE event types whose payload carries the full response
+#: object (including usage) — used for live usage extraction in the stream.
+_TERMINAL_RESPONSE_EVENTS = ("response.completed", "response.incomplete")
 
 
 def _detect_upstream_invalid_response(path: str, payload: Any) -> str | None:
@@ -498,6 +515,21 @@ async def forward_to_cloud_provider(
     # Track cloud capture metadata
     _cloud_capture_attempts = 0
 
+    # ── Responses bridge support (lazy import, routing.py pattern) ──────
+    # Used below to (1) reject unsupported Responses requests with a
+    # client-actionable 400 instead of forwarding upstream, and (2) translate
+    # upstream errors back into the Responses error envelope.
+    from app.proxy.responses_bridge import (
+        ResponsesRequestError,
+        translate_chat_error_to_responses as _responses_error_fn,
+    )
+
+    # Original ingress body, captured before the per-candidate preparation
+    # rebinds ``json_body`` to the translated chat body on the streaming
+    # path — used to echo Responses request parameters on the streamed
+    # response.completed object.
+    responses_source_body = json_body if path == "responses" else None
+
     for attempt_index, (provider, upstream_model) in enumerate(attempts):
         is_last_attempt = attempt_index == len(attempts) - 1
 
@@ -565,9 +597,37 @@ async def forward_to_cloud_provider(
                 capture_ctx.provider = provider.name
             except Exception:
                 pass
-        effective_path, candidate_json_body, candidate_body, needs_translation = (
-            _prepare_cloud_candidate_request(provider, upstream_model, path, json_body, cloud_key_fingerprint)
-        )
+        # ── Responses request translation failure → client 400 ──────────
+        # Unsupported Responses features (previous_response_id, item_reference,
+        # input_file, …) raise ResponsesRequestError inside the per-candidate
+        # preparation.  The error is deterministic — every candidate would fail
+        # identically — so return immediately without forwarding upstream.
+        try:
+            effective_path, candidate_json_body, candidate_body, needs_translation = (
+                _prepare_cloud_candidate_request(provider, upstream_model, path, json_body, cloud_key_fingerprint)
+            )
+        except ResponsesRequestError as exc:
+            logger.info(
+                "🌉 Responses bridge: rejecting /v1/responses request for '%s': %s",
+                model_name, exc,
+            )
+            _finish_live_request_usage(request, status_code=400, response_bytes=0)
+            _dispatch_capture_request_failed(
+                capture_ctx,
+                error_code="responses_request_unsupported",
+                http_status=400,
+                sanitized_message=str(exc),
+                queue_wait_ms=0,
+                duration_ms=(time.monotonic() - cloud_capture_start_time) * 1000 if cloud_capture_start_time else None,
+                attempts=attempt_index + 1,
+                policy_result=capture_policy_result,
+            ) if capture_ctx is not None else None
+            error_payload = _responses_error_fn(400, str(exc))
+            return Response(
+                content=json.dumps(error_payload).encode("utf-8"),
+                status_code=400,
+                headers={"Content-Type": "application/json"},
+            )
 
         if needs_translation:
             logger.info(
@@ -735,6 +795,28 @@ async def forward_to_cloud_provider(
                     )
                     return Response(
                         content=json.dumps(anthropic_error).encode("utf-8"),
+                        status_code=resp.status_code,
+                        headers={"Content-Type": "application/json"},
+                    )
+                if path == "responses":
+                    # Same treatment as the Anthropic branch: upstream errors
+                    # on a streaming request carry a non-SSE JSON body —
+                    # translate it into the Responses error envelope.
+                    try:
+                        error_payload = json.loads(body_bytes)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        error_payload = body_bytes.decode("utf-8", errors="replace")
+                    responses_error = _translate_chat_error_to_responses(
+                        resp.status_code, error_payload
+                    )
+                    logger.warning(
+                        "🌉 Responses bridge: translated %s error from %s: %s",
+                        resp.status_code,
+                        provider.name,
+                        responses_error["error"]["message"][:200],
+                    )
+                    return Response(
+                        content=json.dumps(responses_error).encode("utf-8"),
                         status_code=resp.status_code,
                         headers={"Content-Type": "application/json"},
                     )
@@ -1050,6 +1132,30 @@ async def forward_to_cloud_provider(
                     headers={"Content-Type": "application/json", **debug_headers},
                 )
 
+            # ── Responses response translation (non-streaming) ───────────
+            # Mutually exclusive with the Anthropic branch above: for
+            # path == "responses" needs_translation (Anthropic) is False.
+            if path == "responses" and payload and isinstance(payload, dict):
+                if resp.status_code >= 400:
+                    responses_error = _translate_chat_error_to_responses(
+                        resp.status_code, payload
+                    )
+                    return Response(
+                        content=json.dumps(responses_error).encode("utf-8"),
+                        status_code=resp.status_code,
+                        headers={"Content-Type": "application/json", **debug_headers},
+                    )
+                responses_response = _translate_chat_response_to_responses(
+                    payload,
+                    response_model_name,
+                    source_body=json_body,
+                )
+                return Response(
+                    content=json.dumps(responses_response).encode("utf-8"),
+                    status_code=resp.status_code,
+                    headers={"Content-Type": "application/json", **debug_headers},
+                )
+
             return Response(
                 content=resp.content,
                 status_code=resp.status_code,
@@ -1177,6 +1283,52 @@ async def forward_to_cloud_provider(
                                             _coerce_usage_int(
                                                 data.get("usage", {}).get("output_tokens", 0)
                                             ),
+                                        )
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                    # ── Capture: feed every translated data: line to assembler ──
+                    if _cloud_assembler is not None:
+                        for part in event_line.split("\n"):
+                            if part.startswith("data: "):
+                                try:
+                                    _cloud_assembler.add_sse_line(part)
+                                except Exception:
+                                    pass
+                    encoded_line = event_line.encode("utf-8")
+                    _update_live_request_usage(
+                        request,
+                        response_bytes_delta=len(encoded_line),
+                    )
+                    yield encoded_line
+            elif path == "responses":
+                # ── Responses streaming translation ───────────────
+                # The upstream stream is chat-format (the request was
+                # translated to chat/completions in the candidate prep);
+                # pipe it through the Responses stream translator so the
+                # client sees the Responses event flow.  Sits AFTER the
+                # watchdog (_read_sse_lines), same layering as Anthropic.
+                async for event_line in _translate_openai_stream_to_responses(
+                    _read_sse_lines(),
+                    model=response_model_name,
+                    source_body=responses_source_body,
+                ):
+                    # Extract usage from the terminal event (response.completed
+                    # or response.incomplete — both carry the full response
+                    # object including usage).
+                    if any(name in event_line for name in _TERMINAL_RESPONSE_EVENTS):
+                        try:
+                            for part in event_line.split("\n"):
+                                if part.startswith("data: "):
+                                    data = json.loads(part[6:])
+                                    if data.get("type") in _TERMINAL_RESPONSE_EVENTS:
+                                        resp_usage = (data.get("response") or {}).get("usage") or {}
+                                        usage_totals["prompt_tokens"] = max(
+                                            usage_totals["prompt_tokens"],
+                                            _coerce_usage_int(resp_usage.get("input_tokens", 0)),
+                                        )
+                                        usage_totals["completion_tokens"] = max(
+                                            usage_totals["completion_tokens"],
+                                            _coerce_usage_int(resp_usage.get("output_tokens", 0)),
                                         )
                         except (json.JSONDecodeError, TypeError):
                             pass
