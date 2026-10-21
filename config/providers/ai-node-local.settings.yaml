@@ -250,6 +250,24 @@ models:
     draft_cache_type_v: f16
     extra_args: --jinja --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty
       0.0 --repeat-penalty 1.0 -t 8 -tb 8 -ot exps=CPU
+  # VIEScore2 (Allenda/VIEScore2, Apache 2.0): unified image-evaluation judge
+  # on a Qwen3-VL-8B-Instruct base (SFT + GRPO): dual-axis quality scores
+  # (pq:/sc:), a 16x16 defect grid with grounded explanation. Greedy sampling
+  # (temp 0) for deterministic scoring; the qwen3vl arch is supported by the
+  # active b11790-tq4 build. Added 2026-10-21.
+  viescore2:
+    path: /home/flip/models/viescore2-q8_0.gguf
+    brand: qwen
+    total_layers: 36
+    benchmark_context_limit: 262144
+    context: 131072
+    ngl: 99
+    kv_type: turbo4
+    tensor_split: 0.45,0.55
+    mmproj: /home/flip/models/viescore2-mmproj-f16.gguf
+    default_enable_thinking: false
+    extra_args: --jinja --reasoning off --temp 0.0 --min-p 0.0 --presence-penalty
+      0.0 --repeat-penalty 1.0
   # Fallback insurance: q8_0 KV launches on BOTH the b2111 production binary
   # and the qwen4exp build-latest binary, so this entry stays usable while
   # the 30-flashnext pin is active. Added 2026-10-21.
