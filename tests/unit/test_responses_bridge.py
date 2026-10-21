@@ -854,3 +854,85 @@ class TestResponsesCaptureRequest:
         messages, params = responses_capture_request({"model": "m", "input": 5})
         assert messages == []
         assert params == {"model": "m"}
+
+
+# ── PR #29 review round 2: Responses-only params + list content deltas ──
+
+
+class TestResponsesOnlyParamsNotForwarded:
+    """``metadata`` / ``safety_identifier`` are Responses-only fields with no
+    chat-completions equivalent; strict OpenAI-compatible upstreams reject
+    unknown top-level arguments with 400. They must be echoed on the response
+    object, never forwarded to the chat body (PR #29 review, blocking)."""
+
+    def test_metadata_and_safety_identifier_dropped_from_chat_body(self):
+        chat_body = translate_responses_request_to_chat({
+            "model": "m",
+            "input": "hi",
+            "metadata": {"order_id": "123"},
+            "safety_identifier": "user-abc",
+            "temperature": 0.5,
+        })
+        assert "metadata" not in chat_body
+        assert "safety_identifier" not in chat_body
+        assert chat_body["temperature"] == 0.5
+
+    def test_user_still_passes_through(self):
+        chat_body = translate_responses_request_to_chat({
+            "model": "m",
+            "input": "hi",
+            "user": "client-1",
+        })
+        assert chat_body["user"] == "client-1"
+
+    def test_metadata_and_safety_identifier_echoed_on_response(self):
+        payload = {"choices": [{"finish_reason": "stop", "message": {"content": "ok"}}]}
+        response = translate_chat_response_to_responses(
+            payload,
+            "m",
+            source_body={"metadata": {"order_id": "123"}, "safety_identifier": "user-abc"},
+        )
+        assert response["metadata"] == {"order_id": "123"}
+        assert response["safety_identifier"] == "user-abc"
+
+
+class TestListContentDeltasInStream:
+    """Some providers emit ``delta.content`` as a list of content parts; the
+    stream translation must join them instead of raising TypeError on the
+    text_parts join (which would abort the SSE stream without a terminal
+    response.completed event) — PR #29 review, non-blocking."""
+
+    async def test_content_part_list_delta_is_joined_not_fatal(self):
+        async def chat_lines():
+            yield ('data: {"choices":[{"delta":{"content":['
+                   '{"type":"text","text":"Hel"},"lo",'
+                   '{"type":"text","text":"!"}]}}]}')
+            yield 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}'
+            yield "data: [DONE]"
+
+        chunks = await _collect(
+            translate_openai_stream_to_responses(chat_lines(), model="m")
+        )
+        events = _parse_sse_events(chunks)
+        names = [name for name, _data in events]
+        assert names[-1] == "response.completed"
+        text_deltas = [data["delta"] for name, data in events
+                       if name == "response.output_text.delta"]
+        assert "".join(text_deltas) == "Hello!"
+
+    async def test_none_content_delta_still_completes(self):
+        async def chat_lines():
+            yield 'data: {"choices":[{"delta":{"content":null}}]}'
+            yield 'data: {"choices":[{"delta":{"content":"ok"}}]}'
+            yield 'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}'
+            yield "data: [DONE]"
+
+        chunks = await _collect(
+            translate_openai_stream_to_responses(chat_lines(), model="m")
+        )
+        events = _parse_sse_events(chunks)
+        names = [name for name, _data in events]
+        assert names[-1] == "response.completed"
+        text_deltas = [data["delta"] for name, data in events
+                       if name == "response.output_text.delta"]
+        assert text_deltas == ["ok"]

@@ -29,8 +29,9 @@ agents) get full gateway support:
 - ``tool_choice``: none / auto / required / named
 - ``max_output_tokens`` → ``max_tokens``
 - ``text.format`` (json_schema) → ``response_format``
-- ``temperature``, ``top_p``, ``stream``, ``parallel_tool_calls``,
-  ``metadata`` (echoed back on the response object)
+- ``temperature``, ``top_p``, ``stream``, ``parallel_tool_calls`` pass
+  through; ``metadata`` / ``safety_identifier`` are echoed back on the
+  response object (Responses-only, not forwarded to chat)
 
 **Response translation (cloud):**
 - assistant message → ``output`` message item with ``output_text`` parts
@@ -469,7 +470,9 @@ def translate_responses_request_to_chat(body: dict[str, Any]) -> dict[str, Any]:
     - ``previous_response_id`` (non-empty) raises :class:`ResponsesRequestError`
     - ``store`` / ``background`` / ``include`` / ``truncation`` and other
       unsupported keys are dropped by omission; ``temperature`` / ``top_p`` /
-      ``metadata`` / ``user`` / ``safety_identifier`` pass through
+      ``user`` pass through, while ``metadata`` / ``safety_identifier`` are
+      Responses-only and are echoed on the response object instead of
+      forwarded (strict chat upstreams reject unknown top-level arguments)
     - ``model`` passes through unchanged (already rewritten by the caller)
     """
     if not isinstance(body, dict):
@@ -527,8 +530,12 @@ def translate_responses_request_to_chat(body: dict[str, Any]) -> dict[str, Any]:
     # Simple parameter passthrough. "service_tier" (OpenRouter/OpenAI service
     # tiers: default/flex/priority/fast/ultrafast) rides along unchanged so
     # tier selection works identically on chat and Responses ingress.
-    for key in ("temperature", "top_p", "parallel_tool_calls", "metadata",
-                "user", "safety_identifier", "stream", "service_tier"):
+    # "metadata" and "safety_identifier" are Responses-only fields with no
+    # chat-completions equivalent; strict OpenAI-compatible upstreams reject
+    # unknown top-level arguments with a 400, so they are echoed on the
+    # response object (source_body echo) instead of forwarded.
+    for key in ("temperature", "top_p", "parallel_tool_calls",
+                "user", "stream", "service_tier"):
         if key in body:
             chat_body[key] = body[key]
 
@@ -703,7 +710,7 @@ def _build_responses_object(
     if source_body and isinstance(source_body, dict):
         for key in ("instructions", "temperature", "top_p", "tools", "tool_choice",
                     "parallel_tool_calls", "max_output_tokens", "metadata",
-                    "reasoning", "text", "service_tier"):
+                    "safety_identifier", "reasoning", "text", "service_tier"):
             if key in source_body:
                 response[key] = source_body[key]
     # Served-tier reporting (OpenRouter/OpenAI semantics): the response's
@@ -1111,6 +1118,20 @@ async def translate_openai_stream_to_responses(
 
         # ── Text delta ────────────────────────────────────────────────
         text_delta = delta.get("content")
+        if isinstance(text_delta, list):
+            # Some providers emit content-part lists in deltas; join the text
+            # parts so the stream translation keeps working — the
+            # "".join(text_parts) in _close_text_item/_finalize expects
+            # strings and would raise TypeError mid-stream otherwise.
+            text_delta = "".join(
+                part.get("text", "") if isinstance(part, dict) else str(part)
+                for part in text_delta
+            )
+        if not isinstance(text_delta, str):
+            # Defensive: never let a non-string delta abort the SSE
+            # translation mid-stream (the client would lose the terminal
+            # response.completed event).
+            text_delta = "" if text_delta is None else str(text_delta)
         if text_delta:
             events += _ensure_created()
             # Close reasoning before text starts (item ordering).
