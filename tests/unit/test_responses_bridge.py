@@ -936,3 +936,31 @@ class TestListContentDeltasInStream:
         text_deltas = [data["delta"] for name, data in events
                        if name == "response.output_text.delta"]
         assert text_deltas == ["ok"]
+
+    async def test_interleaved_text_items_do_not_duplicate_text(self):
+        """text -> tool_calls -> text: the reopened text item must carry only
+        its own text in its done events (stream state reuse — PR #29 review),
+        while the final Response object keeps the full message text."""
+
+        async def chat_lines():
+            yield 'data: {"choices":[{"delta":{"content":"Hel"}}]}'
+            yield ('data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
+                   '"id":"call_1","type":"function",'
+                   '"function":{"name":"lookup","arguments":"{}"}}]}}]}')
+            yield 'data: {"choices":[{"delta":{"content":"lo"}}]}'
+            yield 'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}'
+            yield "data: [DONE]"
+
+        chunks = await _collect(
+            translate_openai_stream_to_responses(chat_lines(), model="m")
+        )
+        events = _parse_sse_events(chunks)
+        done_texts = [data["text"] for name, data in events
+                      if name == "response.output_text.done"]
+        assert done_texts == ["Hel", "lo"]
+        completed = [data for name, data in events if name == "response.completed"]
+        assert completed, "stream must end with response.completed"
+        response_out = completed[0]["response"]["output"]
+        message_items = [i for i in response_out if i.get("type") == "message"]
+        assert message_items, response_out
+        assert message_items[0]["content"][0]["text"] == "Hello"

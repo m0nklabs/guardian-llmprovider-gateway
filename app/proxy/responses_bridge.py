@@ -851,11 +851,13 @@ async def translate_openai_stream_to_responses(
 
     text_item_id: str | None = None
     text_output_index: int | None = None
-    text_parts: list[str] = []
+    text_parts: list[str] = []          # per-item buffer (reset on item open)
+    message_text_parts: list[str] = []  # whole-message buffer for the final object
 
     reasoning_item_id: str | None = None
     reasoning_output_index: int | None = None
-    reasoning_text: str = ""
+    reasoning_text: str = ""            # per-item buffer (reset on item open)
+    message_reasoning_text: str = ""    # whole-message buffer for the final object
 
     # OpenAI tool_call index → (item_id, output_index, name, call_id, args)
     tool_items: dict[int, dict[str, Any]] = {}
@@ -879,9 +881,12 @@ async def translate_openai_stream_to_responses(
         ])
 
     def _open_text_item() -> str:
-        nonlocal text_item_id, text_output_index, next_output_index
+        nonlocal text_item_id, text_output_index, next_output_index, text_parts
         if text_item_id is not None:
             return ""
+        # A reopened text item (text -> tool_calls -> text) must not inherit
+        # the previous item's buffer: its done events join text_parts.
+        text_parts = []
         text_item_id = f"msg_{uuid.uuid4().hex[:24]}"
         text_output_index = next_output_index
         next_output_index += 1
@@ -1008,7 +1013,7 @@ async def translate_openai_stream_to_responses(
             "choices": [{
                 "finish_reason": finish_reason,
                 "message": {
-                    "content": "".join(text_parts),
+                    "content": "".join(message_text_parts),
                     "tool_calls": [
                         {
                             "id": tool_items[i]["call_id"],
@@ -1020,7 +1025,7 @@ async def translate_openai_stream_to_responses(
                         }
                         for i in tool_order
                     ] or None,
-                    "reasoning_content": reasoning_text or None,
+                    "reasoning_content": message_reasoning_text or None,
                 },
             }],
             "usage": usage,
@@ -1093,6 +1098,9 @@ async def translate_openai_stream_to_responses(
         if reasoning_delta:
             events += _ensure_created()
             if reasoning_item_id is None:
+                # A reopened reasoning item must not inherit the previous
+                # item's buffer: its done event carries reasoning_text.
+                reasoning_text = ""
                 reasoning_item_id = f"rs_{uuid.uuid4().hex[:24]}"
                 reasoning_output_index = next_output_index
                 next_output_index += 1
@@ -1108,6 +1116,7 @@ async def translate_openai_stream_to_responses(
                     },
                 })
             reasoning_text += reasoning_delta
+            message_reasoning_text += reasoning_delta
             events += _format_sse_event("response.reasoning_text.delta", {
                 "type": "response.reasoning_text.delta",
                 "item_id": reasoning_item_id,
@@ -1140,6 +1149,7 @@ async def translate_openai_stream_to_responses(
             if text_item_id is None:
                 events += _open_text_item()
             text_parts.append(text_delta)
+            message_text_parts.append(text_delta)
             events += _format_sse_event("response.output_text.delta", {
                 "type": "response.output_text.delta",
                 "item_id": text_item_id,

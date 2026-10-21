@@ -2246,6 +2246,29 @@ def test_prepare_cloud_candidate_client_service_tier_wins_over_provider_default(
     assert json_body["service_tier"] == "priority"
 
 
+def test_prepare_cloud_candidate_no_provider_tier_on_native_messages_body():
+    """``service_tier`` has no Anthropic equivalent: a native /v1/messages
+    body must not receive the provider default tier — strict endpoints reject
+    unknown top-level fields with a 400 (PR #29 review)."""
+    provider = CloudProvider(
+        name="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-or-test",
+        models=["openai/gpt-5"],
+        service_tier="flex",
+    )
+    base_body = {
+        "model": "openrouter/openai/gpt-5",
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    effective_path, json_body, _body, _needs_tr = server._prepare_cloud_candidate_request(
+        provider, "openai/gpt-5", "messages", base_body,
+    )
+    assert effective_path == "messages"
+    assert "service_tier" not in json_body
+
+
 def test_prepare_cloud_candidate_model_default_service_tier_wins_over_provider():
     """Model defaults are more specific than the provider default: when the
     model's ``models:`` block pins a tier, it wins over the provider one."""

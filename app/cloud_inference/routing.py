@@ -246,9 +246,13 @@ def prepare_cloud_candidate_request(
 
     # Provider-level default service tier (e.g. openrouter: flex). Applied
     # AFTER the model defaults so precedence is: client value > model
-    # default > provider default.
+    # default > provider default. Rides along only on OpenAI-chat bodies:
+    # "service_tier" has no equivalent on native Anthropic /v1/messages,
+    # legacy /v1/completions or embeddings bodies, and strict endpoints
+    # reject unknown top-level arguments with a 400.
     provider_tier = getattr(provider, "service_tier", None)
-    if provider_tier and "service_tier" not in candidate_json_body:
+    if (effective_path == "chat/completions" and provider_tier
+            and "service_tier" not in candidate_json_body):
         candidate_json_body["service_tier"] = provider_tier
 
     candidate_json_body = _adapt_openai_reasoning_params(
