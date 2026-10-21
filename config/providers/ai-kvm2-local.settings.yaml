@@ -206,6 +206,66 @@ models:
     draft_cache_type_v: f16
     extra_args: --jinja --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty
       0.0 --repeat-penalty 1.0
+  # Swift 1.5 (ukisai/Swift-1.5-Qwen3.8-27B, Swift Open License v1.0: free
+  # commercial use under $1M gross revenue): token-efficiency fine-tune,
+  # -58.5% thinking tokens at +0.35 GPQA vs base; MTP head embedded in the
+  # main GGUF (no separate draft file). Mirrored from ai-node-local 2026-10-21.
+  qwen3.8-27b-swift15:
+    path: /home/flip/models/qwen3.8-27b-swift/Swift-1.5-Qwen3.8-27B-Q4_K_M.gguf
+    brand: qwen
+    total_layers: 65
+    benchmark_context_limit: 262144
+    context: 150000
+    ngl: 99
+    kv_type: turbo4
+    tensor_split: 0.42,0.58
+    mmproj: /home/flip/models/qwen3.8-27b-swift/mmproj-Swift-1.5-Qwen3.8-27B-F16.gguf
+    vision_context: 155000
+    vision_ngl: 99
+    vision_tensor_split: 0.37,0.63
+    default_enable_thinking: true
+    spec_type: draft-mtp
+    extra_args: --jinja --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty
+      0.0 --repeat-penalty 1.0
+  # Qwen3.8-Flash-Next (Qwen/Qwen3.8-Flash-Next, Apache 2.0): 125B-A6B MoE +
+  # 51B n-gram PLE + QSA; experts offloaded to RAM via -ot exps=CPU. Requires
+  # the qwen4exp build pin (30-flashnext-backend.conf); turbo4 KV is NOT
+  # accepted by that binary. Spec: docs/FLASH_NEXT_INTEGRATION_SPEC.md.
+  # Added 2026-10-21.
+  qwen3.8-flash-next:
+    path: /home/flip/models/qwen3.8-flash-next/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf
+    brand: qwen
+    total_layers: 49
+    benchmark_context_limit: 262144
+    context: 150000
+    ngl: 99
+    kv_type: q8_0
+    tensor_split: 0.42,0.58
+    default_enable_thinking: true
+    spec_type: draft-mtp
+    spec_draft_n_max: 3
+    spec_draft_n_min: 1
+    draft_model_path: /home/flip/models/qwen3.8-flash-next/mtp-Qwen3.8-Flash-Next-Q4_0.gguf
+    draft_cache_type_k: f16
+    draft_cache_type_v: f16
+    extra_args: --jinja --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty
+      0.0 --repeat-penalty 1.0 -t 8 -tb 8 -ot exps=CPU
+  # Fallback insurance: q8_0 KV launches on BOTH the b2111 production binary
+  # and the qwen4exp build-latest binary, so this entry stays usable while
+  # the 30-flashnext pin is active. Added 2026-10-21.
+  qwen3.5-9b-q8kv:
+    path: /home/flip/models/qwen3.5-9b/Qwen3.5-9B-UD-Q8_K_XL.gguf
+    brand: qwen
+    total_layers: 32
+    benchmark_context_limit: 262144
+    context: 262144
+    ngl: 99
+    kv_type: q8_0
+    tensor_split: 0.45,0.55
+    mmproj: /home/flip/models/qwen3.5-9b/mmproj-F16.gguf
+    default_enable_thinking: true
+    extra_args: --jinja --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty
+      1.5 --repeat-penalty 1.0
   qwen3.5-9b:
     path: /home/flip/models/qwen3.5-9b/Qwen3.5-9B-UD-Q8_K_XL.gguf
     brand: qwen
@@ -283,6 +343,8 @@ aliases:
   qwen3.8-uncensored: qwen3.8-27b-uncensored-ymq
   qwen3.8-ymq: qwen3.8-27b-uncensored-ymq
   qwen3.8-pi: qwen3.8-27b-pi
+  qwen3.8-swift: qwen3.8-27b-swift15
+  qwen3.8-flash: qwen3.8-flash-next
   qwen3.5-coder: qwen3.5-9b-coder
   qwen3.5-instruct: qwen3.5-9b-instruct
   qwen3.5-reasoner: qwen3.5-9b-reasoner
