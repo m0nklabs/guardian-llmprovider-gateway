@@ -142,6 +142,26 @@ een cloud-GPU-box):
   (curl-cycles + pinnen); de realistische check is Open WebUI → Settings →
   Audio → TTS: engine `OpenAI`, base `http://192.168.1.G:11434/v1`, model
   `qwen3-tts`, voice `nova` → 🔊-knop per chatbericht.
+- **ElevenLabs speech-dialect adapter (operator-verzoek 2026-10-04, op
+  roadmap):** de OpenAI-compatible speech-surface is live, maar ElevenLabs
+  praat een eigen dialect — bridging via het bestaande `speech_adapter`-
+  mechanisme (precedent: `fish`, al gebouwd). Te bouwen:
+  `speech_adapter: elevenlabs` —
+  TTS: `POST /v1/text-to-speech/{voice_id}`, header `xi-api-key`,
+  format-parameter (`response_format`/`output_format`: mp3/pcm/wav/opus);
+  gratis voices vereisen attributie op de free tier.
+  STT: `POST /v1/speech-to-text`, multipart, `model_id` (`scribe_v2`),
+  `language_code` is **ISO-639-3** (`eng`, niet `en`) — mapping naast de
+  bestaande `_qwen_language`-convert; optioneel `diarize`/
+  `tag_audio_events`.
+  Rationale: scribe_v2 is de beste NL-STT van de hele leaderboard (MCV-nl
+  2,34); free tier = 10k credits/maand (~10 min, géén commerciële licentie)
+  → past in de free-tier-pool-gedachte (Keanu-spoor); boven het gratis
+  gedeelte $0,22/uur. Bronnen: elevenlabs.io/pricing + /pricing/api (P),
+  docs-cookbook speech-to-text (P; endpoints/velden), stt-lokaal-dossier
+  `~/onderzoek/stt-lokaal/docs/stt-lokaal-onderzoek.md` §13. Open:
+  exacte credit-verrekening STT (1000/min) vandaag niet geverifieerd
+  [likely].
 - **Redactor precision audit (verzoek setup-agent 09-07, NOG TE BOUWEN):**
   `_IPV4_RE` en `_ENV_VAR_RE` in `app/capture/redactor.py` zijn categorisch te
   breed (non-secrets verdwijnen). Remedie-richting (operator-policy 09-07):
