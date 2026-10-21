@@ -44,6 +44,19 @@ from app.proxy.providers import ProviderRegistry, _expand_env
 
 logger = logging.getLogger("Guardian")
 
+
+def _log_safe(value: object, limit: int = 200) -> str:
+    """Render a possibly user-provided value for one log line.
+
+    Control characters (newline, CR, …) are collapsed to spaces so a request
+    field cannot forge log entries (CodeQL log-injection), and the result is
+    hard-capped so a hostile payload cannot bloat the log.
+    """
+    text = str(value)
+    cleaned = "".join(ch if ch.isprintable() else " " for ch in text)
+    return cleaned[:limit]
+
+
 # ── Injected (set once at startup by init()) ─────────────────────────
 _resolve_cloud_attempts = None
 _prepare_cloud_candidate_request = None
@@ -609,7 +622,7 @@ async def forward_to_cloud_provider(
         except ResponsesRequestError as exc:
             logger.info(
                 "🌉 Responses bridge: rejecting /v1/responses request for '%s': %s",
-                model_name, exc,
+                _log_safe(model_name), _log_safe(exc),
             )
             _finish_live_request_usage(request, status_code=400, response_bytes=0)
             _dispatch_capture_request_failed(
