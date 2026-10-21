@@ -555,7 +555,10 @@ def translate_responses_request_to_chat(body: dict[str, Any]) -> dict[str, Any]:
         chat_tools, _dropped = _convert_responses_tools_to_openai(tools)
         if chat_tools:
             chat_body["tools"] = chat_tools
-    if "tool_choice" in body:
+    # Explicit ``null`` tool_choice means "default" — omit the key entirely
+    # instead of forwarding an explicit null, which strict upstreams reject
+    # with 400 (PR #29 review).
+    if body.get("tool_choice") is not None:
         chat_body["tool_choice"] = _convert_responses_tool_choice(body["tool_choice"])
 
     # When streaming, request usage in the final chunk so response.completed

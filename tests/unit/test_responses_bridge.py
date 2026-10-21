@@ -225,6 +225,14 @@ class TestTranslateResponsesRequestToChat:
             )
             assert chat["tool_choice"] == expected
 
+    def test_explicit_null_tool_choice_is_omitted(self):
+        """Explicit ``null`` tool_choice means "default": omit the key instead
+        of forwarding a null that strict upstreams reject (PR #29 review)."""
+        chat = translate_responses_request_to_chat({
+            "model": "m", "input": "hi", "tool_choice": None,
+        })
+        assert "tool_choice" not in chat
+
     def test_max_output_tokens_maps_to_max_tokens(self):
         chat = translate_responses_request_to_chat({
             "model": "m", "input": "hi", "max_output_tokens": 123,
