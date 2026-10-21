@@ -11,7 +11,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-import yaml
 
 import app.gateway.model_discovery as model_discovery
 from app.local_inference import models as local_models
@@ -61,7 +60,7 @@ def registry_pair(tmp_path: Path) -> tuple[ProviderRegistry, ModelRegistry, Path
 
 
 class TestRegistryBrandAccessors:
-    def test_get_model_brand(self, registry_pair):
+    def test_get_model_brand(self, registry_pair, monkeypatch):
         _, model_registry, _ = registry_pair
         assert model_registry.get_model_brand("qwen3.8-27b") == "qwen"
         assert model_registry.get_model_brand("Phi-4-reasoning-plus") == "phi"
@@ -75,7 +74,7 @@ class TestRegistryBrandAccessors:
         model_registry = ModelRegistry(config_path=str(registry_file))
         assert model_registry.get_model_brand("qwen3.8-27b") is None
 
-    def test_namespaced_addresses(self, registry_pair):
+    def test_namespaced_addresses(self, registry_pair, monkeypatch):
         _, model_registry, _ = registry_pair
         addresses = model_registry.namespaced_addresses(REGISTRY_NAME)
         assert addresses == {
@@ -88,64 +87,64 @@ class TestRegistryBrandAccessors:
 
 
 class TestStripNamespacedLocalAddress:
-    def test_three_segment_with_matching_brand(self, registry_pair):
+    def test_three_segment_with_matching_brand(self, registry_pair, monkeypatch):
         provider_registry, model_registry, _ = registry_pair
-        local_models._provider_registry = provider_registry
-        local_models._model_manager = model_registry
+        monkeypatch.setattr(local_models, "_provider_registry", provider_registry)
+        monkeypatch.setattr(local_models, "_model_manager", model_registry)
         assert (
             local_models.strip_namespaced_local_address(f"{REGISTRY_NAME}/qwen/qwen3.8-27b")
             == "qwen3.8-27b"
         )
 
-    def test_three_segment_with_alias(self, registry_pair):
+    def test_three_segment_with_alias(self, registry_pair, monkeypatch):
         provider_registry, model_registry, _ = registry_pair
-        local_models._provider_registry = provider_registry
-        local_models._model_manager = model_registry
+        monkeypatch.setattr(local_models, "_provider_registry", provider_registry)
+        monkeypatch.setattr(local_models, "_model_manager", model_registry)
         assert (
             local_models.strip_namespaced_local_address(f"{REGISTRY_NAME}/phi/phi4")
             == "Phi-4-reasoning-plus"
         )
 
-    def test_two_segment_form(self, registry_pair):
+    def test_two_segment_form(self, registry_pair, monkeypatch):
         provider_registry, model_registry, _ = registry_pair
-        local_models._provider_registry = provider_registry
-        local_models._model_manager = model_registry
+        monkeypatch.setattr(local_models, "_provider_registry", provider_registry)
+        monkeypatch.setattr(local_models, "_model_manager", model_registry)
         assert (
             local_models.strip_namespaced_local_address(f"{REGISTRY_NAME}/qwen3.8-27b")
             == "qwen3.8-27b"
         )
 
-    def test_mismatched_brand_is_not_local(self, registry_pair):
+    def test_mismatched_brand_is_not_local(self, registry_pair, monkeypatch):
         provider_registry, model_registry, _ = registry_pair
-        local_models._provider_registry = provider_registry
-        local_models._model_manager = model_registry
+        monkeypatch.setattr(local_models, "_provider_registry", provider_registry)
+        monkeypatch.setattr(local_models, "_model_manager", model_registry)
         assert (
             local_models.strip_namespaced_local_address(f"{REGISTRY_NAME}/gemma/qwen3.8-27b")
             is None
         )
 
-    def test_non_managed_provider_returns_none(self, registry_pair):
+    def test_non_managed_provider_returns_none(self, registry_pair, monkeypatch):
         provider_registry, model_registry, _ = registry_pair
-        local_models._provider_registry = provider_registry
-        local_models._model_manager = model_registry
+        monkeypatch.setattr(local_models, "_provider_registry", provider_registry)
+        monkeypatch.setattr(local_models, "_model_manager", model_registry)
         assert (
             local_models.strip_namespaced_local_address("openrouter/deepseek/deepseek-chat")
             is None
         )
 
-    def test_unknown_model_returns_none(self, registry_pair):
+    def test_unknown_model_returns_none(self, registry_pair, monkeypatch):
         provider_registry, model_registry, _ = registry_pair
-        local_models._provider_registry = provider_registry
-        local_models._model_manager = model_registry
+        monkeypatch.setattr(local_models, "_provider_registry", provider_registry)
+        monkeypatch.setattr(local_models, "_model_manager", model_registry)
         assert (
             local_models.strip_namespaced_local_address(f"{REGISTRY_NAME}/qwen/unknown-model")
             is None
         )
 
-    def test_bare_name_returns_none(self, registry_pair):
+    def test_bare_name_returns_none(self, registry_pair, monkeypatch):
         provider_registry, model_registry, _ = registry_pair
-        local_models._provider_registry = provider_registry
-        local_models._model_manager = model_registry
+        monkeypatch.setattr(local_models, "_provider_registry", provider_registry)
+        monkeypatch.setattr(local_models, "_model_manager", model_registry)
         assert local_models.strip_namespaced_local_address("qwen3.8-27b") is None
 
 
@@ -153,19 +152,19 @@ class TestStripNamespacedLocalAddress:
 
 
 class TestResolveInferenceModelNamespaced:
-    def test_namespaced_resolves_like_bare_alias(self, registry_pair):
+    def test_namespaced_resolves_like_bare_alias(self, registry_pair, monkeypatch):
         provider_registry, model_registry, _ = registry_pair
-        local_models._provider_registry = provider_registry
-        local_models._model_manager = model_registry
+        monkeypatch.setattr(local_models, "_provider_registry", provider_registry)
+        monkeypatch.setattr(local_models, "_model_manager", model_registry)
         assert (
             local_models.resolve_inference_model(f"{REGISTRY_NAME}/qwen/qwen3.8-27b", "auto")
             == "qwen3.8-27b"
         )
 
-    def test_bare_alias_still_resolves(self, registry_pair):
+    def test_bare_alias_still_resolves(self, registry_pair, monkeypatch):
         provider_registry, model_registry, _ = registry_pair
-        local_models._provider_registry = provider_registry
-        local_models._model_manager = model_registry
+        monkeypatch.setattr(local_models, "_provider_registry", provider_registry)
+        monkeypatch.setattr(local_models, "_model_manager", model_registry)
         assert (
             local_models.resolve_inference_model("phi4", "auto") == "Phi-4-reasoning-plus"
         )

@@ -90,30 +90,36 @@ def strip_namespaced_local_address(raw_model: str) -> str | None:
     the caller falls through to the normal unknown-model handling). Bare names
     and non-managed provider addresses return None and never reach the local
     resolution here.
+
+    Fail-open by construction: any unexpected registry/manager shape (stubs,
+    partial wiring) returns None so the caller keeps the legacy behavior.
     """
     if not isinstance(raw_model, str) or "/" not in raw_model:
         return None
     if _provider_registry is None or _model_manager is None:
         return None
-    provider = _provider_registry._provider_from_address(raw_model)
-    if provider is None or not provider.managed:
-        return None
-    rest = raw_model.partition("/")[2]
-    if "/" in rest:
-        brand, _, model_name = rest.partition("/")
-    else:
-        brand, model_name = None, rest
     try:
-        canonical = _model_manager.resolve_model(model_name)
-    except ValueError:
-        return None
-    if canonical not in _model_manager.models:
-        return None
-    if brand:
-        entry_brand = (_model_manager.models.get(canonical) or {}).get("brand")
-        if not entry_brand or str(entry_brand).strip().lower() != brand.strip().lower():
+        provider = _provider_registry._provider_from_address(raw_model)
+        if provider is None or not provider.managed:
             return None
-    return canonical
+        rest = raw_model.partition("/")[2]
+        if "/" in rest:
+            brand, _, model_name = rest.partition("/")
+        else:
+            brand, model_name = None, rest
+        try:
+            canonical = _model_manager.resolve_model(model_name)
+        except ValueError:
+            return None
+        if canonical not in _model_manager.models:
+            return None
+        if brand:
+            entry_brand = (_model_manager.models.get(canonical) or {}).get("brand")
+            if not entry_brand or str(entry_brand).strip().lower() != brand.strip().lower():
+                return None
+        return canonical
+    except Exception:
+        return None
 
 
 def reject_unserved_inference_model(raw_model: str | None) -> None:
