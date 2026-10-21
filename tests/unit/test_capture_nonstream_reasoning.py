@@ -193,3 +193,137 @@ class TestDispatchCaptureStreamCompleted:
         assert event["reasoning_content"] == "R"
         assert event["finish_reason"] == "stop"
         assert event["streamed"] is True
+
+
+class TestNonstreamResponsesAndCompletions:
+    """New endpoint coverage: Responses objects, legacy completions, embeddings."""
+
+    def test_responses_payload_captured(self, monkeypatch):
+        """Responses non-stream object: output items → content/tool_calls/
+        reasoning; usage maps input/output_tokens; status → finish_reason."""
+        controller = _patch_controller(monkeypatch)
+        payload = {
+            "id": "resp_1",
+            "object": "response",
+            "status": "completed",
+            "model": "llama3.2-3b",
+            "output": [
+                {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "summary": [],
+                    "content": [{"type": "reasoning_text", "text": "Think"}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "get_weather",
+                    "arguments": '{"city":"Boston"}',
+                    "status": "completed",
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Hello", "annotations": []}],
+                },
+            ],
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "total_tokens": 15,
+                "output_tokens_details": {"reasoning_tokens": 2},
+            },
+        }
+        capture_dispatch.dispatch_capture_nonstream_completed(
+            _request(), "req-r1", "client", "model",
+            _ctx(), _policy(), payload, 200, 0.0,
+        )
+        assert len(controller.completed) == 1
+        event = controller.completed[0]
+        assert event["response_content"] == "Hello"
+        assert event["reasoning_content"] == "Think"
+        assert event["finish_reason"] == "stop"
+        assert event["prompt_tokens"] == 10
+        assert event["completion_tokens"] == 5
+        assert event["completion_tokens_details"] == {"reasoning_tokens": 2}
+        assert event["tool_calls"] == [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "get_weather", "arguments": '{"city":"Boston"}'},
+            }
+        ]
+        assert event["incomplete"] is False
+
+    def test_responses_incomplete_maps_max_output_tokens(self, monkeypatch):
+        controller = _patch_controller(monkeypatch)
+        payload = {
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "partial"}],
+                }
+            ],
+            "usage": {"input_tokens": 1, "output_tokens": 2},
+        }
+        capture_dispatch.dispatch_capture_nonstream_completed(
+            _request(), "req-r2", "client", "model",
+            _ctx(), _policy(), payload, 200, 0.0,
+        )
+        event = controller.completed[0]
+        assert event["finish_reason"] == "length"
+        assert event["response_content"] == "partial"
+
+    def test_legacy_completions_payload_text_captured(self, monkeypatch):
+        """Legacy completions choices carry ``text`` (no message/delta)."""
+        controller = _patch_controller(monkeypatch)
+        payload = {
+            "choices": [{"text": "Once upon a time", "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 4, "completion_tokens": 7},
+        }
+        capture_dispatch.dispatch_capture_nonstream_completed(
+            _request(), "req-c1", "client", "model",
+            _ctx(), _policy(), payload, 200, 0.0,
+        )
+        event = controller.completed[0]
+        assert event["response_content"] == "Once upon a time"
+        assert event["finish_reason"] == "stop"
+        assert event["prompt_tokens"] == 4
+        assert event["completion_tokens"] == 7
+
+    def test_embeddings_payload_content_none_usage_extracted(self, monkeypatch):
+        """Embeddings carry vectors (data list, no choices) — no content text,
+        but the usage is still captured."""
+        controller = _patch_controller(monkeypatch)
+        payload = {
+            "object": "list",
+            "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}],
+            "usage": {"prompt_tokens": 12, "total_tokens": 12},
+        }
+        capture_dispatch.dispatch_capture_nonstream_completed(
+            _request(), "req-e1", "client", "model",
+            _ctx(), _policy(), payload, 200, 0.0,
+        )
+        event = controller.completed[0]
+        assert event["response_content"] is None
+        assert event["prompt_tokens"] == 12
+
+    def test_responses_malformed_payload_does_not_break_dispatch(self, monkeypatch):
+        """Fail-open: a malformed Responses payload must not raise; the
+        event still reaches the controller with empty semantics."""
+        controller = _patch_controller(monkeypatch)
+        payload = {
+            "output": [
+                {"type": "message", "role": "assistant", "content": 42},
+                "not-a-dict",
+            ]
+        }
+        capture_dispatch.dispatch_capture_nonstream_completed(
+            _request(), "req-r3", "client", "model",
+            _ctx(), _policy(), payload, 200, 0.0,
+        )
+        event = controller.completed[0]
+        assert event["response_content"] is None

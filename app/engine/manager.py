@@ -155,6 +155,20 @@ class ModelManager:
         finally:
             self._sync_registry_mirror()
 
+    def get_model_brand(self, model_name: str) -> str | None:
+        """Return the model-maker brand of a canonical local model, or None."""
+        try:
+            return self.registry.get_model_brand(model_name)
+        finally:
+            self._sync_registry_mirror()
+
+    def namespaced_addresses(self, local_provider_name: str) -> dict[str, str]:
+        """Return namespaced local addresses keyed by address → canonical name."""
+        try:
+            return self.registry.namespaced_addresses(local_provider_name)
+        finally:
+            self._sync_registry_mirror()
+
     def get_vision_capability(self, model_name: str) -> dict[str, Any]:
         return self.registry.get_vision_capability(model_name)
 

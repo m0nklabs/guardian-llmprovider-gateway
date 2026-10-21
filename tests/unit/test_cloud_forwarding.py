@@ -1,6 +1,7 @@
 """Regression tests for cloud forwarding edge cases."""
 
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -612,3 +613,67 @@ async def test_non_stream_request_without_disconnect_support_falls_back(monkeypa
     assert response.status_code == 200
     assert len(capture_completed) == 1
     assert capture_cancelled == []
+
+
+# ── PR #29 review pin: Responses non-stream echo keeps the original body ──
+
+
+@pytest.mark.asyncio
+async def test_responses_non_stream_echo_uses_original_responses_body(monkeypatch):
+    """The non-streaming /v1/responses translation must hand the bridge the
+    ORIGINAL Responses-shaped request body (``input``/``max_output_tokens``),
+    never a chat-shaped candidate body (``messages``/``max_tokens``). The
+    streaming winner rebinds ``json_body = candidate_json_body``; this pin
+    freezes that the non-stream branch cannot observe such a rebinding
+    (PR #29 review, ``source_body`` echo on the non-stream translation)."""
+    provider = SimpleNamespace(
+        name="openrouter",
+        base_url="https://provider.example/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+        extra_headers={},
+    )
+    captured_source_bodies = []
+
+    def recording_translate(payload, model, source_body=None):
+        captured_source_bodies.append(source_body)
+        return {"object": "response", "status": "completed", "model": model}
+
+    payload = {
+        "choices": [{"finish_reason": "stop", "message": {"content": "ok"}}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    }
+    http_client = _patch_nonstream_common(
+        monkeypatch, [], provider, _FakeNonStreamClient(httpx.Response(200, json=payload))
+    )
+    monkeypatch.setattr(
+        forwarding, "_translate_chat_response_to_responses", recording_translate
+    )
+
+    responses_body = {
+        "model": "openrouter/provider/model",
+        "input": "hi",
+        "max_output_tokens": 32,
+        "stream": False,
+    }
+    with patch.object(forwarding.httpx, "AsyncClient", return_value=http_client):
+        response = await forwarding.forward_to_cloud_provider(
+            "responses",
+            json.dumps(responses_body).encode("utf-8"),
+            dict(responses_body),
+            "provider/model",
+            SimpleNamespace(),
+            "dsh",
+            capture_ctx=object(),
+            capture_policy_result=object(),
+            cloud_capture_start_time=0.0,
+        )
+
+    assert response.status_code == 200
+    assert len(captured_source_bodies) == 1
+    source_body = captured_source_bodies[0]
+    assert source_body is not None
+    assert source_body.get("input") == "hi"
+    assert source_body.get("max_output_tokens") == 32
+    assert "messages" not in source_body
+    assert "max_tokens" not in source_body

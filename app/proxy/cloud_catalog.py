@@ -359,6 +359,10 @@ class CloudModelCatalog:
     # ── Brand normalization ───────────────────────────────────────────
 
     def _default_brand(self, provider: CloudProvider) -> str:
+        # A provider file's ``brand:`` key wins — configuration over code. The
+        # map below covers providers whose files predate the key.
+        if provider.brand:
+            return provider.brand
         return DEFAULT_BRAND_BY_PROVIDER.get(provider.name, provider.name)
 
     @staticmethod

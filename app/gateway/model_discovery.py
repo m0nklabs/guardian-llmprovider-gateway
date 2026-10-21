@@ -21,6 +21,8 @@ from typing import Any
 from fastapi import HTTPException, Request
 
 from app.gateway.metadata_enrichment import attach_parity_metadata
+from app.local_inference.models import strip_namespaced_local_address
+from app.paths import local_models_file
 
 logger = logging.getLogger("Guardian")
 
@@ -40,6 +42,33 @@ get_model_size = None
 
 # One background catalog self-heal at a time (see _schedule_catalog_self_heal).
 _ensure_fresh_inflight = False
+
+
+def _local_namespaced_addresses() -> dict[str, str]:
+    """Return namespaced local addresses as ``canonical model → address``.
+
+    The address prefix is the managed provider that owns the local registry
+    document (``local_models_file()`` stem). Only registry entries with a
+    valid per-model ``brand:`` field are namespaced (unified provider model,
+    phase A). Empty when the managed provider cannot be determined uniquely.
+    """
+    if _provider_registry is None or _model_manager is None:
+        return {}
+    # Provider name = document basename minus the ".settings.yaml" suffix
+    # (same derivation as provider_names() in app/paths.py).
+    doc_name = local_models_file().name
+    if doc_name.endswith(".settings.yaml"):
+        doc_name = doc_name[: -len(".settings.yaml")]
+    managed = [p for p in _provider_registry.get_enabled_providers() if p.managed]
+    provider = next((p for p in managed if p.name == doc_name), None)
+    if provider is None and len(managed) == 1:
+        provider = managed[0]
+    if provider is None:
+        return {}
+    try:
+        return {c: a for a, c in _model_manager.namespaced_addresses(provider.name).items()}
+    except Exception:
+        return {}
 
 
 def init(
@@ -206,8 +235,16 @@ async def list_models(request: Request, client_id: str) -> dict[str, Any]:
     _schedule_catalog_self_heal()
     models_list = []
     try:
+        namespaced = _local_namespaced_addresses()
+        seen_canonical: set[str] = set()
         for public_name, canonical_name in _model_manager.get_public_model_map().items():
             models_list.append(await build_model_metadata_entry(public_name, canonical_name, client_id))
+            # Unified provider model (phase A): one additive namespaced entry
+            # per branded canonical model, next to its bare alias surface.
+            addr = namespaced.get(canonical_name)
+            if addr is not None and canonical_name not in seen_canonical:
+                seen_canonical.add(canonical_name)
+                models_list.append(await build_model_metadata_entry(addr, canonical_name, client_id))
     except Exception as e:
         logger.error(f"Failed to list models: {e}")
 
@@ -310,7 +347,10 @@ async def model_metadata(model_id: str, request: Request, client_id: str) -> dic
     canonical_name = public_models.get(model_id)
     if canonical_name is None:
         try:
-            canonical_name = _model_manager.resolve_model(model_id)
+            stripped = strip_namespaced_local_address(model_id)
+            canonical_name = _model_manager.resolve_model(
+                stripped if stripped is not None else model_id
+            )
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
     return await build_model_metadata_entry(model_id, canonical_name, client_id)
@@ -347,7 +387,10 @@ async def show_model(request: Request, client_id: str) -> dict[str, Any]:
         cloud_attempts, _ = resolve_cloud_attempts(model_name, request, client_id)
     else:
         try:
-            canonical_name = _model_manager.resolve_model(model_name)
+            stripped = strip_namespaced_local_address(model_name)
+            canonical_name = _model_manager.resolve_model(
+                stripped if stripped is not None else model_name
+            )
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 

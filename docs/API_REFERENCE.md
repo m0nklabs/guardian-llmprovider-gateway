@@ -40,6 +40,7 @@ Guardian keeps a live queued request waiting until one of these things happens:
 Only GPU-backed inference routes are queued:
 
 - `POST /v1/chat/completions`
+- `POST /v1/responses`
 - `POST /v1/completions`
 - `POST /v1/embeddings`
 - `POST /v1/messages`
@@ -345,6 +346,7 @@ Always returns:
 | Method | Path | Queued | Purpose |
 | --- | --- | --- | --- |
 | `POST` | `/v1/chat/completions` | Yes | OpenAI-compatible chat completions |
+| `POST` | `/v1/responses` | Yes | OpenAI Responses API (native llama.cpp passthrough; cloud models via chat-completions translation) |
 | `POST` | `/v1/completions` | Yes | OpenAI-compatible text completions |
 | `POST` | `/v1/embeddings` | Yes | OpenAI-compatible embeddings |
 | `POST` | `/v1/messages` | Yes | Anthropic-style message passthrough when supported by backend |
@@ -397,6 +399,64 @@ Runtime behavior:
   Guardian reloads that same model with the new runtime mode
 - streaming holds the queue slot until the SSE stream closes
 - all streaming paths (local + cloud) emit `: guardian-keepalive` SSE comments every 15s during upstream silence to prevent client idle timeouts; the Anthropic bridge path additionally emits `event: ping` events
+
+#### `POST /v1/responses`
+
+OpenAI Responses API (`POST /v1/responses`, the interface used by the OpenAI
+SDK `client.responses.create` and Codex CLI). Behavior depends on the
+resolved route:
+
+- **Local models** — llama.cpp implements `/v1/responses` natively (it
+  converts internally to chat completions and speaks the Responses SSE event
+  protocol). Guardian routes the request through the standard inference
+  pipeline (queue admission, model resolution/auto-switch, usage tracking,
+  vision preflight) and streams backend events through unmodified.
+- **Cloud models** — cloud providers speak chat completions only, so
+  Guardian transparently translates both directions (request → chat
+  completions; response / SSE stream / errors → Responses format), mirroring
+  the Anthropic bridge. See `app/proxy/responses_bridge.py`.
+
+Representative request:
+
+```json
+{
+  "model": "qwen3.6-35b-uncensored",
+  "instructions": "Answer tersely.",
+  "input": [
+    {
+      "type": "message",
+      "role": "user",
+      "content": [
+        {"type": "input_text", "text": "Reply with exactly: FIT OK"}
+      ]
+    }
+  ],
+  "max_output_tokens": 16,
+  "stream": false
+}
+```
+
+`input` may also be a plain string (`"input": "Reply with exactly: FIT OK"`).
+Supported input items: messages with `input_text`/`input_image` parts,
+assistant output messages, `function_call` / `function_call_output` pairs
+(function tool calling round-trips through the same items), and `reasoning`
+items. Streaming uses the standard Responses event flow
+(`response.created` → `response.output_item.added` →
+`response.output_text.delta` → … → `response.completed`, the last event
+carrying the full response object including usage). Cloud routes also accept
+`service_tier` (OpenRouter service tiers: `default`/`flex`/`priority`/`fast`/
+`ultrafast`) — it rides through the translation, and the terminal response
+reports the tier that actually served the request.
+
+Not supported (no chat-completions equivalent; `previous_response_id`
+returns a 400): stateful `previous_response_id` conversations, `store`,
+`background`, `include`, `item_reference`, `truncation`, and built-in tools
+(web_search, file_search, computer_use — non-function tools are dropped).
+Guardian does not persist responses, so `GET /v1/responses/{id}` is
+backend-decided (llama.cpp returns 404 for unknown ids). Capture covers
+`/v1/responses` like every other text inference endpoint: requests are
+normalized from `input` items to OpenAI-style messages, and Responses SSE
+streams are assembled into a single completed capture event.
 
 #### `POST /api/chat`
 
@@ -471,7 +531,7 @@ Representative response:
 Queue rule for generic `POST /v1/{path:path}`:
 
 - queued only when `path` is `chat/completions`, `completions`, `embeddings`,
-  or `messages`
+  `messages`, or `responses`
 - direct passthrough for all other `POST /v1/*` paths
 - for queued inference paths, Guardian requires a valid JSON object body with a served `model` field before queue admission
 
@@ -773,6 +833,22 @@ done offline by `scripts/keanu_redact.py`; replay with integrity verification is
 clients (`cloud_capture: true`, `per_client_opt_in: false`); `retention_days: -1`
 means keep everything indefinitely and `max_capture_bytes: -1` is an unlimited
 byte budget.
+
+**Coverage — all text inference endpoints.** Every queued text inference route
+is captureable under its native protocol: OpenAI
+(`/v1/chat/completions`, `/v1/responses`, `/v1/completions`, `/v1/embeddings`),
+Anthropic (`/v1/messages`), and Ollama (`/api/chat`, `/api/generate`).
+Requests are normalized to OpenAI-style messages for the record (Responses
+`input` items, legacy `prompt`, and embeddings `input` are all converted
+fail-open; grammar/schema parameters are stripped, presence flags only).
+Streaming requests are accumulated from the SSE stream into a single
+completed event — the assembler understands OpenAI chat deltas, Anthropic
+blocks, and Responses events (`response.output_text.delta`,
+`response.reasoning_text.delta`, function-call items,
+`response.completed`/`response.incomplete`). Embeddings records carry the
+input text with no response content (vectors are not stored). Audio
+endpoints (`/v1/audio/*`) are outside capture coverage (binary media, no
+message model).
 
 `/api/capture/status` shows the effective config (enabled/active, local/cloud,
 opt-in mode, retention, byte budget) plus the sink/writer metrics and disk usage

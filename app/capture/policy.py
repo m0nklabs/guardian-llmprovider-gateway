@@ -234,8 +234,14 @@ def evaluate_capture_policy(
                     field_policies=field_policies,
                 )
         else:
-            # OpenAI
-            if endpoint not in ("/v1/chat/completions",):
+            # OpenAI protocol: chat completions, Responses API, legacy text
+            # completions, and embeddings are all captureable.
+            if endpoint not in (
+                "/v1/chat/completions",
+                "/v1/responses",
+                "/v1/completions",
+                "/v1/embeddings",
+            ):
                 return PolicyResult(
                     should_capture=False,
                     reason="endpoint_not_supported",

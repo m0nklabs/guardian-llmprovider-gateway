@@ -29,23 +29,25 @@ Concrete Copilot destinations follow the same three layers:
 Here `github-copilot` identifies GitHub's Copilot offering, not every GitHub API;
 `openai` is the model brand. There is no separate `copilot` channel layer.
 The migration removes `github/copilot/gpt-6.1-sol`: only the two canonical
-Copilot destinations above remain, with no legacy Copilot aliases. They use an
-external LiteLLM bridge for Responses-only GPT models; see [the routing migration contract](docs/LLM_ROUTER.md#github-copilot-provider-and-external-bridge-migration).
-Runtime activation is pending a bridge restart outside the active session;
-these examples do not claim deployed or live-tested routes.
+Copilot destinations above remain, with no legacy Copilot aliases. They are
+served through an external LiteLLM bridge that adapts Chat Completions to the
+upstream Responses-only GPT models; see [the routing migration contract](docs/LLM_ROUTER.md#github-copilot-provider-and-external-bridge-migration).
+The bridge is deployed and running (LiteLLM process with its own listen port;
+unauthenticated requests are rejected).
 
 Start with the [product roadmap](docs/ROADMAP.md) for scope, priorities,
 architecture boundaries and acceptance criteria. The
 [Guardian 2.0 implementation plan](docs/IMPLEMENTATION_PLAN.md) is the historical
 F0–F7 migration specification, not the current product roadmap.
 
-**Documentation caveat:** the operational sections below retain legacy
-single-host details and configuration examples. For current configuration and
-operations, use [the config schema](docs/CONFIG_SCHEMA.md),
+**Documentation caveat:** the operational sections below keep host-specific
+details and examples. For current configuration and operations, the canonical
+sources are [the config schema](docs/CONFIG_SCHEMA.md),
 [provider files](docs/CONFIG_PROVIDER_FILES.md), [LLM routing](docs/LLM_ROUTER.md)
-and [the operator runbook](docs/skills/operator-runbook.md). Broader documentation
-reconciliation is tracked in roadmap phase G0; this update does not rename
-services, change runtime configuration or deploy new gateway capabilities.
+and [the operator runbook](docs/skills/operator-runbook.md); where they and this
+README disagree, they win. Broader documentation reconciliation is tracked in
+roadmap phase G0; this README was last reconciled against the running system on
+2026-10-04.
 
 ## Why It Exists
 
@@ -63,21 +65,36 @@ instead of hard-crashing into CUDA OOM loops or restart storms.
 
 ## What Guardian Actually Does
 
-- Single-slot FIFO inference queue with explicit request lifecycle tracking,
-  disconnect-aware cleanup, queue polling, per-request status/cancel endpoints,
-  and `X-Request-Id` / `X-Queue-Wait-Ms` headers
+- Authenticated inference gateway with model resolution, cloud routing, ordered
+  failover with health tracking, and cloud rate limiting
+- Protocol surfaces on the same authenticated port: OpenAI Chat Completions
+  (`/v1/chat/completions`), the OpenAI Responses API (`/v1/responses`, native
+  llama.cpp passthrough plus a full Responses⇄chat translation for cloud
+  providers), Anthropic Messages (`/v1/messages`, native or translated), legacy
+  completions/embeddings, and Ollama-compatible `/api/chat` + `/api/generate`
+- Service-tier support for cloud routes: `service_tier` rides through on every
+  ingress form, `:nitro`/`:floor` model variants survive resolution, and the
+  OpenRouter provider defaults unpinned requests to `flex`
+- Inference queue with explicit request lifecycle tracking, disconnect-aware
+  cleanup, queue polling, per-request status/cancel endpoints, and
+  `X-Request-Id` / `X-Queue-Wait-Ms` headers
 - Admission control for GPU-backed inference: unauthenticated requests never
   enter the queue, each API key may own multiple waiting requests but only one
   running GPU slot, and unknown model names fail fast with clear `404` payloads
-- Model lifecycle ownership through `sudo systemctl start|stop llama-server`
-- Hot-reloaded model registry from [config/models.local.settings.yaml](config/models.local.settings.yaml),
+- Backend lifecycle through the llama.cpp caretaker (`caretaker-llamacpp`
+  service, control API on `:11441`): remote-first idempotent `/ensure` for
+  model switches and runtime flips, with crash-aware reload recovery
+- Hot-reloaded model registry from [config/providers/ai-node-local.settings.yaml](config/providers/ai-node-local.settings.yaml),
   including aliases, text and vision runtime fields, and switch policy
 - Cooperative VRAM fencing via `POST {comfyui_url}/free` before every load or
   switch
-- Auth-gated control plane on `:11434`, with model pinning and a switch
-  allowlist
-- Dashboard and monitoring surfaces on `:11437`, plus `/metrics` and
-  `/api/status`
+- Auth-gated control plane on `:11434` (HTTP and TLS through the nginx stream
+  multiplexer), with model pinning and a switch allowlist
+- Dashboard and monitoring surfaces on `:11437` (API endpoints require a
+  Bearer key), plus `/metrics` and `/api/status`
+- Privacy-aware capture: raw request/response events in a JSONL WAL under
+  `data/capture/` with media extraction and offline redaction
+  (`scripts/keanu_redact.py`, `scripts/guardianctl.py`)
 - Host-specific finetune v2 workflow that tunes `context`, `ngl`, and
   `tensor_split` without mutating the model registry until `--apply`
 
@@ -87,18 +104,20 @@ instead of hard-crashing into CUDA OOM loops or restart storms.
 Clients
   |
   v
-Guardian proxy :11434
-  - auth
-  - queue
-  - model switching
-  - auto-reload / idle-unload
-  - Ollama and OpenAI-compatible endpoints
+nginx stream mux :11434        (plain HTTP and TLS on the same port)
   |
   v
-llama-server :11440
-  - official llama.cpp binary
-  - started from scripts/start_llama.sh
-  - args generated into config/current_model.args
+Guardian proxy :11434
+  - auth
+  - queue + admission control
+  - cloud routing / failover
+  - OpenAI, Responses, Anthropic and Ollama protocol surfaces
+  |
+  ├─> llama-server :11440      (official llama.cpp binary, lifecycle via
+  |                             the caretaker :11441, args in
+  |                             config/current_model.args)
+  └─> cloud providers          (openrouter, nvidia, google, groq, … from
+                                config/providers/*.settings.yaml)
 
 Guardian UI :11437
   - dashboard
@@ -110,8 +129,9 @@ Guardian UI :11437
 
 Guardian is currently configured for a shared dual-GPU host with:
 
-- `proxy.vram_limit_mb: 27000` in [config/settings.yaml](config/settings.yaml)
-- mixed `tensor_split` profiles in [config/models.local.settings.yaml](config/models.local.settings.yaml)
+- `proxy.vram_limit_mb: 27000` in [config/global.settings.yaml](config/global.settings.yaml)
+- mixed `tensor_split` profiles in the local model registry
+  ([config/providers/ai-node-local.settings.yaml](config/providers/ai-node-local.settings.yaml))
 - optional ComfyUI integration at `http://127.0.0.1:8188/free`
 - backend path resolution via [app/paths.py](app/paths.py) and
   [scripts/start_llama.sh](scripts/start_llama.sh)
@@ -135,15 +155,16 @@ expects:
 - the official `llama-server` binary at
   `${LLAMA_CPP_OFFICIAL_ROOT}/build/bin/llama-server`
   or an explicit known-good `LLAMA_SERVER_BINARY` override
-- on this host, the current CUDA 13.2 validation target is
-  `/home/flip/llama_cpp_official/worktrees/cuda132-master/build-cuda132/bin/llama-server`
-- the live systemd drop-ins for `llama-server.service` and
-  `guardian-llmprovider-gateway.service` pin that b1295 binary through `LLAMA_SERVER_BINARY`
+- on this host, the live build is
+  `/home/flip/llama_cpp_official/worktrees/cuda128-laguna-tq-full/build-cuda128-full/bin/llama-server`,
+  pinned through the `llama-server.service.d/20-turboquant-backend.conf`
+  systemd drop-in (`LLAMA_SERVER_BINARY`)
 - GGUFs in `${MODELS_DIR}` (default: sibling `../models`)
-- a `llama-server` systemd unit that starts
-  [scripts/start_llama.sh](scripts/start_llama.sh)
-- Guardian to have permission to run `sudo systemctl start llama-server` and
-  `sudo systemctl stop llama-server`
+- the backend lifecycle owned by the llama.cpp caretaker
+  (`caretaker-llamacpp.service`, control API on `:11441`), which launches
+  [scripts/start_llama.sh](scripts/start_llama.sh); Guardian delegates model
+  switches and runtime flips to the caretaker (remote-first idempotent
+  `/ensure` with local fallback)
 
 Important: run the combined Guardian service with `python -m app.main`.
 Starting only `uvicorn app.proxy.server:app` gives you the proxy API but not
@@ -153,11 +174,13 @@ the dashboard on `:11437`.
 
 Edit these files before the first load:
 
-- [config/models.local.settings.yaml](config/models.local.settings.yaml): model paths, aliases, runtime
-  fields, pinning, switch allowlist, idle unload
-- [config/settings.yaml](config/settings.yaml): queue wait budget telemetry,
-  VRAM budget, timeout tiers, cloud routing, context overrides, ComfyUI URL,
-  maintenance window
+- [config/providers/ai-node-local.settings.yaml](config/providers/ai-node-local.settings.yaml):
+  local model registry, aliases, runtime fields, pinning, switch allowlist
+- [config/global.settings.yaml](config/global.settings.yaml): proxy, queue,
+  timeouts, VRAM budget, capture policy, context overrides, ComfyUI URL,
+  maintenance window, cloud provider registry wiring
+- [config/providers/](config/providers/): one settings file per provider
+  (base URL, key reference, models, model defaults such as `service_tier`)
 - [config/guardian.keys.yaml](config/guardian.keys.yaml): API keys used by clients
 
 Create the first key with the bundled helper:
@@ -173,19 +196,19 @@ routes. OpenAI-compatible discovery exposes `context_length`, `meta.n_ctx`,
 and `max_input_tokens`; Ollama-compatible `POST /api/show` exposes
 `model_info.general.context_length`.
 
-Use the top-level `context_overrides` map in
-[config/settings.yaml](config/settings.yaml) when an upstream catalog omits a
-verified value. Keys use the canonical upstream model ID, so one entry applies
-to raw, `openrouter/`, and `guardian/{provider}/` route forms:
+Context metadata resolves in a fixed order: per-model `context_window` entries
+in a provider's `models:` block (the successor of the former
+`context_overrides` map), cloud-provider overrides, the live catalog or the
+active local backend's `/props` `n_ctx`, and finally a conservative `131072`
+fallback with a warning when no source is available. Keys use the canonical
+upstream model ID:
 
 ```yaml
-context_overrides:
-  moonshotai/kimi-k3: 1048576
+# config/providers/<provider>.settings.yaml
+models:
+  deepseek/deepseek-chat:
+    context_window: 1000000
 ```
-
-Guardian otherwise caches cloud-provider catalogs for one hour, reads the
-active local backend's `/props` `n_ctx`, and finally reports a conservative
-`131072` fallback with a warning when no source is available.
 
 ### 4. Start Guardian
 
@@ -229,6 +252,26 @@ curl -sS \
   http://127.0.0.1:11434/v1/chat/completions
 ```
 
+### Send a Responses API request
+
+The same gateway also speaks the OpenAI Responses API (`client.responses.create`,
+Codex CLI) for local and cloud models:
+
+```bash
+curl -sS \
+  -H "Authorization: Bearer $GUARDIAN_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "qwen3.6-35b-uncensored",
+    "input": "Reply with exactly: GUARDIAN OK",
+    "max_output_tokens": 16
+  }' \
+  http://127.0.0.1:11434/v1/responses
+```
+
+Anthropic-protocol clients use `/v1/messages` (see
+[docs/ANTHROPIC_BRIDGE.md](docs/ANTHROPIC_BRIDGE.md)).
+
 ### Inspect health and queue state
 
 ```bash
@@ -259,12 +302,14 @@ Browse to `http://127.0.0.1:11437/`.
 
 | File | Purpose |
 | --- | --- |
-| [config/models.local.settings.yaml](config/models.local.settings.yaml) | Model registry, aliases, text and vision runtime fields, Guardian policy |
-| [config/settings.yaml](config/settings.yaml) | Queue, timeouts, VRAM budget, ComfyUI URL, maintenance schedule |
+| [config/global.settings.yaml](config/global.settings.yaml) | Proxy, queue, timeouts, VRAM budget, capture policy, context overrides, ComfyUI URL |
+| [config/providers/](config/providers/) | Per-provider settings: base URL, key reference, models, model defaults (`service_tier`, `context_window`, …) |
+| [config/providers/ai-node-local.settings.yaml](config/providers/ai-node-local.settings.yaml) | Local model registry, aliases, runtime fields, Guardian policy |
 | [config/guardian.keys.yaml](config/guardian.keys.yaml) | Bearer and x-api-key registry |
 | [config/current_model.args](config/current_model.args) | Generated `llama-server` arguments for the active runtime |
-| [scripts/start_llama.sh](scripts/start_llama.sh) | Backend launcher used by the `llama-server` service |
+| [scripts/start_llama.sh](scripts/start_llama.sh) | Backend launcher used by the caretaker |
 | [data/api_usage_state.json](data/api_usage_state.json) | Persistent usage snapshot for the dashboard |
+| [data/capture/](data/capture/) | Capture WAL (raw events + media extraction) |
 | [data/model_finetune_v2_results.json](data/model_finetune_v2_results.json) | Append-only finetune v2 results log |
 
 ## Documentation Map
@@ -277,10 +322,12 @@ handoff document for auth, model discovery, queue ownership, rejection
 contracts, polling, and timeout behavior.
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- [docs/HARDWARE_TUNING.md](docs/HARDWARE_TUNING.md)
 - [docs/API_REFERENCE.md](docs/API_REFERENCE.md)
+- [docs/LLM_ROUTER.md](docs/LLM_ROUTER.md) (cloud routing, failover, Responses ingress, service tiers)
+- [docs/ANTHROPIC_BRIDGE.md](docs/ANTHROPIC_BRIDGE.md)
+- [docs/CONFIG_SCHEMA.md](docs/CONFIG_SCHEMA.md) and [docs/CONFIG_PROVIDER_FILES.md](docs/CONFIG_PROVIDER_FILES.md)
+- [docs/HARDWARE_TUNING.md](docs/HARDWARE_TUNING.md)
 - [docs/FINETUNE_V2_REQUIREMENTS.md](docs/FINETUNE_V2_REQUIREMENTS.md)
-- [docs/CLIENT_INTEGRATION.md](docs/CLIENT_INTEGRATION.md)
 
 ## Security Model
 
@@ -288,6 +335,11 @@ On port `11434`, every endpoint requires authentication except:
 
 - `GET /healthz`
 - `GET /metrics`
+
+Port `11434` serves both plain HTTP and TLS: an nginx stream multiplexer
+pre-reads the TLS ClientHello and passes TLS unchanged to Guardian on
+`127.0.0.1:11435`, routing plain HTTP through nginx on `127.0.0.1:11436`
+(see `deploy/nginx/`).
 
 Guardian accepts:
 
@@ -300,6 +352,7 @@ Model switching can be restricted with:
 - `guardian.pinned_model`
 - `guardian.switch_allowlist`
 
-Note: the dashboard port `11437` is a separate UI surface. In current code,
-its `/` and `/api/*` endpoints are not auth-gated. Protect that port at the
-network or reverse-proxy layer if it is not localhost-only.
+The dashboard on `:11437` is a separate UI surface; its `/api/*` endpoints
+require a Bearer key (the dashboard stores
+`guardian_dashboard_api_key` in localStorage). Keep the port localhost-only
+or protect it at the network/reverse-proxy layer.

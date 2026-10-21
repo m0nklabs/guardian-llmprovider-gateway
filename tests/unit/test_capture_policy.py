@@ -302,8 +302,8 @@ class TestEndpointGate:
         )
         assert result.should_capture
 
-    def test_completions_not_supported_yet(self, test_env):
-        """First delivery slice only covers chat/completions."""
+    def test_completions_is_supported(self, test_env):
+        """Legacy /v1/completions is captureable for the OpenAI protocol."""
         config = _config()
         result = evaluate_capture_policy(
             config, route_type=ROUTE_LOCAL,
@@ -312,8 +312,48 @@ class TestEndpointGate:
             requested_model="llama3.2-3b",
             client_ref=_make_client_ref(),
         )
-        assert not result.should_capture
-        assert result.reason == "endpoint_not_supported"
+        assert result.should_capture
+        assert result.reason == "allowed"
+
+    def test_responses_endpoint_is_supported(self, test_env):
+        """OpenAI Responses API /v1/responses is captureable."""
+        config = _config()
+        result = evaluate_capture_policy(
+            config, route_type=ROUTE_LOCAL,
+            endpoint="/v1/responses",
+            ingress_protocol=PROTOCOL_OPENAI,
+            requested_model="llama3.2-3b",
+            client_ref=_make_client_ref(),
+        )
+        assert result.should_capture
+        assert result.reason == "allowed"
+
+    def test_embeddings_endpoint_is_supported(self, test_env):
+        """/v1/embeddings is captureable (input text only)."""
+        config = _config()
+        result = evaluate_capture_policy(
+            config, route_type=ROUTE_LOCAL,
+            endpoint="/v1/embeddings",
+            ingress_protocol=PROTOCOL_OPENAI,
+            requested_model="llama3.2-3b",
+            client_ref=_make_client_ref(),
+        )
+        assert result.should_capture
+        assert result.reason == "allowed"
+
+    def test_non_listed_endpoint_still_rejected(self, test_env):
+        """Endpoints outside the OpenAI allowlist remain rejected."""
+        config = _config()
+        for endpoint in ("/v1/audio/speech", "/v1/audio/transcriptions", "/v1/moderations"):
+            result = evaluate_capture_policy(
+                config, route_type=ROUTE_LOCAL,
+                endpoint=endpoint,
+                ingress_protocol=PROTOCOL_OPENAI,
+                requested_model="llama3.2-3b",
+                client_ref=_make_client_ref(),
+            )
+            assert not result.should_capture, endpoint
+            assert result.reason == "endpoint_not_supported"
 
 
 class TestFailOpen:

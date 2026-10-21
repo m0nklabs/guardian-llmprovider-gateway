@@ -83,6 +83,14 @@ def _normalize_bool_marker(value):
     return bool(value)
 
 
+#: OpenRouter-style service tiers accepted for the provider-level default
+#: (``CloudProvider.service_tier``). ``fast`` is OpenAI's alias for
+#: ``priority``; OpenRouter accepts both spellings.
+VALID_SERVICE_TIERS: frozenset[str] = frozenset(
+    {"default", "flex", "priority", "fast", "ultrafast"}
+)
+
+
 @dataclass
 class CloudProvider:
     """A single upstream cloud LLM provider."""
@@ -104,6 +112,14 @@ class CloudProvider:
     # every model regardless of what the free token can actually reach. When
     # non-empty, only these ids are surfaced in discovery and routed.
     catalog_allowlist: list[str] | None = None
+    # Namespace brand for bare upstream model ids: the ``{brand}`` segment of
+    # the ``{provider}/{brand}/{model}`` address. Set it when the upstream
+    # advertises bare ids and the model maker differs from the provider name
+    # (e.g. the F6 LAN llama-server hosts, whose ``qwen3.5-9b`` must surface
+    # as ``{provider}/qwen/qwen3.5-9b``, not ``{provider}/{provider}/...``).
+    # None falls back to the catalog's DEFAULT_BRAND_BY_PROVIDER map, then to
+    # the provider name.
+    brand: str | None = None
     # Managed providers are served by Guardian's own lifecycle (engine/manager):
     # the local llama-server is the only ``managed: true`` entry (F3, docs/
     # LAN_GPU_BACKENDS.md §Unificatie). Everything else (Windows, cloud) is a
@@ -111,6 +127,11 @@ class CloudProvider:
     # recognised as *local*, never cloud-routed, and is keyless (no upstream
     # api_key; its catalog comes from llama-server /v1/models).
     managed: bool = False
+    # Default OpenRouter-style service tier (``default``/``flex``/``priority``/
+    # ``fast``/``ultrafast``) injected into cloud requests when the client did
+    # not send one. Precedence: client value > model-default > this. None =
+    # no default (requests without a tier use the provider's standard tier).
+    service_tier: str | None = None
 
     @property
     def is_configured(self) -> bool:
@@ -219,6 +240,41 @@ class ProviderRegistry:
             else:
                 allowlist = None
 
+            # Provider-level default service tier (OpenRouter-style). Invalid
+            # values are ignored with a warning — fail-open, the request then
+            # simply carries no tier.
+            service_tier = cfg.get("service_tier")
+            if isinstance(service_tier, str) and service_tier.strip():
+                service_tier = service_tier.strip().lower()
+                if service_tier not in VALID_SERVICE_TIERS:
+                    logger.warning(
+                        "⚠️  Provider '%s' has invalid service_tier '%s' — "
+                        "expected one of %s; ignoring",
+                        provider_name, service_tier,
+                        sorted(VALID_SERVICE_TIERS),
+                    )
+                    service_tier = None
+            else:
+                service_tier = None
+
+            # Namespace brand override for bare upstream model ids (see
+            # CloudProvider.brand). Lowercase single segment; anything else is
+            # ignored with a warning — fail-open to the catalog default.
+            raw_brand = cfg.get("brand")
+            if isinstance(raw_brand, str) and raw_brand.strip():
+                raw_brand = raw_brand.strip().lower()
+                if raw_brand and "/" not in raw_brand:
+                    brand = raw_brand
+                else:
+                    logger.warning(
+                        "⚠️  Provider '%s' has invalid brand '%s' — must be a "
+                        "single namespace segment; ignoring",
+                        provider_name, raw_brand,
+                    )
+                    brand = None
+            else:
+                brand = None
+
             # Managed: Guardian owns the lifecycle. A local provider is
             # recognised by `local: true` and/or the `-local` name suffix
             # (F2), and/or an explicit `managed: true` (F3 generalisation).
@@ -249,7 +305,9 @@ class ProviderRegistry:
                 extra_headers=extra_headers,
                 catalog_url=catalog_url,
                 catalog_allowlist=allowlist,
+                brand=brand,
                 managed=managed,
+                service_tier=service_tier,
             )
             self._providers[provider_name] = provider
 

@@ -17,6 +17,8 @@ import logging
 import math
 from typing import Any
 
+from app.capture.responses_format import responses_status_to_finish_reason
+
 logger = logging.getLogger("Guardian.Capture.StreamAssembler")
 
 
@@ -99,6 +101,12 @@ class StreamResponseAssembler:
                     if isinstance(content, str) and content:
                         self._content_parts.append(content)
                         self._has_content = True
+                    # Legacy /v1/completions deltas carry plain ``text``
+                    # (no ``content`` key).
+                    text = delta.get("text")
+                    if isinstance(text, str) and text:
+                        self._content_parts.append(text)
+                        self._has_content = True
                     # Reasoning content — OpenAI sends `reasoning_content`,
                     # OpenRouter proxies `reasoning` (same text; never both).
                     reasoning = delta.get("reasoning_content")
@@ -163,6 +171,46 @@ class StreamResponseAssembler:
             usage = data.get("message", {}).get("usage", {})
             if isinstance(usage, dict):
                 self._extract_usage(usage)
+
+        # ── OpenAI Responses SSE events (llama.cpp /v1/responses) ──────
+        responses_type = data.get("type")
+        if responses_type == "response.output_text.delta":
+            delta_text = data.get("delta")
+            if isinstance(delta_text, str) and delta_text:
+                self._content_parts.append(delta_text)
+                self._has_content = True
+        elif responses_type == "response.reasoning_text.delta":
+            delta_text = data.get("delta")
+            if isinstance(delta_text, str) and delta_text:
+                self._reasoning_parts.append(delta_text)
+        elif responses_type == "response.output_item.done":
+            item = data.get("item")
+            if (isinstance(item, dict) and item.get("type") == "function_call"):
+                arguments = item.get("arguments")
+                self._tool_calls.append({
+                    "id": item.get("call_id", ""),
+                    "type": "function",
+                    "function": {
+                        "name": item.get("name", ""),
+                        "arguments": arguments if isinstance(arguments, str) else "",
+                    },
+                })
+        elif responses_type in ("response.completed", "response.incomplete"):
+            response_obj = data.get("response")
+            if isinstance(response_obj, dict):
+                usage = response_obj.get("usage")
+                if isinstance(usage, dict):
+                    self._extract_usage(usage)
+                    # Responses reports the reasoning token breakdown under
+                    # ``output_tokens_details`` — mirror it onto the chat
+                    # ``completion_tokens_details`` key.
+                    output_details = usage.get("output_tokens_details")
+                    if isinstance(output_details, dict) and output_details:
+                        self._completion_tokens_details = output_details
+                self._finish_reason = responses_status_to_finish_reason(
+                    response_obj.get("status"),
+                    response_obj.get("incomplete_details"),
+                )
 
         # ── Direct usage field (some providers send usage in the final chunk) ──
         usage = data.get("usage")

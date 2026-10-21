@@ -93,6 +93,11 @@ from app.proxy.anthropic_bridge import (
     translate_openai_response_to_anthropic,
     translate_openai_stream_to_anthropic,
 )
+from app.proxy.responses_bridge import (
+    translate_chat_error_to_responses,
+    translate_chat_response_to_responses,
+    translate_openai_stream_to_responses,
+)
 from app.proxy.auth import (
     _token_fingerprint,
     generate_api_key,
@@ -1142,6 +1147,9 @@ _cloud_forwarding.init(
     translate_openai_error_to_anthropic=translate_openai_error_to_anthropic,
     translate_openai_response_to_anthropic=translate_openai_response_to_anthropic,
     translate_openai_stream_to_anthropic=translate_openai_stream_to_anthropic,
+    translate_chat_error_to_responses=translate_chat_error_to_responses,
+    translate_chat_response_to_responses=translate_chat_response_to_responses,
+    translate_openai_stream_to_responses=translate_openai_stream_to_responses,
     rate_limiter=cloud_rate_limiter,
     health_tracker=failover_health,
     guardian_request_cancelled=_GuardianRequestCancelled,
