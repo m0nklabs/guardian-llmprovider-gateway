@@ -9,6 +9,7 @@ Bare aliases remain the compat surface and are never renamed.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -207,3 +208,75 @@ class TestLocalNamespacedAddressesHelper:
         monkeypatch.setattr(model_discovery, "_model_manager", model_registry)
         monkeypatch.setattr(model_discovery, "local_models_file", lambda: patched_doc)
         assert model_discovery._local_namespaced_addresses() == {}
+
+
+# ── namespaced-only advertising (operator decision 2026-10-22) ──────
+
+
+class _FakeDiscoveryManager:
+    """Minimal _model_manager stand-in for the listing surfaces."""
+
+    def __init__(self, public_map, models=None):
+        self._public_map = public_map
+        self.models = models if models is not None else {}
+
+    def get_public_model_map(self):
+        return self._public_map
+
+
+_NAMESPACED_ONLY_MAP = {
+    "qwen3.8-27b": "qwen3.8-27b",
+    "phi4": "Phi-4-reasoning-plus",
+    "Phi-4-reasoning-plus": "Phi-4-reasoning-plus",
+    "nobrand-model": "nobrand-model",
+}
+_NAMESPACED_ONLY_ADDRESSES = {
+    "qwen3.8-27b": "reg/qwen/qwen3.8-27b",
+    "Phi-4-reasoning-plus": "reg/phi/Phi-4-reasoning-plus",
+}
+
+
+async def _fake_entry(name, canonical, client_id):
+    return {"id": name, "object": "model"}
+
+
+async def test_list_models_advertises_namespaced_only(monkeypatch):
+    """Branded canonicals advertise only as ``{provider}/{brand}/{model}``
+    (deduped across aliases); bare names stay resolvable but are not listed;
+    an unbranded canonical keeps its bare entry as invisible-guard fallback."""
+    monkeypatch.setattr(
+        model_discovery, "_model_manager", _FakeDiscoveryManager(_NAMESPACED_ONLY_MAP)
+    )
+    monkeypatch.setattr(
+        model_discovery,
+        "_local_namespaced_addresses",
+        lambda: dict(_NAMESPACED_ONLY_ADDRESSES),
+    )
+    monkeypatch.setattr(model_discovery, "build_model_metadata_entry", _fake_entry)
+    monkeypatch.setattr(model_discovery, "_key_can_access_cloud", lambda request, client_id: False)
+    # Earlier tests leak a populated failover registry; hermetic run: no groups.
+    monkeypatch.setattr(model_discovery, "_failover_registry", SimpleNamespace(_groups={}))
+
+    payload = await model_discovery.list_models(
+        request=SimpleNamespace(headers={}, state=SimpleNamespace()), client_id="test-user"
+    )
+    ids = [m["id"] for m in payload["data"]]
+    assert ids == ["reg/qwen/qwen3.8-27b", "reg/phi/Phi-4-reasoning-plus", "nobrand-model"]
+
+
+async def test_tags_ollama_advertises_namespaced_only(monkeypatch):
+    """``/api/tags`` follows the same contract: namespaced surface for
+    branded models, bare fallback for unbranded ones."""
+    manager = _FakeDiscoveryManager({}, models={"qwen3.8-27b": {}, "nobrand-model": {}})
+    monkeypatch.setattr(model_discovery, "_model_manager", manager)
+    monkeypatch.setattr(
+        model_discovery,
+        "_local_namespaced_addresses",
+        lambda: {"qwen3.8-27b": "reg/qwen/qwen3.8-27b"},
+    )
+    monkeypatch.setattr(model_discovery, "get_model_size", lambda name: 0)
+
+    payload = await model_discovery.tags_ollama()
+    names = [m["name"] for m in payload["models"]]
+    assert names == ["reg/qwen/qwen3.8-27b", "nobrand-model"]
+    assert payload["models"][0]["model"] == "reg/qwen/qwen3.8-27b"

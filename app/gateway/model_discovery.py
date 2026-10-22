@@ -178,10 +178,17 @@ async def tags_ollama() -> dict[str, Any]:
             logger.error("_model_manager.models is missing or None")
             return {"models": []}
 
+        namespaced = _local_namespaced_addresses()
         for name in _model_manager.models.keys():
+            # Namespaced-only advertising (operator decision 2026-10-22):
+            # same contract as /v1/models — ``{provider}/{brand}/{model}``
+            # when the registry entry carries a brand, bare name otherwise
+            # (unbranded fallback so nothing becomes invisible). Size lookups
+            # keep the canonical name.
+            surface = namespaced.get(name) or name
             models.append({
-                "name": name,
-                "model": name,
+                "name": surface,
+                "model": surface,
                 "modified_at": "2024-01-01T00:00:00.0000000+00:00",
                 "size": get_model_size(name) * 1024 * 1024,
                 "digest": "000000000000",
@@ -238,13 +245,19 @@ async def list_models(request: Request, client_id: str) -> dict[str, Any]:
         namespaced = _local_namespaced_addresses()
         seen_canonical: set[str] = set()
         for public_name, canonical_name in _model_manager.get_public_model_map().items():
-            models_list.append(await build_model_metadata_entry(public_name, canonical_name, client_id))
-            # Unified provider model (phase A): one additive namespaced entry
-            # per branded canonical model, next to its bare alias surface.
+            # Namespaced-only advertising (operator decision 2026-10-22): the
+            # listing surfaces ``{provider}/{brand}/{model}`` only. Bare names
+            # remain resolvable for requests but are no longer advertised. An
+            # unbranded canonical keeps its bare entry so nothing becomes
+            # invisible.
             addr = namespaced.get(canonical_name)
-            if addr is not None and canonical_name not in seen_canonical:
+            if addr is not None:
+                if canonical_name in seen_canonical:
+                    continue
                 seen_canonical.add(canonical_name)
                 models_list.append(await build_model_metadata_entry(addr, canonical_name, client_id))
+            else:
+                models_list.append(await build_model_metadata_entry(public_name, canonical_name, client_id))
     except Exception as e:
         logger.error(f"Failed to list models: {e}")
 
