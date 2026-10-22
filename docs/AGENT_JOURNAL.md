@@ -530,3 +530,22 @@ Carry-forward per gearchiveerd milestone (essentie + bewijs → voltekst in `doc
   double-binding). Browser red/green evidence captured with the QA hook and a
   canary `alert`; committed guard: `tests/unit/test_dashboard_ui_safety.py`
   (no `${` in any inline `onclick`; delegated copy wiring present).
+
+## 2026-10-21 — Flash-Next (qwen3.8-flash) cutover completed (agent dsh-flip-main)
+
+- Executed the Flash-Next pipeline end-to-end; verified cold start via gateway:
+  144 s end-to-end, 5.72 tok/s decode, correct output. Full details + deviations:
+  `docs/FLASH_NEXT_INTEGRATION_SPEC.md` §10.
+- Cross-repo change (caretaker-llamacpp): added best-effort `health_polls` YAML
+  knob (default 120 s aborted the ~145 s load twice; 400 now in
+  `models.local.settings.yaml`); 55 targeted tests pass. Open handoff there:
+  `/ensure` blocks the control-API event loop during loads — needs
+  `anyio.to_thread` (spec §10.5).
+- Guardian config-only fix: `failover.remote_ensure_timeout_seconds` 120 → 420
+  (hot-reloaded); covers the caretaker ensure client timeout.
+- Binary pin: `30-flashnext-backend.conf` drop-in (qwen4exp build-latest).
+  Rollback order: remove drop-in + daemon-reload FIRST, then request
+  `qwen3.8-ymq`. Turbo4 entries unlaunchable while pinned; `qwen3.5-9b-q8kv`
+  is the dual-binary fallback.
+- Measurement caveat: a concurrent CUDA build (sm_120a) skewed early tok/s
+  readings (1.28-1.86); quiet-host figure is 5.72.
