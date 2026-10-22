@@ -28,7 +28,7 @@ def provider_dir(tmp_path: Path) -> Path:
     """A providers/ tree with one local provider and one cloud provider."""
     d = tmp_path / "providers"
     d.mkdir()
-    (d / "ai-node-local.settings.yaml").write_text(textwrap.dedent("""\
+    (d / "ai-kvm2-local.settings.yaml").write_text(textwrap.dedent("""\
         enabled: true
         base_url: http://127.0.0.1:11440/v1
         local: true
@@ -52,16 +52,16 @@ def reg(monkeypatch, provider_dir: Path) -> ProviderRegistry:
 
 
 def test_local_is_managed_entry_in_registry(reg: ProviderRegistry):
-    assert "ai-node-local" in reg._providers
-    local = reg._providers["ai-node-local"]
+    assert "ai-kvm2-local" in reg._providers
+    local = reg._providers["ai-kvm2-local"]
     assert local.managed is True
     assert local.is_configured is True  # keyless catalogs are configurable
     # Address form resolves to the local provider.
-    assert reg._provider_from_address("ai-node-local/llama3.2-3b") is local
+    assert reg._provider_from_address("ai-kvm2-local/llama3.2-3b") is local
 
 
 def test_local_is_not_a_cloud_model(reg: ProviderRegistry):
-    assert reg.is_cloud_model("ai-node-local/llama3.2-3b") is False
+    assert reg.is_cloud_model("ai-kvm2-local/llama3.2-3b") is False
     assert reg.is_cloud_model("llama3.2-3b") is False
     # Nexus: cloud stays cloud.
     assert reg.is_cloud_model("nvidia/llama-3.3-70b-instruct") is True
@@ -71,7 +71,7 @@ def test_local_address_is_not_cloud_routed(reg: ProviderRegistry):
     # is_cloud_or_guardian_route is driven through the registry's injected
     # globals; test the underlying provider logic instead by checking the
     # address resolves to a managed provider (never cloud-routed).
-    provider = reg._provider_from_address("ai-node-local/llama3.2-3b")
+    provider = reg._provider_from_address("ai-kvm2-local/llama3.2-3b")
     assert provider is not None and provider.managed is True
     # And the cloud path (unmanaged) resolves normally.
     assert reg._provider_from_address("nvidia/x/y") is reg._providers["nvidia"]
@@ -95,7 +95,7 @@ async def test_catalog_refresh_managed_provider_keyless(monkeypatch, reg: Provid
         provider_registry=reg,
         cache_file=tmp_path / "cache.json",
     )
-    local = reg._providers["ai-node-local"]
+    local = reg._providers["ai-kvm2-local"]
 
     async def fake_fetch(url, headers):
         class _R:
@@ -117,12 +117,12 @@ async def test_catalog_refresh_managed_provider_keyless(monkeypatch, reg: Provid
         ac.return_value.__aenter__.return_value.get = fake_fetch
         result = await catalog.refresh_provider(local)
     # Upstream ids are normalized to {brand}/{model} where brand = provider name
-    # (ai-node-local), so local catalog addresses are ai-node-local/<model>.
+    # (ai-kvm2-local), so local catalog addresses are ai-kvm2-local/<model>.
     assert result == {
-        "ai-node-local/llama3.2-3b": "llama3.2-3b",
-        "ai-node-local/qwen3.8-27b": "qwen3.8-27b",
+        "ai-kvm2-local/llama3.2-3b": "llama3.2-3b",
+        "ai-kvm2-local/qwen3.8-27b": "qwen3.8-27b",
     }
-    assert catalog._catalogs["ai-node-local"]["auth_error"] is False
+    assert catalog._catalogs["ai-kvm2-local"]["auth_error"] is False
 
 
 def test_managed_address_not_cloud_metadata(reg: ProviderRegistry):
@@ -131,7 +131,7 @@ def test_managed_address_not_cloud_metadata(reg: ProviderRegistry):
     Mirrors the model_discovery cloud-branch guard
     ``is_cloud_model(x) or (addr is not None and not addr.managed)``.
     """
-    test_model = "ai-node-local/llama3.2-3b"
+    test_model = "ai-kvm2-local/llama3.2-3b"
     addr = reg._provider_from_address(test_model)
     assert addr is not None
     assert addr.managed is True

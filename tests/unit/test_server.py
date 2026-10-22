@@ -1972,7 +1972,7 @@ async def test_list_models_excludes_managed_provider_cloud_entries():
     would leak local models as `{local}/{model}` cloud entries here. Pin that the
     cloud-entry loop skips managed providers."""
     managed = CloudProvider(
-        name="ai-node-local",
+        name="ai-kvm2-local",
         base_url="http://127.0.0.1:11440/v1",
         api_key="",
         models=["llama3.2-3b", "qwen3.8-27b"],
@@ -1994,8 +1994,8 @@ async def test_list_models_excludes_managed_provider_cloud_entries():
 
     ids = [m["id"] for m in result["data"]]
     # The managed provider's local models must not appear as cloud entries.
-    assert "ai-node-local/llama3.2-3b" not in ids
-    assert "ai-node-local/qwen3.8-27b" not in ids
+    assert "ai-kvm2-local/llama3.2-3b" not in ids
+    assert "ai-kvm2-local/qwen3.8-27b" not in ids
     assert "local-model" in ids
 
 

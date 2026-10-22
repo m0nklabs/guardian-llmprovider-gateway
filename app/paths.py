@@ -141,7 +141,7 @@ def is_local_provider_name(name: str) -> bool:
     """Return True when a provider name marks a local (managed) provider.
 
     Local providers are identified by the ``-local`` name suffix (F2, docs/
-    CONFIG_PROVIDER_FILES.md) — e.g. ``ai-node-local``, ``windows-gpu-local``.  The
+    CONFIG_PROVIDER_FILES.md) — e.g. ``ai-kvm2-local``, ``windows-gpu-local``.  The
     ``local: true`` marker in the document is read separately by the directory
     scan; this helper is a cheap name-based fallback.
     """
@@ -161,14 +161,14 @@ def local_models_file() -> "Path":
     """Resolve the local model registry path.
 
     Since F2 (docs/CONFIG_PROVIDER_FILES.md) the local registry lives in the
-    local provider's file ``config/providers/ai-node-local.settings.yaml``
+    local provider's file ``config/providers/ai-kvm2-local.settings.yaml``
     (with its ``models:``/``aliases:``/``guardian:`` blocks).  This helper
     keeps resolving there so ``app/engine/manager.py``, scripts and tests that
     import it keep working unchanged.  Legacy single-file names are kept as a
     final fallback for older installations still on the pre-F2 layout.
     """
     return resolve_config_file(
-        "providers/ai-node-local.settings.yaml",
+        "providers/ai-kvm2-local.settings.yaml",
     )
 
 

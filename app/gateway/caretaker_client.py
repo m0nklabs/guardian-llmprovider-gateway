@@ -356,7 +356,7 @@ def build_caretaker_client(config: dict) -> CaretakerClient:
 
     Resolution order:
     - ``management_url``: from the local provider document
-      (``config/providers/ai-node-local.settings.yaml``; ``CONFIG["providers"][...]``),
+      (``config/providers/ai-kvm2-local.settings.yaml``; ``CONFIG["providers"][...]``),
       ``${VAR}``-expanded.  Mandatory — a missing value raises ``ValueError``.
     - ``api_key``: ``CARETAKER_KEY`` env-only (never from YAML).  ``None`` when
       absent (the client then sends no Authorization header and logs a warning).
@@ -400,7 +400,7 @@ def build_caretaker_client(config: dict) -> CaretakerClient:
     # this is the gateway's own caretaker (ai-kvm-2 talks to its own daemon,
     # never to a Windows/remote GPU host, for lifecycle execution).  Loopback
     # OR this host's hostname/LAN-IP.  Dict ordering must not decide which
-    # caretaker the gateway unloads (F5 multi-host: ai-node-local vs a future
+    # caretaker the gateway unloads (F5 multi-host: ai-kvm2-local vs a future
     # windows-gpu-local).
     for name, doc in providers.items():
         doc = doc or {}

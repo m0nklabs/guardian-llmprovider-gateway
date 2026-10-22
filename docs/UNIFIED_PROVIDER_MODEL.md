@@ -81,7 +81,7 @@ Current `managed`/local gate locations and their target attribute:
 ### Phase A — namespaced local addresses (additive)
 
 1. Per-model `brand:` in the local registry documents (`ai-kvm2-local`,
-   `ai-node-local`); inventory of all model entries with maker-family brands
+   `ai-kvm2-local`); inventory of all model entries with maker-family brands
    (done 2026-10-04: `docs/archive/brand-inventory-draft-2026-10-04.md` —
    25 model entries across qwen/gemma/nomic/llama/phi/granite, aliases
    inherit the target brand, one flagged name (`qwen3.8-27b-swift15`) is a
@@ -89,7 +89,7 @@ Current `managed`/local gate locations and their target attribute:
 2. Discovery advertises `{local-provider}/{brand}/{model}` **alongside** the
    bare alias — same metadata, context, capabilities. The address prefix is
    the managed provider that owns the local registry document
-   (`local_models_file()` stem, currently `ai-node-local`); generous input:
+   (`local_models_file()` stem, currently `ai-kvm2-local`); generous input:
    any managed provider prefix resolves.
 3. Local resolution accepts the namespaced form: strict brand match, strip to
    the registry entry, route through the native path exactly like the bare
@@ -101,9 +101,9 @@ Current `managed`/local gate locations and their target attribute:
 
 Registry hygiene found during phase A (to consolidate in phase B): the two
 local documents are near-identical drifted copies of the same backend registry
-(`ai-node-local` = the app-read canonical; `ai-kvm2-local` = referenced by
+(`ai-kvm2-local` = the app-read canonical; `ai-kvm2-local` = referenced by
 `global.settings.yaml` failover groups and `tts.providers`); deltas: only
-`ai-node-local` has `qwen3.8-27b-swift15`, only `ai-kvm2-local` has
+`ai-kvm2-local` has `qwen3.8-27b-swift15`, only `ai-kvm2-local` has
 `Huihui-Qwen3.5-9B-abliterated`. Phase B collapses them to one source of
 truth.
 
@@ -112,7 +112,7 @@ truth.
 1. Parse `backend:`/`lifecycle:`; legacy `local:`/`managed:`/`-local`-suffix
    map onto them with deprecation warnings (one release cycle).
 2. Replace the dispatch-map gates above; `managed` becomes derived.
-3. Config migration: `ai-kvm2-local`/`ai-node-local` →
+3. Config migration: `ai-kvm2-local`/`ai-kvm2-local` →
    `backend: llama-server` + `lifecycle: guardian`; `windows-gpu-local`/
    `14700k-local` → `backend: llama-server` + `lifecycle: operator`.
 4. Behavior preserved for both hosts: the local box stays on the native path;

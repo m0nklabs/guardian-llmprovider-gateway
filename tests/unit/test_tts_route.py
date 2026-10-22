@@ -17,7 +17,7 @@ from app.gateway import tts as tts_mod
 def _provider_docs():
     return {
         "providers": {
-            "ai-node-local": {
+            "ai-kvm2-local": {
                 "management_url": "http://127.0.0.1:11441",
                 "management_key": "${CARETAKER_KEY}",
                 "tts_url": "http://127.0.0.1:11450",
@@ -38,7 +38,7 @@ def _cfg(**overrides):
         "timeout_seconds": 120,
         "ensure_timeout_seconds": 300,
         "default_instruct": "",
-        "providers": ["ai-node-local", "windows-gpu-local"],
+        "providers": ["ai-kvm2-local", "windows-gpu-local"],
     }
     base.update(overrides)
     return base
@@ -117,7 +117,7 @@ def test_mapping_explicit_instruct_wins_and_extras_passthrough():
 def test_backends_resolve_in_configured_order(monkeypatch):
     _patch_config(monkeypatch)
     backends = tts_mod._tts_backends(_cfg())
-    assert [b["name"] for b in backends] == ["ai-node-local", "windows-gpu-local"]
+    assert [b["name"] for b in backends] == ["ai-kvm2-local", "windows-gpu-local"]
     assert backends[0]["tts_url"] == "http://127.0.0.1:11450"
     assert backends[0]["key"] == "ctk_local"
     assert backends[1]["key"] == "ctk_windows"
@@ -182,7 +182,7 @@ async def test_all_providers_failed_returns_502(monkeypatch):
     with pytest.raises(HTTPException) as excinfo:
         await tts_mod.handle_audio_speech(_FakeRequest({"input": "x"}), "dsh")
     assert excinfo.value.status_code == 502
-    assert "ai-node-local" in str(excinfo.value.detail) and "windows-gpu-local" in str(excinfo.value.detail)
+    assert "ai-kvm2-local" in str(excinfo.value.detail) and "windows-gpu-local" in str(excinfo.value.detail)
 
 
 @pytest.mark.asyncio

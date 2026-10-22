@@ -18,7 +18,7 @@ def _provider_docs():
                 "management_key": "${WINDOWS_LAN_KEY}",
                 "stt_url": "http://192.168.1.W:11451",
             },
-            "ai-node-local": {
+            "ai-kvm2-local": {
                 "management_url": "http://127.0.0.1:11441",
                 "management_key": "${CARETAKER_KEY}",
                 # no stt_url: ai-node runs no ASR engine — must be skipped
@@ -33,7 +33,7 @@ def _cfg(**overrides):
         "enabled": True,
         "timeout_seconds": 300,
         "ensure_timeout_seconds": 420,
-        "providers": ["windows-gpu-local", "ai-node-local"],
+        "providers": ["windows-gpu-local", "ai-kvm2-local"],
     }
     base.update(overrides)
     return base

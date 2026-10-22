@@ -44,7 +44,7 @@ def provider_dir(tmp_path: Path) -> Path:
         enabled: true
         base_url: http://127.0.0.1:11441/v1
     """))
-    (d / "ai-node-local.settings.yaml").write_text(textwrap.dedent("""\
+    (d / "ai-kvm2-local.settings.yaml").write_text(textwrap.dedent("""\
         local: true
         enabled: true
         base_url: http://127.0.0.1:11440/v1
@@ -82,7 +82,7 @@ async def test_name_suffix_still_managed_without_explicit_marker(
 
 async def test_local_true_still_managed(reg: ProviderRegistry):
     """`local: true` (this host's llama-server) stays a managed entry."""
-    p = reg._providers["ai-node-local"]
+    p = reg._providers["ai-kvm2-local"]
     assert p is not None
     assert p.managed is True
 
@@ -94,10 +94,10 @@ async def test_cloud_models_include_windows_brand_not_managed(reg: ProviderRegis
     # Statically declared models surface under the brand prefix; the dynamic
     # /v1/models catalog adds the rest at refresh time (brand-normalized).
     assert "windows/qwen3-8b-q5" in cloud
-    assert "ai-node-local" not in cloud
+    assert "ai-kvm2-local" not in cloud
     # The managed host's models are never advertised as cloud.
     assert reg.is_cloud_model("windows/qwen3-8b-q5") is True
-    assert reg.is_cloud_model("ai-node-local/llama3.2-3b") is False
+    assert reg.is_cloud_model("ai-kvm2-local/llama3.2-3b") is False
 
 
 def test_shipped_homelab_provider_file_markers():
@@ -164,17 +164,17 @@ async def test_unrecognized_local_string_keeps_suffix_fallback(
     -local provider cannot be silently flipped to non-managed."""
     d = tmp_path / "providers"
     d.mkdir()
-    (d / "ai-node-local.settings.yaml").write_text(
+    (d / "ai-kvm2-local.settings.yaml").write_text(
         "local: \"flase\"\nenabled: true\nbase_url: http://127.0.0.1:11440/v1\n"
     )
     monkeypatch.setattr("app.paths.PROVIDERS_DIR", d)
     reg = ProviderRegistry()
-    assert reg._providers["ai-node-local"].managed is True  # suffix fallback
-    (d / "ai-node-local.settings.yaml").write_text(
+    assert reg._providers["ai-kvm2-local"].managed is True  # suffix fallback
+    (d / "ai-kvm2-local.settings.yaml").write_text(
         "local: \"\"\nenabled: true\nbase_url: http://127.0.0.1:11440/v1\n"
     )
     reg2 = ProviderRegistry()
-    assert reg2._providers["ai-node-local"].managed is True
+    assert reg2._providers["ai-kvm2-local"].managed is True
 
 
 async def test_quoted_managed_marker_does_not_defeat_local_false(

@@ -126,7 +126,7 @@ def test_provider_registry_excludes_local_provider(monkeypatch, tmp_path: Path):
     _make_provider_dir(tmp_path)
     _write(
         tmp_path / "providers",
-        "ai-node-local.settings.yaml",
+        "ai-kvm2-local.settings.yaml",
         yaml.safe_dump(
             {
                 "enabled": True,
@@ -143,13 +143,13 @@ def test_provider_registry_excludes_local_provider(monkeypatch, tmp_path: Path):
     reg = ProviderRegistry()
     # F3: the local provider is a managed entry in the registry — present,
     # flagged managed, keyless-configured, and NEVER a cloud gateway.
-    assert "ai-node-local" in reg._providers
-    local_provider = reg._providers["ai-node-local"]
+    assert "ai-kvm2-local" in reg._providers
+    local_provider = reg._providers["ai-kvm2-local"]
     assert local_provider.managed is True
     assert local_provider.is_configured is True
-    assert not reg.is_cloud_model("ai-node-local/llama3.2-3b")
+    assert not reg.is_cloud_model("ai-kvm2-local/llama3.2-3b")
     assert not reg.is_cloud_model("llama3.2-3b")
-    assert reg._provider_from_address("ai-node-local/llama3.2-3b") is local_provider
+    assert reg._provider_from_address("ai-kvm2-local/llama3.2-3b") is local_provider
 
 
 def test_path_aliases_resolve_schema_names(monkeypatch, tmp_path: Path):
@@ -165,7 +165,7 @@ def test_path_aliases_resolve_schema_names(monkeypatch, tmp_path: Path):
         (tmp_path / name).write_text("{}", encoding="utf-8")
     providers_dir = tmp_path / "providers"
     providers_dir.mkdir()
-    (providers_dir / "ai-node-local.settings.yaml").write_text("{}", encoding="utf-8")
+    (providers_dir / "ai-kvm2-local.settings.yaml").write_text("{}", encoding="utf-8")
 
     monkeypatch.setattr(paths, "CONFIG_DIR", tmp_path)
     monkeypatch.setattr(paths, "PROVIDERS_DIR", providers_dir)
@@ -175,7 +175,7 @@ def test_path_aliases_resolve_schema_names(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(paths, "CLOUD_MODELS_OVERRIDES_FILE", tmp_path / "models.cloud.overrides.yaml")
 
     # local_models_file now resolves to the per-provider local file (F2).
-    assert paths.local_models_file() == providers_dir / "ai-node-local.settings.yaml"
+    assert paths.local_models_file() == providers_dir / "ai-kvm2-local.settings.yaml"
     assert paths.guardian_apikeys_file().name == "guardian.keys.yaml"
     assert paths.global_settings_file().name == "global.settings.yaml"
     assert paths.models_cloud_overrides_file().name == "models.cloud.overrides.yaml"
@@ -190,14 +190,14 @@ def test_provider_names_and_local_marker(monkeypatch, tmp_path: Path):
 
     providers_dir = tmp_path / "providers"
     providers_dir.mkdir()
-    for name in ("openrouter", "nvidia", "ai-node-local"):
+    for name in ("openrouter", "nvidia", "ai-kvm2-local"):
         (providers_dir / f"{name}.settings.yaml").write_text("{}", encoding="utf-8")
     # A non-settings file is ignored.
     (providers_dir / "notes.txt").write_text("x", encoding="utf-8")
 
     monkeypatch.setattr(paths, "PROVIDERS_DIR", providers_dir)
 
-    assert paths.provider_names() == ["ai-node-local", "nvidia", "openrouter"]
-    assert paths.is_local_provider_name("ai-node-local") is True
+    assert paths.provider_names() == ["ai-kvm2-local", "nvidia", "openrouter"]
+    assert paths.is_local_provider_name("ai-kvm2-local") is True
     assert paths.is_local_provider_name("windows-gpu-local") is True
     assert paths.is_local_provider_name("openrouter") is False

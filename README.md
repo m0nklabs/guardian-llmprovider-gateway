@@ -84,7 +84,7 @@ instead of hard-crashing into CUDA OOM loops or restart storms.
 - Backend lifecycle through the llama.cpp caretaker (`caretaker-llamacpp`
   service, control API on `:11441`): remote-first idempotent `/ensure` for
   model switches and runtime flips, with crash-aware reload recovery
-- Hot-reloaded model registry from [config/providers/ai-node-local.settings.yaml](config/providers/ai-node-local.settings.yaml),
+- Hot-reloaded model registry from [config/providers/ai-kvm2-local.settings.yaml](config/providers/ai-kvm2-local.settings.yaml),
   including aliases, text and vision runtime fields, and switch policy
 - Cooperative VRAM fencing via `POST {comfyui_url}/free` before every load or
   switch
@@ -131,7 +131,7 @@ Guardian is currently configured for a shared dual-GPU host with:
 
 - `proxy.vram_limit_mb: 27000` in [config/global.settings.yaml](config/global.settings.yaml)
 - mixed `tensor_split` profiles in the local model registry
-  ([config/providers/ai-node-local.settings.yaml](config/providers/ai-node-local.settings.yaml))
+  ([config/providers/ai-kvm2-local.settings.yaml](config/providers/ai-kvm2-local.settings.yaml))
 - optional ComfyUI integration at `http://127.0.0.1:8188/free`
 - backend path resolution via [app/paths.py](app/paths.py) and
   [scripts/start_llama.sh](scripts/start_llama.sh)
@@ -174,7 +174,7 @@ the dashboard on `:11437`.
 
 Edit these files before the first load:
 
-- [config/providers/ai-node-local.settings.yaml](config/providers/ai-node-local.settings.yaml):
+- [config/providers/ai-kvm2-local.settings.yaml](config/providers/ai-kvm2-local.settings.yaml):
   local model registry, aliases, runtime fields, pinning, switch allowlist
 - [config/global.settings.yaml](config/global.settings.yaml): proxy, queue,
   timeouts, VRAM budget, capture policy, context overrides, ComfyUI URL,
@@ -304,7 +304,7 @@ Browse to `http://127.0.0.1:11437/`.
 | --- | --- |
 | [config/global.settings.yaml](config/global.settings.yaml) | Proxy, queue, timeouts, VRAM budget, capture policy, context overrides, ComfyUI URL |
 | [config/providers/](config/providers/) | Per-provider settings: base URL, key reference, models, model defaults (`service_tier`, `context_window`, …) |
-| [config/providers/ai-node-local.settings.yaml](config/providers/ai-node-local.settings.yaml) | Local model registry, aliases, runtime fields, Guardian policy |
+| [config/providers/ai-kvm2-local.settings.yaml](config/providers/ai-kvm2-local.settings.yaml) | Local model registry, aliases, runtime fields, Guardian policy |
 | [config/guardian.keys.yaml](config/guardian.keys.yaml) | Bearer and x-api-key registry |
 | [config/current_model.args](config/current_model.args) | Generated `llama-server` arguments for the active runtime |
 | [scripts/start_llama.sh](scripts/start_llama.sh) | Backend launcher used by the caretaker |

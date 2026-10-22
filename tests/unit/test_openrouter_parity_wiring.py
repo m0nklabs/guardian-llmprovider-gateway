@@ -236,7 +236,7 @@ def test_identity_key_resolves_the_cross_provider_join():
     assert identity_key("openai/gpt-4o", "openai") == "openai/gpt-4o"
     # Local aliases and provider-less lookups are untouched.
     assert identity_key("llama3.2-3b", None) == "llama3.2-3b"
-    assert identity_key("llama3.2-3b", "ai-node-local") == "llama3.2-3b"
+    assert identity_key("llama3.2-3b", "ai-kvm2-local") == "llama3.2-3b"
 
 
 def test_two_segment_cloud_address_still_receives_cross_provider_metadata():

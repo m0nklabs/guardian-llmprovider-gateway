@@ -88,7 +88,7 @@ def test_split_identity_one_two_and_three_segment_ids():
         split_identity("nvidia/meta-llama/llama-3.3-70b-instruct")
         == "meta-llama/llama-3.3-70b-instruct"
     )
-    assert split_identity("ai-node-local/local/gemma-3-27b") == "local/gemma-3-27b"
+    assert split_identity("ai-kvm2-local/local/gemma-3-27b") == "local/gemma-3-27b"
     assert split_identity("") == ""
 
 
@@ -613,7 +613,7 @@ def test_overrides_win_over_upstream_and_report_the_override_label():
 
 def test_local_context_is_used_when_nothing_else_knows_a_context():
     fields, sources = resolve_model_metadata(
-        "ai-node-local/local/gemma-3-27b",
+        "ai-kvm2-local/local/gemma-3-27b",
         local={"served_by": "local", "context": 32768, "max_tokens": 4096},
     )
     assert fields["context_length"] == 32768
@@ -627,7 +627,7 @@ def test_local_context_is_used_when_nothing_else_knows_a_context():
 
 def test_local_pricing_is_grounded_zeros():
     fields, sources = resolve_model_metadata(
-        "ai-node-local/local/gemma-3-27b", local={"served_by": "local"}
+        "ai-kvm2-local/local/gemma-3-27b", local={"served_by": "local"}
     )
     expected = {key: "0" for key in LOCAL_PRICING_KEYS}
     expected["local"] = "true"
@@ -638,7 +638,7 @@ def test_local_pricing_is_grounded_zeros():
 
 def test_local_pricing_ignores_a_reference_price_block():
     fields, sources = resolve_model_metadata(
-        "ai-node-local/local/gemma-3-27b",
+        "ai-kvm2-local/local/gemma-3-27b",
         reference=subset(pricing={"prompt": "0.000003"}),
         reference_source="openrouter",
         local={"served_by": "local"},
@@ -866,7 +866,7 @@ def test_local_supported_parameters_are_honest_and_gated():
 
 def test_local_route_uses_the_local_parameter_list_not_the_upstream_advertisement():
     fields, sources = resolve_model_metadata(
-        "ai-node-local/local/gemma-3-27b",
+        "ai-kvm2-local/local/gemma-3-27b",
         upstream=subset(supported_parameters=["tools", "logit_bias", "include_reasoning"]),
         local={"served_by": "local", "grammar_decoding": False, "tool_support": True},
     )
@@ -1027,9 +1027,9 @@ def test_endpoint_entry_always_carries_every_section_4_key():
 
 
 def test_endpoint_entry_has_no_grounded_value_for_unknown_fields():
-    entry = endpoint_entry_fields(model_id="ai-node-local/local/gemma-3-27b")
+    entry = endpoint_entry_fields(model_id="ai-kvm2-local/local/gemma-3-27b")
     assert tuple(entry) == ENDPOINT_KEYS
-    assert entry["model_id"] == "ai-node-local/local/gemma-3-27b"
+    assert entry["model_id"] == "ai-kvm2-local/local/gemma-3-27b"
     # Unknown tool capability -> None, never a fabricated all-false map.
     assert entry["supports_tool_choice"] is None
     assert entry["name"] is None  # no grounded provider name
