@@ -241,7 +241,10 @@ class TestC3PlainActiveFile:
         await writer.start()
         for i in range(20):
             sink.try_put(CaptureEvent(data={"seq": i, "data": "x" * 40}))
-        await asyncio.sleep(0.5)
+        # Drain deterministically instead of sleep-timing: stop() waits for the
+        # writer task, which consumes the queue and applies the size-rotation
+        # check on every write — a fixed sleep flakes on a loaded CI runner.
+        await writer.stop()
 
         root = Path(small.capture_root)
         active = root / ACTIVE_FILENAME
@@ -251,8 +254,6 @@ class TestC3PlainActiveFile:
             assert active.stat().st_size < 200 + 200  # at most one record over
         rotated = list(root.glob("guardian_capture_*.jsonl.gz"))
         assert len(rotated) >= 1, "plain-byte threshold should have triggered rotation"
-
-        await writer.stop()
 
 
 class TestWALWriterRotation:
@@ -560,10 +561,11 @@ class TestWALWriterRetention:
         writer = CaptureWALWriter(sink, small_config)
         await writer.start()
 
-        # Write and rotate files
+        # Write and rotate files. Drain deterministically via stop() (the
+        # writer task applies size-rotation checks on every write) instead of
+        # sleep-timing, which flakes on a loaded CI runner.
         for i in range(200):
             sink.try_put(CaptureEvent(data={"seq": i, "data": "x" * 50}))
-        await asyncio.sleep(1.0)
         # Stop first: retention runs INSIDE the writer loop in production
         # (never concurrently with rotation), so the manual sweep must not
         # race an in-flight rotation either.

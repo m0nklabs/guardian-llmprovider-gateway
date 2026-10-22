@@ -4,7 +4,7 @@
 > Doel bereikt: één configuratiebestand per provider in plaats van de huidige
 > defaults/overrides-split tussen lokale en cloud-settings. Het
 > local/cloud-onderscheid is dan aan de **providernaam** te zien
-> (`ai-node-local`, `windows-gpu-local` vs `openrouter`, `google`, …).
+> (`ai-kvm2-local`, `windows-gpu-local` vs `openrouter`, `google`, …).
 > Zie `docs/CONFIG_SCHEMA.md` (migratietabel) voor de eindstand.
 
 ## Huidige situatie (geverifieerd 2026-08-26)
@@ -34,7 +34,7 @@ config/
 ├─ global.settings.yaml          # cross-cutting (ongewijzigd)
 ├─ guardian.keys.yaml            # keys (ongewijzigd)
 └─ providers/                    # NIEUW: één bestand per provider
-   ├─ ai-node-local.settings.yaml    # = vroegere models.local.settings.yaml
+   ├─ ai-kvm2-local.settings.yaml    # = vroegere models.local.settings.yaml
    │                                 #   + lokale provider-blok (base_url, management_url)
    ├─ windows-gpu-local.settings.yaml     # Windows-host (later, zelfde vorm)
    ├─ openrouter.settings.yaml       # base_url + api_key + prefixes + catalog_url
@@ -66,7 +66,7 @@ models:                       # per-model overrides (was models.cloud.overrides.
 ```
 
 ```yaml
-# ai-node-local.settings.yaml
+# ai-kvm2-local.settings.yaml
 enabled: true
 base_url: http://127.0.0.1:11440/v1
 management_url: http://127.0.0.1:11441   # manager-contract (later; zie GATEWAY_MANAGER_SPLIT.md)
@@ -92,14 +92,14 @@ omgeving-specifieke deltas, maar niet nu.
 1. **`app/paths.py`**: `PROVIDERS_DIR = CONFIG_DIR / "providers"`,
    helpers `provider_settings_file(name)` + `provider_names()` (scan
    `*.settings.yaml`); `local_models_file()` blijft bestaan maar resolvert
-   naar `providers/ai-node-local.settings.yaml` (compat voor scripts/tests).
+   naar `providers/ai-kvm2-local.settings.yaml` (compat voor scripts/tests).
 2. **`app/config_loader.py`**: deep-merge van twee bestanden → directory-scan
    (per provider één dict, geen merge-laag meer).
 3. **`app/proxy/providers.py`**: `_load_settings_config` leest de directory;
    `context_overrides` / `model_defaults` komen uit het `models:`-blok van
    de betreffende provider i.p.v. uit `models.cloud.overrides.yaml`.
 4. **`app/engine/manager.py` + `app/local_inference/models.py`**: models
-   uit `providers/ai-node-local.settings.yaml` (via helper; de manager blijft
+   uit `providers/ai-kvm2-local.settings.yaml` (via helper; de manager blijft
    dezelfde lezer gebruiken).
 5. **`app/gateway/context_metadata.py` + `app/cloud_inference/routing.py`**:
    `get_override` leest het provider-bestand.
@@ -112,10 +112,10 @@ omgeving-specifieke deltas, maar niet nu.
 
 ## Naamgeving / adressering (open punten)
 
-- Providernamen worden `ai-node-local` en `windows-gpu-local` (operator 2026-08-26).
+- Providernamen worden `ai-kvm2-local` en `windows-gpu-local` (operator 2026-08-26).
 - **Blijven lokale aliases bare-name werken** (bv. `llama3.2-3b` zonder
   prefix)? Voorstel: ja — aliases blijven zoals nu; de provider-naam is de
-  register-naam. Volledige adressering `ai-node-local/llama3.2-3b` kan
+  register-naam. Volledige adressering `ai-kvm2-local/llama3.2-3b` kan
   optioneel (zelfde patroon als `{provider}/{brand}/{model}` bij cloud).
 - `local: true` als expliciete marker naast de naam-suffix (robust tegen
   hernoemen; routing gebruikt de marker, niet de string).

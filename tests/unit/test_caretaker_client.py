@@ -301,7 +301,7 @@ def test_build_from_local_provider_config(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setenv("CARETAKER_KEY", "env-secret")
     config = {
         "providers": {
-            "ai-node-local": {
+            "ai-kvm2-local": {
                 "local": True,
                 "management_url": "http://127.0.0.1:11441",
             }
@@ -321,7 +321,7 @@ def test_build_env_expansion(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CARETAKER_KEY", raising=False)
     config = {
         "providers": {
-            "ai-node-local": {
+            "ai-kvm2-local": {
                 "local": True,
                 "management_url": "${CARETAKER_MGMT}",
             }
@@ -358,7 +358,7 @@ def test_build_prefers_loopback_local_over_other_local(monkeypatch: pytest.Monke
         "providers": {
             # Intentionally ordered so the non-loopback one comes first.
             "windows-gpu-local": {"local": True, "management_url": "http://192.168.1.K:11441"},
-            "ai-node-local": {"local": True, "management_url": "http://127.0.0.1:11441"},
+            "ai-kvm2-local": {"local": True, "management_url": "http://127.0.0.1:11441"},
         }
     }
     client = build_caretaker_client(config)
@@ -383,7 +383,7 @@ def test_build_prefers_own_host_lan_ip_local(monkeypatch: pytest.MonkeyPatch) ->
         "providers": {
             # Intentionally ordered so the non-this-host one comes first.
             "windows-gpu-local": {"local": True, "management_url": "http://192.168.1.K:11441"},
-            "ai-node-local": {"local": True, "management_url": "http://192.168.1.G:11441"},
+            "ai-kvm2-local": {"local": True, "management_url": "http://192.168.1.G:11441"},
         }
     }
     client = build_caretaker_client(config)
@@ -439,7 +439,7 @@ def test_build_rejects_null_management_url(
     survives _expand_env) must raise a clear ValueError at build time, not
     normalize to a truthy \"None\" string that only fails at transport time."""
     monkeypatch.delenv("CARETAKER_KEY", raising=False)
-    config = {"providers": {"ai-node-local": {"local": True, "management_url": None}}}
+    config = {"providers": {"ai-kvm2-local": {"local": True, "management_url": None}}}
     with pytest.raises(ValueError, match="management_url is missing"):
         build_caretaker_client(config)
 
@@ -457,7 +457,7 @@ def test_build_allows_key_to_own_host_lan_ip(
     )
     config = {
         "providers": {
-            "ai-node-local": {"local": True, "management_url": "http://192.168.1.G:11441"},
+            "ai-kvm2-local": {"local": True, "management_url": "http://192.168.1.G:11441"},
         }
     }
     client = build_caretaker_client(config)
@@ -474,7 +474,7 @@ def test_build_ignores_caretaker_key_in_yaml(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.delenv("CARETAKER_KEY", raising=False)
     config = {
         "providers": {
-            "ai-node-local": {
+            "ai-kvm2-local": {
                 "local": True,
                 "management_url": "http://127.0.0.1:11441",
                 "caretaker_key": "would-leak-over-lan",
@@ -505,7 +505,7 @@ def test_build_fails_closed_on_multiple_locals_no_this_host(
     config = {
         "providers": {
             "windows-gpu-local": {"local": True, "management_url": "http://192.168.1.K:11441"},
-            "ai-node-local": {"local": True, "management_url": "http://192.168.1.G:11441"},
+            "ai-kvm2-local": {"local": True, "management_url": "http://192.168.1.G:11441"},
         }
     }
     with pytest.raises(ValueError, match="Multiple local providers"):

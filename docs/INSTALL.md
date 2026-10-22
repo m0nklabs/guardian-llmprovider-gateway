@@ -66,7 +66,7 @@ To reuse an existing pair (e.g. from a previous install): pass
   `POST /api/config/reload` — code changes still need a restart.
 - `config/providers/<name>.settings.yaml` — one file per provider (F2):
   base_url, API key via `${ENV_VAR}`, `catalog_url`, model overrides,
-  local registry/aliases in `ai-node-local.settings.yaml`.
+  local registry/aliases in `ai-kvm2-local.settings.yaml`.
 - `config/guardian.keys.yaml` — named API keys (gitignored secrets).
 - `.env` — all secrets; `${VAR}` expansion everywhere. Start from
   `.env.example`.

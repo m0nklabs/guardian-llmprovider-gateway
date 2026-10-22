@@ -54,7 +54,7 @@ providers:
       - minimaxai/
     catalog_allowlist:
       - minimaxai/minimax-m3
-  ai-node-local:
+  ai-kvm2-local:
     enabled: true
     base_url: http://127.0.0.1:11440/v1
     local: true
@@ -156,7 +156,7 @@ DEFAULT_CATALOGS = {
         "context": {},
         "modalities": {},
     },
-    "ai-node-local": {
+    "ai-kvm2-local": {
         "fetched_at": 1.0,
         "models": {"llama3.2-3b": "llama3.2-3b"},
         "metadata": {},
@@ -515,9 +515,9 @@ async def test_local_model_yields_its_local_backend_endpoint(tmp_path):
     endpoints = payload["data"]["endpoints"]
     assert len(endpoints) == 1
     endpoint = endpoints[0]
-    assert endpoint["provider_name"] == "ai-node-local"
+    assert endpoint["provider_name"] == "ai-kvm2-local"
     assert endpoint["model_id"] == "llama3.2-3b"
-    assert endpoint["tag"] == "ai-node-local"
+    assert endpoint["tag"] == "ai-kvm2-local"
     assert endpoint["pricing"] == {
         "prompt": "0",
         "completion": "0",
@@ -553,7 +553,7 @@ async def test_local_model_without_a_configured_local_provider(tmp_path):
 async def test_local_route_keeps_local_pricing_even_for_a_cloud_sibling(tmp_path):
     """A cloud passthrough price is never inherited by the local route."""
     catalogs = dict(DEFAULT_CATALOGS)
-    catalogs["ai-node-local"] = {
+    catalogs["ai-kvm2-local"] = {
         "fetched_at": 1.0,
         "models": {"openai/gpt-4o": "openai/gpt-4o"},
         "metadata": {},
@@ -565,7 +565,7 @@ async def test_local_route_keeps_local_pricing_even_for_a_cloud_sibling(tmp_path
 
     payload = await world.endpoints("openai/gpt-4o")
 
-    local_endpoints = [e for e in payload["data"]["endpoints"] if e["provider_name"] == "ai-node-local"]
+    local_endpoints = [e for e in payload["data"]["endpoints"] if e["provider_name"] == "ai-kvm2-local"]
     assert len(local_endpoints) == 1
     assert local_endpoints[0]["pricing"]["local"] == "true"
     assert local_endpoints[0]["pricing"]["prompt"] == "0"
@@ -778,7 +778,7 @@ async def test_cloud_access_disabled_still_serves_local_models(tmp_path):
 
     payload = await world.endpoints("llama3.2-3b")
 
-    assert world.names(payload) == ["ai-node-local"]
+    assert world.names(payload) == ["ai-kvm2-local"]
 
 
 async def test_cloud_access_disabled_hides_cloud_endpoints_of_a_local_model(tmp_path):
@@ -797,11 +797,11 @@ async def test_cloud_access_disabled_hides_cloud_endpoints_of_a_local_model(tmp_
 
     payload = await world.endpoints("llama3.2-3b")
 
-    assert world.names(payload) == ["ai-node-local"]
+    assert world.names(payload) == ["ai-kvm2-local"]
 
     # With cloud access the very same request also reports the cloud route.
     allowed = _build_world(tmp_path, catalogs=catalogs)
-    assert allowed.names(await allowed.endpoints("llama3.2-3b")) == ["openrouter", "ai-node-local"]
+    assert allowed.names(await allowed.endpoints("llama3.2-3b")) == ["openrouter", "ai-kvm2-local"]
 
 
 async def test_router_403_is_propagated_when_the_reader_disagrees(tmp_path):

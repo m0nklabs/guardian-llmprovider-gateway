@@ -33,7 +33,7 @@ config/
 ├─ global.settings.yaml            # GLOBAL: proxy/queue/timeouts/scaler/capture/grammar/cloud_retry/failover/benchmark/services
 ├─ guardian.keys.yaml              # Guardian API keys (36, cloud_gateway_access)
 └─ providers/                      # EÉN bestand per provider (F2, docs/CONFIG_PROVIDER_FILES.md)
-   ├─ ai-node-local.settings.yaml  # lokale provider: base_url + models/aliases/guardian registry
+   ├─ ai-kvm2-local.settings.yaml  # lokale provider: base_url + models/aliases/guardian registry
    ├─ openrouter.settings.yaml     # base_url/api_key/timeout/prefixes + catalog_url + models:-overrides
    ├─ nvidia.settings.yaml         # idem + catalog_allowlist + models:-overrides
    ├─ google.settings.yaml
@@ -55,16 +55,16 @@ config/
 |---|---|---|
 | `.env` | `.env` (ongewijzigd) | secrets + machine |
 | `guardian_apikeys.yaml` | `guardian.keys.yaml` | Guardian keys — compat-symlink verwijderd 2026-08-22 |
-| `local_models.yaml` (+ symlink `models.yaml`) | `providers/ai-node-local.settings.yaml` | lokale registry (`local_models.yaml` symlink wijst nu naar de provider-file) |
+| `local_models.yaml` (+ symlink `models.yaml`) | `providers/ai-kvm2-local.settings.yaml` | lokale registry (`local_models.yaml` symlink wijst nu naar de provider-file) |
 | `cloud_models.yaml` | *(per-provider `models:`-blok, F2)* | cloud model afwijkingen + sampling/context — compat-symlink verwijderd 2026-08-22 |
 | `providers.settings.yaml` + `providers.overrides.yaml` | `providers/<naam>.settings.yaml` | één bestand per provider (F2, 2026-08-26) |
-| `models.local.settings.yaml` | `providers/ai-node-local.settings.yaml` | lokale registry (models/aliases/guardian in de lokale provider-file) |
+| `models.local.settings.yaml` | `providers/ai-kvm2-local.settings.yaml` | lokale registry (models/aliases/guardian in de lokale provider-file) |
 | `models.cloud.overrides.yaml` | `providers/<naam>.settings.yaml` → `models:`-blok | per-model overrides bij de juiste provider (F2) |
 | *(nieuw, gereserveerd)* | `models.cloud.settings.yaml` | cloud model defaults — **nog geen consumer, nog niet geleverd** |
 | *(nieuw, gereserveerd)* | `models.local.overrides.yaml` | lokale model afwijkingen — **nog geen consumer, nog niet geleverd** |
 | `providers.*` in settings.yaml | `providers/<naam>.settings.yaml` | provider config |
 | `settings.yaml` | `global.settings.yaml` | global infra + subsystem |
-| `api_keys.json`, `cloud_keys.json`, `models.yaml`, `benchmark_models.json` | *(verwijderd 2026-08-22)* | legacy — vervangen door `guardian.keys.yaml` resp. `providers/ai-node-local.settings.yaml`; zie `.scratch/cleanup/legacy-config/` |
+| `api_keys.json`, `cloud_keys.json`, `models.yaml`, `benchmark_models.json` | *(verwijderd 2026-08-22)* | legacy — vervangen door `guardian.keys.yaml` resp. `providers/ai-kvm2-local.settings.yaml`; zie `.scratch/cleanup/legacy-config/` |
 | `current_model.args/.sig`, `data/cloud_catalog_cache.json` | ongew. | runtime, niet hand-editeerbaar |
 
 ## 3. Mapping: waar elke settings.yaml-key heen gaat

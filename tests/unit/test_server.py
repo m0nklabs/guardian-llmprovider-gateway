@@ -1972,7 +1972,7 @@ async def test_list_models_excludes_managed_provider_cloud_entries():
     would leak local models as `{local}/{model}` cloud entries here. Pin that the
     cloud-entry loop skips managed providers."""
     managed = CloudProvider(
-        name="ai-node-local",
+        name="ai-kvm2-local",
         base_url="http://127.0.0.1:11440/v1",
         api_key="",
         models=["llama3.2-3b", "qwen3.8-27b"],
@@ -1994,8 +1994,8 @@ async def test_list_models_excludes_managed_provider_cloud_entries():
 
     ids = [m["id"] for m in result["data"]]
     # The managed provider's local models must not appear as cloud entries.
-    assert "ai-node-local/llama3.2-3b" not in ids
-    assert "ai-node-local/qwen3.8-27b" not in ids
+    assert "ai-kvm2-local/llama3.2-3b" not in ids
+    assert "ai-kvm2-local/qwen3.8-27b" not in ids
     assert "local-model" in ids
 
 
@@ -2244,6 +2244,29 @@ def test_prepare_cloud_candidate_client_service_tier_wins_over_provider_default(
         provider, "openai/gpt-5", "chat/completions", base_body,
     )
     assert json_body["service_tier"] == "priority"
+
+
+def test_prepare_cloud_candidate_no_provider_tier_on_native_messages_body():
+    """``service_tier`` has no Anthropic equivalent: a native /v1/messages
+    body must not receive the provider default tier — strict endpoints reject
+    unknown top-level fields with a 400 (PR #29 review)."""
+    provider = CloudProvider(
+        name="openrouter",
+        base_url="https://openrouter.ai/api/v1",
+        api_key="sk-or-test",
+        models=["openai/gpt-5"],
+        service_tier="flex",
+    )
+    base_body = {
+        "model": "openrouter/openai/gpt-5",
+        "max_tokens": 64,
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    effective_path, json_body, _body, _needs_tr = server._prepare_cloud_candidate_request(
+        provider, "openai/gpt-5", "messages", base_body,
+    )
+    assert effective_path == "messages"
+    assert "service_tier" not in json_body
 
 
 def test_prepare_cloud_candidate_model_default_service_tier_wins_over_provider():

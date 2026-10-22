@@ -124,7 +124,7 @@
 | Path | Function | Related processes/files |
 |------|----------|------------------------|
 | `config/global.settings.yaml` | Global settings: proxy (port/target/pid), queue, timeouts, capture, cloud_retry, failover_health | `app/config_loader.py`, scripts, systemd |
-| `config/providers/ai-node-local.settings.yaml` | Local model registry: models, aliases, guardian (symlink `config/local_models.yaml` removed 2026-09-09) | `app/local_inference/model_registry.py` via `local_models_file()` |
+| `config/providers/ai-kvm2-local.settings.yaml` | Local model registry: models, aliases, guardian (symlink `config/local_models.yaml` removed 2026-09-09) | `app/local_inference/model_registry.py` via `local_models_file()` |
 | `config/models.cloud.overrides.yaml` | Merged cloud model overrides (context_window, model_defaults) | `app/proxy/providers.py`, `app/gateway/context_metadata.py` |
 | `config/models.local.settings.yaml` | Local model registry (aliases, runtime, tensor_split, switch policy) | `app/local_inference/models.py` |
 | `config/providers.overrides.yaml` | Per-provider overrides (win over defaults) | `app/config_loader.py`, `app/proxy/providers.py` |
@@ -344,7 +344,7 @@ _End of draft. This register is a living document; update it as files are added/
 ### Config (F2 provider split + F6) (8)
 | Path | Function | Related processes/files |
 |---|---|---|
-| `config/providers/ai-node-local.settings.yaml` | Local managed provider (registry/aliases, `local: true`) | `app/proxy/providers.py`, `app/gateway/caretaker_client.py` |
+| `config/providers/ai-kvm2-local.settings.yaml` | Local managed provider (registry/aliases, `local: true`) | `app/proxy/providers.py`, `app/gateway/caretaker_client.py` |
 | `config/providers/openrouter.settings.yaml` | OpenRouter cloud provider (`catalog_url` /models/user override) | `app/proxy/cloud_catalog.py` |
 | `config/providers/nvidia.settings.yaml` | NVIDIA cloud provider (`model_prefixes`) | `app/proxy/providers.py` |
 | `config/providers/google.settings.yaml` | Google cloud provider | `app/proxy/cloud_catalog.py` |

@@ -409,6 +409,10 @@ async def route_v1_post(path: str, request: Request, client_id: str):
         json_body["messages"] = _sanitize_messages_for_qwen_chat_template(
             json_body.get("messages", [])
         )
+    # Re-serialize from json_body so EVERY mutation above (model rewrite,
+    # reasoning defaults, GCD kill-strip, qwen template sanitize) reaches the
+    # backend; the later stream-detection block re-parses these bytes, so a
+    # stale body would resurrect stripped fields.
     body = json.dumps(json_body).encode("utf-8")
     # has_image_inputs already computed above
 

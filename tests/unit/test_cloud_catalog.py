@@ -700,7 +700,7 @@ class TestOverrides:
                 context_window: 1048576
         """))
         # Local provider models are NOT cloud overrides.
-        (providers_dir / "ai-node-local.settings.yaml").write_text(textwrap.dedent("""\
+        (providers_dir / "ai-kvm2-local.settings.yaml").write_text(textwrap.dedent("""\
             enabled: true
             base_url: http://127.0.0.1:11440/v1
             local: true
