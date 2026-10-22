@@ -46,7 +46,11 @@ async def test_lifespan_does_not_wait_for_startup_check(tmp_path: Path):
         start = asyncio.get_running_loop().time()
         async with server.lifespan(server.app):
             elapsed = asyncio.get_running_loop().time() - start
-            assert elapsed < 0.1
+            # Generous wall-clock ceiling only: the real pin is the state
+            # below (startup_check is still blocked => lifespan did not wait
+            # for it, or the context entry would never be reached). A 0.1s
+            # ceiling flaked when a loaded CI/runner descheduled the process.
+            assert elapsed < 2.0
 
             await asyncio.sleep(0)
 
