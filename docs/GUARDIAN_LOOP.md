@@ -27,6 +27,8 @@ Guardian). Anything else is out of scope, even when it looks related.
 **Not granted (hard stops):**
 
 1. **Never merge a PR.** Finish it and leave it ready for the human merge.
+   The toolset does expose `mcp__github__merge_pull_request`; calling it is
+   forbidden, as is any equivalent `gh pr merge`.
    Never approve a PR, never dismiss a review, never resolve a thread that
    still has an unanswered finding.
 2. **Never push to `main`** (or any long-lived branch), never force-push,
