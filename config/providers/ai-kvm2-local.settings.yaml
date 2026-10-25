@@ -1,354 +1,64 @@
+# Local provider registry — ai-kvm2 (phase B, 2026-10-25).
+# This file owns model IDENTITY only: canonical model names, per-model
+# ``brand`` (namespaced addressing) and the ``aliases`` surface. All
+# launch/capability settings are owned by the caretaker's models file
+# (launch_settings_file) and are adopted at read time by the registry —
+# do not re-add copies here, edit the caretaker file instead.
 enabled: true
 base_url: http://127.0.0.1:11440/v1
 management_url: http://127.0.0.1:11441
 management_key: ${CARETAKER_KEY}
-# TTS engine (qwen3tts-http, caretaker-managed on-demand lifecycle)
 tts_url: http://127.0.0.1:11450
 local: true
 models:
   llama3.2-3b:
-    path: /home/flip/models/llama3.2-3b.gguf
     brand: llama
-    total_layers: 28
-    benchmark_context_limit: 131072
-    context: 131072
-    ngl: 99
-    kv_type: f16
-    grammar_decoding: true
   nomic-embed-text-v2-moe.f16:
-    path: /home/flip/models/nomic-embed-text-v2-moe.f16.gguf
     brand: nomic
-    model_type: embedding
-    default_enable_thinking: false
-    total_layers: 12
-    benchmark_context_limit: 512
-    context: 32768
-    ngl: 99
-    extra_args: --embedding --reasoning off
   nomic-embed-text-cpu:
-    path: /home/flip/models/nomic-embed-text-cpu.gguf
     brand: nomic
-    model_type: embedding
-    default_enable_thinking: false
-    total_layers: 12
-    benchmark_context_limit: 2048
-    context: 32768
-    ngl: 99
-    extra_args: --embedding --reasoning off
   Phi-4-reasoning-plus:
-    path: /home/flip/models/Phi-4-reasoning-plus-Q8_0.gguf
     brand: phi
-    total_layers: 40
-    benchmark_context_limit: 32768
-    context: 32768
-    ngl: 99
-    kv_type: f16
-    tensor_split: 0.45,0.55
   Huihui-gemma-4-26B-A4B-it-abliterated:
-    path: /home/flip/models/gemma-4-26B-A4B.unsloth-imatrix-UD-Q4_K_XL.gguf
     brand: gemma
-    total_layers: 30
-    benchmark_context_limit: 262144
-    context: 262144
-    ngl: 99
-    kv_type: turbo4
-    tensor_split: 0.45,0.55
-    mmproj: /home/flip/models/gemma-4-26b-a4b-mmproj-BF16.gguf
-    extra_args: --flash-attn on --repeat-penalty 1 --temp 1.0 --top-p 0.95 --top-k
-      64
   Huihui-gemma-4-26B-A4B-it-abliterated-Q8KV:
-    path: /home/flip/models/gemma-4-26B-A4B.unsloth-imatrix-UD-Q4_K_XL.gguf
     brand: gemma
-    total_layers: 30
-    benchmark_context_limit: 262144
-    context: 262144
-    ngl: 99
-    kv_type: turbo4
-    tensor_split: 0.36,0.64
-    mmproj: /home/flip/models/gemma-4-26b-a4b-mmproj-BF16.gguf
-    extra_args: --flash-attn on --repeat-penalty 1 --temp 1.0 --top-p 0.95 --top-k
-      64
-    vision_context: 262144
-    vision_ngl: 99
-    vision_tensor_split: 0.36,0.64
   unsloth-gemma-4-26B-A4B-it-qat-UD-Q4_K_XL-Q8KV:
-    path: /home/flip/models/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
     brand: gemma
-    total_layers: 30
-    benchmark_context_limit: 262144
-    context: 262144
-    ngl: 99
-    kv_type: turbo4
-    tensor_split: 0.36,0.64
-    mmproj: /home/flip/models/gemma-4-26b-a4b-mmproj-BF16.gguf
-    extra_args: --flash-attn on --repeat-penalty 1 --temp 1.0 --top-p 0.95 --top-k
-      64 --main-gpu 1 -sm layer
-    vision_context: 262144
-    vision_ngl: 99
-    vision_tensor_split: 0.36,0.64
   gemma-4-E4B-it-uncensored:
-    path: /home/flip/models/gemma-4-E4B-it-uncensored-Q4_K_M.gguf
     brand: gemma
-    total_layers: 42
-    benchmark_context_limit: 131072
-    context: 131072
-    ngl: 99
-    kv_type: f16
-    tensor_split: 0.32,0.68
-    extra_args: --flash-attn on --parallel 1 --batch-size 256 --ubatch-size 128 --repeat-penalty
-      1 --repeat-last-n 128 --dry-multiplier 1.0 --dry-base 1.75 --dry-penalty-last-n
-      256 --temp 1.0 --top-p 0.95 --top-k 64
   granite-4.1-8b:
-    path: /home/flip/models/granite-4.1-8b-UD-Q8_K_XL.gguf
     brand: granite
-    total_layers: 40
-    benchmark_context_limit: 131072
-    context: 131072
-    ngl: 99
-    kv_type: turbo4
-    extra_args: --jinja
   qwen3.8-27b:
-    path: /home/flip/models/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_XL.gguf
     brand: qwen
-    total_layers: 65
-    benchmark_context_limit: 262144
-    context: 262144
-    ngl: 99
-    kv_type: turbo4
-    tensor_split: 0.45,0.55
-    mmproj: /home/flip/models/qwen3.8-27b/mmproj-F16.gguf
-    default_enable_thinking: true
-    extra_args: --jinja --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty
-      0.0 --repeat-penalty 1.0
   qwen3.8-27b-q8kv:
-    path: /home/flip/models/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_XL.gguf
     brand: qwen
-    total_layers: 65
-    benchmark_context_limit: 262144
-    context: 220000
-    ngl: 99
-    kv_type: q8_0
-    tensor_split: 0.40,0.60
-    mmproj: /home/flip/models/qwen3.8-27b/mmproj-F16.gguf
-    vision_context: 165000
-    vision_ngl: 99
-    vision_tensor_split: 0.37,0.63
-    default_enable_thinking: true
-    extra_args: --jinja --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty
-      0.0 --repeat-penalty 1.0
   qwen3.8-27b-instruct:
-    path: /home/flip/models/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_XL.gguf
     brand: qwen
-    total_layers: 65
-    benchmark_context_limit: 262144
-    context: 262144
-    ngl: 99
-    kv_type: turbo4
-    tensor_split: 0.45,0.55
-    mmproj: /home/flip/models/qwen3.8-27b/mmproj-F16.gguf
-    default_enable_thinking: false
-    extra_args: --jinja --reasoning off --temp 0.7 --top-p 0.8 --top-k 20 --min-p
-      0.0 --presence-penalty 1.5 --repeat-penalty 1.0
   qwen3.8-27b-mtp:
-    path: /home/flip/models/qwen3.8-27b/Qwen3.8-27B-UD-Q4_K_XL.gguf
     brand: qwen
-    total_layers: 65
-    benchmark_context_limit: 262144
-    context: 242144
-    ngl: 99
-    kv_type: turbo4
-    tensor_split: 0.45,0.55
-    mmproj: /home/flip/models/qwen3.8-27b/mmproj-F16.gguf
-    default_enable_thinking: true
-    spec_type: draft-mtp
-    extra_args: --jinja --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty
-      0.0 --repeat-penalty 1.0
   qwen3.8-27b-uncensored-ymq:
-    path: /home/flip/models/qwen3.8-27b-uncensored-ymq/Qwen3.8-27B-Uncensored-YMQ-XL.gguf
     brand: qwen
-    total_layers: 65
-    benchmark_context_limit: 262144
-    context: 150000
-    ngl: 99
-    kv_type: turbo4
-    tensor_split: 0.42,0.58
-    mmproj: /home/flip/models/qwen3.8-27b/mmproj-F16.gguf
-    vision_context: 155000
-    vision_ngl: 99
-    vision_tensor_split: 0.37,0.63
-    default_enable_thinking: true
-    spec_type: draft-mtp
-    extra_args: --jinja --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty
-      0.0 --repeat-penalty 1.0
-  # QwenPi (bytkim/Qwen3.8-27B-pi, apache-2.0): token-efficiency agent-loop
-  # fine-tune. Card quickstart: Q4_K_M main + separate MTP head Q4_0
-  # (draft-3 = +50-58% decode) + own mmproj; thinking sampling identical to
-  # the other Qwen3.8 local entries. Added 2026-10-04 (Sam Witteveen video).
   qwen3.8-27b-pi:
-    path: /home/flip/models/qwen3.8-27b-pi/Qwen3.8-27B-pi-Q4_K_M.gguf
     brand: qwen
-    total_layers: 65
-    benchmark_context_limit: 262144
-    context: 150000
-    ngl: 99
-    kv_type: turbo4
-    tensor_split: 0.42,0.58
-    mmproj: /home/flip/models/qwen3.8-27b-pi/mmproj-Qwen3.8-27B-pi-BF16.gguf
-    vision_context: 155000
-    vision_ngl: 99
-    vision_tensor_split: 0.37,0.63
-    default_enable_thinking: true
-    spec_type: draft-mtp
-    spec_draft_n_max: 3
-    spec_draft_n_min: 1
-    draft_model_path: /home/flip/models/qwen3.8-27b-pi/mtp/mtp-Qwen3.8-27B-pi-Q4_0.gguf
-    draft_cache_type_k: f16
-    draft_cache_type_v: f16
-    extra_args: --jinja --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty
-      0.0 --repeat-penalty 1.0
-  # Swift 1.5 (ukisai/Swift-1.5-Qwen3.8-27B, Swift Open License v1.0: free
-  # commercial use under $1M gross revenue): token-efficiency fine-tune,
-  # -58.5% thinking tokens at +0.35 GPQA vs base; MTP head embedded in the
-  # main GGUF (no separate draft file). Mirrored from ai-node-local 2026-10-21.
   qwen3.8-27b-swift15:
-    path: /home/flip/models/qwen3.8-27b-swift/Swift-1.5-Qwen3.8-27B-Q4_K_M.gguf
     brand: qwen
-    total_layers: 65
-    benchmark_context_limit: 262144
-    context: 150000
-    ngl: 99
-    kv_type: turbo4
-    tensor_split: 0.42,0.58
-    mmproj: /home/flip/models/qwen3.8-27b-swift/mmproj-Swift-1.5-Qwen3.8-27B-F16.gguf
-    vision_context: 155000
-    vision_ngl: 99
-    vision_tensor_split: 0.37,0.63
-    default_enable_thinking: true
-    spec_type: draft-mtp
-    extra_args: --jinja --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty
-      0.0 --repeat-penalty 1.0
-  # Qwen3.8-Flash-Next (Qwen/Qwen3.8-Flash-Next, Apache 2.0): 125B-A6B MoE +
-  # 51B n-gram PLE + QSA; experts offloaded to RAM via -ot exps=CPU. Requires
-  # the qwen4exp build pin (30-flashnext-backend.conf); turbo4 KV is NOT
-  # accepted by that binary. Spec: docs/FLASH_NEXT_INTEGRATION_SPEC.md.
-  # Added 2026-10-21.
   qwen3.8-flash-next:
-    path: /home/flip/models/qwen3.8-flash-next/IQ3_S/Qwen3.8-Flash-Next-GSQ-RCO-IQ3_S-00001-of-00002.gguf
     brand: qwen
-    total_layers: 49
-    benchmark_context_limit: 262144
-    context: 150000
-    ngl: 99
-    kv_type: q8_0
-    tensor_split: 0.42,0.58
-    default_enable_thinking: true
-    spec_type: draft-mtp
-    spec_draft_n_max: 3
-    spec_draft_n_min: 1
-    draft_model_path: /home/flip/models/qwen3.8-flash-next/mtp-Qwen3.8-Flash-Next-Q4_0.gguf
-    draft_cache_type_k: f16
-    draft_cache_type_v: f16
-    extra_args: --jinja --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty
-      0.0 --repeat-penalty 1.0 -t 8 -tb 8 -ot exps=CPU
-  # VIEScore2 (Allenda/VIEScore2, Apache 2.0): unified image-evaluation judge
-  # on a Qwen3-VL-8B-Instruct base (SFT + GRPO): dual-axis quality scores
-  # (pq:/sc:), a 16x16 defect grid with grounded explanation. Greedy sampling
-  # (temp 0) for deterministic scoring; the qwen3vl arch is supported by the
-  # active b11790-tq4 build. Mirrored from ai-node-local 2026-10-21.
   viescore2:
-    path: /home/flip/models/viescore2-q8_0.gguf
     brand: qwen
-    total_layers: 36
-    benchmark_context_limit: 262144
-    context: 131072
-    ngl: 99
-    kv_type: turbo4
-    tensor_split: 0.45,0.55
-    mmproj: /home/flip/models/viescore2-mmproj-f16.gguf
-    default_enable_thinking: false
-    extra_args: --jinja --reasoning off --temp 0.0 --min-p 0.0 --presence-penalty
-      0.0 --repeat-penalty 1.0
-  # Fallback insurance: q8_0 KV launches on BOTH the b2111 production binary
-  # and the qwen4exp build-latest binary, so this entry stays usable while
-  # the 30-flashnext pin is active. Added 2026-10-21.
   qwen3.5-9b-q8kv:
-    path: /home/flip/models/qwen3.5-9b/Qwen3.5-9B-UD-Q8_K_XL.gguf
     brand: qwen
-    total_layers: 32
-    benchmark_context_limit: 262144
-    context: 262144
-    ngl: 99
-    kv_type: q8_0
-    tensor_split: 0.45,0.55
-    mmproj: /home/flip/models/qwen3.5-9b/mmproj-F16.gguf
-    default_enable_thinking: true
-    extra_args: --jinja --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty
-      1.5 --repeat-penalty 1.0
   qwen3.5-9b:
-    path: /home/flip/models/qwen3.5-9b/Qwen3.5-9B-UD-Q8_K_XL.gguf
     brand: qwen
-    total_layers: 32
-    benchmark_context_limit: 262144
-    context: 262144
-    ngl: 99
-    kv_type: turbo4
-    tensor_split: 0.45,0.55
-    mmproj: /home/flip/models/qwen3.5-9b/mmproj-F16.gguf
-    default_enable_thinking: true
-    extra_args: --jinja --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty
-      1.5 --repeat-penalty 1.0
   qwen3.5-9b-coder:
-    path: /home/flip/models/qwen3.5-9b/Qwen3.5-9B-UD-Q8_K_XL.gguf
     brand: qwen
-    total_layers: 32
-    benchmark_context_limit: 262144
-    context: 262144
-    ngl: 99
-    kv_type: turbo4
-    tensor_split: 0.45,0.55
-    mmproj: /home/flip/models/qwen3.5-9b/mmproj-F16.gguf
-    default_enable_thinking: true
-    extra_args: --jinja --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty
-      0.0 --repeat-penalty 1.0
   qwen3.5-9b-instruct:
-    path: /home/flip/models/qwen3.5-9b/Qwen3.5-9B-UD-Q8_K_XL.gguf
     brand: qwen
-    total_layers: 32
-    benchmark_context_limit: 262144
-    context: 262144
-    ngl: 99
-    kv_type: turbo4
-    tensor_split: 0.45,0.55
-    mmproj: /home/flip/models/qwen3.5-9b/mmproj-F16.gguf
-    default_enable_thinking: false
-    extra_args: --jinja --reasoning off --temp 0.7 --top-p 0.8 --top-k 20 --min-p
-      0.0 --presence-penalty 1.5 --repeat-penalty 1.0
   qwen3.5-9b-reasoner:
-    path: /home/flip/models/qwen3.5-9b/Qwen3.5-9B-UD-Q8_K_XL.gguf
     brand: qwen
-    total_layers: 32
-    benchmark_context_limit: 262144
-    context: 262144
-    ngl: 99
-    kv_type: turbo4
-    tensor_split: 0.45,0.55
-    mmproj: /home/flip/models/qwen3.5-9b/mmproj-F16.gguf
-    default_enable_thinking: false
-    extra_args: --jinja --reasoning off --temp 1.0 --top-p 0.95 --top-k 20 --min-p
-      0.0 --presence-penalty 1.5 --repeat-penalty 1.0
   Huihui-Qwen3.5-9B-abliterated:
-    path: /home/flip/models/qwen3.5-9b-abliterated/Huihui-Qwen3.5-9B-abliterated.Q4_K_M.gguf
     brand: qwen
-    total_layers: 32
-    benchmark_context_limit: 262144
-    context: 262144
-    ngl: 99
-    kv_type: turbo4
-    tensor_split: 0.45,0.55
-    mmproj: /home/flip/models/qwen3.5-9b-abliterated/mmproj-F16.gguf
-    default_enable_thinking: true
-    extra_args: --jinja --temp 1.0 --top-p 0.95 --top-k 20 --min-p 0.0 --presence-penalty
-      1.5 --repeat-penalty 1.0 --alias Huihui-Qwen3.5-9B-abliterated
 aliases:
   phi4: Phi-4-reasoning-plus
   gemma4: Huihui-gemma-4-26B-A4B-it-abliterated-Q8KV
@@ -372,3 +82,4 @@ guardian:
   pinned_model: null
   switch_allowlist: null
   idle_unload_minutes: 5
+launch_settings_file: /home/flip/caretaker-llamacpp/models.local.settings.yaml

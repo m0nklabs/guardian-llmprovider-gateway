@@ -120,6 +120,26 @@ omgeving-specifieke deltas, maar niet nu.
 - `local: true` als expliciete marker naast de naam-suffix (robust tegen
   hernoemen; routing gebruikt de marker, niet de string).
 
+## Launch-settings ownership (phase B, 2026-10-25)
+
+Sinds phase B is de taakverdeling voor de managed lokale provider:
+
+- **Registry-bestand** (`ai-kvm2-local.settings.yaml`) bezit *identiteit*:
+  canonical modelnamen, per-model `brand:` (namespaced adressering) en de
+  top-level `aliases:`-surface. Sinds dezelfde datum worden bare namen niet
+  meer geadverteerd (namespaced-only advertising).
+- **Caretaker-bestand** (`caretaker-llamacpp/models.local.settings.yaml`)
+  bezit de launch/capability-settings: `path`, `context`, `ngl`, `kv_type`,
+  `tensor_split`, `mmproj`, `vision_*`, `spec_*`/`draft_*`,
+  `default_enable_thinking`, `extra_args`, `total_layers`,
+  `grammar_decoding`, `benchmark_context_limit`, `model_type`.
+- De registry adopteert die velden at-read-time via de top-level pointer
+  `launch_settings_file:` in het registry-bestand; expliciete waarden in het
+  registry-bestand winnen (override escape hatch). Ontbrekend/ongeldig
+  bronbestand = no-op. Zie `ModelRegistry._merge_launch_settings`.
+- **Nieuwe/modificeerde launch-instellingen horen in het caretaker-bestand** —
+  geen copies meer in het registry-bestand bijhouden.
+
 ## Verhouding tot andere plannen
 
 - Dit is de **config-laag** van de provider-unificatie

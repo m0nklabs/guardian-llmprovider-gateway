@@ -32,6 +32,34 @@ logger = logging.getLogger("model-registry")
 
 MISMATCH_MODEL_NAME = "__MISMATCH__"
 
+# Fields owned by the caretaker's models file (phase B, 2026-10-25): the
+# caretaker launches llama-server from its own settings, so this registry
+# adopts these per-model values at read time instead of carrying copies.
+# Identity fields (canonical name, ``brand``) stay registry-owned.
+_LAUNCH_SOURCED_FIELDS: frozenset[str] = frozenset({
+    "path",
+    "context",
+    "ngl",
+    "kv_type",
+    "tensor_split",
+    "mmproj",
+    "vision_context",
+    "vision_ngl",
+    "vision_tensor_split",
+    "spec_type",
+    "spec_draft_n_max",
+    "spec_draft_n_min",
+    "draft_model_path",
+    "draft_cache_type_k",
+    "draft_cache_type_v",
+    "default_enable_thinking",
+    "extra_args",
+    "total_layers",
+    "grammar_decoding",
+    "benchmark_context_limit",
+    "model_type",
+})
+
 
 @dataclass
 class VisionCapability:
@@ -71,8 +99,9 @@ class ModelRegistry:
             config_path = str(local_models_file())
         self.config_path = Path(config_path)
         # mtime-gated parse cache: resolve_model() runs per local request and
-        # used to re-open + re-parse models.yaml every time.
-        self._config_cache: tuple[int, dict] | None = None
+        # used to re-open + re-parse models.yaml every time. The key covers
+        # both the registry document and its optional launch-settings source.
+        self._config_cache: tuple[tuple[int | None, int | None], dict] | None = None
         # Runtime state mirror (the authoritative values live on the bound
         # lifecycle owner; these provide a sane standalone default).
         self._current_model: str | None = None
@@ -111,19 +140,70 @@ class ModelRegistry:
 
     # ------------------------------------------------------------------------
 
+    def _launch_settings_mtime(self) -> int | None:
+        """Return the mtime of the configured ``launch_settings_file``."""
+        try:
+            with open(self.config_path, "r", encoding="utf-8") as fh:
+                source = (yaml.safe_load(fh) or {}).get("launch_settings_file")
+        except (OSError, yaml.YAMLError):
+            return None
+        if not source:
+            return None
+        try:
+            return Path(str(source)).stat().st_mtime_ns
+        except OSError:
+            return None
+
+    def _merge_launch_settings(self, cfg: dict, source: str) -> None:
+        """Adopt per-model launch/capability fields from the caretaker-owned
+        models file (phase B, 2026-10-25: the caretaker owns model settings;
+        this registry keeps identity — canonical names, ``brand``, aliases).
+
+        Missing keys are adopted from the source document; an explicit value
+        in this registry wins (override escape hatch). A missing or invalid
+        source file leaves entries as they are.
+        """
+        try:
+            with open(source, "r", encoding="utf-8") as fh:
+                launch_models = (yaml.safe_load(fh) or {}).get("models", {}) or {}
+        except OSError:
+            logger.warning("launch_settings_file not readable: %s", source)
+            return
+        except yaml.YAMLError as exc:
+            logger.warning("launch_settings_file invalid YAML (%s): %s", source, exc)
+            return
+        adopted = 0
+        for name, entry in cfg.items():
+            if not isinstance(entry, dict):
+                continue
+            launch_entry = launch_models.get(name)
+            if not isinstance(launch_entry, dict):
+                continue
+            for field in _LAUNCH_SOURCED_FIELDS:
+                if field not in entry and field in launch_entry:
+                    entry[field] = launch_entry[field]
+                    adopted += 1
+        if adopted:
+            logger.info("Registry adopted %d launch fields from %s", adopted, source)
+
     def _load_config(self) -> dict:
         try:
             mtime = self.config_path.stat().st_mtime_ns
         except OSError:
             mtime = None
-        if mtime is not None and self._config_cache and self._config_cache[0] == mtime:
+        cache_key = (mtime, self._launch_settings_mtime())
+        if self._config_cache and self._config_cache[0] == cache_key:
             return self._config_cache[1]
         if not self.config_path.exists():
             logger.warning(f"Config not found at {self.config_path}")
             return {}
-        with open(self.config_path, "r") as f:
-            cfg = yaml.safe_load(f).get("models", {})
-        self._config_cache = (mtime, cfg)
+        with open(self.config_path, "r", encoding="utf-8") as f:
+            doc = yaml.safe_load(f) or {}
+        cfg = doc.get("models", {}) or {}
+        launch_source = doc.get("launch_settings_file")
+        if launch_source:
+            self._merge_launch_settings(cfg, str(launch_source))
+        self._config_cache = (cache_key, cfg)
         return cfg
 
     def _refresh_model_registry(self) -> None:
