@@ -10,6 +10,10 @@
 
 ## Scope and autonomy boundary
 
+Deployment, preset requirements and the reminder spec live in
+`docs/GUARDIAN_LOOP_HANDOFF.md` (moving the loop to another session,
+delivery verification, known traps).
+
 **In scope:** `m0nklabs/guardian-llmprovider-gateway` only — gateway core,
 cloud/local inference, capture, dashboard, config, and the caretaker
 (including its TTS/STT lifecycle and management wiring, which is part of
