@@ -59,6 +59,8 @@ models:
     brand: qwen
   Huihui-Qwen3.5-9B-abliterated:
     brand: qwen
+  qwen3.8-27b-turbofcfusion-mtp:
+    brand: qwen
 aliases:
   phi4: Phi-4-reasoning-plus
   gemma4: Huihui-gemma-4-26B-A4B-it-abliterated-Q8KV
@@ -70,6 +72,7 @@ aliases:
   qwen3.8-q8kv: qwen3.8-27b-q8kv
   qwen3.8-uncensored: qwen3.8-27b-uncensored-ymq
   qwen3.8-ymq: qwen3.8-27b-uncensored-ymq
+  qwen3.8-turbo-uncensored: qwen3.8-27b-turbofcfusion-mtp
   qwen3.8-pi: qwen3.8-27b-pi
   qwen3.8-swift: qwen3.8-27b-swift15
   qwen3.8-flash: qwen3.8-flash-next
