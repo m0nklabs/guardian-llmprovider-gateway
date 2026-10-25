@@ -133,7 +133,7 @@ Caretaker is in scope.
 | Task disappeared | Session archived? Archiving with active reminders is refused until they stop, and stopping deletes them |
 | Session will not resume | `systemctl --user status dsh-web-next`; `journalctl --user -u dsh-web-next -n 100` |
 | Run fired but did nothing | The session transcript of the bound session, then issue #30 |
-| Tools missing in a session | Preset is not `standard`/`ptc`/`cordis`, or the caller is a subagent | |
+| Tools missing in a session | Preset is not `standard`/`ptc`/`cordis`, or the caller is a subagent |
 
 ## 8. Definition of done for a deployment
 
