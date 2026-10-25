@@ -116,6 +116,10 @@ See `docs/ROADMAP.md` for definitions and compatibility boundaries.
   context.
 - `CLAUDE.md` and `.goosehints` are relative symlinks to this file. Keep hot
   instructions durable; place dated status and tool details in cold documents.
+- The nightly **guardian loop** (daily 04:00 UTC) follows `docs/GUARDIAN_LOOP.md`
+  and reports on issue #30. Its autonomy stops at merge: it remediates PRs,
+  requests `/review`, and works issues, but never merges, never pushes to
+  `main`, and never restarts Guardian or any systemd unit.
 - Reuse the organization-level self-hosted runner pool; never add a project
   runner. GPU jobs use `[self-hosted, Linux, gpu]` and
   `/home/flip/github-action-runners/bin/gpu-run.sh` so GPU work stays serial.
