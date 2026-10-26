@@ -14,6 +14,7 @@ models:
   openai/gpt-6.1-sol:
     context_window: 1050000
     max_tokens: 128000
+    reasoning_effort: high
   openai/gpt-6-astra:
     context_window: 1050000
     max_tokens: 128000
