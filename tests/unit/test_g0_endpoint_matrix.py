@@ -17,11 +17,13 @@ build here is "add or delete these rows", not "something changed".
 from __future__ import annotations
 
 import ast
+import importlib
 import inspect
 import re
 from pathlib import Path
 
 import pytest
+import starlette.routing
 
 from app import main as dashboard_module
 from app.proxy import server as proxy_module
@@ -32,10 +34,14 @@ TESTS_DIR = REPO_ROOT / "tests"
 
 PRIVILEGE_CLASSES = {"public", "client", "admin", "operator"}
 MOUNT_METHOD = "MOUNT"
+WEBSOCKET_METHOD = "WEBSOCKET"
+OTHER_METHOD = "OTHER"
 HEAD_METHOD = "HEAD"
 
 #: ``| 1 | proxy | GET | `/healthz` | `app/proxy/server.py:1200` | none | public | none |``
-_HANDLER_RE = re.compile(r"^`?(?P<file>[A-Za-z0-9_./-]+\.py):(?P<line>\d+)`?$")
+#: The line is optional only for framework-owned handlers; repo code stays pinned
+#: (enforced in ``test_every_row_is_classified_and_code_linked``).
+_HANDLER_RE = re.compile(r"^`?(?P<file>[A-Za-z0-9_./-]+\.py)(?::(?P<line>\d+))?`?$")
 _BACKTICKED_RE = re.compile(r"`([^`]+)`")
 _TOTAL_RE = re.compile(
     r"Route count:\s*(?P<total>\d+)\s*—\s*(?P<proxy>\d+)\s*proxy,\s*(?P<dashboard>\d+)\s*dashboard"
@@ -46,11 +52,27 @@ _UNCOVERED_HEADER_RE = re.compile(r"(?P<count>\d+) of the (?P<total>\d+) routes"
 # ── Route collection ───────────────────────────────────────────────────
 
 
+def _method_less_kind(route) -> str:
+    """Classify a route object that has no ``methods`` set.
+
+    Only a real ``Mount`` is a mount. Anything else (``WebSocketRoute`` today,
+    a future route type tomorrow) gets its own kind so that it surfaces as an
+    undocumented route instead of being silently filed as ``MOUNT``.
+    """
+    if isinstance(route, starlette.routing.Mount):
+        return MOUNT_METHOD
+    if isinstance(route, starlette.routing.WebSocketRoute):
+        return WEBSOCKET_METHOD
+    return OTHER_METHOD
+
+
 def _collect_routes(application) -> dict[tuple[str, str], object]:
     """Return ``{(METHOD, path): route}`` for one app.
 
     ``HEAD`` is folded into ``GET`` because Starlette adds it to every ``GET``
-    route; a ``Mount`` has no methods and is collected as one ``MOUNT`` entry.
+    route. Method-less routes are classified by ``_method_less_kind``: a
+    ``Mount`` becomes one ``MOUNT`` entry, a WebSocket route becomes
+    ``WEBSOCKET`` and an unknown method-less route becomes ``OTHER``.
     """
     collected: dict[tuple[str, str], object] = {}
     for route in application.routes:
@@ -59,7 +81,7 @@ def _collect_routes(application) -> dict[tuple[str, str], object]:
             continue
         methods = getattr(route, "methods", None)
         if not methods:
-            collected[(MOUNT_METHOD, path)] = route
+            collected[(_method_less_kind(route), path)] = route
             continue
         for method in set(methods) - {HEAD_METHOD}:
             collected[(method, path)] = route
@@ -197,6 +219,25 @@ def _handler_span(endpoint) -> tuple[str, int, int]:
     return _doc_relative(source_file), first_line, first_line + len(source_lines) - 1
 
 
+def _installed_module_file(relative: str) -> bool:
+    """True when ``<package>/<file>.py`` resolves inside an installed package.
+
+    Framework handlers are documented without a line number, so the row stays
+    valid across a dependency bump; this check keeps the module reference real.
+    """
+    parts = Path(relative).parts
+    if len(parts) < 2:
+        return False
+    try:
+        package = importlib.import_module(parts[0])
+    except ImportError:
+        return False
+    origin = getattr(package, "__file__", None)
+    if not origin:
+        return False
+    return Path(origin).parent.joinpath(*parts[1:]).is_file()
+
+
 # ── Tests ──────────────────────────────────────────────────────────────
 
 
@@ -265,22 +306,39 @@ def test_every_row_is_classified_and_code_linked(collected):
 
         match = _HANDLER_RE.match(row["handler"])
         if not match:
-            problems.append(f"{label}: handler {row['handler']!r} is not a 'file.py:line' reference")
+            problems.append(f"{label}: handler {row['handler']!r} is not a 'file.py[:line]' reference")
+            continue
+
+        documented_file = match.group("file")
+        documented_line = match.group("line")
+
+        if documented_line is None:
+            # Module-only linkage is reserved for framework code, so a dependency
+            # bump cannot turn this guard red over upstream line churn.
+            if (REPO_ROOT / documented_file).exists():
+                problems.append(
+                    f"{label}: repo handler {documented_file} must be pinned to a line "
+                    "('file.py:line'); module-only references are for framework code"
+                )
+            elif not _installed_module_file(documented_file):
+                problems.append(
+                    f"{label}: handler module {documented_file} does not resolve in any installed package"
+                )
             continue
 
         route = collected[key]
         endpoint = getattr(route, "endpoint", None)
         if endpoint is None:
-            target = REPO_ROOT / match.group("file")
+            target = REPO_ROOT / documented_file
             if not target.is_file():
-                problems.append(f"{label}: handler file {match.group('file')} does not exist")
+                problems.append(f"{label}: handler file {documented_file} does not exist")
             continue
 
         expected_file, first_line, last_line = _handler_span(endpoint)
-        documented_line = int(match.group("line"))
-        if match.group("file") != expected_file:
+        documented_line = int(documented_line)
+        if documented_file != expected_file:
             problems.append(
-                f"{label}: matrix points at {match.group('file')} but the registered "
+                f"{label}: matrix points at {documented_file} but the registered "
                 f"handler lives in {expected_file}"
             )
         elif not first_line <= documented_line <= last_line:
@@ -339,3 +397,29 @@ def test_uncovered_section_matches_none_rows():
     assert int(header.group("total")) == len(rows), (
         f"section states {header.group('total')} routes but the matrix has {len(rows)} rows"
     )
+
+
+def test_collect_routes_classifies_method_less_routes():
+    """A ``Mount`` is ``MOUNT``; a WebSocket route must not pose as one."""
+    from starlette.applications import Starlette
+    from starlette.routing import Mount, Route, WebSocketRoute
+
+    async def home(request):  # pragma: no cover - never invoked
+        return None
+
+    async def socket(websocket):  # pragma: no cover - never invoked
+        return None
+
+    synthetic = Starlette(
+        routes=[
+            Route("/home", home),
+            WebSocketRoute("/ws", socket),
+            Mount("/static", app=Starlette(routes=[])),
+        ]
+    )
+
+    assert set(_collect_routes(synthetic)) == {
+        ("GET", "/home"),
+        (WEBSOCKET_METHOD, "/ws"),
+        (MOUNT_METHOD, "/static"),
+    }

@@ -10,9 +10,10 @@ when this file and the code disagree.
 
 **Route count: 57 — 41 proxy, 16 dashboard.** One row per `(method, path)` of a
 registered route object; `HEAD` is folded into `GET` (Starlette adds it to every
-`GET` route) and a `Mount` counts as one `MOUNT` row. Both apps also register the
-four FastAPI documentation routes; they are listed because they are reachable,
-not because they belong to the Guardian API.
+`GET` route) and a method-less route is classified by kind: a `Mount` is one
+`MOUNT` row, a WebSocket route is `WEBSOCKET`, anything else is `OTHER`. Both apps
+also register the four FastAPI documentation routes; they are listed because they
+are reachable, not because they belong to the Guardian API.
 
 ## Reading the columns
 
@@ -36,17 +37,21 @@ not because they belong to the Guardian API.
     auth or wiring regression would not be caught by it.
   - `tests/integration/…` — live-service test, deselected by default; run with
     `-m integration` against a running Guardian.
-- **Handler** — the `def` line of the endpoint. The guard fails when a handler
-  moves out of the documented line range, so a stale row cannot survive.
+- **Handler** — for repo code, the `def` line of the endpoint (`file.py:line`);
+  the guard fails when a handler moves out of the documented line range, so a
+  stale row cannot survive. Framework-owned handlers carry the module only
+  (`fastapi/applications.py`), because pinning a line inside an installed
+  dependency would turn the guard red on a routine version bump; the guard still
+  checks that the module resolves in the installed package.
 
 ## Proxy surface — `app.proxy.server:app` (`:11434`)
 
 | # | Surface | Method | Path | Handler | Auth dependency | Privilege | Covering tests |
 |---|---------|--------|------|---------|-----------------|-----------|----------------|
-| 1 | proxy | GET | `/openapi.json` | `fastapi/applications.py:1083` | none | public | none |
-| 2 | proxy | GET | `/docs` | `fastapi/applications.py:1094` | none | public | none |
-| 3 | proxy | GET | `/docs/oauth2-redirect` | `fastapi/applications.py:1112` | none | public | none |
-| 4 | proxy | GET | `/redoc` | `fastapi/applications.py:1122` | none | public | none |
+| 1 | proxy | GET | `/openapi.json` | `fastapi/applications.py` | none | public | none |
+| 2 | proxy | GET | `/docs` | `fastapi/applications.py` | none | public | none |
+| 3 | proxy | GET | `/docs/oauth2-redirect` | `fastapi/applications.py` | none | public | none |
+| 4 | proxy | GET | `/redoc` | `fastapi/applications.py` | none | public | none |
 | 5 | proxy | POST | `/api/chat` | `app/proxy/server.py:1171` | `verify_api_key` | client | `tests/unit/test_model_switch_verification.py::test_ollama_chat_fails_closed_when_backend_serves_other_model`<br>`tests/unit/test_model_switch_verification.py::test_ollama_chat_same_model_reload_still_succeeds` |
 | 6 | proxy | POST | `/api/generate` | `app/proxy/server.py:1179` | `verify_api_key` | client | `tests/unit/test_model_switch_verification.py::test_ollama_generate_fails_closed_when_backend_serves_other_model` |
 | 7 | proxy | GET | `/api/tags` | `app/proxy/server.py:1191` | `verify_api_key` | client | `tests/integration/test_live_inference.py::TestRestartRace::test_api_tags` |
@@ -89,10 +94,10 @@ not because they belong to the Guardian API.
 
 | # | Surface | Method | Path | Handler | Auth dependency | Privilege | Covering tests |
 |---|---------|--------|------|---------|-----------------|-----------|----------------|
-| 1 | dashboard | GET | `/openapi.json` | `fastapi/applications.py:1083` | none | public | none |
-| 2 | dashboard | GET | `/docs` | `fastapi/applications.py:1094` | none | public | none |
-| 3 | dashboard | GET | `/docs/oauth2-redirect` | `fastapi/applications.py:1112` | none | public | none |
-| 4 | dashboard | GET | `/redoc` | `fastapi/applications.py:1122` | none | public | none |
+| 1 | dashboard | GET | `/openapi.json` | `fastapi/applications.py` | none | public | none |
+| 2 | dashboard | GET | `/docs` | `fastapi/applications.py` | none | public | none |
+| 3 | dashboard | GET | `/docs/oauth2-redirect` | `fastapi/applications.py` | none | public | none |
+| 4 | dashboard | GET | `/redoc` | `fastapi/applications.py` | none | public | none |
 | 5 | dashboard | MOUNT | `/static` | `app/main.py:73` | none | public | none |
 | 6 | dashboard | GET | `/` | `app/main.py:75` | none | public | none |
 | 7 | dashboard | GET | `/favicon.ico` | `app/main.py:79` | none | public | none |
