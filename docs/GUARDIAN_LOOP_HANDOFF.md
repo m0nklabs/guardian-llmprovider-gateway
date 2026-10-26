@@ -120,10 +120,11 @@ Caretaker is in scope.
   are not currently on a branch", easy to swallow when piping output). Push
   explicitly — `git push origin <sha>:refs/heads/<branch>` — and verify with
   `git ls-remote origin <branch>`.
-- **Untracked duplicates:** the procedure file also exists untracked in the
-  main checkout while it is still in review (PR #31). After that PR merges,
-  remove the untracked copies before pulling, otherwise `git merge` refuses
-  with "untracked working tree file would be overwritten".
+- **Untracked duplicates:** while these two files are still under review they
+  also exist untracked in the main checkout. After the PR that adds them
+  merges, remove the untracked copies before pulling, otherwise `git merge`
+  refuses with "untracked working tree file would be overwritten". The same
+  applies to any later revision of these files.
 
 ## 7. Where to look when something is wrong
 
