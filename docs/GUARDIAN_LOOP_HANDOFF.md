@@ -38,7 +38,7 @@ Exact reminder spec, verbatim (use this to re-create an identical task):
 ```json
 {
   "title": "Guardian loop — development run",
-  "prompt": "Guardian loop run. Read /home/flip/guardian-llmprovider-gateway/docs/GUARDIAN_LOOP.md and execute it end-to-end for today, exactly as written: preflight, open-PR remediation, open issues, at most one roadmap issue, then post the run report as a comment on tracking issue #30. Hard stops: never merge a PR, never push to main, never force-push, never approve, never restart Guardian or any systemd unit, never touch another repository.",
+  "prompt": "Guardian loop run. Read /home/flip/guardian-llmprovider-gateway/docs/GUARDIAN_LOOP.md and execute it end-to-end for this slot, exactly as written: preflight, open-PR remediation (merge only through the merge gate), open issues, at most one roadmap row, then post the run report as a comment on tracking issue #30. Standing objective: finish docs/ROADMAP.md. Hard stops: never approve a PR, never push to main, never force-push, never restart Guardian or any systemd unit (put needed restarts in the run report), never touch a repository other than guardian-llmprovider-gateway and caretaker-llamacpp.",
   "cron": { "expression": "0 4-22/6 * * *", "time_zone": "UTC" }
 }
 ```
@@ -98,12 +98,18 @@ delivered `21:25:22.402Z`, session replied within 53 s.
 ## 5. Autonomy boundary — do not re-derive it
 
 Single source of truth: `docs/GUARDIAN_LOOP.md`, "Scope and autonomy
-boundary". Summary: **everything except merge.** Never merge (the tool
-`mcp__github__merge_pull_request` is visible in the toolset and is
-forbidden), never approve, never push to `main`, never force-push, never
-close issues, **never restart Guardian or any systemd unit** (the loop's own
-model traffic runs through Guardian), never touch another repository.
-Caretaker is in scope.
+boundary". Summary as of 2026-10-27 (merge authority granted): the loop may
+**merge a PR, but only through the gate** — latest review at the merge head
+with no findings, CI green, every thread resolved, closing comment with the
+evidence. Squash only. It never approves a PR, never dismisses a review, never
+pushes to `main`, never force-pushes, never closes issues, **never restarts
+Guardian or any systemd unit** (its own model traffic runs through Guardian —
+it merges, gates and batches restarts, the operator executes them), and
+touches only two repositories: `guardian-llmprovider-gateway` and
+`caretaker-llamacpp`.
+
+The standing objective is to finish `docs/ROADMAP.md`; each run may deliver one
+roadmap row (issue → branch → PR → review → merge gate).
 
 ## 6. Traps worth knowing before you debug something twice
 
