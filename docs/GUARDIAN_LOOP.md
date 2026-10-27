@@ -1,12 +1,14 @@
-# Guardian Loop — nightly development procedure (cold file)
+# Guardian Loop — development procedure (cold file)
 
-> Executed by the daily reminder bound to the guardian-loop Session at
-> **04:00 UTC**. This file is the authoritative procedure: the reminder only
-> says "run the guardian loop", so a compacted or restored Session re-reads
-> this document and continues from here.
+> Executed by the cron reminder bound to the guardian-loop Session at
+> **04:00, 10:00, 16:00 and 22:00 UTC** (four runs a day, six hours apart).
+> This file is the authoritative procedure: the reminder only says "run the
+> guardian loop", so a compacted or restored Session re-reads this document
+> and continues from here.
 >
-> Operator decisions baked in (2026-10-25): autonomy **everything except
-> merge**; cadence **04:00 UTC**; scope **this repository only**.
+> Operator decisions baked in (2026-10-25, cadence raised 2026-10-27): autonomy
+> **everything except merge**; cadence **4×/day at 04:00, 10:00, 16:00, 22:00
+> UTC**; scope **this repository only**.
 
 ## Scope and autonomy boundary
 
@@ -26,7 +28,7 @@ Guardian). Anything else is out of scope, even when it looks related.
 - apply correct review suggestions, reply on review threads with evidence;
 - post `/review` from the human `gh` account (`m0nk111`) after each push;
 - open issues that describe verified defects or the next roadmap step;
-- comment the nightly report on the tracking issue.
+- comment the run report on the tracking issue.
 
 **Not granted (hard stops):**
 
@@ -47,9 +49,10 @@ Guardian). Anything else is out of scope, even when it looks related.
    cert/key pair rule, private keys `0600`, keys only in `.env` or
    `config/guardian.keys.yaml`.
 
-## Budget per night
+## Budget per run
 
-Bounded so a run stays reviewable and cheap:
+Bounded so a run stays reviewable and cheap (the budget is **per run**, and
+runs do not accumulate it — each of the four daily runs starts fresh):
 
 - **all** open-PR remediation (batched: one coherent tested push per PR head);
 - **at most one** new issue implementation, from a branch off `origin/main`;
@@ -57,7 +60,8 @@ Bounded so a run stays reviewable and cheap:
   issue/PR at hand.
 
 Stop and report when the budget is spent. A finished short run is better than
-a long speculative one.
+a long speculative one. When nothing needs doing, say so and stop: four runs a
+day makes a no-op run the normal case on a quiet repository.
 
 ## Phase 0 — Preflight (evidence only, no writes)
 
@@ -144,11 +148,11 @@ run — one issue maximum. Skip when phases 1–2 already consumed the budget.
 
 ## Phase 4 — Report
 
-Post one comment on the tracking issue **Guardian loop — nightly run log**
+Post one comment on the tracking issue **Guardian loop — run log**
 (tracking issue **#30**; `gh issue comment 30 --body-file <tmp>`):
 
 ```markdown
-## Run <YYYY-MM-DD> 04:00 UTC
+## Run <YYYY-MM-DD HH:MM> UTC
 - window: <start> → <end> UTC
 - PRs: #<n> <one line: what changed / settled / blocked> (or "none open")
 - issues: #<n> <state after the run> (or "no executable issue")
