@@ -141,10 +141,20 @@ When a PR is settled, walk the **merge gate** (four conditions, at the current
 head SHA) and record it in one closing comment: what changed, the evidence, and
 `Merge gate: passed` (or which condition is unmet and why).
 
-Gate passed → merge it: `gh pr merge <N> --squash` (with a subject naming the
-PR), then **verify `main`**: fetch, and run the relevant checks on the merged
-head (the repo suite for code, the guard tests for docs). If the merged head is
-red, fixing it is the next run's first task — report it as such.
+Gate passed → merge it **pinned to the SHA you verified**:
+
+```bash
+head=$(gh pr view <N> --json headRefOid --jq .headRefOid)
+gh pr merge <N> --squash --match-head-commit "$head" --subject "<what> (#<N>)"
+```
+
+`--match-head-commit` makes the merge fail if anything was pushed between the
+gate walk and the merge; if it fails that way, re-walk the gate on the new head
+(fresh review, fresh CI) instead of retrying blindly.
+
+Then **verify `main`**: fetch, and run the relevant checks on the merged head
+(the repo suite for code, the guard tests for docs). If the merged head is red,
+fixing it is the next run's first task — report it as such.
 
 Gate not passed → leave it open for the operator, with the failing condition
 named. Never merge on the strength of an older review, never merge with an
