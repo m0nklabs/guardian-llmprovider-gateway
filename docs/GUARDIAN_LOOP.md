@@ -141,16 +141,22 @@ When a PR is settled, walk the **merge gate** (four conditions, at the current
 head SHA) and record it in one closing comment: what changed, the evidence, and
 `Merge gate: passed` (or which condition is unmet and why).
 
-Gate passed → merge it **pinned to the SHA you verified**:
+Gate passed → merge **the exact SHA you verified**, in this order:
 
 ```bash
-head=$(gh pr view <N> --json headRefOid --jq .headRefOid)
-gh pr merge <N> --squash --match-head-commit "$head" --subject "<what> (#<N>)"
+# 1. pin the candidate FIRST
+verified=$(gh pr view <N> --json headRefOid --jq .headRefOid)
+# 2. verify THAT sha: the latest review must name it (`head \`$verified\``),
+#    every check in `gh pr checks <N>` must pass for it, every thread resolved
+# 3. merge that sha — never re-read the head in between
+gh pr merge <N> --squash --match-head-commit "$verified" --subject "<what> (#<N>)"
 ```
 
-`--match-head-commit` makes the merge fail if anything was pushed between the
-gate walk and the merge; if it fails that way, re-walk the gate on the new head
-(fresh review, fresh CI) instead of retrying blindly.
+The order matters: reading the head *after* the gate walk would pin whatever
+arrived in between, and `--match-head-commit` would then happily accept an
+unverified commit. Pin → verify → merge. If `--match-head-commit` rejects, the
+head moved: walk the gate again from step 1 (fresh review, fresh CI) instead of
+retrying blindly.
 
 Then **verify `main`**: fetch, and run the relevant checks on the merged head
 (the repo suite for code, the guard tests for docs). If the merged head is red,
