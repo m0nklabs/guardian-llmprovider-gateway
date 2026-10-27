@@ -321,11 +321,14 @@ verified by reading the code:
 
 ### 4.1 Flat authentication, one attribute
 
-There is **one** authentication mechanism for all 57 routes across both apps:
-the `verify_api_key` dependency (`app/proxy/auth.py:411`), used 45 times
-(`grep -c 'Depends(verify_api_key)'` over `app/`), plus the routes the matrix
-lists as `none`. It returns the key's `name` as `client_id` and puts the whole
-key entry on `request.state`.
+There is **one** authentication mechanism for every protected route of both
+apps: the `verify_api_key` dependency (`app/proxy/auth.py:411`). It appears on
+45 dependency lines in `app/` — 36 in `app/proxy/server.py`, 9 in
+`app/main.py` (`grep -rn 'Depends(verify_api_key)' app/`) — which is an
+occurrence count, not a route count: the matrix's 57 rows are the route
+authority, and the routes it lists as `none` are the ones without the
+dependency. `verify_api_key` returns the key's `name` as `client_id` and puts
+the whole key entry on `request.state`.
 
 A key entry is normalised to exactly four fields — `name`, `created_at`,
 `metadata`, `cloud_gateway_access` (`app/proxy/auth.py:_normalize_key_entry`,
