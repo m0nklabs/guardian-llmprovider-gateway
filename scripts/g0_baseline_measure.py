@@ -73,15 +73,18 @@ def call(url: str, key: str, payload: dict | None = None, method: str = "POST") 
     started = time.perf_counter()
     try:
         with urllib.request.urlopen(req, timeout=1800) as resp:
-            raw, status, headers = resp.read(), resp.status, dict(resp.headers)
+            raw, status, headers = resp.read(), resp.status, resp.headers
     except urllib.error.HTTPError as exc:  # an HTTP error is still a measurement
-        raw, status, headers = exc.read(), exc.code, dict(exc.headers or {})
+        raw, status, headers = exc.read(), exc.code, exc.headers or {}
     elapsed = time.perf_counter() - started
     try:
         parsed: object = json.loads(raw)
     except ValueError:
         parsed = {"_raw": raw[:400].decode("utf-8", "replace")}
-    return status, parsed, elapsed, headers
+    # Header names are case-insensitive on the wire (uvicorn sends lowercase);
+    # normalise once here so callers never silently read None.
+    normalised = {str(name).lower(): value for name, value in (headers or {}).items()}
+    return status, parsed, elapsed, normalised
 
 
 def summarise(rows: list[dict]) -> dict:
@@ -127,8 +130,8 @@ def run_series(args: argparse.Namespace) -> int:
             "i": index,
             "status": status,
             "latency_ms": round(elapsed * 1000.0, 2),
-            "request_id": headers.get("X-Request-Id"),
-            "queue_wait_ms": headers.get("X-Queue-Wait-Ms"),
+            "request_id": headers.get("x-request-id"),
+            "queue_wait_ms": headers.get("x-queue-wait-ms"),
             **detail,
         }
         rows.append(row)
@@ -158,8 +161,8 @@ def run_queue_probe(args: argparse.Namespace) -> int:
         results[label] = {
             "status": status,
             "elapsed_ms": round(elapsed * 1000.0, 2),
-            "request_id": headers.get("X-Request-Id"),
-            "queue_wait_ms": headers.get("X-Queue-Wait-Ms"),
+            "request_id": headers.get("x-request-id"),
+            "queue_wait_ms": headers.get("x-queue-wait-ms"),
             "detail": (parsed.get("detail") or parsed.get("error")) if isinstance(parsed, dict) else str(parsed)[:300],
         }
 
@@ -167,7 +170,41 @@ def run_queue_probe(args: argparse.Namespace) -> int:
         _, parsed, _, _ = call(f"{args.base}/v1/queue/status", key, None, method="GET")
         return parsed if isinstance(parsed, dict) else {}
 
+    # This probe cancels a queued request, so it must never guess which one.
+    # The queue is owner-scoped per key: `your_requests` is the only trustworthy
+    # correlation surface, and it is used exclusively. If this key already owns a
+    # queued or active request, or the queue is busy, we refuse to start — the
+    # alternative is cancelling somebody else's production work.
     before = status()
+    if before.get("active_count") or before.get("waiting"):
+        print(
+            "queue not idle before the probe (active_count="
+            f"{before.get('active_count')}, waiting={len(before.get('waiting') or [])}); "
+            "refusing to enqueue and cancel — rerun when Guardian is idle",
+            file=sys.stderr,
+        )
+        return 1
+
+    # Mirrors app/proxy/queue.py:ACTIVE_STATES — "running"/"cancelling" are the
+    # active states; the queue has no plain "active" status.
+    active_states = {"running", "cancelling"}
+
+    def own(status_payload: dict, wanted: str) -> list[dict]:
+        """Owner-scoped entries in the given state, newest first."""
+        return [
+            item
+            for item in (status_payload.get("your_requests") or [])
+            if item.get("status") == wanted
+        ]
+
+    def own_active(status_payload: dict) -> list[dict]:
+        """Owner-scoped entries currently holding or cancelling the slot."""
+        return [
+            item
+            for item in (status_payload.get("your_requests") or [])
+            if item.get("status") in active_states
+        ]
+
     first = threading.Thread(target=chat, args=("A", 256), daemon=True)
     first.start()
 
@@ -175,12 +212,14 @@ def run_queue_probe(args: argparse.Namespace) -> int:
     active = {}
     while time.monotonic() < deadline:
         active = status()
-        if active.get("active_count", 0) >= 1:
+        if len(own_active(active)) == 1:
             break
         time.sleep(0.02)
     else:
         print("request A never became active", file=sys.stderr)
         return 2
+
+    a_id = own_active(active)[0]["request_id"]
 
     second = threading.Thread(target=chat, args=("B", 32), daemon=True)
     second.start()
@@ -189,31 +228,57 @@ def run_queue_probe(args: argparse.Namespace) -> int:
     queued = {}
     while time.monotonic() < deadline:
         queued = status()
-        if queued.get("waiting"):
+        queued_own = [item for item in own(queued, "queued") if item["request_id"] != a_id]
+        if queued_own:
             break
         time.sleep(0.02)
     else:
-        print("request B never appeared in the queue", file=sys.stderr)
+        print("request B never appeared in this key's queue", file=sys.stderr)
         return 3
 
-    request_id = queued["waiting"][0]["request_id"]
+    if len(queued_own) != 1:
+        # Two entries of our own key queued: B's identity is ambiguous, and
+        # cancelling the wrong one would destroy a real request.
+        print(
+            "ambiguous queue correlation: expected exactly one queued request of this key, got "
+            f"{[item['request_id'] for item in queued_own]}; no DELETE issued",
+            file=sys.stderr,
+        )
+        second.join(timeout=args.timeout)
+        first.join(timeout=args.timeout)
+        return 4
+
+    request_id = queued_own[0]["request_id"]
     del_status, del_body, _, _ = call(f"{args.base}/v1/queue/requests/{request_id}", key, None, method="DELETE")
 
     second.join(timeout=args.timeout)
     first.join(timeout=args.timeout)
     after = status()
 
+    # Post-condition: the cancellation must be observable on request B itself.
+    b_result = results.get("B") or {}
+    b_cancelled = b_result.get("status") == 499 or "cancel" in str(b_result.get("detail") or "").lower()
+    if not b_cancelled:
+        print(
+            "post-condition failed: request B did not report cancellation "
+            f"(status={b_result.get('status')}, detail={b_result.get('detail')!r}); "
+            "the cancelled id may not have been B",
+            file=sys.stderr,
+        )
+
     print(json.dumps({
         "status_before": before,
         "status_with_queued_request": queued,
         "cancelled_request_id": request_id,
+        "active_request_id": a_id,
+        "cancellation_correlated": b_cancelled,
         "delete_status": del_status,
         "delete_body": del_body,
         "request_A": results.get("A"),
         "request_B": results.get("B"),
         "status_after": after,
     }, indent=2))
-    return 0
+    return 0 if b_cancelled else 5
 
 
 def main(argv: list[str] | None = None) -> int:

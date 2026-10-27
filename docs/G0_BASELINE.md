@@ -255,6 +255,21 @@ Two behaviours worth recording as baseline facts:
   key queues even when `max_concurrent` would allow more
   (`_owner_has_active_request`, `app/proxy/queue.py:181-190,249-257`).
 
+**Harness hardening (review follow-up, same PR).** The probe above was reworked
+so it can never cancel a stranger's work: it refuses to start unless the queue
+is idle, correlates B **only** through the owner-scoped `your_requests` list,
+aborts without issuing a `DELETE` when that key owns more than one queued
+request, and treats "B did not report `499 request_cancelled`" as a failed
+probe (`exit 5`) rather than evidence. Re-run on 2026-10-27T23:41Z confirmed the
+correlation end to end: `active_request_id=0d7f213c…`,
+`cancelled_request_id=fc7daa26…`, `cancellation_correlated: true`, A finished
+`200` in 5772.79 ms, queue back to `0/0`.
+
+Response headers are also normalised to lower case in the harness before use
+(uvicorn sends `x-request-id` / `x-queue-wait-ms`; the earlier `X-Request-Id`
+lookups silently produced `null`). Verified live: a fresh chat sample now
+records `request_id` + `queue_wait_ms` (`0`) instead of two nulls.
+
 ### 2.5 Capacity statement
 
 | Bound | Config key → live value | What was measured |
