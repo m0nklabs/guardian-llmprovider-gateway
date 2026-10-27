@@ -4,12 +4,16 @@ For client-side integration patterns, queue ownership rules, and recommended
 error handling, start with [CLIENT_INTEGRATION.md](CLIENT_INTEGRATION.md). This
 document stays focused on the raw surface contract.
 
+Per-route linkage (handler, auth dependency, privilege class, covering test) for
+every registered route is in [G0_ENDPOINT_AUTH_MATRIX.md](G0_ENDPOINT_AUTH_MATRIX.md);
+`tests/unit/test_g0_endpoint_matrix.py` keeps the two in sync.
+
 ## Ports and Auth Boundaries
 
 | Port | Surface | Auth in current code |
 | --- | --- | --- |
-| `11434` | Guardian proxy and control plane | Required for everything except `/healthz` and `/metrics` |
-| `11437` | Dashboard UI and stats API | No auth |
+| `11434` | Guardian proxy and control plane | Required except `/healthz`, `/metrics` and the FastAPI docs routes (`/docs`, `/redoc`, `/openapi.json`, `/docs/oauth2-redirect`) |
+| `11437` | Dashboard UI and stats API | UI assets are unauthenticated; every `/api/*` route requires a Bearer key |
 | `11440` | Raw `llama-server` backend | Private Guardian-managed backend |
 
 ## Authentication
