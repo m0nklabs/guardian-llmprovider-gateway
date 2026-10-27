@@ -14,6 +14,7 @@ import os
 import time
 from dataclasses import replace
 from pathlib import Path
+from typing import Callable
 from unittest.mock import patch
 
 import pytest
@@ -33,6 +34,64 @@ def _read_active_text(active: Path) -> str:
     from app.capture.gzip_reader import read_all_text
 
     return read_all_text(active)
+
+
+def _active_contains(active: Path, needle: str) -> bool:
+    """True when the active WAL currently contains ``needle``.
+
+    A missing active file reads as "not yet written" — after a rotation the
+    new active file only appears when the writer opens it again.
+    """
+    try:
+        return needle in _read_active_text(active)
+    except OSError:
+        return False
+
+
+async def _wait_until(
+    predicate: Callable[[], bool],
+    *,
+    message: str,
+    timeout: float = 10.0,
+    interval: float = 0.01,
+) -> None:
+    """Poll ``predicate`` until true, failing after a bounded deadline.
+
+    The writer drains the sink on its own task: one ``asyncio.to_thread`` hop
+    plus an ``fsync`` per record, so "push events, then sleep N ms" bets on
+    scheduler and disk speed. That bet lost once on ``python-ci`` (PR #39:
+    ``test_manual_rotate_opens_new_active`` asserted on a batch that had not
+    been fsynced yet). Polling the observable state is deterministic on a
+    slow runner and returns immediately on a fast one.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        if predicate():
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"timed out after {timeout:g}s waiting for: {message}")
+        await asyncio.sleep(interval)
+
+
+async def _wait_for_records(
+    writer: CaptureWALWriter,
+    active: Path,
+    needle: str,
+    *,
+    message: str,
+) -> None:
+    """Wait until ``needle`` is in the active file AND the writer accounted bytes.
+
+    ``rotate()`` refuses to rotate while ``_active_file_size == 0``, and the
+    size counter is bumped *after* ``fsync()`` — later than the bytes become
+    visible through a read. Waiting only for file content can therefore call
+    ``rotate()`` in the window between "record flushed" and "size counted",
+    which is how the pre-fix tests failed on a loaded runner.
+    """
+    await _wait_until(
+        lambda: writer._active_file_size > 0 and _active_contains(active, needle),
+        message=message,
+    )
 
 
 def _append_partial_line(active: Path, text: str) -> None:
@@ -320,7 +379,12 @@ class TestWALWriterRotation:
         await writer.start()
         for i in range(10):
             sink.try_put(CaptureEvent(data={"seq": i, "data": "x" * 50}))
-        await asyncio.sleep(0.2)
+        await _wait_for_records(
+            writer,
+            Path(config.capture_root) / ACTIVE_FILENAME,
+            '"seq":9',
+            message="the pre-rotation batch to be fsynced and accounted",
+        )
 
         rotated = writer.rotate()
         assert rotated is not None
@@ -361,7 +425,12 @@ class TestWALWriterRotation:
         # Write some events to have content
         for i in range(10):
             sink.try_put(CaptureEvent(data={"seq": i, "data": "x" * 50}))
-        await asyncio.sleep(0.2)
+        await _wait_for_records(
+            writer,
+            Path(config.capture_root) / ACTIVE_FILENAME,
+            '"seq":9',
+            message="the pre-rotation batch to be fsynced and accounted",
+        )
 
         rotated = writer.rotate()
         assert rotated is not None
@@ -385,17 +454,31 @@ class TestWALWriterRotation:
         await writer.start()
         for i in range(10):
             sink.try_put(CaptureEvent(data={"seq": i, "data": "x" * 50}))
-        await asyncio.sleep(0.2)
+
+        # rotate() only rotates (and re-opens the active file) when bytes have
+        # been written, so wait for the first batch to be fsynced rather than
+        # guessing that 200 ms is enough.
+        root = Path(config.capture_root)
+        active = root / ACTIVE_FILENAME
+        await _wait_for_records(
+            writer,
+            active,
+            '"seq":9',
+            message="the pre-rotation batch to be fsynced and accounted",
+        )
 
         writer.rotate()
 
         # Write more events — they should go to a new active file
         for i in range(5):
             sink.try_put(CaptureEvent(data={"seq": 100 + i, "data": "y" * 50}))
-        await asyncio.sleep(0.2)
 
-        root = Path(config.capture_root)
-        active = root / ACTIVE_FILENAME
+        # Bounded poll for the post-rotation batch instead of a fixed sleep.
+        await _wait_until(
+            lambda: _active_contains(active, '"seq":100'),
+            message="the post-rotation batch to be written to the new active file",
+        )
+
         assert active.exists()
         active_content = _read_active_text(active)
         assert '"seq":100' in active_content or '"seq": 100' in active_content
@@ -875,7 +958,15 @@ class TestWALWriterCrashRecovery:
         """Rotation sequence persists across restarts so file names don't collide."""
         await writer.start()
         sink.try_put(CaptureEvent(data={"seq": 1, "event_type": "request_received"}))
-        await asyncio.sleep(0.1)  # Let the writer consume the event
+        # Wait until the writer fsynced the record: rotate() would otherwise
+        # short-circuit on an empty active file and return None (the same
+        # timing race that failed test_manual_rotate_opens_new_active).
+        await _wait_for_records(
+            writer,
+            tmp_capture_root / ACTIVE_FILENAME,
+            '"seq":1',
+            message="the first record to be fsynced and accounted before the first rotation",
+        )
         # Force a rotation to increment rotation_seq
         path = writer.rotate()
         assert path is not None, "rotate() should return the rotated file path"
@@ -890,7 +981,12 @@ class TestWALWriterCrashRecovery:
         # Next rotation should use the incremented seq
         await writer2.start()
         sink2.try_put(CaptureEvent(data={"seq": 2, "event_type": "request_received"}))
-        await asyncio.sleep(0.1)
+        await _wait_for_records(
+            writer2,
+            tmp_capture_root / ACTIVE_FILENAME,
+            '"seq":2',
+            message="the post-restart record to be fsynced and accounted before the second rotation",
+        )
         result = writer2.rotate()
         assert result is not None
         await writer2.stop()
@@ -1149,7 +1245,12 @@ class TestWALWriterLegacyMigration:
         # never appended to, so the plain active file takes over.
         assert not Path(legacy).exists(), "legacy active file must be migrated away"
         sink.try_put(CaptureEvent(data={"seq": 1}))
-        await asyncio.sleep(0.2)
+        await _wait_for_records(
+            writer,
+            tmp_capture_root / ACTIVE_FILENAME,
+            '"seq":1',
+            message="the record to be fsynced and accounted before the manual rotation",
+        )
         rotated = writer.rotate()
         await writer.stop()
 
