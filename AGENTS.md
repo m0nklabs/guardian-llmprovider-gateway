@@ -118,9 +118,13 @@ See `docs/ROADMAP.md` for definitions and compatibility boundaries.
   instructions durable; place dated status and tool details in cold documents.
 - The **guardian loop** runs **four times a day** (cron `0 4-22/6 * * *`:
   04:00, 10:00, 16:00, 22:00 UTC) and follows `docs/GUARDIAN_LOOP.md`, reporting
-  on issue #30. Its autonomy stops at merge: it remediates PRs, requests
-  `/review`, and works issues, but never merges, never pushes to `main`, and
-  never restarts Guardian or any systemd unit.
+  on issue #30; its standing objective is finishing `docs/ROADMAP.md`. Autonomy
+  runs **up to and including merge, but only through the merge gate**: latest
+  review at the merge head with no findings, CI green, every thread resolved,
+  a closing comment with the evidence, squash only. It never approves a PR,
+  never pushes to `main`, never force-pushes, and never restarts Guardian or
+  any systemd unit — merged work that needs a restart goes into a batch the
+  operator executes. In scope: this repo plus `caretaker-llamacpp`.
 - Reuse the organization-level self-hosted runner pool; never add a project
   runner. GPU jobs use `[self-hosted, Linux, gpu]` and
   `/home/flip/github-action-runners/bin/gpu-run.sh` so GPU work stays serial.
