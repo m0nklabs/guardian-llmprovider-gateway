@@ -59,10 +59,17 @@ another session's task. Cross-session management is **GUI-only**.
    session): *Automation tasks* → *Guardian loop — nightly development run* →
    *Automation task actions* → *Delete task* → *Confirm deletion*. The notice
    must read `Task deleted.`
-4. **Verify there is exactly one** daily task: the *Automation tasks* list
-   shows one `Daily at 04:00` row, and
-   `python3 -c "import json;print(len(json.load(open('/home/flip/.dsh-next/storages/schedule.json'))['tables']['tasks']))"`
-   prints `1`.
+4. **Verify there is exactly one daily task for this loop**: the *Automation
+   tasks* list shows one `Daily at 04:00` row, and this prints `1`:
+
+   ```bash
+   python3 -c "import json;t=json.load(open('/home/flip/.dsh-next/storages/schedule.json'))['tables']['tasks'];print(sum(1 for v in t.values() if v['record'].get('kind')=='daily' and v['record'].get('title','').startswith('Guardian loop')))"
+   ```
+
+   `tables.tasks` is a per-host mapping, not a per-session list: it also holds
+   the other loops' daily tasks and any delivered one-shot test task (those
+   stay stored as `inactive` until deleted), so a raw `len()` never proved
+   anything about *this* loop. Filter on `kind == "daily"` and the task title.
 
 Do **not** run step 2 and skip step 3: two active daily tasks mean two
 concurrent nightly runs on the same repo.
