@@ -133,7 +133,7 @@ design in `AGENTS.md` ("TLS: nginx stream TLS preread multiplexes both
 | --- | --- |
 | Authenticates | `Authorization: Bearer ${CARETAKER_KEY}` on all three control endpoints. Anchor: `app/gateway/caretaker_client.py:14-17` (`POST /ensure`, `POST /unload`, `GET /status`), key resolution `:449` (env-only, `CARETAKER_KEY`, **no YAML fallback**), verdict confirmed live: `curl http://127.0.0.1:11441/status` without a key → `401`. |
 | Plaintext | Yes — plain HTTP on loopback. `management_url: http://127.0.0.1:11441` (`config/providers/ai-kvm2-local.settings.yaml:9`). The client *refuses* to send the key over cleartext to a non-loopback, non-own-host URL: `caretaker_client.py:455-459`. |
-| Reachable if compromised | **[judgement]** Lifecycle control of the shared GPU: load/switch/unload any registered model, i.e. denial of service against every Guardian client and VRAM eviction of co-tenant workloads. It cannot read prompt data. |
+| Reachable if compromised | **[judgement]** Possession of `CARETAKER_KEY` permits lifecycle control of the shared GPU: load/switch/unload any registered model, i.e. denial of service against every Guardian client and VRAM eviction of co-tenant workloads. The control API does not expose prompt data. A compromised caretaker **process**, however, runs as `flip` — the same Unix user as Guardian (`User=flip` in both units, verified live via `ps -o user`) — so it can also read Guardian's credentials and capture data that `flip` can read; it is not confined to the control API. |
 | Anchor | `caretaker_client.py:449,455-459`; unit `caretaker-llamacpp.service` (`EnvironmentFile=/etc/caretaker/caretaker.env`, `User=flip`). |
 
 ### H6 — Guardian → LAN provider host (192.168.1.245)
@@ -355,7 +355,7 @@ rows — link to them.
 | **Any valid key** ("client" in intent) | all 41 proxy routes and all 16 dashboard routes except the `public` ones: inference (local *and* cloud, subject to `cloud_gateway_access`), model discovery, queue status/cancel, `/admin/load`, `/admin/unload`, `/api/config/reload`, `/api/keys` (mint), `/api/capture/*`, `/api/scaler/*`, `/api/session/*`, `/api/crashes`, `/api/status` | nothing on Guardian's surface is held back |
 | **Key with `cloud_gateway_access: false`** | local inference and every local/admin/operator route | cloud models: hidden from `/v1/models` and rejected on routing (`routing.py:100`) — **unless** it mints a new key (B-08) |
 | **Holder of `CARETAKER_KEY`** | caretaker `/ensure`, `/unload`, `/status` (`:11441`) | prompt data |
-| **Host-local process** | `:11440` unauthenticated inference; `:11441` gated by the caretaker key; `.env`, `config/guardian.keys.yaml`, the capture WAL | — |
+| **Host-local process** (filesystem access depends on Unix identity) | `:11440` unauthenticated inference; `:11441` only with the caretaker key. Processes running as `flip`, or otherwise authorized by Unix DAC, can also read the applicable credentials and the capture files. | files denied by Unix DAC (`0600` key store, `0640` WAL, `0750` capture dir); caretaker operations without its key |
 
 ### 4.3 Where a compromise escalates
 
@@ -370,7 +370,9 @@ rows — link to them.
 3. **Client key → cloud spend.** With `cloud_gateway_access` true (the default,
    and mintable — B-08) a client reaches every cloud model the operator has
    credentials for.
-4. **Unauthenticated LAN host → local backend.** `:11440` needs no key (B-01).
+4. **Unauthenticated host-local process → local backend.** `:11440` needs no
+   key (B-01); this bypass requires access to the host network namespace, not
+   merely LAN connectivity.
 5. **nginx/host compromise → everything.** Plaintext on the `:11436` path
    (H2), `.env` and the key store readable as `flip` (H9).
 
@@ -479,6 +481,7 @@ UTC. No daemon was POSTed to, nothing was restarted, no config was changed.
 | nginx mux, loopback-http, dashboard blocks (repo + rendered) | `cat -n deploy/nginx/*.conf`; `nginx -T` (rendered config dump); direct read of `/etc/nginx/sites-enabled/*` |
 | Listener map, `:11440` absent, `0.0.0.0:11434` | `ss -ltn` (+ `-p` for owner pids) |
 | TLS host/port, cert/key/USMask | `systemctl cat` + drop-in read; `/proc/188579/environ`; `openssl s_client`; `ls -l`; three-way `md5sum` of the cert |
+| Service users — Guardian **and** caretaker both run as `flip` | `systemctl cat` `User=` on both units; `ps -o user -p 188579,2032300` |
 | Guardian bind logic, dashboard loopback, TLS pair | `app/main.py:320-345,381` read |
 | `verify_api_key`, key sources, store, fail-closed load, `cloud_gateway_access` default | `app/proxy/auth.py` read (221-234, 323-336, 358-370, 405, 411) |
 | Key minting / listing | `app/gateway/admin_api.py:97-129`, `app/proxy/server.py:1389-1399` |
