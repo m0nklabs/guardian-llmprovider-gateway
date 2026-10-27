@@ -3,7 +3,7 @@
 Baseline required by `docs/ROADMAP.md` §4 G0 and backlog row G0-02
 (`docs/ROADMAP.md:334`), reviewed together with the endpoint/policy matrix from
 G0-01 ([`docs/G0_ENDPOINT_AUTH_MATRIX.md`](G0_ENDPOINT_AUTH_MATRIX.md)). It is
-the reference G1 ("G1-01 authorization/admin isolation", "G1-02
+the baseline that G1 ("G1-01 authorization/admin isolation", "G1-02
 destination/credential enforcement") is checked against, so a reviewer can tell
 a new hole from a documented one.
 
