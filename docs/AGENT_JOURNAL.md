@@ -495,3 +495,31 @@ Carry-forward per nog-OPEN item (essentie + bewijs → voltekst in `docs/AGENT_J
   is the dual-binary fallback.
 - Measurement caveat: a concurrent CUDA build (sm_120a) skewed early tok/s
   readings (1.28-1.86); quiet-host figure is 5.72.
+
+## 2026-10-25 — guardian loop ingericht (nightly, 04:00 UTC)
+
+- **Wat:** dagelijkse autonome ontwikkelrun ("guardian loop") i.p.v. ad-hoc
+  sessies. Trigger = dsh Automation task
+  `schedule-9ddb2f08-3237-4b56-bb6c-69b4f0dd137c` (daily `04:00:00`, zone
+  `UTC`) gebonden aan loop-sessie `session-290d375d-726c-4871-9820-5105c9b2d80e`
+  in workspace `/home/flip/guardian-llmprovider-gateway`. Procedure:
+  `docs/GUARDIAN_LOOP.md`; rapportage als comment op issue #30.
+- **Autonomie (operator-besluit):** alles behalve merge. Geen merge, geen
+  approve, geen push naar `main`, geen force-push, geen issue-sluiting, geen
+  herstart van Guardian of enige systemd-unit (de loop draait zelf dóór
+  Guardian), geen andere repo's. Caretaker valt binnen scope.
+- **Waarom geen systemd-timer:** de dsh Automation-task overleeft host-restarts,
+  is zichtbaar/bestuurbaar in de GUI en levert een follow-up message in de
+  eigen sessie; een timer zou een tweede, onzichtbare sessie opzetten.
+- **Verified (niet aangenomen):** levering end-to-end getest met een
+  wegwerp-reminder (`after_seconds` 120) → `deliveryHistory.deliveredAt`
+  gevuld, sessie-antwoord `LOOP-DELIVERY-OK`, daarna verwijderd. Alleen de
+  dagelijkse taak resteert.
+- **Valkuil voor de volgende sessie:** de werkboom van de operator is vaak
+  dirty (nu: `config/global.settings.yaml`, `docs/FLASH_NEXT_INTEGRATION_SPEC.md`).
+  De loop stopt daar niet op — hij noteert de dirty paden, raakt ze nooit aan
+  en staget alleen expliciete paden (nooit `git add -A`/`commit -a`/`stash`).
+- **Preset-les:** de schedule-tools (`schedule_create` e.d.) zitten alleen in
+  de presets `standard`, `ptc` en `cordis`; het custom preset "Context Regime"
+  mount ze niet. Een reminder maken kan alleen vanuit een sessie op zo'n
+  preset — de Automation-tasks-pagina heeft bewust géén aanmaakformulier.
