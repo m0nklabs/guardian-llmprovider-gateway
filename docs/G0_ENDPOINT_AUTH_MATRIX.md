@@ -113,11 +113,14 @@ are reachable, not because they belong to the Guardian API.
 
 ## Uncovered routes
 
-34 of the 57 routes have no test that invokes them. Eleven of those are
-framework surfaces (the four FastAPI docs routes per app, the `/static` mount,
-`/` and `/favicon.ico`), leaving **23 app-owned routes without route-level
-coverage** — the G1 test backlog. The guard keeps this list in sync with the
-`none` cells above.
+34 of the 57 routes list no test at all. Eleven of those are framework
+surfaces (the four FastAPI docs routes per app, the `/static` mount, `/` and
+`/favicon.ico`), leaving **23 app-owned routes with no listed test**. On top of
+those, **4 app-owned routes are covered only at delegate level** (`†`): their
+tests call the `app.gateway.*` implementation, never the handler, so a
+route-level auth or wiring regression slips through. That makes
+**27 app-owned routes without route-level coverage** — the G1 test backlog. The
+guard keeps the `none` list below in sync with the `none` cells above.
 
 - `GET` `/openapi.json` — proxy
 - `GET` `/docs` — proxy

@@ -70,9 +70,11 @@ def _collect_routes(application) -> dict[tuple[str, str], object]:
     """Return ``{(METHOD, path): route}`` for one app.
 
     ``HEAD`` is folded into ``GET`` because Starlette adds it to every ``GET``
-    route. Method-less routes are classified by ``_method_less_kind``: a
-    ``Mount`` becomes one ``MOUNT`` entry, a WebSocket route becomes
-    ``WEBSOCKET`` and an unknown method-less route becomes ``OTHER``.
+    route — but only where the route also serves ``GET``: a HEAD-only route is
+    its own entry, otherwise it would never appear in the matrix or the counts.
+    Method-less routes are classified by ``_method_less_kind``: a ``Mount``
+    becomes one ``MOUNT`` entry, a WebSocket route becomes ``WEBSOCKET`` and an
+    unknown method-less route becomes ``OTHER``.
     """
     collected: dict[tuple[str, str], object] = {}
     for route in application.routes:
@@ -83,7 +85,10 @@ def _collect_routes(application) -> dict[tuple[str, str], object]:
         if not methods:
             collected[(_method_less_kind(route), path)] = route
             continue
-        for method in set(methods) - {HEAD_METHOD}:
+        verbs = set(methods)
+        if HEAD_METHOD in verbs and "GET" in verbs:
+            verbs.discard(HEAD_METHOD)
+        for method in verbs:
             collected[(method, path)] = route
     return collected
 
@@ -423,3 +428,54 @@ def test_collect_routes_classifies_method_less_routes():
         (WEBSOCKET_METHOD, "/ws"),
         (MOUNT_METHOD, "/static"),
     }
+
+
+def test_collect_routes_keeps_head_only_routes():
+    """HEAD folds into GET only when GET exists; a HEAD-only route stays visible.
+
+    Dropping ``HEAD`` unconditionally would let ``@app.head("/probe")`` exist
+    without ever appearing in the matrix or the route counts.
+    """
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+
+    async def home(request):  # pragma: no cover - never invoked
+        return None
+
+    async def probe(request):  # pragma: no cover - never invoked
+        return None
+
+    synthetic = Starlette(
+        routes=[
+            Route("/home", home),
+            Route("/probe", probe, methods=["HEAD"]),
+        ]
+    )
+
+    assert set(_collect_routes(synthetic)) == {("GET", "/home"), ("HEAD", "/probe")}
+
+
+def test_delegate_only_routes_are_counted_separately():
+    """The prose must keep the delegate-only (``†``) routes apart from ``none``.
+
+    Those rows do have a test, so they never appear in the 'no listed test'
+    count — but that test never invokes the handler, so they still lack
+    route-level coverage. The document states both numbers; this pins the
+    delegate-only one so the G1 backlog cannot silently shrink.
+    """
+    rows = _parse_rows(_matrix_text())
+    delegate_only = [row for row in rows if "†" in row["tests"]]
+    assert len(delegate_only) == 4, (
+        "expected 4 delegate-only rows (speech routes, /api/config/reload, "
+        f"/v1/models/{{id}}/endpoints); found {len(delegate_only)}: "
+        f"{[(row['method'], row['path']) for row in delegate_only]}"
+    )
+    text = _matrix_text()
+    stated = re.search(r"\*\*(\d+) app-owned routes are covered only at delegate level\*\*", text)
+    assert stated, (
+        "docs/G0_ENDPOINT_AUTH_MATRIX.md must state "
+        "'**<n> app-owned routes are covered only at delegate level**'"
+    )
+    assert int(stated.group(1)) == len(delegate_only), (
+        f"document states {stated.group(1)} delegate-only route(s) but {len(delegate_only)} rows carry '†'"
+    )
