@@ -413,27 +413,36 @@ on an assumed-complete picture. Neither is addressed by this document.
 ### 6.1 Issue #34 — a backend crash/OOM during a live session is invisible
 
 Guardian learns about a dead backend only through a `503 model_load_failed` on
-the next `/ensure`; `caretaker_client.status()` has exactly one call site (the
-`already_unloaded` check in `/admin/unload`, `app/proxy/server.py:1301`). There
-is no OOM signal anywhere in the caretaker path. Tracked in
-[#34](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/34); the
-root causes live in `m0nklabs/caretaker-llamacpp` (watchdog never started, OOM
-reporting undecided).
+the next `/ensure`. Verified on the Guardian side in this repository:
+`caretaker_client.status()` has exactly one call site — the `already_unloaded`
+check in `/admin/unload` (`app/proxy/server.py:1301`) — and an OOM-signal scan
+finds one comment and no handling at all
+(`grep -rnE '\boom\b|OOM' app/gateway/ app/proxy/` → `app/proxy/queue.py:142`
+only). Tracked in
+[#34](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/34). The
+root causes are stated there to live in `m0nklabs/caretaker-llamacpp` (watchdog
+never started, OOM reporting undecided); that repository is not in this
+workspace and was not read here, so those two statements are `unverified:` in
+this document and quoted from the issue.
 
 **Why it matters for this model:** H5/H6 show the caretaker as the lifecycle
 authority, and F-12 shows the failure is silent. Any G1 claim of the form "a
 compromised or crashed backend is detected" would be unsupported until #34
-lands. "[judgement] A backend that dies without a report is
-indistinguishable from one that was never loaded" remains the honest statement.
+lands. **[judgement]** A backend that dies without a report is
+indistinguishable from one that was never loaded.
 
 ### 6.2 caretaker-llamacpp #17 — `vram_limit_mb: .inf` aborts the daemon at boot
 
-`_yaml_vram_limit_mb()` converts the YAML value with `int(raw)` inside
-`except (TypeError, ValueError)`, so a non-finite float raises `OverflowError`
-in the constructor and aborts the daemon at boot (same class as the fixed
-`health_polls` knob). Tracked in
+Reported there: `_yaml_vram_limit_mb()` converts the YAML value with `int(raw)`
+inside `except (TypeError, ValueError)`, so a non-finite float raises
+`OverflowError` in the constructor and aborts the daemon at boot (same class as
+the fixed `health_polls` knob). Tracked in
 [m0nklabs/caretaker-llamacpp#17](https://github.com/m0nklabs/caretaker-llamacpp/issues/17);
 it is a different repository, so it is a handoff, not a fix here.
+`unverified:` the function name and the exception tuple are quoted from that
+issue — `m0nklabs/caretaker-llamacpp` is not in this workspace and its code was
+not read in this session. The failure *class* is verifiable independently in
+Python: `int(float("inf"))` raises `OverflowError`.
 
 **Why it matters for this model:** F-05/F-06 assume the caretaker is either up
 or cleanly down. A daemon that cannot boot fails *before* serving, so Guardian
@@ -483,7 +492,7 @@ UTC. No daemon was POSTed to, nothing was restarted, no config was changed.
 | Config reload fail-static | `app/config_loader.py:164-190` read; docs string quoted |
 | Fail-open/closed inventory | a plain-text scan of `app/` for both spellings and per-site reads |
 | Public surfaces live | `curl -o /dev/null -w '%{http_code}'` against `/healthz`, `/metrics`, `/api/status`, dashboard `/`, dashboard `/api/stats` |
-| Handoffs | `gh api` for issue #34 and `m0nklabs/caretaker-llamacpp` issue #17 (bodies quoted) |
+| Handoffs | `gh api` for issue #34 and `m0nklabs/caretaker-llamacpp` issue #17 (bodies quoted); the Guardian-side half of #34 re-verified here: `grep -rnE '\boom\b|OOM' app/gateway/ app/proxy/` → one comment only; `int(float("inf"))` → `OverflowError` |
 | No host firewall | `ufw status` → inactive; `nft list ruleset` → Docker chains only |
 | Docs-only test impact | `pytest tests/unit -q` → **1863 passed in 56.74s** |
 
@@ -523,6 +532,18 @@ something this session could not check. Nothing here is stated as fact above.
 8. `unverified:` **Behaviour of the public API under a LAN MITM.** The cleartext
    `http://:11434` path (B-05) is verified as *accepted*; no capture of a real
    client's key on the wire was performed.
+9. `unverified:` **Caretaker-repository claims.** `m0nklabs/caretaker-llamacpp`
+   is not in this workspace, so the `_yaml_vram_limit_mb()` / `OverflowError`
+   detail (§6.2) and the "watchdog never started" / "OOM reporting undecided"
+   statements (§6.1) are quoted from caretaker #17 and guardian #34, not read
+   here. The failure class itself is verified independently:
+   `int(float("inf"))` → `OverflowError: cannot convert float infinity to
+   integer`.
+10. `unverified:` **Exact route count behind the dependency count.** The 45
+    `Depends(verify_api_key)` lines are counted directly; reconciling them
+    one-to-one with the matrix's protected rows was not done (§4.1 treats the
+    matrix as the route authority, which its guard
+    `tests/unit/test_g0_endpoint_matrix.py` enforces).
 
 ## 10. Deliberately out of scope
 
