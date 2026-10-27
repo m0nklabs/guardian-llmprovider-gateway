@@ -492,7 +492,7 @@ UTC. No daemon was POSTed to, nothing was restarted, no config was changed.
 | Config reload fail-static | `app/config_loader.py:164-190` read; docs string quoted |
 | Fail-open/closed inventory | a plain-text scan of `app/` for both spellings and per-site reads |
 | Public surfaces live | `curl -o /dev/null -w '%{http_code}'` against `/healthz`, `/metrics`, `/api/status`, dashboard `/`, dashboard `/api/stats` |
-| Handoffs | `gh api` for issue #34 and `m0nklabs/caretaker-llamacpp` issue #17 (bodies quoted); the Guardian-side half of #34 re-verified here: `grep -rnE '\boom\b|OOM' app/gateway/ app/proxy/` → one comment only; `int(float("inf"))` → `OverflowError` |
+| Handoffs | `gh api` for issue #34 and `m0nklabs/caretaker-llamacpp` issue #17 (bodies quoted); the Guardian-side half of #34 re-verified here: an OOM scan of `app/gateway/` + `app/proxy/` (word-boundary match) → one comment only; `int(float("inf"))` → `OverflowError` |
 | No host firewall | `ufw status` → inactive; `nft list ruleset` → Docker chains only |
 | Docs-only test impact | `pytest tests/unit -q` → **1863 passed in 56.74s** |
 
