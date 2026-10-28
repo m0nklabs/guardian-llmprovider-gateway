@@ -38,9 +38,19 @@ failover_health:
   failure_threshold: 5
   cooldown_seconds: 30
   rate_limit_cooldown_seconds: 60
+# Inference queue (restart-only: the queue object is built at startup, so
+# changes here take effect after `systemctl restart llama-guardian` and are NOT
+# picked up by POST /api/config/reload).
 queue:
   max_concurrent: 1
-  queue_timeout_seconds: 300
+  # Enforced wait budget for one request in the queue, in seconds. When it
+  # elapses the queued request is cancelled as `expired` with
+  # `cancel_reason: "queue_timeout"`, and the waiting client receives the
+  # usual typed cancellation (HTTP 499, `error: "request_cancelled"`).
+  # 0 or a negative value disables the timeout and restores the unbounded wait
+  # (GET /v1/queue/status then reports `queue_timeout_enforced: false`); an
+  # absent key falls back to the built-in default, 1800.
+  queue_timeout_seconds: 1800
   history_ttl: 300
 services:
   comfyui_url: http://127.0.0.1:8188

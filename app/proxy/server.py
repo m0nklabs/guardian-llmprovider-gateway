@@ -122,7 +122,7 @@ from app.proxy.metrics import (
     update_system_metrics,
 )
 from app.proxy.providers import CloudProvider, ProviderRegistry
-from app.proxy.queue import InferenceQueue
+from app.proxy.queue import DEFAULT_QUEUE_TIMEOUT_S, InferenceQueue
 from app.proxy.ratelimit import RateLimitConfig, RateLimitRetryManager
 
 # ── Proxy state container (Phase 5 extraction) ───────────────────────
@@ -1059,7 +1059,7 @@ def _load_queue_config() -> dict:
 _queue_cfg = _load_queue_config()
 inference_queue = InferenceQueue(
     max_concurrent=_queue_cfg.get("max_concurrent", 1),
-    queue_timeout=_queue_cfg.get("queue_timeout_seconds", 300),
+    queue_timeout=_queue_cfg.get("queue_timeout_seconds", DEFAULT_QUEUE_TIMEOUT_S),
     history_ttl=_queue_cfg.get("history_ttl", 300),
 )
 
