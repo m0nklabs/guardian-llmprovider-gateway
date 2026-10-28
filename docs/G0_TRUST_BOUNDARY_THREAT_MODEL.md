@@ -537,11 +537,21 @@ remains unmeasured with the reason given.
    `0750` parents (see B-06).
 4. **Verified — inert duplicate, not a bypass.** `192.168.1.W` does not
    resolve (`gaierror -2`); a request routed to it returns
-   `503 "Caretaker unreachable at http://192.168.1.W:11441"`; it contributes 0
+   `503 "Caretaker unreachable at http://192.168.1.W:11441"`; it contributed 0
    ids to `/v1/models` despite `enabled: true`
-   (`config/providers/windows-gpu-local.settings.yaml:11,18,21,23`). The real
-   LAN bypass remains its sibling `14700k-local` → `192.168.1.245` (B-03). Dead
-   config, registered for removal in [#38](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/38).
+   (`config/providers/windows-gpu-local.settings.yaml:11,18,21,23`), so it never
+   was a *second* bypass. The real LAN bypass remains its sibling `14700k-local`
+   → `192.168.1.245` (B-03). [#48](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/48)
+   resolves the item as a configuration decision rather than a removal: the
+   provider is now `enabled: false`, and its header states that `192.168.1.W` is a
+   per-deployment placeholder each deployment fills in locally. Enabling it stays
+   possible but is a deliberate, reviewed decision — a guessed address would
+   expose four cleartext LAN hops (`:11440`, `:11441`, `:11450`, `:11451`) of
+   exactly the B-03 kind. Guard:
+   `tests/unit/test_provider_placeholder_guard.py` fails any committed provider
+   file that is enabled while a URL host is placeholder-shaped (an IPv4-shaped
+   host with a non-numeric octet, `PLACEHOLDER`, `<host>`), and it is red on the
+   pre-#48 tree.
 5. **Still unknown — and one thing is now known.** `:11450/` answers `404`
    unauthenticated, but `GET /health` answers `200 {"model":"model-design"}`
    **without credentials**, i.e. the speech host leaks its model name
@@ -564,13 +574,21 @@ remains unmeasured with the reason given.
    The watchdog/OOM statements match the code and stay tracked in guardian #34.
    The failure class is also verified standalone:
    `int(float("inf"))` → `OverflowError`.
-10. **Verified / reconciled.** The matrix's 57 rows split into 13 with no
-    auth dependency and 44 protected rows; the code search finds 45
-    `Depends(verify_api_key)` sites, and the extra one is `get_version`
-    (`app/proxy/server.py:1187`) — a function with no route decorator and no
-    registration, i.e. dead code, not a 45th protected route. The matrix stays
-    the route authority; its guard
-    (`tests/unit/test_g0_endpoint_matrix.py`, 8 tests) enforces that.
+10. **Verified / reconciled — clean 44 ↔ 44, no footnote.** The matrix's 57
+    rows split into 13 with no auth dependency and 44 protected rows, and
+    exactly 44 registered route handlers declare `Depends(verify_api_key)`
+    (9 in `app/main.py`, 35 in `app/proxy/server.py`). The former 45th site,
+    `get_version`, was an `async def` with no route decorator and no
+    registration — dead code, never a protected route — and
+    [#47](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/47)
+    deleted it rather than routing it: nothing in the gateway consumes Ollama's
+    `/api/version`, so routing it would have invented a contract. Two guards keep
+    the count honest, from both directions: the matrix stays the route authority
+    and `tests/unit/test_g0_endpoint_matrix.py` enforces documented rows ↔
+    registered routes, while `tests/unit/test_route_registration.py` enforces
+    that every handler declaring the auth dependency is a registered route and
+    that the protected rows equal the routed auth handlers — 44 ↔ 44, red on the
+    pre-#47 tree.
 
 ## 10. Deliberately out of scope
 
