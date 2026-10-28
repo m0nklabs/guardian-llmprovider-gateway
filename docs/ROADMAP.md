@@ -342,12 +342,12 @@ production expansion or tool execution from this roadmap alone.
 | G1-02 | Destination/credential/header enforcement | P0 | G0-02 | SSRF, redirect, DNS and credential-leak tests | **merged** #60 — needs restart to verify live |
 | G1-03 | Bounded admission and metadata audit | P0 | G0-03 | Non-default limit tests and audit-without-payload demonstration | in flight #57 |
 | G2-01 | Registered HTTP adapter vertical slice | P1 | G0-04, G1 exit | Real non-AI call and existing API regression suite | blocked: G1 exit (restart) + #44 target confirmed |
-| G3-01 | Explicit pools and weighted selection | P1 | G2 exit | Distribution/compatibility tests and measured comparison |
+| G3-01 | Explicit pools and weighted selection | P1 | G2 exit | Distribution/compatibility tests and measured comparison | blocked: G2 exit |
 
 Status column added 2026-10-28 by the guardian loop: it records what is on
 `main`, not what is claimed. "Needs restart to verify live" means the code is
 merged and gated but the operator-run restart that proves the behaviour has not
-happened yet; those issues stay open (see `docs/GUARDIAN_LOOP.md`, closing rule). blocked: G2 exit |
+happened yet; those issues stay open (see `docs/GUARDIAN_LOOP.md`, closing rule).
 
 ## 6. Risks, exclusions and decision gates
 
