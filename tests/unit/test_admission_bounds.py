@@ -721,3 +721,54 @@ class TestTokenBucket:
         assert seen == [fingerprint]
         assert seen[0] != "testclient"  # never the source IP
         assert CLIENT_TOKEN not in seen[0]  # a fingerprint, not the secret
+
+
+class TestReaderDoesNotAmplifyOrLie:
+    """The reader must not allocate past the bound, nor hide a disconnect.
+
+    Both findings came from PR-Piet on #63: retaining the message that crosses
+    the limit (plus a full copy of the buffer) hands a rejected sender an
+    allocation primitive, and replaying a truncated body as complete turns a
+    disconnect into a silently accepted partial request.
+    """
+
+    @pytest.mark.asyncio
+    async def test_overflow_returns_no_body_to_copy(self):
+        from app.proxy.admission import _read_bounded_body
+
+        frames = [
+            {"type": "http.request", "body": b"a" * 100, "more_body": True},
+            {"type": "http.request", "body": b"b" * 10_000, "more_body": True},
+        ]
+
+        async def receive():
+            return frames.pop(0)
+
+        body, seen, overflow, tail, finished = await _read_bounded_body(receive, 1024)
+        assert overflow is True
+        assert body == b""  # nothing retained, nothing to copy
+        assert tail == []
+        assert finished is False
+        assert seen >= 10_100
+
+    @pytest.mark.asyncio
+    async def test_a_disconnect_mid_body_stays_visible_to_the_handler(self):
+        from app.proxy.admission import _ReplayReceive, _read_bounded_body
+
+        frames = [
+            {"type": "http.request", "body": b'{"model": "x"', "more_body": True},
+            {"type": "http.disconnect"},
+        ]
+
+        async def receive():
+            return frames.pop(0)
+
+        body, _seen, overflow, tail, finished = await _read_bounded_body(receive, 1024)
+        assert overflow is False
+        assert finished is False
+
+        replay = _ReplayReceive(body, tail, receive, finished=finished)
+        first = await replay()
+        assert first["more_body"] is True, "a truncated body must not look complete"
+        second = await replay()
+        assert second["type"] == "http.disconnect"

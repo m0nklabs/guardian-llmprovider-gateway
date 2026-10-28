@@ -705,7 +705,7 @@ def _has_transfer_encoding(scope: Mapping[str, Any]) -> bool:
 async def _read_bounded_body(
     receive: Callable[[], Awaitable[dict]],
     limit_bytes: int,
-) -> tuple[bytes, int, bool, list[dict]]:
+) -> tuple[bytes, int, bool, list[dict], bool]:
     """Read an unlabelled body up to ``limit_bytes``.
 
     Returns ``(body, seen, overflow, tail)``; ``tail`` holds any non-body message
@@ -714,18 +714,26 @@ async def _read_bounded_body(
     The body is coalesced into one ``bytearray`` instead of a list of ASGI
     messages: a sender that delivers millions of one-byte messages must not be
     able to allocate per message, and replaying a coalesced body is linear.
+
+    On overflow the crossing message is **not** retained and no copy of the
+    buffer is made: the caller discards it, so allocating past the bound here
+    would hand an unauthenticated sender an allocation primitive (PR-Piet, #63).
+    ``finished`` records whether the body actually ended, so a replay can keep a
+    disconnect visible instead of pretending the truncated body was complete.
     """
     buffer = bytearray()
     while True:
         message = await receive()
         if message.get("type") != "http.request":
-            return bytes(buffer), len(buffer), False, [message]
-        buffer += message.get("body") or b""
-        seen = len(buffer)
-        if seen > limit_bytes:
-            return bytes(buffer), seen, True, []
+            # The channel ended before the body did: keep the disconnect in the
+            # tail so the replay still delivers it.
+            return bytes(buffer), len(buffer), False, [message], False
+        chunk = message.get("body") or b""
+        if len(buffer) + len(chunk) > limit_bytes:
+            return b"", limit_bytes + len(chunk), True, [], False
+        buffer += chunk
         if not message.get("more_body", False):
-            return bytes(buffer), seen, False, []
+            return bytes(buffer), len(buffer), False, [], True
 
 
 class _ReplayReceive:
@@ -736,18 +744,34 @@ class _ReplayReceive:
     keeps the replay linear.
     """
 
-    __slots__ = ("_body", "_tail", "_receive", "_sent")
+    __slots__ = ("_body", "_tail", "_receive", "_sent", "_finished")
 
-    def __init__(self, body: bytes, tail: list[dict], receive: Callable[[], Awaitable[dict]]) -> None:
+    def __init__(
+        self,
+        body: bytes,
+        tail: list[dict],
+        receive: Callable[[], Awaitable[dict]],
+        *,
+        finished: bool = True,
+    ) -> None:
         self._body = body
         self._tail = tail
         self._receive = receive
         self._sent = False
+        self._finished = finished
 
     async def __call__(self) -> dict:
         if not self._sent:
             self._sent = True
-            return {"type": "http.request", "body": self._body, "more_body": False}
+            # A body that never finished must not look complete: reporting
+            # ``more_body: False`` here would let a handler accept a truncated
+            # request (a syntactically complete JSON prefix) instead of seeing
+            # the disconnect (PR-Piet, #63).
+            return {
+                "type": "http.request",
+                "body": self._body,
+                "more_body": not self._finished,
+            }
         if self._tail:
             return self._tail.pop(0)
         return await self._receive()
@@ -804,7 +828,9 @@ class BodySizeLimitMiddleware:
             return
 
         if chunked or declared is None:
-            body, seen, overflow, tail = await _read_bounded_body(receive, limit_bytes)
+            body, seen, overflow, tail, finished = await _read_bounded_body(
+                receive, limit_bytes
+            )
             if overflow:
                 await self._refuse(
                     scope,
@@ -814,7 +840,7 @@ class BodySizeLimitMiddleware:
                     observed_bytes=seen,
                 )
                 return
-            receive = _ReplayReceive(body, tail, receive)
+            receive = _ReplayReceive(body, tail, receive, finished=finished)
 
         await self.app(scope, receive, send)
 
