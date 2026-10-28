@@ -35,6 +35,8 @@ Anything else is out of scope, even when it looks related.
 - post `/review` from the human `gh` account (`m0nk111`) after each push;
 - open issues that describe verified defects or the next roadmap step;
 - **merge a PR once the merge gate below passes** (squash merge, `--squash`);
+- **close an issue** whose merged PR satisfies its acceptance criteria, with a
+  comment naming the merge commit and the evidence (operator rule, 2026-10-28);
 - comment the run report on the tracking issue.
 
 **Merge gate (all four, per PR, at the current head SHA):**
@@ -55,8 +57,10 @@ merge — ask in the report.
    never dismiss a review, never resolve a thread that still has an unanswered
    finding, never merge your own unreviewed push.
 2. **Never push to `main`** (or any long-lived branch), never force-push,
-   never rewrite published history, never delete branches or issues. Merge and
-   only merge — through the gate above.
+   never rewrite published history, never delete branches. Issues are closed
+   only under the rule above — a completed deliverable, never to tidy the board,
+   never with an acceptance criterion unmet. Merge and only merge — through the
+   gate above.
 3. **Never restart `llama-guardian` or any systemd unit.** The loop's own
    model traffic runs *through* Guardian: a restart kills the run mid-flight
    and is not self-healing. Run `scripts/pre_restart_check.py` as a validation
@@ -190,7 +194,18 @@ gh issue list --state open --json number,title,labels,updatedAt
 The standing objective is to **finish `docs/ROADMAP.md`** (G0 → G5, backlog rows
 in §5). Pick the next row whose dependencies are merged, write a falsifiable
 issue (problem statement, acceptance criteria, evidence links), then implement
-it in the same run — one issue maximum per run. A row that changes behaviour
+it in the same run — one issue maximum per run.
+
+**Claim before you build.** Other agents work in these repositories outside this
+loop (observed 2026-10-27: a sibling session pushed to an open PR and deleted a
+worktree mid-run). Before writing code for a row, comment on its issue:
+`loop-claim: <who> <UTC timestamp>`; if a claim from someone else is younger
+than 24 h, take the next row instead. Two sessions on one branch is how work
+gets lost.
+
+**Closing keyword, bare.** A PR body declares `Closes #N` **without backticks** —
+GitHub does not parse closing keywords inside inline code, which is how #40
+stayed open after its deliverable merged. A row that changes behaviour
 needs a live restart to be proven: the loop merges it and puts it in the
 restart batch, it never deploys it. Skip when phases 1–2 already consumed the
 budget, and say in the report which row is next.
