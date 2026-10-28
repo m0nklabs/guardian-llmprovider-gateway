@@ -20,6 +20,7 @@ from typing import Any
 import httpx
 from fastapi import HTTPException
 
+from app.destination_policy import guarded_async_client
 from app.proxy.providers import CloudProvider, ProviderRegistry
 
 logger = logging.getLogger("Guardian")
@@ -83,7 +84,9 @@ async def discover_google_models(api_key: str) -> list[str]:
     """Fetch the current Google AI Studio OpenAI-compatible model catalog."""
     try:
         timeout = httpx.Timeout(_GOOGLE_MODEL_CATALOG_TIMEOUT_S, connect=5.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with guarded_async_client(
+            timeout=timeout, purpose="google-catalog", credential_owner="google"
+        ) as client:
             response = await client.get(
                 _GOOGLE_MODEL_CATALOG_URL,
                 headers={"Authorization": f"Bearer {api_key}"},

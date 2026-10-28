@@ -174,8 +174,11 @@ def required_scope_for(method: str | None, path_template: str | None) -> Scope |
 SCOPES_ENFORCED_AFTER_KEY = ("auth", "scopes_enforced_after")
 
 #: Shipped in ``config/global.settings.yaml`` as ``2026-11-11T00:00:00Z``.
-#: The code has no implicit fallback: an absent or unparseable value enforces
-#: immediately (fail-closed), it never re-opens the window.
+#: An **absent** key falls back to this same shipped deadline (with a warning):
+#: an operator whose config file predates G1-01 must not lose every privileged
+#: client the moment they restart. A **malformed** value still enforces
+#: immediately (fail-closed) — a typo must never silently extend the window.
+SHIPPED_ENFORCED_AFTER = "2026-11-11T00:00:00Z"
 _TIMESTAMP_CACHE: dict[tuple[str, str], datetime | None] = {}
 _LOGGED_BAD_TIMESTAMPS: set[str] = set()
 
@@ -223,6 +226,18 @@ def configured_enforced_after() -> datetime | None:
 
     section = CONFIG.get(SCOPES_ENFORCED_AFTER_KEY[0])
     raw = section.get(SCOPES_ENFORCED_AFTER_KEY[1]) if isinstance(section, dict) else None
+    if raw is None:
+        # Absent ≠ malformed: use the shipped deadline so an un-reconciled
+        # config keeps the documented grace window instead of enforcing today.
+        raw = SHIPPED_ENFORCED_AFTER
+        marker = "absent"
+        if marker not in _LOGGED_BAD_TIMESTAMPS:
+            _LOGGED_BAD_TIMESTAMPS.add(marker)
+            logger.warning(
+                "🛡️ auth.scopes_enforced_after is absent; using the shipped default "
+                "%s. Add the key to config/global.settings.yaml to make it explicit.",
+                SHIPPED_ENFORCED_AFTER,
+            )
     cache_key = (type(raw).__name__, repr(raw))
     if cache_key in _TIMESTAMP_CACHE:
         return _TIMESTAMP_CACHE[cache_key]

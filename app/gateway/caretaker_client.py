@@ -28,6 +28,8 @@ from typing import Any, Self
 
 import httpx
 
+from app.destination_policy import guarded_async_client
+
 logger = logging.getLogger("Guardian")
 
 # Matches ``${ENV_VAR}`` in config strings (mirrors app/proxy/providers._expand_env
@@ -132,9 +134,14 @@ class CaretakerClient:
         timeout: float = 5.0,
         logger: logging.Logger | None = None,
         _transport: httpx.AsyncBaseTransport | None = None,
+        credential_owner: str | None = None,
     ) -> None:
         self._management_url = management_url.rstrip("/")
         self._api_key = api_key or None
+        # G1-02 credential isolation: the Bearer key may only travel to this
+        # provider's own approved destination (app/destination_policy.py).  The
+        # owner is the local provider whose management_url this client talks to.
+        self._credential_owner = credential_owner
         self._timeout = timeout
         self._log = logger or logging.getLogger("Guardian.CaretakerClient")
         # Capability flag: set True once a successful /ensure response carries
@@ -146,9 +153,11 @@ class CaretakerClient:
         self.supports_fresh_load = False
         # _transport is an internal override used only by tests (MockTransport);
         # it is not part of the public constructor contract.
-        self._client = httpx.AsyncClient(
+        self._client = guarded_async_client(
             timeout=httpx.Timeout(timeout),
             transport=_transport,
+            purpose="caretaker-management",
+            credential_owner=credential_owner,
         )
         if self._api_key is None:
             self._log.warning(
@@ -459,4 +468,6 @@ def build_caretaker_client(config: dict) -> CaretakerClient:
             f"management_url {management_url}; use https:// or a loopback address."
         )
 
-    return CaretakerClient(management_url=management_url, api_key=api_key)
+    return CaretakerClient(
+        management_url=management_url, api_key=api_key, credential_owner=local_name
+    )

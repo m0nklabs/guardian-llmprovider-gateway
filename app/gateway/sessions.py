@@ -12,6 +12,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from app.destination_policy import guarded_async_client
 import httpx
 from fastapi import HTTPException, Request
 
@@ -53,7 +54,7 @@ async def save_session(request: Request, client_id: str) -> Any:
         data = await request.json()
         filename = sanitize_session_filename(data.get("filename"))
         
-        async with httpx.AsyncClient() as client:
+        async with guarded_async_client(purpose="session-state") as client:
             resp = await client.post(
                 f"{_llama_server_url}/slots/0?action=save",
                 json={"filename": filename},
@@ -78,7 +79,7 @@ async def load_session(request: Request, client_id: str) -> Any:
         data = await request.json()
         filename = sanitize_session_filename(data.get("filename"))
             
-        async with httpx.AsyncClient() as client:
+        async with guarded_async_client(purpose="session-state") as client:
             resp = await client.post(
                 f"{_llama_server_url}/slots/0?action=restore",
                 json={"filename": filename},

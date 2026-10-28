@@ -49,6 +49,7 @@ import httpx
 from fastapi import HTTPException, Request, Response
 
 from app.config_loader import CONFIG, load_tts_config
+from app.destination_policy import guarded_async_client
 from app.gateway.speech_routing import address_intent, parse_speech_model, resolve_speech_route
 from app.proxy.providers import _expand_env
 
@@ -267,7 +268,9 @@ async def _try_cloud_backend(
     if speed is not None:
         payload["speed"] = speed
     try:
-        async with httpx.AsyncClient(timeout=timeout_s) as client:
+        async with guarded_async_client(
+            timeout=timeout_s, purpose="tts-cloud", credential_owner=name
+        ) as client:
             resp = await client.post(
                 f"{route['base_url']}/audio/speech",
                 json=payload,
@@ -332,7 +335,9 @@ async def _try_fish_tts(
         "model": fish_model,
     }
     try:
-        async with httpx.AsyncClient(timeout=timeout_s) as client:
+        async with guarded_async_client(
+            timeout=timeout_s, purpose="tts-cloud", credential_owner=route["provider"]
+        ) as client:
             resp = await client.post(
                 f"{route['base_url']}/v1/tts",
                 json=payload,
@@ -375,7 +380,9 @@ async def _try_backend(
     started = time.monotonic()
     headers = {"Authorization": f"Bearer {backend['key']}"} if backend["key"] else {}
     try:
-        async with httpx.AsyncClient(timeout=ensure_timeout_s) as client:
+        async with guarded_async_client(
+            timeout=ensure_timeout_s, purpose="tts-ensure", credential_owner=name
+        ) as client:
             ensure_resp = await client.post(f"{mgmt_url}/tts/ensure", headers=headers)
         ensure_body: dict[str, Any] = {}
         try:
@@ -389,7 +396,9 @@ async def _try_backend(
             return f"{name}: ensure failed (HTTP {ensure_resp.status_code}): {_clean_log(reason)}"
         logger.info("🔊 TTS ensure via %s: %s", name, ensure_body.get("already_running", "?"))
 
-        async with httpx.AsyncClient(timeout=timeout_s) as client:
+        async with guarded_async_client(
+            timeout=timeout_s, purpose="tts-local", credential_owner=name
+        ) as client:
             resp = await client.post(f"{tts_url}/tts", json=payload, headers=headers)
         if resp.status_code != 200:
             logger.warning(

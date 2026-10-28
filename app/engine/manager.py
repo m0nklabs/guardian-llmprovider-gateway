@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 import yaml
 
+from app.destination_policy import guarded_async_client
 from app.local_inference.model_registry import (
     MISMATCH_MODEL_NAME,
     ModelRegistry,
@@ -597,7 +598,7 @@ class ModelManager:
     async def backend_health_ok(self) -> bool:
         """Return True when the managed llama-server backend accepts requests."""
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with guarded_async_client(timeout=5.0, purpose="backend-health") as client:
                 resp = await client.get(f"{self.server_url}/health")
             return resp.status_code == 200
         except httpx.ConnectError:
@@ -985,7 +986,7 @@ class ModelManager:
         """Ask ComfyUI to unload all models and free GPU memory via its API."""
         comfyui_url = self._get_comfyui_url()
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with guarded_async_client(timeout=15.0, purpose="comfyui-free") as client:
                 resp = await client.post(
                     f"{comfyui_url}/free",
                     json={"unload_models": True, "free_memory": True},
@@ -1182,7 +1183,7 @@ class ModelManager:
 
     async def _save_context(self, filename: str):
         try:
-            async with httpx.AsyncClient() as client:
+            async with guarded_async_client(purpose="local-backend") as client:
                 resp = await client.post(
                     f"{self.server_url}/slots/0?action=save",
                     json={"filename": filename},
@@ -1194,7 +1195,7 @@ class ModelManager:
             logger.warning(f"Failed to auto-save context: {e}")
 
     async def _load_context(self, filename: str):
-        async with httpx.AsyncClient() as client:
+        async with guarded_async_client(purpose="local-backend") as client:
             resp = await client.post(
                 f"{self.server_url}/slots/0?action=restore",
                 json={"filename": filename},
@@ -1424,7 +1425,7 @@ class ModelManager:
 
         for i in range(120):  # 120 seconds timeout for large models
             try:
-                async with httpx.AsyncClient() as client:
+                async with guarded_async_client(purpose="local-backend") as client:
                     resp = await client.get(f"{self.server_url}/health", timeout=5.0)
                     if resp.status_code == 200:
                         logger.info(f"✅ Server healthy after {i}s (model: {model_name})")

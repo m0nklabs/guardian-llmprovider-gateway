@@ -40,6 +40,7 @@ from typing import Any, Callable
 import yaml
 
 from app.config_loader import provider_settings_documents
+from app.destination_policy import current_policy, provider_destination_errors
 from app.paths import (
     PROVIDERS_SETTINGS_FILE,
     is_local_provider_name,
@@ -132,6 +133,13 @@ class CloudProvider:
     # not send one. Precedence: client value > model-default > this. None =
     # no default (requests without a tier use the provider's standard tier).
     service_tier: str | None = None
+    # G1-02: set when one of this provider's configured URLs is not an approved
+    # destination (app/destination_policy.py). The provider stays visible for
+    # diagnosis, but no request can reach it: the guarded transport refuses the
+    # destination with a typed ``destination_denied`` before a socket is opened.
+    destination_error: str | None = None
+    #: The offending provider field ("base_url", "management_url", ...).
+    destination_error_field: str | None = None
 
     @property
     def is_configured(self) -> bool:
@@ -314,6 +322,30 @@ class ProviderRegistry:
             if not enabled:
                 logger.info("☁️  Provider '%s' is disabled", provider_name)
                 continue
+
+            # G1-02: reject an unapproved destination at configuration load.  The
+            # shipped config (config/providers/*.settings.yaml) is validated
+            # against destination_policy; a provider whose URL is not an explicit
+            # allowlist entry (a placeholder host, an unapproved port, a
+            # non-http(s) scheme, URL userinfo) is flagged here — loudly, once
+            # per load — and stays unreachable at request time.
+            destination_errors = provider_destination_errors(
+                provider_name, cfg, current_policy()
+            )
+            if destination_errors:
+                field, denied = destination_errors[0]
+                provider.destination_error = denied.reason
+                provider.destination_error_field = field
+                logger.error(
+                    "🛑 Provider '%s' rejected at configuration load: %s=%r is not "
+                    "an approved destination (%s). Add it to "
+                    "destination_policy.allow — requests to this provider are "
+                    "refused with destination_denied.",
+                    provider_name,
+                    field,
+                    cfg.get(field),
+                    denied.reason,
+                )
             if not provider.is_configured:
                 logger.warning(
                     "⚠️  Provider '%s' has no API key — global cloud models will not be advertised",

@@ -418,9 +418,19 @@ class TestFailClosed:
         _assert_scope_denial(_call(proxy_client, "get", "/api/keys", token=LEGACY_TOKEN), "admin")
         assert _call(proxy_client, "get", "/v1/queue/status", token=LEGACY_TOKEN).status_code == 200
 
-    def test_absent_auth_section_enforces_immediately(self, proxy_client, deadline):
-        deadline(ABSENT)
-        _assert_scope_denial(_call(proxy_client, "get", "/api/keys", token=LEGACY_TOKEN), "admin")
+    def test_absent_auth_section_uses_the_shipped_deadline(self, proxy_client, deadline, caplog):
+        """Absent ≠ malformed: an un-reconciled config keeps the shipped window.
+
+        Reboot safety: a config file written before G1-01 (or an operator's own
+        copy of it) must not turn every legacy key into a `client`-only key the
+        instant the gateway restarts. A malformed value still enforces
+        immediately — that case is covered separately.
+        """
+        with caplog.at_level("WARNING"):
+            deadline(ABSENT)
+        response = _call(proxy_client, "get", "/api/keys", token=LEGACY_TOKEN)
+        assert response.status_code == 200, response.text
+        assert any("shipped default" in record.getMessage() for record in caplog.records)
 
     def test_unreadable_key_store_rejects_every_request(self, tmp_path, monkeypatch, stubbed_admin):
         unreadable = tmp_path / "keys-as-directory.yaml"

@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 from fastapi import HTTPException, Request
 
+from app.destination_policy import guarded_async_client
 from app.gateway.context_metadata import enrich_model_context_metadata
 from app.gateway.metadata_enrichment import attach_parity_metadata
 from app.log_safety import clean_log_value
@@ -321,10 +322,21 @@ async def get_cloud_ratelimit_stats(request: Request, client_id: str) -> Any:
 async def list_cloud_providers(client_id: str) -> Any:
     providers = []
     for p in _provider_registry.get_enabled_providers():
+        denied = getattr(p, "destination_error", None)
         providers.append({
             "name": p.name,
             "base_url": p.base_url,
             "configured": p.is_configured,
+            # G1-02: an unapproved provider URL is refused at configuration
+            # load and on every request; surface it here instead of hiding it.
+            "destination_status": (
+                "approved"
+                if not denied
+                else {
+                    "denied": denied,
+                    "field": getattr(p, "destination_error_field", None),
+                }
+            ),
             "credential_status": (
                 "broken" if _cloud_catalog.is_auth_error(p.name) else
                 ("ok" if p.is_configured else "unconfigured")
@@ -378,7 +390,7 @@ async def get_server_status(client_id: str) -> Any:
     active_switch_owner = startup_status.get("owner") if switch_in_progress else None
     healthy = False
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with guarded_async_client(timeout=5.0, purpose="backend-health") as client:
             resp = await client.get(f"{_llama_server_url}/health")
             healthy = resp.status_code == 200
     except Exception:
@@ -486,6 +498,13 @@ async def reload_config(client_id: str) -> Any:
     try:
         _provider_registry.reload()
         reloaded.append("providers")
+        # G1-02: the destination policy is re-read per request, so a changed
+        # allowlist is live after this reload; log the effective policy and any
+        # still-unmigrated cleartext credential hop.
+        from app.destination_policy import log_startup_summary
+
+        log_startup_summary()
+        reloaded.append("destination_policy")
     except Exception as exc:  # pragma: no cover - defensive
         errors.append(f"providers: {exc}")
         not_reloaded.append("providers")

@@ -17,6 +17,7 @@ import app.cloud_inference as _cloud_inf
 from app import config_loader as _config_loader
 
 # ── Capture subsystem (opt-in, fail-open, disabled by default) ───────
+from app.destination_policy import guarded_async_client
 from app.capture.integration import (
     capture_controller,
     get_capture_controller,
@@ -1533,7 +1534,7 @@ async def cancel_queue_request(request_id: str, request: Request, client_id: str
 # OpenAI-compatible /v1/ routes (used by OpenClaw and other OpenAI-compatible clients)
 @app.get("/v1/{path:path}")
 async def proxy_v1_get(path: str, request: Request, client_id: str = Depends(verify_api_key)):
-    async with httpx.AsyncClient() as client:
+    async with guarded_async_client(purpose="v1-passthrough") as client:
         resp = await client.get(f"{LLAMA_SERVER_URL}/v1/{path}", params=request.query_params)
         return Response(content=resp.content, status_code=resp.status_code, headers=resp.headers)
 

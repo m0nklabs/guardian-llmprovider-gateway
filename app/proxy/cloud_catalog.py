@@ -50,6 +50,7 @@ import httpx
 import yaml
 
 from app.config_loader import provider_settings_documents
+from app.destination_policy import guarded_async_client
 from app.paths import CLOUD_CATALOG_CACHE_FILE, is_local_provider_name
 from app.proxy.providers import CloudProvider, ProviderRegistry
 
@@ -516,7 +517,9 @@ class CloudModelCatalog:
         url = f"{provider.base_url}{catalog_path}"
         timeout = min(max(float(provider.timeout_seconds), 1.0), 30.0)
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with guarded_async_client(
+                timeout=timeout, purpose="cloud-catalog", credential_owner=provider.name
+            ) as client:
                 response = await client.get(url, headers=headers)
             response.raise_for_status()
             payload = response.json()
