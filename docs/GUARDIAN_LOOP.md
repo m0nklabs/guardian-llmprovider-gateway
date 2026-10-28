@@ -203,9 +203,17 @@ worktree mid-run). Before writing code for a row, comment on its issue:
 than 24 h, take the next row instead. Two sessions on one branch is how work
 gets lost.
 
-**Closing keyword, bare.** A PR body declares `Closes #N` **without backticks** —
-GitHub does not parse closing keywords inside inline code, which is how #40
-stayed open after its deliverable merged. A row that changes behaviour
+**Closing keyword: bare, and only when the merge really completes the issue.**
+A PR body declares `Closes #N` **without backticks** — GitHub does not parse
+closing keywords inside inline code, which is how #40 stayed open after its
+deliverable merged.
+
+But do **not** attach `Closes #N` to work whose acceptance criteria need a live
+verification the loop cannot perform, i.e. anything sitting in the restart batch
+(G1-class behaviour changes): the keyword fires on merge and would close the
+issue before the operator has run the restart. Reference it as `Refs #N`
+instead, merge, and close the issue only after the restart is confirmed in the
+run report. Closing is earned by evidence, never by the merge event. A row that changes behaviour
 needs a live restart to be proven: the loop merges it and puts it in the
 restart batch, it never deploys it. Skip when phases 1–2 already consumed the
 budget, and say in the report which row is next.
