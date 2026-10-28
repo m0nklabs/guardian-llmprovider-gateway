@@ -16,6 +16,7 @@ from typing import Any
 
 from fastapi import HTTPException, Request
 
+from app.log_safety import clean_log_value
 from app.proxy.cloud_catalog import CloudModelCatalog
 from app.proxy.providers import CloudProvider, ProviderRegistry
 
@@ -242,7 +243,11 @@ def prepare_cloud_candidate_request(
         }
         if missing:
             candidate_json_body = {**candidate_json_body, **missing}
-            logger.info("☁️  Applied model defaults for '%s': %s", upstream_model, missing)
+            logger.info(
+                "☁️  Applied model defaults for '%s': %s",
+                clean_log_value(upstream_model),
+                missing,
+            )
 
     # Provider-level default service tier (e.g. openrouter: flex). Applied
     # AFTER the model defaults so precedence is: client value > model

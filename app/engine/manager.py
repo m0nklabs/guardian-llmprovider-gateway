@@ -23,6 +23,7 @@ from app.local_inference.model_registry import (
     ModelRegistry,
     VisionCapability,
 )
+from app.log_safety import clean_log_value
 from app.paths import (
     CURRENT_MODEL_ARGS_FILE,
     CURRENT_MODEL_ENV_FILE,
@@ -873,7 +874,7 @@ class ModelManager:
         if launch_sig is not None:
             self._write_persisted_signature(launch_sig)
         self.reset_vision_validation(model_name)
-        logger.info("F5: caretaker confirmed model '%s' loaded", model_name)
+        logger.info("F5: caretaker confirmed model '%s' loaded", clean_log_value(model_name))
 
     async def save_current_context(self) -> None:
         """F5: persist the currently loaded model's session context (auto-save).
@@ -924,8 +925,8 @@ class ModelManager:
         except Exception as exc:  # noqa: BLE001 — restore must never block the hotpath
             logger.warning(
                 "Context restore failed for %s (switch continues): %s",
-                self.current_model,
-                exc,
+                clean_log_value(self.current_model),
+                clean_log_value(exc),
             )
 
     async def _free_gpu_memory(self) -> None:
@@ -1202,7 +1203,7 @@ class ModelManager:
                 timeout=60.0
             )
             if resp.status_code == 200:
-                logger.info(f"Auto-restored context from {filename}")
+                logger.info("Auto-restored context from %s", clean_log_value(filename))
             else:
                 raise Exception("Restore failed")
 
