@@ -33,7 +33,7 @@ keeps every legitimate ``/v1/...`` endpoint working unchanged.
 from __future__ import annotations
 
 import logging
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 import httpx
 from fastapi import HTTPException
@@ -242,13 +242,23 @@ def build_upstream_url(
             "the path component moved the destination",
         )
 
-    expected_prefix = f"{base.path.rstrip('/')}{prefix.rstrip('/')}/"
-    raw_path = assembled.raw_path.decode("ascii", "replace")
+    # Compare *raw* paths on both sides. ``URL.path`` is percent-decoded, so a
+    # configured base carrying an encoded segment (`http://host/llama%20cpp`)
+    # would compare its decoded form against the assembled URL's encoded one and
+    # refuse every legitimate request (PR-Piet, #75 round 1).
+    expected_prefix = (
+        base.raw_path.rstrip(b"/")
+        + quote(prefix, safe="/").encode("ascii").rstrip(b"/")
+        + b"/"
+    )
+    raw_path = assembled.raw_path
     if not raw_path.startswith(expected_prefix):
         raise _reject(
             REASON_PATH_ESCAPE,
             path,
-            f"the assembled path {raw_path!r} left {expected_prefix!r}",
+            "the assembled path "
+            f"{raw_path.decode('ascii', 'replace')!r} left "
+            f"{expected_prefix.decode('ascii', 'replace')!r}",
         )
     if assembled.query or assembled.fragment:
         raise _reject(

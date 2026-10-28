@@ -86,6 +86,31 @@ def test_legitimate_v1_paths_still_build_the_same_url(path: str, expected: str) 
     assert backend_v1_url(BACKEND, path) == expected
 
 
+@pytest.mark.parametrize(
+    "base",
+    [
+        "http://127.0.0.1:11440/llama%20cpp",
+        "http://127.0.0.1:11440/llama%20cpp/",
+        "http://127.0.0.1:11440/v1/llama%20cpp",
+    ],
+)
+def test_an_encoded_base_prefix_still_serves_legitimate_paths(base: str) -> None:
+    """A percent-encoded segment in the *configured* base is a valid prefix.
+
+    ``URL.path`` is decoded while ``URL.raw_path`` is not, so comparing the
+    decoded base prefix against the encoded assembled path refused every
+    request for such a base (PR-Piet, #75 round 1). Both sides are compared raw.
+    """
+    expected_tail = "/v1/models"
+    built = build_upstream_url(base, "models", prefix="/v1")
+    assert str(built).endswith(expected_tail)
+    assert built.raw_path.endswith(b"/llama%20cpp" + expected_tail.encode())
+    # The bound is unchanged for a hostile component on the same base.
+    with pytest.raises(UpstreamPathRejected) as excinfo:
+        build_upstream_url(base, "../props", prefix="/v1")
+    assert excinfo.value.reason == REASON_DOT_SEGMENT
+
+
 def test_the_backend_url_is_text_the_transport_accepts() -> None:
     """``backend_v1_url`` returns exactly the URL string the call sites send."""
     url = backend_v1_url(BACKEND, "chat/completions")

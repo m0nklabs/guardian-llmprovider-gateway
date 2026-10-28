@@ -435,7 +435,11 @@ repeated percent-decoding, no `\`, `?`, `#`, control characters, no absolute
 path), formats the URL in one named function, then **re-parses the result** and
 refuses it unless scheme, host and port are the base's and the path is still
 inside the template's prefix (`path_escape`, `destination_changed`,
-`query_in_path`). The second layer is not decoration: it fires when the
+`query_in_path`). Prefix comparison is byte-wise on both sides: ``URL.path`` is
+percent-decoded while the assembled URL keeps its encoding, so a configured base
+with an encoded segment (`http://host/llama%20cpp`) would otherwise have every
+legitimate request refused — a PR-Piet round-1 finding, pinned by
+`test_an_encoded_base_prefix_still_serves_legitimate_paths`. The second layer is not decoration: it fires when the
 component check is bypassed, and it is the check that would catch a "cleaner"
 `urljoin`-based join, which treats `//host/x` as a new authority
 (`test_the_second_layer_refuses_an_escape_the_first_layer_missed`,
