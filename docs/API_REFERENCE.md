@@ -104,7 +104,6 @@ Notes:
 | `GET` | `/v1/models/{model_id}/endpoints` | No | Return the serving routes for one model (OpenRouter-style) |
 | `GET` | `/api/tags` | No | Ollama-compatible model list |
 | `POST` | `/api/show` | No | Ollama-compatible metadata for one model |
-| `GET` | `/api/version` | No | Ollama-compatible version endpoint |
 
 #### `GET /v1/models`
 
@@ -337,13 +336,15 @@ response always includes a positive context window in
 `model_info.general.context_length`, `model_info.guardian.context_length`, and
 the `num_ctx` parameter.
 
-#### `GET /api/version`
+#### `GET /api/version` — not served
 
-Always returns:
-
-```json
-{"version": "0.1.27"}
-```
+Guardian does not implement Ollama's version endpoint: the path is not
+registered, so a request returns `404`. An unregistered handler that would have
+answered `{"version": "0.1.27"}` existed in `app/proxy/server.py` and was
+removed in [#47](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/47);
+routing it would be a new feature (route, test, and a matrix row), not a
+correction. Ollama clients that require a version banner should probe
+`GET /api/tags` or `GET /v1/models` instead.
 
 ### Inference endpoints
 

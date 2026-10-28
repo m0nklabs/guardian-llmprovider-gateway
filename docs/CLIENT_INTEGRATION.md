@@ -106,13 +106,15 @@ POST /api/chat
 POST /api/generate
 GET  /api/tags
 POST /api/show
-GET  /api/version
 ```
 
-Only `POST /api/chat` and `POST /api/generate` are queued. `GET /api/tags`,
-`POST /api/show`, and `GET /api/version` are direct metadata endpoints.
+Only `POST /api/chat` and `POST /api/generate` are queued. `GET /api/tags` and
+`POST /api/show` are direct metadata endpoints.
 
-Standard Ollama request/response format. Existing Ollama clients work without modification.
+Standard Ollama request/response format for those four routes. `GET /api/version`
+is **not** served (it returns `404`); an Ollama client that insists on a version
+banner must be pointed at `GET /api/tags` or `GET /v1/models` instead. See
+`docs/API_REFERENCE.md`.
 
 ### Non-inference operational endpoints
 
