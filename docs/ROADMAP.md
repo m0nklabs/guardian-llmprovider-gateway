@@ -188,7 +188,8 @@ No calendar promises: effort estimates require each phase's scoped technical spe
 
 ### G0 — Reconcile contracts and establish a measurable baseline
 
-**Priority:** P0. **Status:** planning document delivered; runtime baseline open.
+**Priority:** P0. **Status:** **complete** (2026-10-28) — matrix #33, threat model #39,
+baseline + triage #41, first HTTP target #44. G0's exit gate is satisfied.
 
 - Inventory public endpoints, identities, privileges, routing rules, health and
   capture behavior. Pin chat/speech exact-target semantics with regression tests.
@@ -207,7 +208,10 @@ checks and known failures recorded; first service and smoke-test fixtures define
 
 ### G1 — Security and admission foundation
 
-**Priority:** P0. **Depends on:** G0.
+**Priority:** P0. **Depends on:** G0. **Status:** 2 of 3 rows merged, live verification
+outstanding — #55 (scopes, admin isolation) and #60 (destination allowlists, credential
+isolation) are on `main` and enter the operator restart batch; #57 (bounded admission +
+metadata audit) is in flight. G1's exit gate needs a restart before it can be claimed.
 
 - Extend identities with explicit service, route and operation scopes; separate
   admin, lifecycle and capture-export permissions. Plan key rotation/revocation
@@ -328,17 +332,22 @@ production expansion or tool execution from this roadmap alone.
 
 ## 5. First implementation backlog
 
-| ID | Deliverable | Priority | Dependency | Completion evidence |
-| --- | --- | --- | --- | --- |
-| G0-01 | Current endpoint/auth/route matrix | P0 | None | Code-linked matrix and regression-test inventory |
-| G0-02 | Trust-boundary and bypass threat model | P0 | G0-01 | Approved destinations, client/admin roles and failure modes |
-| G0-03 | Baseline and existing failure triage | P0 | G0-01 | Reproducible measurements; known failures separately attributed |
-| G0-04 | First general HTTP service contract | P0 | G0-02 | Selected service, methods/paths, read-only fixture and owner |
-| G1-01 | Service/operation authorization and admin isolation | P0 | G0-02 | Positive/negative compatibility and privilege tests |
-| G1-02 | Destination/credential/header enforcement | P0 | G0-02 | SSRF, redirect, DNS and credential-leak tests |
-| G1-03 | Bounded admission and metadata audit | P0 | G0-03 | Non-default limit tests and audit-without-payload demonstration |
-| G2-01 | Registered HTTP adapter vertical slice | P1 | G0-04, G1 exit | Real non-AI call and existing API regression suite |
+| ID | Deliverable | Priority | Dependency | Completion evidence | Status |
+| --- | --- | --- | --- | --- | --- |
+| G0-01 | Current endpoint/auth/route matrix | P0 | None | Code-linked matrix and regression-test inventory | **done** #33 |
+| G0-02 | Trust-boundary and bypass threat model | P0 | G0-01 | Approved destinations, client/admin roles and failure modes | **done** #39 |
+| G0-03 | Baseline and existing failure triage | P0 | G0-01 | Reproducible measurements; known failures separately attributed | **done** #41 |
+| G0-04 | First general HTTP service contract | P0 | G0-02 | Selected service, methods/paths, read-only fixture and owner | **done** #44 (target: MoniFuse read API) |
+| G1-01 | Service/operation authorization and admin isolation | P0 | G0-02 | Positive/negative compatibility and privilege tests | **merged** #55 — needs restart to verify live |
+| G1-02 | Destination/credential/header enforcement | P0 | G0-02 | SSRF, redirect, DNS and credential-leak tests | **merged** #60 — needs restart to verify live |
+| G1-03 | Bounded admission and metadata audit | P0 | G0-03 | Non-default limit tests and audit-without-payload demonstration | in flight #57 |
+| G2-01 | Registered HTTP adapter vertical slice | P1 | G0-04, G1 exit | Real non-AI call and existing API regression suite | blocked: G1 exit (restart) + #44 target confirmed |
 | G3-01 | Explicit pools and weighted selection | P1 | G2 exit | Distribution/compatibility tests and measured comparison |
+
+Status column added 2026-10-28 by the guardian loop: it records what is on
+`main`, not what is claimed. "Needs restart to verify live" means the code is
+merged and gated but the operator-run restart that proves the behaviour has not
+happened yet; those issues stay open (see `docs/GUARDIAN_LOOP.md`, closing rule). blocked: G2 exit |
 
 ## 6. Risks, exclusions and decision gates
 
