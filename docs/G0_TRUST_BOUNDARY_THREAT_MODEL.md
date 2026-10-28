@@ -281,6 +281,20 @@ any uid other than `flip`/the `flip` group (verified with a
 removes the *last* DAC layer rather than creating a second reader class. This is not a Guardian-auth bypass (B-01 style) but it is a
 data-path gap and is registered in [#38](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/38).
 
+**[fixed 2026-10-28]** The writer no longer derives media permissions from the
+umask ([#49](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/49)):
+`media/` and every media file take their mode from configuration —
+`capture.directory_mode`/`capture.file_mode` (`0750`/`0640`, the pair the WAL
+writer already used) — via `mkdir(mode=...)` plus `os.open(..., O_CREAT, mode)`
+with the `chmod` applied *before* any payload byte is written, and the writer's
+start re-applies the directory mode. A world-readable file is therefore no
+longer reachable through this path regardless of the caller's umask, and an
+existing looser file is tightened on rewrite. The 305 pre-fix files are **not**
+rewritten by the service: the audit and one-shot correction command is in
+`docs/skills/operator-runbook.md` ("Capture media permissions"). What remains
+open here is the on-disk content itself (unencrypted, retained forever), not the
+DAC layer.
+
 ### B-07 — Guardian keeps direct backend lifecycle control
 
 `app/engine/manager.py:1402,1410` (`sudo systemctl stop` / `start llama-server`) and

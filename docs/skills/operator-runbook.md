@@ -51,6 +51,39 @@ journalctl -u llama-server.service --since "5 min ago" --no-pager | tail -20
 # Named keys exist for: goose, oelala, hydroponics, and others.
 ```
 
+## Capture media permissions
+
+Capture media (`data/capture/media/`) holds user images verbatim. Since
+[#49](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/49) the
+writer applies explicit modes from configuration
+(`capture.file_mode`/`capture.directory_mode`, currently `0640`/`0750` — the
+same pair the WAL writer uses), so new files no longer depend on the process
+umask. The writer's start also re-applies the mode to the `media/` directory.
+
+Files written **before** that fix keep the permissions they were created with.
+They are operator data and are never bulk-corrected by the service; audit and,
+if acceptable, correct them yourself:
+
+```bash
+cd /home/flip/guardian-llmprovider-gateway/data/capture
+
+# 1. Audit: world-readable (or world-accessible) media files + directory modes
+stat -c '%a %n' . media
+find media -type f -perm -004 | wc -l          # expect 0 on a clean tree
+find media -type f -perm -004 -printf '%TY-%Tm-%Td %TH:%TM %m %p\n' | sort | head
+
+# 2. One-shot correction (dry run first: the -print line, no chmod)
+find media -type f -perm -004 -print
+find media -type f -perm -004 -exec chmod 0640 {} +
+find media -type d -perm -004 -exec chmod 0750 {} +
+chmod 0750 media
+```
+
+The service restart that activates a writer change is the usual
+`scripts/pre_restart_check.py` gate plus the restart batch; never `chmod` a
+live capture tree without an explicit operator decision (issue #49 forbids a
+silent rewrite).
+
 ## Discovering served models
 
 ```bash

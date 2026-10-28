@@ -24,6 +24,15 @@ Fail-open invariants:
   instead of the raw data; capture never blocks inference.
 - Non-data URLs (e.g. ``https://...`` image references) are left untouched —
   they contain no payload bytes and are already what the client sent.
+
+Permission invariant (issue #49):
+- The media directory and every media file get an explicit mode taken from
+  the capture configuration (``CaptureConfig.directory_mode``/``file_mode``,
+  the same pair the WAL writer uses), never from the process umask.  Files are
+  created with that mode through ``os.open(..., O_CREAT, mode)`` and the mode
+  is re-applied with ``chmod`` *before* any payload byte is written, so there
+  is no window in which media exists with umask-derived permissions and a
+  pre-existing looser file is tightened on rewrite.
 """
 
 from __future__ import annotations
@@ -31,10 +40,12 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any
 
+from app.capture.config import DEFAULT_DIRECTORY_MODE, DEFAULT_FILE_MODE
 from app.capture.redactor import _try_extract_image_dimensions
 
 logger = logging.getLogger("Guardian.Capture.Media")
@@ -56,21 +67,76 @@ def _extension_for(mime_type: str) -> str:
     return _MIME_EXT.get((mime_type or "").lower(), ".bin")
 
 
+def _ensure_media_dir(media_root: Path, directory_mode: int) -> None:
+    """Create ``media_root`` (if needed) at exactly ``directory_mode``.
+
+    ``mkdir(mode=...)`` is masked by the process umask and never touches an
+    existing directory, so the explicit ``chmod`` is what makes the configured
+    mode authoritative — it also repairs a directory that drifted (the live
+    ``data/capture/media`` was ``0755``).
+    """
+    media_root.mkdir(parents=True, exist_ok=True, mode=directory_mode)
+    os.chmod(media_root, directory_mode)
+
+
+def ensure_media_directory(
+    capture_root: Path,
+    *,
+    directory_mode: int = DEFAULT_DIRECTORY_MODE,
+) -> bool:
+    """Enforce the configured mode on ``<capture_root>/media`` (issue #49).
+
+    Called when the capture writer starts, so a directory that drifted (the
+    live tree was ``0755``) is corrected without waiting for the next image.
+    Deliberately **directory-only**: existing media *files* are never
+    bulk-chmoded by the service.  Rewriting already-captured user data is an
+    operator-audited one-shot (see the operator runbook's capture section).
+
+    Returns ``True`` when the media directory exists and was checked.
+    """
+    media_root = Path(capture_root) / MEDIA_SUBDIR
+    if not media_root.is_dir():
+        return False
+    _ensure_media_dir(media_root, directory_mode)
+    return True
+
+
 def _write_media_file(
     media_root: Path,
     request_id: str,
     idx: int,
     raw: bytes,
     mime_type: str,
+    *,
+    file_mode: int = DEFAULT_FILE_MODE,
+    directory_mode: int = DEFAULT_DIRECTORY_MODE,
 ) -> tuple[str, str]:
-    """Write one media payload; returns (relative_path, sha256)."""
+    """Write one media payload; returns (relative_path, sha256).
+
+    The file mode comes from configuration (``file_mode``), not the umask: the
+    descriptor is created with that mode and ``chmod`` is applied *before* the
+    payload is written, so neither the create window nor a pre-existing looser
+    file can leave world/group-inappropriate permissions behind.
+    """
     ext = _extension_for(mime_type)
     filename = f"{request_id}_{idx}{ext}"
     rel = f"{MEDIA_SUBDIR}/{filename}"
     target = media_root / filename
-    target.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_media_dir(target.parent, directory_mode)
     sha = hashlib.sha256(raw).hexdigest()
-    target.write_bytes(raw)
+    fd = os.open(
+        str(target),
+        os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+        file_mode,
+    )
+    try:
+        os.chmod(str(target), file_mode)
+        view = memoryview(raw)
+        while view:
+            written = os.write(fd, view)
+            view = view[written:]
+    finally:
+        os.close(fd)
     return rel, sha
 
 
@@ -91,6 +157,9 @@ def _handle_openai_image_url(
     media_root: Path,
     request_id: str,
     idx: int,
+    *,
+    file_mode: int,
+    directory_mode: int,
 ) -> dict[str, Any]:
     """Extract an OpenAI ``image_url`` block's data-URL payload."""
     image_url = block.get("image_url")
@@ -110,7 +179,15 @@ def _handle_openai_image_url(
         logger.debug("Failed to decode image base64 — error reference only")
         return {"type": "image_media", "image_media": {"error": "decode_failed"}}
     try:
-        rel, sha = _write_media_file(media_root, request_id, idx, raw, mime_type)
+        rel, sha = _write_media_file(
+            media_root,
+            request_id,
+            idx,
+            raw,
+            mime_type,
+            file_mode=file_mode,
+            directory_mode=directory_mode,
+        )
     except OSError as exc:
         logger.warning("Failed to write media file (fail-open): %s", exc)
         return {"type": "image_media", "image_media": {"error": "write_failed"}}
@@ -131,6 +208,9 @@ def _handle_anthropic_image(
     media_root: Path,
     request_id: str,
     idx: int,
+    *,
+    file_mode: int,
+    directory_mode: int,
 ) -> dict[str, Any]:
     """Extract an Anthropic ``image`` block's base64 ``source.data`` payload."""
     source = block.get("source")
@@ -147,7 +227,15 @@ def _handle_anthropic_image(
         logger.debug("Failed to decode Anthropic image base64 — error reference only")
         return {"type": "image_media", "image_media": {"error": "decode_failed"}}
     try:
-        rel, sha = _write_media_file(media_root, request_id, idx, raw, mime_type)
+        rel, sha = _write_media_file(
+            media_root,
+            request_id,
+            idx,
+            raw,
+            mime_type,
+            file_mode=file_mode,
+            directory_mode=directory_mode,
+        )
     except OSError as exc:
         logger.warning("Failed to write media file (fail-open): %s", exc)
         return {"type": "image_media", "image_media": {"error": "write_failed"}}
@@ -166,6 +254,9 @@ def extract_media_from_messages(
     messages: Any,
     capture_root: Path,
     request_id: str,
+    *,
+    file_mode: int = DEFAULT_FILE_MODE,
+    directory_mode: int = DEFAULT_DIRECTORY_MODE,
 ) -> Any:
     """Replace image content blocks in request messages with media references.
 
@@ -173,6 +264,10 @@ def extract_media_from_messages(
     data-bearing image block with an ``image_media`` reference.  Returns the
     (possibly unchanged) messages.  ``messages`` may be ``None`` or a list of
     dicts; non-list input is returned as-is.
+
+    ``file_mode``/``directory_mode`` are the configured capture permissions
+    (``CaptureConfig.file_mode``/``directory_mode``); the caller passes them so
+    the media tree never inherits the ambient umask.
     """
     if not isinstance(messages, list):
         return messages
@@ -192,11 +287,25 @@ def extract_media_from_messages(
                 block_type = block.get("type")
                 if block_type == "image_url":
                     new_blocks.append(
-                        _handle_openai_image_url(block, media_root, request_id, idx)
+                        _handle_openai_image_url(
+                            block,
+                            media_root,
+                            request_id,
+                            idx,
+                            file_mode=file_mode,
+                            directory_mode=directory_mode,
+                        )
                     )
                 elif block_type == "image":
                     new_blocks.append(
-                        _handle_anthropic_image(block, media_root, request_id, idx)
+                        _handle_anthropic_image(
+                            block,
+                            media_root,
+                            request_id,
+                            idx,
+                            file_mode=file_mode,
+                            directory_mode=directory_mode,
+                        )
                     )
                 else:
                     new_blocks.append(block)

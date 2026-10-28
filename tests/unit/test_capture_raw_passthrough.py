@@ -193,6 +193,54 @@ class TestRawPassthrough:
         assert target.read_bytes() == base64.b64decode(PNG_1PX)
 
     @pytest.mark.asyncio
+    async def test_media_modes_come_from_config_not_umask(self, tmp_path, monkeypatch):
+        """Issue #49: the configured file/directory modes reach the writer.
+
+        The end-to-end path matters: the unit tests pin the writer, this pins
+        the wiring (``CaptureConfig`` -> ``extract_media_from_messages``) under
+        a permissive umask, which is exactly how the drift happened.
+        """
+        import os
+        import stat
+
+        monkeypatch.setenv("GUARDIAN_CAPTURE_CLIENT_REF_SECRET", "test-client-ref-secret")
+        monkeypatch.setenv("GUARDIAN_CAPTURE_RECORD_AUTH_SECRET", "test-record-auth-secret")
+        cfg = _make_config(tmp_path, file_mode=0o600, directory_mode=0o700)
+        ctrl = CaptureController.__new__(CaptureController)
+        ctrl._config = cfg
+        ctrl._sink = CaptureSink(max_pending_events=cfg.max_pending_events)
+        ctrl._writer = CaptureWALWriter(ctrl._sink, cfg)
+        ctrl._writer_started = False
+        ctrl._request_origin = {}
+        await ctrl.start_writer()
+        original_umask = os.umask(0o000)
+        try:
+            ctrl.maybe_capture_request_received(
+                request_id="req-mode-cfg",
+                client_fingerprint="fp-test",
+                endpoint="/v1/chat/completions",
+                ingress_protocol="openai",
+                route_type="local",
+                requested_model="llama3.2-3b",
+                request_messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{PNG_1PX}"}},
+                    ],
+                }],
+            )
+            await asyncio.sleep(0.3)
+        finally:
+            os.umask(original_umask)
+            await ctrl.stop_writer()
+
+        media_dir = tmp_path / "media"
+        target = media_dir / "req-mode-cfg_0.png"
+        assert stat.S_IMODE(media_dir.stat().st_mode) == 0o700
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+        assert target.read_bytes() == base64.b64decode(PNG_1PX)
+
+    @pytest.mark.asyncio
     async def test_no_capture_without_client_identity(self, controller):
         """Unauthenticated requests (no client fingerprint) are never captured."""
         ctrl, cfg, root = controller

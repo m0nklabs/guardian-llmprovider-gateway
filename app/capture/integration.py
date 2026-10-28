@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from app.capture.config import CaptureConfig, load_capture_config
-from app.capture.media import extract_media_from_messages
+from app.capture.media import ensure_media_directory, extract_media_from_messages
 from app.capture.policy import PolicyResult, evaluate_capture_policy
 from app.capture.schema import (
     BuildContext,
@@ -144,6 +144,16 @@ class CaptureController:
             return
         await self._writer.start()
         self._writer_started = True
+        # Existing media directories keep the mode they were created with;
+        # re-apply the configured one now (files stay untouched — correcting
+        # historical files is an operator-audited one-shot).
+        try:
+            ensure_media_directory(
+                Path(self._config.capture_root),
+                directory_mode=self._config.directory_mode,
+            )
+        except OSError as exc:
+            logger.warning("Media directory mode could not be enforced: %s", exc)
         logger.info("Capture WAL writer started")
 
     async def stop_writer(self) -> None:
@@ -324,10 +334,14 @@ class CaptureController:
             # event).  Redaction is Keanu's job — NOT applied here.
             raw_messages = request_messages
             if isinstance(request_messages, list):
+                # Modes come from configuration (same pair the WAL writer
+                # uses), so media files never inherit the process umask.
                 raw_messages = extract_media_from_messages(
                     request_messages,
                     Path(self._config.capture_root),
                     request_id,
+                    file_mode=self._config.file_mode,
+                    directory_mode=self._config.directory_mode,
                 )
 
             event = build_request_received_event(

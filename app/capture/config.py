@@ -32,6 +32,14 @@ DEFAULT_MAX_PENDING_EVENTS = 10_000
 DEFAULT_MAX_FILE_BYTES = 256 * 1024 * 1024  # 256 MB
 DEFAULT_MAX_FILE_AGE_SECONDS = 3600  # 1 hour
 
+#: Permission modes for every capture artefact on disk.  They govern the WAL
+#: (``file_mode``/``directory_mode``) *and* the media extraction writer
+#: (``media/`` and the image files inside it): both hold user content and
+#: neither may depend on the process umask.  World access is never granted;
+#: :meth:`CaptureConfig._validate` enforces that for overrides too.
+DEFAULT_FILE_MODE = 0o640  # owner rw, group r
+DEFAULT_DIRECTORY_MODE = 0o750  # owner rwx, group rx
+
 #: Inbound request headers consulted for caller correlation (C6).  Lowercase
 #: header names; the FIRST header present on the inbound request is stored as
 #: ``caller_request_id`` on every capture event of that request.
@@ -143,11 +151,13 @@ class CaptureConfig:
     #: Maximum age of an active JSONL file before rotation.
     max_file_age_seconds: int = DEFAULT_MAX_FILE_AGE_SECONDS
 
-    #: File mode for capture files (0o640 = owner rw, group r).
-    file_mode: int = 0o640
+    #: File mode for capture files (0o640 = owner rw, group r), applied to the
+    #: WAL files *and* to extracted media files.
+    file_mode: int = DEFAULT_FILE_MODE
 
-    #: Directory mode for capture dir (0o750 = owner rwx, group rx).
-    directory_mode: int = 0o750
+    #: Directory mode for capture directories (0o750 = owner rwx, group rx),
+    #: applied to the capture root *and* to the ``media/`` subdirectory.
+    directory_mode: int = DEFAULT_DIRECTORY_MODE
 
     #: Root directory for capture files.
     capture_root: str = DEFAULT_CAPTURE_ROOT
@@ -353,8 +363,8 @@ def load_capture_config(settings_path: Path | None = None) -> CaptureConfig:
             val = os.environ.get(env_var, "")
         return val
 
-    file_mode_raw = _get("file_mode", 0o640)
-    dir_mode_raw = _get("directory_mode", 0o750)
+    file_mode_raw = _get("file_mode", DEFAULT_FILE_MODE)
+    dir_mode_raw = _get("directory_mode", DEFAULT_DIRECTORY_MODE)
 
     config = CaptureConfig(
         enabled=bool(_get("enabled", False)),
