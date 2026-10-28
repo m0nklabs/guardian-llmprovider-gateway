@@ -265,3 +265,21 @@ tts:
   providers:
     - 14700k-local
     - ai-kvm2-local
+
+# Privilege scopes (G1-01, docs/decisions/G1-01-privilege-scopes.md).
+# Keys declare their scopes in config/guardian.keys.yaml:
+#     metadata:
+#       scopes: [client]                      # ordinary inference only
+#       scopes: [operator]                    # + /admin/load, /admin/unload
+#       scopes: [admin]                       # + /api/keys, /api/config/reload,
+#                                             #   shared state, capture export
+#       scopes: [capture-export]              # capture WAL export/rotation only
+# An absent `scopes` list marks a legacy key: it keeps today's full access to
+# privileged routes until `scopes_enforced_after`, and is a plain `client` key
+# from that instant on (typed 403 naming the missing scope). Explicitly scoped
+# keys are enforced immediately, grace window or not.
+# Hot-reloadable via POST /api/config/reload. Shipped default: two weeks after
+# the G1-01 decision record. An absent, unparseable or non-ISO value enforces
+# immediately (fail-closed) — it never re-opens the window.
+auth:
+  scopes_enforced_after: "2026-11-11T00:00:00Z"

@@ -263,17 +263,39 @@ async def list_api_keys_ui(_client_id: str = Depends(verify_api_key)):
 
 @app.post("/api/keys")
 async def create_api_key_ui(request: Request, _client_id: str = Depends(verify_api_key)):
-    """Generate a new Guardian API key. Body: {"name": "my-app"}"""
+    """Generate a new Guardian API key. Body: {"name": "my-app"}.
+
+    G1-01: the minting rule (B-08) is shared with the proxy surface — the new
+    key inherits the minting key's declared scopes and its
+    ``cloud_gateway_access`` and can never exceed them. See
+    ``docs/decisions/G1-01-privilege-scopes.md``.
+    """
     body = await request.json()
     name = str(body.get("name", "")).strip()
     if not name:
         name = f"key-{len(load_api_keys()) + 1}"
     prefix = body.get("prefix")
-    api_key = generate_api_key(name, metadata={"client": name}, prefix=prefix)
+    requested_metadata = body.get("metadata")
+    metadata = dict(requested_metadata) if isinstance(requested_metadata, dict) else {}
+    metadata.setdefault("client", name)
+    grant = _admin_api.resolve_mint_grant(
+        request,
+        metadata,
+        body.get("cloud_gateway_access"),
+        source="dashboard",
+    )
+    api_key = generate_api_key(
+        name,
+        metadata=grant.metadata,
+        prefix=prefix,
+        cloud_gateway_access=grant.cloud_gateway_access,
+    )
     return {
         "api_key": api_key,
         "key_fingerprint": _token_fingerprint(api_key),
         "name": name,
+        "scopes": grant.metadata.get("scopes"),
+        "cloud_gateway_access": grant.cloud_gateway_access,
     }
 
 

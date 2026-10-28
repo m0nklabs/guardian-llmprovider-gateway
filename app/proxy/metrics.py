@@ -121,6 +121,23 @@ AUTH_FAILURES = Counter(
 )
 
 
+# === Authorization / privilege scopes (G1-01) ===
+# docs/decisions/G1-01-privilege-scopes.md: ``grace`` counts privileged calls a
+# legacy unscoped key was still allowed to make, ``denials`` counts typed 403s.
+
+SCOPE_GRACE_CALLS = Counter(
+    "guardian_scope_grace_calls_total",
+    "Privileged calls allowed only by the G1-01 migration grace window",
+    ["scope", "route"],
+)
+
+SCOPE_DENIALS = Counter(
+    "guardian_scope_denials_total",
+    "Requests denied because the key lacks the route's required scope",
+    ["scope", "route"],
+)
+
+
 # === Capture Metrics ===
 
 CAPTURE_EVENTS_TOTAL = Counter(

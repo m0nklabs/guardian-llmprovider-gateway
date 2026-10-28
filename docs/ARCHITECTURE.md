@@ -94,6 +94,29 @@ flowchart TD
 
 `app.proxy.queue.InferenceQueue` is Guardian's primary runtime lock.
 
+### Authorization before admission
+
+Authentication and authorization both happen in the single dependency every
+protected route declares (`app/proxy/auth.py:verify_api_key`), before the
+inference queue sees a request (G1-01,
+[decisions/G1-01-privilege-scopes.md](decisions/G1-01-privilege-scopes.md)):
+
+1. the caller's token is resolved from `Authorization: Bearer`, `x-api-key` or
+   `api-key` against the key store (`config/guardian.keys.yaml`);
+2. the matched FastAPI route **template** is looked up in
+   `app/proxy/scopes.py:ROUTE_SCOPES`, the one declaration per route;
+3. the key's scopes (explicit `metadata.scopes`, or the legacy grace-window
+   default) are authorized against that requirement;
+4. denial is a stable typed `403` naming the missing scope; an undeclared
+   protected route is denied too (fail-closed), never admitted by default.
+
+`admin` implies `operator`, `client` and `capture-export`; `operator` implies
+`client`. The decision is per request, so a narrowing in
+`config/guardian.keys.yaml` takes effect on the next request without a restart.
+Routes that need no key (`/healthz`, `/metrics`, the FastAPI docs routes and the
+dashboard static assets) have no auth dependency and are declared `public` only
+so the matrix stays complete.
+
 ### What enters the queue
 
 Queued inference endpoints:
@@ -479,7 +502,12 @@ These are intentional or current-state limits that docs should not overclaim:
 
 - Guardian runs one inference slot at a time by design.
 - There is no built-in token-bucket or per-client rate limiter.
-- The dashboard is auth-gated and bound to `127.0.0.1` (commit `6b46f46`).
+- The dashboard is auth-gated and bound to `127.0.0.1` (commit `6b46f46`); its
+  `/api/*` routes require scope `admin` since G1-01.
+- Privilege scopes are enforced per route (`app/proxy/auth.py:verify_api_key` +
+  `app/proxy/scopes.py:ROUTE_SCOPES`). Keys without an explicit
+  `metadata.scopes` list stay fully privileged only until
+  `auth.scopes_enforced_after` (`config/global.settings.yaml`).
 - ComfyUI integration is cooperative VRAM release, not full cross-service job
   orchestration.
 - Historical benchmark helpers still exist, but they are not the live runtime

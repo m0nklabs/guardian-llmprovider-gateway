@@ -5,6 +5,12 @@
 from the code, so this module collects the routes of both FastAPI apps the way
 the application registers them and compares that set with the documented rows.
 
+Since G1-01 the matrix also carries the enforced **Scope** of every route, and
+the enforcement declaration is code (``app/proxy/scopes.py:ROUTE_SCOPES``). The
+guard keeps all three in sync: documented row, registered route and required
+scope. A protected route without a declaration is denied at runtime, so a
+missing entry is a production incident, not a documentation nit.
+
 Nothing leaves the process: the two app objects are imported (the same ones
 ``tests/unit/test_main.py`` and ``tests/unit/test_server.py`` already import),
 routes are read from ``app.routes``, and the matrix is parsed as text. No server
@@ -26,13 +32,14 @@ import pytest
 import starlette.routing
 
 from app import main as dashboard_module
+from app.proxy import scopes as scope_module
 from app.proxy import server as proxy_module
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MATRIX_PATH = REPO_ROOT / "docs" / "G0_ENDPOINT_AUTH_MATRIX.md"
 TESTS_DIR = REPO_ROOT / "tests"
 
-PRIVILEGE_CLASSES = {"public", "client", "admin", "operator"}
+PRIVILEGE_CLASSES = {"public", "client", "operator", "admin", "capture-export"}
 MOUNT_METHOD = "MOUNT"
 WEBSOCKET_METHOD = "WEBSOCKET"
 OTHER_METHOD = "OTHER"
@@ -134,14 +141,14 @@ def _parse_rows(text: str) -> list[dict[str, str]]:
     """Parse the numbered table rows of the matrix.
 
     The header row (``#``) and the ``|---|`` separator are skipped; every data
-    row carries exactly the eight documented columns.
+    row carries exactly the nine documented columns.
     """
     rows: list[dict[str, str]] = []
     for line in text.splitlines():
         if not line.startswith("| "):
             continue
         cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        if len(cells) != 8 or not cells[0].isdigit():
+        if len(cells) != 9 or not cells[0].isdigit():
             continue
         rows.append(
             {
@@ -152,7 +159,8 @@ def _parse_rows(text: str) -> list[dict[str, str]]:
                 "handler": cells[4],
                 "auth": cells[5],
                 "privilege": cells[6],
-                "tests": cells[7],
+                "scope": cells[7],
+                "tests": cells[8],
             }
         )
     return rows
@@ -301,6 +309,13 @@ def test_every_row_is_classified_and_code_linked(collected):
 
         if row["privilege"] not in PRIVILEGE_CLASSES:
             problems.append(f"{label}: privilege {row['privilege']!r} is not one of {sorted(PRIVILEGE_CLASSES)}")
+        if row["scope"] not in PRIVILEGE_CLASSES:
+            problems.append(f"{label}: scope {row['scope']!r} is not one of {sorted(PRIVILEGE_CLASSES)}")
+        elif row["scope"] != row["privilege"]:
+            problems.append(
+                f"{label}: scope {row['scope']!r} and privilege {row['privilege']!r} disagree — "
+                "the enforced scope IS the privilege class (docs/decisions/G1-01-privilege-scopes.md)"
+            )
         if (row["auth"] == "none") != (row["privilege"] == "public"):
             problems.append(
                 f"{label}: auth {row['auth']!r} and privilege {row['privilege']!r} disagree — "
@@ -479,3 +494,92 @@ def test_delegate_only_routes_are_counted_separately():
     assert int(stated.group(1)) == len(delegate_only), (
         f"document states {stated.group(1)} delegate-only route(s) but {len(delegate_only)} rows carry '†'"
     )
+
+
+# ── G1-01: the enforced scope must match the documented column ─────────
+
+
+def test_scope_column_matches_the_code_declaration():
+    """Every documented scope equals ``scopes.ROUTE_SCOPES[(method, path)]``.
+
+    This is the single-declaration guard: the matrix is reviewed prose, the
+    table is what the runtime reads. Disagreement means either the doc or the
+    enforcement changed alone — both are bugs.
+    """
+    documented = {(row["method"], row["path"]): row for row in _parse_rows(_matrix_text())}
+    declared = scope_module.ROUTE_SCOPES
+
+    problems: list[str] = []
+    for key in sorted(set(documented) | set(declared)):
+        row = documented.get(key)
+        scope = declared.get(key)
+        label = f"{key[0]} {key[1]}"
+        if row is None:
+            problems.append(f"{label}: declared in app/proxy/scopes.py but missing from the matrix")
+        elif scope is None:
+            problems.append(f"{label}: documented but not declared in app/proxy/scopes.py")
+        elif row["scope"] != scope.value:
+            problems.append(
+                f"{label}: matrix scope {row['scope']!r} != code scope {scope.value!r}"
+            )
+    assert not problems, "documented scopes and code declarations disagree:\n  " + "\n  ".join(problems)
+
+
+def test_scope_declaration_is_public_iff_no_auth_dependency(collected):
+    """Public routes take no auth dependency; every other route is protected.
+
+    ``verify_api_key`` resolves the scope of the *matched* route, so the two
+    sets must agree exactly: a protected route declared ``public`` would skip
+    authorization, and an unauthenticated route declared non-public could never
+    satisfy its own requirement.
+    """
+    declared = scope_module.ROUTE_SCOPES
+    problems: list[str] = []
+    for (surface, method, path), route in collected.items():
+        scope = declared.get((method, path))
+        if scope is None:
+            continue  # reported by test_scope_column_matches_the_code_declaration
+        authenticated = _route_has_auth_dependency(route)
+        if scope == scope_module.Scope.PUBLIC and authenticated:
+            problems.append(f"{surface} {method} {path}: declared public but the route requires a key")
+        elif scope != scope_module.Scope.PUBLIC and not authenticated:
+            problems.append(f"{surface} {method} {path}: declared {scope.value!r} but the route takes no auth dependency")
+    assert not problems, "route authentication and declared scope disagree:\n  " + "\n  ".join(problems)
+
+
+def _route_has_auth_dependency(route) -> bool:
+    """True when ``verify_api_key`` appears anywhere in the route's dependants."""
+    stack = [getattr(route, "dependant", None)]
+    while stack:
+        dependant = stack.pop()
+        if dependant is None:
+            continue
+        call = getattr(dependant, "call", None)
+        if getattr(call, "__name__", "") == "verify_api_key":
+            return True
+        stack.extend(getattr(dependant, "dependencies", []) or [])
+    return False
+
+
+def test_shared_routes_agree_across_surfaces():
+    """A route identity served by both apps has exactly one requirement.
+
+    ``ROUTE_SCOPES`` is keyed by ``(method, path)``, so a pair that exists on
+    both the proxy and the dashboard surfaces gets one declaration. The matrix
+    documents both rows; they must not disagree, otherwise one surface would be
+    enforced against the other's privilege.
+    """
+    by_identity: dict[tuple[str, str], list[dict[str, str]]] = {}
+    for row in _parse_rows(_matrix_text()):
+        by_identity.setdefault((row["method"], row["path"]), []).append(row)
+
+    problems: list[str] = []
+    for (method, path), rows in sorted(by_identity.items()):
+        scopes_in_rows = {row["scope"] for row in rows}
+        if len(scopes_in_rows) > 1:
+            problems.append(
+                f"{method} {path}: documented scopes disagree across surfaces: {sorted(scopes_in_rows)}"
+            )
+        if len(scopes_in_rows) == 1 and scopes_in_rows.pop() != scope_module.ROUTE_SCOPES[(method, path)].value:
+            problems.append(f"{method} {path}: shared rows disagree with the code declaration")
+    assert not problems, "shared route identities disagree:\n  " + "\n  ".join(problems)

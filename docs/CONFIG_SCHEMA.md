@@ -202,3 +202,38 @@ bestaande config-dict, zodat alle `.get("key")`-reads intact blijven.
 - **`/models/user` filter** → eerste `providers.overrides.yaml` entry: `catalog_url`.
 - **`model_defaults` uit cloud_keys.json** (temp/top_p/max_tokens/seed) →
   `models.cloud.overrides.yaml` vóór verwijdering van cloud_keys.json.
+
+## 9. `auth` — privilege scopes (G1-01, 2026-10-28)
+
+Source of record: `docs/decisions/G1-01-privilege-scopes.md`. Added to
+`config/global.settings.yaml`; hot-reloadable through `POST /api/config/reload`
+(no restart needed to move the window).
+
+```yaml
+auth:
+  scopes_enforced_after: "2026-11-11T00:00:00Z"
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `auth.scopes_enforced_after` | ISO-8601 UTC timestamp (string) | `"2026-11-11T00:00:00Z"` | Instant from which a key **without** `metadata.scopes` is a plain `client` key. Before it, such a key keeps the pre-G1-01 flat access to privileged routes, with a structured grace log and `guardian_scope_grace_calls_total` on every privileged call. |
+
+Rules:
+
+- Keys carry their scopes in the key store, not here:
+  `config/guardian.keys.yaml` -> `<token>.metadata.scopes: [client, operator]`.
+  `admin` implies `operator`, `client` and `capture-export`; `operator` implies
+  `client`; `capture-export` implies nothing else.
+- **Absent/unparseable value enforces immediately** (fail-closed): a missing
+  section, a typo'd timestamp or a non-ISO value never re-opens the permissive
+  window. The same applies to an absent `auth` section.
+- An unquoted YAML timestamp (`scopes_enforced_after: 2026-11-11T00:00:00Z`) is
+  parsed by PyYAML into a `datetime`; both shapes are accepted. A naive value is
+  interpreted as UTC.
+- Moving the timestamp is itself an `admin` operation (it widens or narrows every
+  legacy key's privilege), so it is not part of the `client`-reachable surface.
+- Shipped default rationale: two weeks after the decision record, so the
+  operator can scope the existing named keys (dashboard, monitoring, lifecycle
+  scripts, export tooling) without an unattended break. Change the date in place
+  when the migration is scheduled; the value is documented in the file's own
+  comments as well.
