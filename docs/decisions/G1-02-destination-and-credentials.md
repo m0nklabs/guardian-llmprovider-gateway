@@ -319,3 +319,60 @@ configuration", and the warning makes it visible in the startup log either way.
 This is the amended G1-01 rule as well (an absent timestamp used to enforce
 immediately); the amendment is recorded in
 `G1-01-privilege-scopes.md` §"Amendment 2026-10-28".
+
+## Amendment 2026-10-28 — §2.1's completeness claim was false (#65)
+
+§2.1 stated that *all* outbound client constructions in `app/` were converted.
+That claim was false when it was written, and it stayed false until issue #65.
+
+**What was true.** Every other outbound path — providers, catalog discovery,
+management/caretaker, speech, sessions, context metadata, ComfyUI, the Copilot
+bridge, cloud forwarding and the main local-inference router — really did go
+through `guarded_async_client`. The mechanism, the enforcement point below the
+call sites (redirects, retries, per-hop re-validation) and the pinning behaved
+exactly as §2 describes; nothing in this amendment weakens §2.2–§2.9.
+
+**What was missed.** Two production hops in
+`app/local_inference/ollama.py` — `chat_ollama` (`/api/chat`) and
+`generate_ollama` (`/api/generate`) — built a bare
+`httpx.AsyncClient(timeout=request_timeout)` for
+`{_llama_server_url}/v1/chat/completions` (then `build_request` + streaming
+`send`). Those two hops never called `DestinationPolicy.check()`: no allowlist
+check, no pinning to the validated address (a DNS answer that changed between
+configuration and connect was never re-checked, and the connection followed the
+name), no
+`follow_redirects: False`, and no G1-03 audit record when the hop was — or
+would have been — refused. The destination currently resolves inside the
+shipped allowlist (`127.0.0.1:11440`), so this was a silent guard bypass and a
+silent hole in the audit trail, not a live SSRF: `_llama_server_url` is
+deployment configuration, not client input. It would become reachable the
+moment that URL was misconfigured. The G1-03 part 2 work found it by noticing
+that these inference hops produced no audit record; #65 records the finding.
+
+The count in §2.1 was stale as well: at the time of the conversion there were
+29 guarded constructions plus these 2 unguarded production ones (and 3 in the
+offline `app/tweaker/**` tooling, which never runs inside the gateway). "24"
+was never a verified figure; completeness was the claim that mattered, and it
+was wrong.
+
+**What changed.** Both sites share `_guarded_backend_client()` in
+`app/local_inference/ollama.py`, which is
+`guarded_async_client(timeout=..., purpose="local-inference")`. Streaming,
+`build_request`/`send` semantics, the `_await_or_cancel_request(...,
+cleanup=client.aclose)` contract and the caller's timeouts
+(`_build_stream_timeout` when streaming, the plain timeout otherwise — the
+guard must never override them) are unchanged. A refused hop now raises the
+typed `destination_denied` with the policy reason, and leaves one G1-03 audit
+record on the request.
+
+**Where it is enforced now.** `tests/unit/test_outbound_client_guard.py` scans
+every module under `app/` with `ast` and fails on any raw
+`httpx.AsyncClient(…)`/`httpx.Client(…)` construction that is not the guard
+factory itself or a named, reasoned allowlist entry (today: the three offline
+`app/tweaker/**` sites); a stale entry fails too, the allowlisted modules must
+stay unimportable from the gateway app, and a planted construction proves the
+scan is not vacuous. `tests/unit/test_ollama_destination_guard.py` pins the two
+converted paths: refusal for an unapproved destination, refusal for a resolver
+answer outside a pin, the pinned-address connect on the allowed path, the
+preserved streaming/plain timeouts, and the audit record for a refused hop.
+This class of omission can no longer reach `main` unreviewed.
