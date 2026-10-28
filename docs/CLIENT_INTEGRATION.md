@@ -349,10 +349,12 @@ or because one of these happens first:
 - the client explicitly cancels the request through `DELETE /v1/queue/requests/{request_id}` (`cancel_reason: "client_requested_cancel"`)
 - a higher-level client policy aborts the request locally
 
-`queue_timeout_seconds: 0` (or a negative value) disables the timeout; the wait
-is then unbounded, and `queue_timeout_enforced` in `/v1/queue/status` is
-`false` with `queue_timeout_s: 0`. When enforcement is off, size your client
-timeout from your own inference deadline instead of `queue_timeout_s`.
+`queue_timeout_seconds: 0` (or a negative/non-finite value) disables the
+timeout; the wait is then unbounded, and `queue_timeout_enforced` in
+`/v1/queue/status` is `false` with `queue_timeout_s: 0`. Removing the key does
+not disable it — an absent key falls back to the enforced `1800 s` default.
+When enforcement is off, size your client timeout from your own inference
+deadline instead of `queue_timeout_s`.
 
 When Guardian cancels a queued request, the response keeps one typed shape; the
 `message` field carries the reason:

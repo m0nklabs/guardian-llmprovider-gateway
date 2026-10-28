@@ -1,6 +1,7 @@
 """Tests for app.proxy.queue — FIFO inference queue."""
 
 import asyncio
+import math
 import time
 
 import pytest
@@ -322,6 +323,8 @@ class TestQueueTimeoutEnforcement:
             (-1, False),
             (-0.5, False),
             (None, False),
+            (float("nan"), False),
+            (float("inf"), False),
             (0.2, True),
             (900, True),
             (1800.0, True),
@@ -334,6 +337,8 @@ class TestQueueTimeoutEnforcement:
 
         assert status["queue_timeout_enforced"] is expected_enforced
         assert status["queue_timeout_s"] == (float(configured) if expected_enforced else 0.0)
+        # The payload must stay JSON-serializable: never nan/inf.
+        assert math.isfinite(status["queue_timeout_s"])
         assert status["wait_policy"] == "disconnect_or_cancel"
 
     def test_default_budget_is_enforced(self):

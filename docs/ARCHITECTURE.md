@@ -117,7 +117,8 @@ Non-inference routes stay outside the queue, including `GET /v1/models`,
 - The configured `queue_timeout_seconds` (shipped default `1800`) is an
   enforced wait budget: a request that waits longer finalizes as `expired`
   with `cancel_reason: "queue_timeout"` and its client receives the typed
-  `499 request_cancelled`. `0`/negative/absent disables enforcement and
+  `499 request_cancelled`. `0`/negative/`None` disables enforcement (an
+  absent key falls back to the enforced `1800 s` default) and
   `GET /v1/queue/status` reports `queue_timeout_enforced` accordingly.
 - Every queued response carries `X-Request-Id` and `X-Queue-Wait-Ms`.
 - `GET /v1/queue/status` is intentionally not queued, so waiting clients can

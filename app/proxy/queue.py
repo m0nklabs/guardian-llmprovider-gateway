@@ -6,8 +6,9 @@ or expired. A queued request that holds a live connection is bounded by the
 configured ``queue_timeout`` wait budget (``queue.queue_timeout_seconds``): once
 it elapses the request finalizes as ``expired`` with ``cancel_reason:
 "queue_timeout"`` and the waiting client receives the usual typed cancellation.
-A non-positive budget disables enforcement and restores the unbounded wait, in
-which case the request stays queued until it disconnects or is cancelled.
+A non-positive (or non-finite) budget disables enforcement and restores the
+unbounded wait, in which case the request stays queued until it disconnects or
+is cancelled.
 """
 
 import asyncio
@@ -32,8 +33,9 @@ QUEUE_TIMEOUT_REASON = "queue_timeout"
 def _normalize_queue_timeout(queue_timeout: object) -> float:
     """Return the enforced queue wait budget in seconds.
 
-    ``0``, negative values, ``None``, ``nan`` and non-numeric input all mean
-    "no queue timeout" and normalize to ``0.0``.
+    ``0``, negative values, ``None``, non-finite values (``nan``, ``inf``) and
+    non-numeric input all mean "no queue timeout" and normalize to ``0.0``, so
+    the advertised enforcement flag and the status payload stay finite.
     """
     if queue_timeout is None or isinstance(queue_timeout, bool):
         return 0.0
@@ -41,7 +43,7 @@ def _normalize_queue_timeout(queue_timeout: object) -> float:
         timeout = float(queue_timeout)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return 0.0
-    if not timeout > 0:  # catches 0, negatives and nan
+    if not 0 < timeout < float("inf"):  # catches 0, negatives and non-finite values
         return 0.0
     return timeout
 

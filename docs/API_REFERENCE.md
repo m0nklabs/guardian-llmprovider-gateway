@@ -72,8 +72,9 @@ When it elapses, Guardian cancels the queued request:
   waiter is woken and promoted if a slot is free, and `your_status` /
   `your_cancel_reason` report the final state.
 
-`queue_timeout_seconds: 0` or a negative value means **no queue timeout**: the
-wait is unbounded, as before, `queue_timeout_s` reports `0` and
+`queue_timeout_seconds: 0`, a negative value or a non-finite value (`.inf`)
+means **no queue timeout**: the wait is unbounded, as before,
+`queue_timeout_s` reports `0` and
 `queue_timeout_enforced` reports `false`. An absent key falls back to the
 built-in default (`1800`), so deleting the key does not silently disable the
 guarantee. Both status fields are derived from the configured value at startup
@@ -707,9 +708,11 @@ Representative response:
 ```
 
 `queue_timeout_enforced` is derived from the configured
-`queue.queue_timeout_seconds`: `true` for a positive value, `false` for `0`,
-a negative value, `None` or an absent key (each of which disables the timeout).
-A request that expires reports `your_status: "expired"` with
+`queue.queue_timeout_seconds`: `true` for a positive finite value, `false` for
+`0`, a negative value, `None` or any non-finite value (each of which disables
+the timeout). An **absent** key is not a disable switch: it falls back to the
+enforced `1800`-second default. A request that expires reports
+`your_status: "expired"` with
 `your_cancel_reason: "queue_timeout"` and increments
 `stats.total_timeouts` / `stats.total_expired`.
 
