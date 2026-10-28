@@ -127,6 +127,13 @@ an entry and a capture context). Without it, a client that keeps retrying while
 `max_concurrent: 1` grows the waiting list without limit; with it, the 33rd waiter
 gets a `503` it can act on.
 
+The bound is **global per process, not per key**: one aggressive client can fill
+all 32 slots, and its next request then gets the same `503 queue_full` as everyone
+else's. That is deliberate — the point is that the waiting list cannot grow, not
+that every caller is guaranteed a fair share; the rate bound is what limits one
+client's arrival rate, and the per-key "one running request" rule (`409
+queue_admission_rejected`) is what stops one key from occupying a slot twice.
+
 The retry hint is `admission.queue_full_retry_after_seconds`, default **60 s**:
 one local generation is tens of seconds (`docs/G0_BASELINE.md`: ~7 s for 256
 tokens at ~33 tok/s, 55.9 s for a cold model load), so a minute is the scale at
