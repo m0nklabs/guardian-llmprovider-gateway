@@ -34,3 +34,5 @@ decision records"); this directory is where they live.
 | [G1-02](G1-02-destination-and-credentials.md) | Destination allowlist, credential isolation and SSRF resistance | Accepted | 2026-10-28 |
 | [G1-03](G1-03-admission-and-audit.md) | Bounded admission and metadata audit | Accepted | 2026-10-28 |
 | [G1-04](G1-04-log-injection.md) | Log-injection guard: one sanitizer, and a model that can see it | Accepted | 2026-10-28 |
+| [G1-05](G1-05-session-slot-path-containment.md) | Session-slot filenames are contained by normalisation plus a prefix check | Accepted | 2026-10-28 |
+| [G1-06](G1-06-credential-fingerprint-hashing.md) | The credential fingerprint is an identity, not a password hash | Accepted | 2026-10-28 |
