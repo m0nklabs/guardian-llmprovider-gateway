@@ -256,11 +256,27 @@ Two behaviours worth recording as baseline facts:
   (`_owner_has_active_request`, `app/proxy/queue.py:181-190,249-257`).
 
 **Harness hardening (review follow-up, same PR).** The probe above was reworked
-so it can never cancel a stranger's work: it refuses to start unless the queue
-is idle, correlates B **only** through the owner-scoped `your_requests` list,
-aborts without issuing a `DELETE` when that key owns more than one queued
-request, and treats "B did not report `499 request_cancelled`" as a failed
-probe (`exit 5`) rather than evidence. Re-run on 2026-10-27T23:41Z confirmed the
+so it cannot silently cancel someone else's work, with an explicit limit that
+the reader must respect: **it requires a key nobody else is using.** Guardian
+assigns queue request ids server-side, so a client cannot label its own
+request; correlation therefore has to be inferential:
+
+- it refuses to start unless the queue is idle at that moment;
+- it correlates B **only** through the owner-scoped `your_requests` list, and
+  diffs that list against a snapshot taken immediately before B is enqueued, so
+  an id created during the window is the only candidate;
+- it aborts without issuing a `DELETE` when that diff is not exactly one id —
+  a second same-key client arriving in the window makes the run refuse rather
+  than guess;
+- it treats "B did not report `499 request_cancelled`" as a failed probe
+  (`exit 5`) and marks `cancellation_correlated: false`, so a mismatch can
+  never be published as evidence.
+
+That is **detection, not prevention**: if two same-key requests are created
+inside the window, the abort fires; if a same-key request is created and
+displaced in a way the snapshot cannot separate, the post-condition catches it
+only after the fact. Hence the exclusivity requirement — do not run this probe
+against a key that other clients are actively using. Re-run on 2026-10-27T23:41Z confirmed the
 correlation end to end: `active_request_id=0d7f213c…`,
 `cancelled_request_id=fc7daa26…`, `cancellation_correlated: true`, A finished
 `200` in 5772.79 ms, queue back to `0/0`.

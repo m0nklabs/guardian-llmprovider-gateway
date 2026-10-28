@@ -145,7 +145,18 @@ def run_series(args: argparse.Namespace) -> int:
 
 
 def run_queue_probe(args: argparse.Namespace) -> int:
-    """Occupy the single slot with one request and cancel a second, queued one."""
+    """Occupy the single slot with one request and cancel a second, queued one.
+
+Requires a **key nobody else is using** at that moment. Guardian assigns queue
+request ids server-side, so a client cannot label its own request; the probe
+therefore correlates B against the owner-scoped queue snapshot and refuses to
+issue the DELETE whenever the correlation is not unique. A same-key request
+arriving between the snapshot and B's appearance makes the correlation
+ambiguous and aborts the run; the post-condition on B (must report
+``499 request_cancelled``) then catches any residual mismatch. That is
+detection, not a guarantee: never point this at a key you do not exclusively
+own while it is in use.
+"""
     key = load_key(args.key_name, Path(args.keys_file))
     results: dict[str, dict] = {}
 
@@ -221,6 +232,16 @@ def run_queue_probe(args: argparse.Namespace) -> int:
 
     a_id = own_active(active)[0]["request_id"]
 
+    # Snapshot which queued ids this key already owns *before* B exists. Any id
+    # in the post-B queue that is absent here was created during the window, and
+    # only an exclusive key makes that unambiguous: a second same-key client
+    # queueing in this window would produce two new ids, which is a refusal.
+    # (A same-key client cannot supply its own request id, so this diff plus the
+    # post-condition is detection, not prevention — see the docstring.)
+    waiting_before_b = {
+        item["request_id"] for item in own(active, "queued") if item["request_id"] != a_id
+    }
+
     second = threading.Thread(target=chat, args=("B", 32), daemon=True)
     second.start()
 
@@ -228,7 +249,11 @@ def run_queue_probe(args: argparse.Namespace) -> int:
     queued = {}
     while time.monotonic() < deadline:
         queued = status()
-        queued_own = [item for item in own(queued, "queued") if item["request_id"] != a_id]
+        queued_own = [
+            item
+            for item in own(queued, "queued")
+            if item["request_id"] not in waiting_before_b
+        ]
         if queued_own:
             break
         time.sleep(0.02)
