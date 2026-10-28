@@ -153,6 +153,91 @@ one request: the depth bound refuses a request *before* it is registered (no
 request id, no wait budget involved), while an admitted request that waits too
 long still ends as the usual `499` / `queue_timeout` described above.
 
+## Audit records (G1-03 part 2)
+
+Guardian writes **one metadata-only audit record per authorization/admission
+decision** — allows *and* denials — on both surfaces (`:11434` → `surface:
+"proxy"`, `:11437` → `surface: "dashboard"`). Source of record:
+[decisions/G1-03-admission-and-audit.md](decisions/G1-03-admission-and-audit.md)
+§11; implementation `app/proxy/audit.py`.
+
+**Audited:** every request that presents a key (allowed, with its resolved
+scopes) and every refusal on the way — `401` auth failure, `403` scope denial,
+`429` rate limit, `413` body bound, `503` queue depth / misconfiguration, and a
+refused outbound destination (`502 destination_denied`).
+
+**Not audited:** `public` routes (`/healthz`, the docs routes, `/`, `/favicon.ico`,
+`/static`) — they carry no key and make no authorization decision. Payload
+capture is a separate, opt-in subsystem and is unchanged.
+
+### The record
+
+One JSON object per line on logger `Guardian.Audit` (`INFO` for allow, `WARNING`
+for deny), one line per decision:
+
+```json
+{"decision":"deny","detail":"insufficient_scope","event":"audit","key_fingerprint":"4e99bf5e7dae","key_name":"agent-one","limit":null,"limit_value":null,"method":"GET","reason":"insufficient_scope","required_scope":"admin","route":"/api/keys","scopes":["client"],"status":403,"surface":"proxy","ts":"2026-10-28T13:54:17.256Z"}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `ts` | UTC timestamp, milliseconds, `Z` |
+| `event` | always `"audit"` |
+| `surface` | `proxy` (`:11434`) or `dashboard` (`:11437`) |
+| `decision` | `allow` or `deny` |
+| `reason` | closed vocabulary: `scope_granted`, `scope_grace`, `missing_api_key`, `invalid_api_key`, `insufficient_scope`, `invalid_scope_declaration`, `scope_undeclared_route`, `rate_limited`, `queue_full`, `admission_misconfigured`, `request_too_large`, `destination_denied`, `other` |
+| `detail` | machine sub-code where the reason has one (e.g. the destination reason like `host_not_allowed`), otherwise `null` |
+| `method` | HTTP method |
+| `route` | the FastAPI **route template** (`/v1/{path:path}`), never the concrete path; `null` when the request was refused before routing (`413`) |
+| `required_scope` | the scope the route declares (`client`, `operator`, `admin`, `capture-export`) |
+| `scopes` | the key's resolved scopes, sorted (`null` when the key was never resolved) |
+| `key_fingerprint` | `sha256(token)[:12]` — the G1-01 identity of the **presented** key (validated or not) |
+| `key_name` | operator-assigned key name (`null` when `audit.include_key_name: false`) |
+| `status` | the HTTP status the client received |
+| `limit` | config key of the admission bound that refused it, when one did |
+| `limit_value` | that bound's configured number |
+
+`decision` is the authorization/admission answer and `status` is what the client
+got, so an allowed request that then failed (the `499 queue_timeout` wait budget,
+a `5xx` from the backend) reads `"decision":"allow"` with that status.
+
+**What a record never contains:** payload or prompt text, completion/model
+output, any header value, the raw token, the query string, the concrete path,
+the client IP or user agent. The field set is closed (`RECORD_FIELDS` in
+`app/proxy/audit.py`) and every string is length-capped, so the line is safe to
+ship to a shared log aggregator. The `key_name` can be omitted
+(`audit.include_key_name: false`) where key names are personal data — see
+[CONFIG_SCHEMA.md](CONFIG_SCHEMA.md) §12.
+
+**Auth-header invariant.** No `Bearer`/`api-key`/`Authorization` value can reach
+a Guardian log line: the G1-02 redaction filter (`app/log_safety.py`) scrubs
+registered secrets (provider credentials, the caretaker key and the Guardian key
+store) and credential-shaped values, and
+`tests/unit/test_audit_metadata.py` fails the build if any exercised path logs
+one — `DEBUG` included.
+
+### Querying it
+
+The log line is the durable sink; the in-process buffer (bounded, default 256
+records) is a post-incident tail, not an HTTP endpoint.
+
+```bash
+# every decision since the last restart
+journalctl -u guardian-llmprovider-gateway --since today | grep '"event":"audit"'
+# just the denials, newest last
+journalctl -u guardian-llmprovider-gateway | grep '"event":"audit"' | grep '"decision":"deny"'
+# one key's trail (fingerprint from the auth line or the record itself)
+journalctl -u guardian-llmprovider-gateway | grep '"event":"audit"' | grep '"key_fingerprint":"4e99bf5e7dae"'
+# rate/queue refusals, if jq is available
+journalctl -u guardian-llmprovider-gateway -o cat \
+  | grep '"event":"audit"' | jq -c 'select(.reason=="rate_limited" or .reason=="queue_full")'
+```
+
+`grep '"event":"audit"' guardian.log` works the same way when the service writes
+its log file. Aggregated counts are on `GET /metrics`
+(scope `client`): `guardian_audit_records_total{decision,reason}` — at most
+`2 × 14` series, so the metric cannot grow with traffic or with caller input.
+
 ## Error Model
 
 Common statuses:
@@ -1379,5 +1464,10 @@ longer a live control path.
   `429`) with retry hints; the rate limiter is keyed on the key fingerprint, is
   single-process and is documented as such. See
   [decisions/G1-03-admission-and-audit.md](decisions/G1-03-admission-and-audit.md).
-- Backpressure comes from the FIFO queue and model-size timeout tiers, not from
-  per-client rate limiting.
+- Metadata-only audit records (G1-03 part 2) are written for every allow and
+  deny decision on both surfaces; no payload, header value, token or query
+  string can reach them, and no `Bearer` value can reach a log line at any
+  level. See [decisions/G1-03-admission-and-audit.md](decisions/G1-03-admission-and-audit.md)
+  §11.
+- Backpressure comes from the FIFO inference queue, the per-key token bucket
+  (G1-03), the waiting-depth bound and the model-size timeout tiers.
