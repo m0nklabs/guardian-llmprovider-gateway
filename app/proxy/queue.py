@@ -25,6 +25,8 @@ import time
 import uuid
 from dataclasses import dataclass, field
 
+from app.log_safety import clean_log_value
+
 logger = logging.getLogger("Queue")
 
 FINAL_STATES = {"completed", "cancelled", "failed", "expired"}
@@ -333,8 +335,8 @@ class InferenceQueue:
                 "📋 [%s] Queued at position %s (client: %s, model: %s)",
                 request_id[:8],
                 position,
-                normalized_client_id,
-                model,
+                clean_log_value(normalized_client_id),
+                clean_log_value(model),
             )
         self._signal_change()
         return request_id

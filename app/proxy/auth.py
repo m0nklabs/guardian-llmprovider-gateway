@@ -628,7 +628,7 @@ def generate_api_key(
     }
     save_api_keys(keys)
     register_secret(api_key)
-    logger.info(f"Generated new API key for '{name}'")
+    logger.info("Generated new API key for '%s'", clean_log_value(name))
     return api_key
 
 async def verify_api_key(request: Request, creds: HTTPAuthorizationCredentials | None = Security(security_scheme)):

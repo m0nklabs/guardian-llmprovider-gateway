@@ -28,6 +28,8 @@ from pathlib import Path
 
 import yaml
 
+from app.log_safety import clean_log_value
+
 logger = logging.getLogger("Guardian.Degeneration")
 
 #: mtime-gated config cache — detectors are created per stream; the yaml
@@ -204,7 +206,7 @@ def make_detector() -> DegenerationDetector:
 def log_cutoff(model: str, verdict: DegenerationVerdict, duration_s: float | None = None) -> None:
     logger.info(
         "🛑 Degeneration cutoff: model=%s loop_period=%d repeats=%d bytes=%d%s",
-        model,
+        clean_log_value(model),
         verdict.period,
         verdict.repeats,
         verdict.repeat_bytes,
