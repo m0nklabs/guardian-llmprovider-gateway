@@ -194,8 +194,8 @@ the tooling must follow.
 
 | Condition | Behaviour | Why |
 | --- | --- | --- |
-| Unknown/typo'd scope token in `metadata.scopes` | The whole declaration is treated as invalid: `client` only, `403` on every privileged route, one error log naming the offending tokens | A typo must never silently grant the stronger neighbour; the key keeps working for inference so a live integration does not die of a spelling mistake |
-| `metadata.scopes` not a list of strings | Same as unknown token | Malformed declaration cannot be interpreted safely |
+| Unknown/typo'd scope token in `metadata.scopes` | The whole declaration is treated as invalid: `client` only, `403` on every privileged route, one structured log naming the offending tokens | A typo must never silently grant the stronger neighbour; the key keeps working for inference so a live integration does not die of a spelling mistake |
+| `metadata.scopes` not a list of strings (including an explicit `null`) | Same as unknown token | Present-but-null is a broken declaration, not an absence; it must not inherit the legacy grace grant |
 | `auth.scopes_enforced_after` absent or malformed | Window closed; unscoped keys are `client` | A broken config must not extend privilege |
 | Key store unreadable/unparseable | `401` on every route (existing `load_api_keys` behaviour) | No token can be verified, so no request is authorized; there is no permissive fallback to fall back to |
 | Protected route missing from `ROUTE_SCOPES` | `403` `authorization_misconfigured` | A new route must not become reachable just because nobody declared its scope; the matrix guard also fails the build |

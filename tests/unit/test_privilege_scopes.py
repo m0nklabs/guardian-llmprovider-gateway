@@ -363,6 +363,37 @@ class TestFailClosed:
         assert excinfo.value.status_code == 403
         assert excinfo.value.detail["type"] == "authorization_misconfigured"
 
+    def test_explicit_null_scope_declaration_denies_privilege(
+        self, proxy_client, keys_file, deadline
+    ):
+        """``metadata.scopes: null`` is a declaration, not an absence."""
+
+        deadline(FUTURE)  # even with the window wide open
+        document = yaml.safe_load(keys_file.read_text(encoding="utf-8"))
+        document["null_key"] = {
+            "name": "null-scoped",
+            "created_at": 9,
+            "metadata": {"scopes": None},
+        }
+        keys_file.write_text(yaml.safe_dump(document), encoding="utf-8")
+        auth._API_KEYS_CACHE.clear()
+
+        _assert_scope_denial(
+            _call(proxy_client, "get", "/api/keys", token="null_key"), "admin"
+        )
+        assert _call(proxy_client, "get", "/v1/queue/status", token="null_key").status_code == 200
+
+    def test_client_routes_are_not_counted_as_grace(self, proxy_client, deadline, caplog):
+        """Ordinary inference survives the deadline, so it is not a grace use."""
+
+        deadline(FUTURE)
+        before = metrics.SCOPE_GRACE_CALLS.labels(scope="client", route="GET /v1/queue/status")._value.get()
+        with caplog.at_level(logging.WARNING, logger="Auth"):
+            assert _call(proxy_client, "get", "/v1/queue/status", token=LEGACY_TOKEN).status_code == 200
+        after = metrics.SCOPE_GRACE_CALLS.labels(scope="client", route="GET /v1/queue/status")._value.get()
+        assert after == before
+        assert "scope-grace" not in caplog.text
+
     def test_unparseable_scope_value_never_grants(self):
         for value in ("not-a-date", "", 12345, {"nested": "dict"}, None):
             assert scopes.parse_enforced_after(value) is None
@@ -414,7 +445,12 @@ class TestMinting:
         grant = scopes.mint_metadata(operator_entry, {"scopes": ["client"]})
         assert grant.metadata["scopes"] == ["client"]
 
-    def test_grandfathered_key_cannot_launder_its_grace_grant(self, proxy_client, keys_file):
+    def test_grandfathered_key_cannot_launder_its_grace_grant(
+        self, proxy_client, keys_file, deadline
+    ):
+        # Pinned to an explicitly open window: the shipped deadline must not
+        # decide whether this test exercises minting or the 403 boundary.
+        deadline(FUTURE)
         escalation = self._mint(
             proxy_client, LEGACY_TOKEN, {"name": "launder", "metadata": {"scopes": ["admin"]}}
         )

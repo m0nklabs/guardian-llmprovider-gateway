@@ -181,9 +181,9 @@ async def create_api_key(request: Request, client_id: str) -> Any:
     )
     logger.info(
         "🔑 Admin '%s' generated new API key for '%s' (scopes=%s, cloud_gateway_access=%s)",
-        client_id,
-        name,
-        grant.metadata.get("scopes", "inherit/unscoped"),
+        clean_log_value(client_id),
+        clean_log_value(name),
+        clean_log_value(grant.metadata.get("scopes", "inherit/unscoped")),
         grant.cloud_gateway_access,
     )
     return {

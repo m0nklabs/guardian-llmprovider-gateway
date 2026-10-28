@@ -307,12 +307,16 @@ def resolve_key_scopes(
       :data:`IMPLIED_SCOPES`, enforced from day one;
     * absent -> legacy key: every key scope while the window is open, plain
       ``client`` once it is closed;
-    * present but malformed (not a list of strings) or carrying an unknown
-      token -> ``client`` only. Privilege fails closed; ordinary inference keeps
+    * present but malformed (not a list of strings, explicit ``null``) or
+      carrying an unknown token -> ``client`` only. Privilege fails closed; ordinary inference keeps
       working instead of the key silently becoming unusable.
     """
     metadata = _metadata(entry)
     declared, invalid_tokens, malformed = _parse_declared(metadata.get("scopes"))
+    if "scopes" in metadata and metadata["scopes"] is None:
+        # Present-but-null is an explicit (broken) declaration, not an absence:
+        # it must fail closed instead of inheriting the legacy grace grant.
+        malformed = True
 
     if invalid_tokens or malformed:
         return KeyScopes(
@@ -339,7 +343,17 @@ class AuthorizationDecision:
 
     @property
     def grace_used(self) -> bool:
-        return self.allowed and self.key_scopes.mode == "grace"
+        """True only when grace actually bought a *privileged* call.
+
+        ``client`` access survives the deadline, so marking ordinary inference
+        and discovery as a grace use would flood the log and the counter with
+        requests that need no migration at all.
+        """
+        return (
+            self.allowed
+            and self.required not in {Scope.PUBLIC, Scope.CLIENT}
+            and self.key_scopes.mode == "grace"
+        )
 
 
 def authorize_key(
