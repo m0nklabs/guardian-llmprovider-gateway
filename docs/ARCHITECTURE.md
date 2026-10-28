@@ -113,9 +113,11 @@ inference queue sees a request (G1-01,
 `admin` implies `operator`, `client` and `capture-export`; `operator` implies
 `client`. The decision is per request, so a narrowing in
 `config/guardian.keys.yaml` takes effect on the next request without a restart.
-Routes that need no key (`/healthz`, `/metrics`, the FastAPI docs routes and the
-dashboard static assets) have no auth dependency and are declared `public` only
-so the matrix stays complete.
+Routes that need no key (`/healthz`, the FastAPI docs routes and the dashboard
+static assets) have no auth dependency and are declared `public` only so the
+matrix stays complete. `GET /metrics` is **not** one of them: it carries model
+names, queue depth and process state and requires the `client` scope
+([#46](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/46)).
 
 ### What enters the queue
 

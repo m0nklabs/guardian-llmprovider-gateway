@@ -1463,13 +1463,16 @@ async def rotate_capture_file(client_id: str = Depends(verify_api_key)):
 
 
 
-# --- Prometheus metrics endpoint (no auth — standard for scraping) ---
+# --- Prometheus metrics endpoint (client scope — issue #46) ---
 
 @app.get("/metrics")
-async def prometheus_metrics():
+async def prometheus_metrics(client_id: str = Depends(verify_api_key)):
     """Expose Prometheus-compatible metrics for Grafana/alerting.
 
-    No auth required — standard Prometheus convention for scrape targets.
+    Requires a key holding the ``client`` scope: the payload names models and
+    exposes queue depth and process state, i.e. reconnaissance data, so it is
+    no longer an anonymous LAN surface (issue #46). ``GET /healthz`` remains
+    public because a liveness probe must not need a key.
     """
     update_queue_metrics(inference_queue)
     await update_gpu_metrics_cached()

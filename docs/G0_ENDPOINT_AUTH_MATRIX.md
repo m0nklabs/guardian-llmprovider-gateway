@@ -83,21 +83,21 @@ are reachable, not because they belong to the Guardian API.
 | 24 | proxy | GET | `/api/status` | `app/proxy/server.py:1447` | `verify_api_key` | admin | admin | `tests/integration/test_live_inference.py::TestStatus::test_api_status`<br>`tests/integration/test_live_inference.py::TestRestartRace::test_api_status_vram_fields` |
 | 25 | proxy | GET | `/api/capture/status` | `app/proxy/server.py:1453` | `verify_api_key` | capture-export | capture-export | none |
 | 26 | proxy | POST | `/api/capture/rotate` | `app/proxy/server.py:1459` | `verify_api_key` | capture-export | capture-export | none |
-| 27 | proxy | GET | `/metrics` | `app/proxy/server.py:1468` | none | public | public | `tests/integration/test_live_inference.py::TestRestartRace::test_metrics_endpoint` |
-| 28 | proxy | GET | `/api/scaler` | `app/proxy/server.py:1484` | `verify_api_key` | admin | admin | none |
-| 29 | proxy | PUT | `/api/scaler` | `app/proxy/server.py:1490` | `verify_api_key` | admin | admin | none |
-| 30 | proxy | POST | `/api/scaler/reset` | `app/proxy/server.py:1496` | `verify_api_key` | admin | admin | none |
-| 31 | proxy | POST | `/api/scaler/recommend` | `app/proxy/server.py:1502` | `verify_api_key` | admin | admin | none |
-| 32 | proxy | GET | `/v1/queue/status` | `app/proxy/server.py:1511` | `verify_api_key` | client | client | `tests/integration/test_live_inference.py::TestQueueBehavior::test_status_shows_active_during_inference`<br>`tests/integration/test_live_inference.py::TestRestartRace::test_queue_status` |
-| 33 | proxy | GET | `/v1/queue/requests/{request_id}` | `app/proxy/server.py:1517` | `verify_api_key` | client | client | `tests/unit/test_server.py::test_queue_request_status_endpoint_returns_snapshot`<br>`tests/unit/test_server.py::test_queue_request_status_endpoint_is_isolated_per_api_key` |
-| 34 | proxy | DELETE | `/v1/queue/requests/{request_id}` | `app/proxy/server.py:1523` | `verify_api_key` | client | client | `tests/unit/test_server.py::test_cancel_queue_request_endpoint_marks_running_request` |
-| 35 | proxy | GET | `/v1/{path:path}` | `app/proxy/server.py:1531` | `verify_api_key` | client | client | none |
-| 36 | proxy | POST | `/v1/audio/speech` | `app/proxy/server.py:1643` | `verify_api_key` | client | client | `tests/unit/test_tts_route.py::test_success_primary_provider_and_expanded_keys` †<br>`tests/unit/test_tts_routes.py::test_cloud_route_forwards_canonical_payload` †<br>`tests/unit/test_tts_routes.py::test_cloud_route_failure_is_exact_no_local_fallback` † |
-| 37 | proxy | POST | `/v1/audio/transcriptions` | `app/proxy/server.py:1649` | `verify_api_key` | client | client | `tests/unit/test_stt_routes.py::test_cloud_route_forwards_brand_model_id_and_language` †<br>`tests/unit/test_stt_routes.py::test_unknown_provider_returns_404_model_not_served` †<br>`tests/unit/test_stt_routes.py::test_cloud_error_body_never_reaches_client_detail` † |
-| 38 | proxy | POST | `/v1/{path:path}` | `app/proxy/server.py:1655` | `verify_api_key` | client | client | `tests/unit/test_model_switch_verification.py::test_v1_switch_verify_fails_closed_when_backend_serves_other_model`<br>`tests/unit/test_grammar_passthrough.py::test_local_passthrough_preserves_all_gcd_fields_byte_identical`<br>`tests/unit/test_server.py::test_v1_post_forwards_cloud_model_to_provider_not_local` |
-| 39 | proxy | POST | `/api/session/save` | `app/proxy/server.py:1850` | `verify_api_key` | admin | admin | none |
-| 40 | proxy | POST | `/api/session/load` | `app/proxy/server.py:1856` | `verify_api_key` | admin | admin | none |
-| 41 | proxy | GET | `/api/session/list` | `app/proxy/server.py:1862` | `verify_api_key` | admin | admin | none |
+| 27 | proxy | GET | `/metrics` | `app/proxy/server.py:1468` | `verify_api_key` | client | client | `tests/unit/test_privilege_scopes.py::TestMetricsGate::test_client_key_gets_the_same_prometheus_payload`<br>`tests/unit/test_privilege_scopes.py::TestMetricsGate::test_unauthenticated_metrics_is_the_existing_typed_401`<br>`tests/integration/test_live_inference.py::TestRestartRace::test_metrics_endpoint` |
+| 28 | proxy | GET | `/api/scaler` | `app/proxy/server.py:1487` | `verify_api_key` | admin | admin | none |
+| 29 | proxy | PUT | `/api/scaler` | `app/proxy/server.py:1493` | `verify_api_key` | admin | admin | none |
+| 30 | proxy | POST | `/api/scaler/reset` | `app/proxy/server.py:1499` | `verify_api_key` | admin | admin | none |
+| 31 | proxy | POST | `/api/scaler/recommend` | `app/proxy/server.py:1505` | `verify_api_key` | admin | admin | none |
+| 32 | proxy | GET | `/v1/queue/status` | `app/proxy/server.py:1514` | `verify_api_key` | client | client | `tests/integration/test_live_inference.py::TestQueueBehavior::test_status_shows_active_during_inference`<br>`tests/integration/test_live_inference.py::TestRestartRace::test_queue_status` |
+| 33 | proxy | GET | `/v1/queue/requests/{request_id}` | `app/proxy/server.py:1520` | `verify_api_key` | client | client | `tests/unit/test_server.py::test_queue_request_status_endpoint_returns_snapshot`<br>`tests/unit/test_server.py::test_queue_request_status_endpoint_is_isolated_per_api_key` |
+| 34 | proxy | DELETE | `/v1/queue/requests/{request_id}` | `app/proxy/server.py:1526` | `verify_api_key` | client | client | `tests/unit/test_server.py::test_cancel_queue_request_endpoint_marks_running_request` |
+| 35 | proxy | GET | `/v1/{path:path}` | `app/proxy/server.py:1534` | `verify_api_key` | client | client | none |
+| 36 | proxy | POST | `/v1/audio/speech` | `app/proxy/server.py:1646` | `verify_api_key` | client | client | `tests/unit/test_tts_route.py::test_success_primary_provider_and_expanded_keys` †<br>`tests/unit/test_tts_routes.py::test_cloud_route_forwards_canonical_payload` †<br>`tests/unit/test_tts_routes.py::test_cloud_route_failure_is_exact_no_local_fallback` † |
+| 37 | proxy | POST | `/v1/audio/transcriptions` | `app/proxy/server.py:1652` | `verify_api_key` | client | client | `tests/unit/test_stt_routes.py::test_cloud_route_forwards_brand_model_id_and_language` †<br>`tests/unit/test_stt_routes.py::test_unknown_provider_returns_404_model_not_served` †<br>`tests/unit/test_stt_routes.py::test_cloud_error_body_never_reaches_client_detail` † |
+| 38 | proxy | POST | `/v1/{path:path}` | `app/proxy/server.py:1658` | `verify_api_key` | client | client | `tests/unit/test_model_switch_verification.py::test_v1_switch_verify_fails_closed_when_backend_serves_other_model`<br>`tests/unit/test_grammar_passthrough.py::test_local_passthrough_preserves_all_gcd_fields_byte_identical`<br>`tests/unit/test_server.py::test_v1_post_forwards_cloud_model_to_provider_not_local` |
+| 39 | proxy | POST | `/api/session/save` | `app/proxy/server.py:1853` | `verify_api_key` | admin | admin | none |
+| 40 | proxy | POST | `/api/session/load` | `app/proxy/server.py:1859` | `verify_api_key` | admin | admin | none |
+| 41 | proxy | GET | `/api/session/list` | `app/proxy/server.py:1865` | `verify_api_key` | admin | admin | none |
 
 ## Dashboard surface — `app.main:app` (`127.0.0.1:11437`)
 
@@ -130,6 +130,34 @@ Three rows changed privilege class when the classes became enforced scopes:
 - `GET /api/capture/status` and `POST /api/capture/rotate` — `admin` →
   `capture-export`: capture data is user payload, so exporting/rotating it is
   its own privilege. `admin` still reaches them through scope implication.
+
+## Metrics gate change (issue #46, 2026-10-28)
+
+`GET /metrics` moved from `public` to **`client`**: the payload names the loaded
+models and exposes queue depth and process state, so it is reconnaissance data
+for any host on the LAN and key-holder data for a Guardian key
+([#46](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/46)).
+One row changed; `GET /healthz` stays `public` because a liveness probe must not
+need a key, and the docs routes and dashboard shell are untouched.
+
+Why this option and not loopback binding or payload reduction:
+
+- **Loopback binding** would need an nginx path split on top of the stream
+  multiplexer and would make a LAN-side scraper impossible to add later without
+  undoing the change.
+- **Payload reduction** would remove exactly the model/queue/process detail the
+  key holders want from the scrape target.
+- **`client` scope** keeps one enforcement point (`verify_api_key`), returns the
+  existing typed `401` for an anonymous request, and needs no nginx or config
+  change.
+
+No consumer scrapes `/metrics` today (checked `/etc/prometheus`, the alloy,
+Grafana and telegraf units, systemd units, `scripts/` and `dashboard/src/`), so
+the change breaks no live integration. Scrapers now pass a key:
+
+```bash
+curl -H "Authorization: Bearer $GUARDIAN_API_KEY" http://127.0.0.1:11434/metrics
+```
 
 ## Uncovered routes
 

@@ -80,6 +80,19 @@ PAST = "2020-01-01T00:00:00Z"
 FUTURE = "2099-01-01T00:00:00Z"
 ABSENT = object()
 
+#: Every key class against ``GET /metrics`` (issue #46): the payload names
+#: models, queue depth and process state, so it is ``client`` data. ``operator``
+#: and ``admin`` reach it through scope implication; ``capture-export`` alone
+#: does not, exactly like ordinary inference.
+METRICS_MATRIX = [
+    ("no_key", None, 401),
+    ("unknown_key", "fake_00000000000000000000000000000000", 401),
+    ("capture-export", CAPTURE_TOKEN, 403),
+    ("client", CLIENT_TOKEN, 200),
+    ("operator", OPERATOR_TOKEN, 200),
+    ("admin", ADMIN_TOKEN, 200),
+]
+
 #: Every privileged route a ``client`` key must be refused on (issue #52).
 PRIVILEGED_CALLS = [
     ("get", "/api/keys", None),
@@ -152,6 +165,33 @@ def proxy_client(keys_file, stubbed_admin, idle_backend):
     return TestClient(server.app)
 
 
+@pytest.fixture
+def stubbed_metrics(monkeypatch):
+    """Keep ``/metrics`` hermetic: the gate is what this suite asserts.
+
+    The gauges themselves are covered by ``tests/unit/test_metrics.py``; here
+    the endpoint must only do the cheap work of rendering the registry.
+    """
+
+    async def _async_noop(*_args, **_kwargs):
+        return None
+
+    def _noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(server, "update_queue_metrics", _noop)
+    monkeypatch.setattr(server, "update_system_metrics", _noop)
+    monkeypatch.setattr(server, "update_capture_metrics", _noop)
+    monkeypatch.setattr(server, "update_gpu_metrics_cached", _async_noop)
+    monkeypatch.setattr(server, "get_capture_sink_snapshot", _async_noop)
+
+
+@pytest.fixture
+def metrics_client(keys_file, stubbed_metrics):
+    """Proxy app with a temporary key store and a cheap metrics handler."""
+    return TestClient(server.app)
+
+
 def _call(client: TestClient, method: str, path: str, body=None, token: str = CLIENT_TOKEN):
     headers = {"Authorization": f"Bearer {token}"}
     if body is None:
@@ -183,9 +223,13 @@ class TestRouteDeclaration:
         assert scopes.required_scope_for(None, "/api/keys") is None
 
     def test_public_routes_are_declared_public(self):
-        for path in ("/healthz", "/metrics", "/"):
+        for path in ("/healthz", "/"):
             assert scopes.ROUTE_SCOPES[("GET", path)] is scopes.Scope.PUBLIC
         assert scopes.ROUTE_SCOPES[("MOUNT", "/static")] is scopes.Scope.PUBLIC
+
+    def test_metrics_requires_a_client_key(self):
+        """Issue #46: the payload names models, queue depth and process state."""
+        assert scopes.ROUTE_SCOPES[("GET", "/metrics")] is scopes.Scope.CLIENT
 
 
 # ── Class matrix ───────────────────────────────────────────────────────
@@ -252,6 +296,54 @@ class TestExplicitScopes:
         ]
         assert by_name["legacy-unscoped"]["scopes"] is None
         assert by_name["typo-key"]["scope_mode"] == "invalid"
+
+
+# ── /metrics gate (issue #46) ─────────────────────────────────────────
+
+
+class TestMetricsGate:
+    """``GET /metrics`` is ``client`` data: any key may scrape, no key may not."""
+
+    @pytest.mark.parametrize("label,token,expected", METRICS_MATRIX)
+    def test_metrics_scope_matrix(self, metrics_client, label, token, expected):
+        headers = {} if token is None else {"Authorization": f"Bearer {token}"}
+        response = metrics_client.get("/metrics", headers=headers)
+        assert response.status_code == expected, f"{label}: {response.text}"
+
+    def test_unauthenticated_metrics_is_the_existing_typed_401(self, metrics_client):
+        """No new error shape: the 401 is the one every protected route returns."""
+        response = metrics_client.get("/metrics")
+        assert response.status_code == 401
+        assert response.json() == {"detail": "API Key required"}
+        assert response.headers["WWW-Authenticate"] == "Bearer"
+        assert "guardian_" not in response.text
+
+    def test_unknown_key_metrics_is_the_existing_typed_401(self, metrics_client):
+        response = metrics_client.get(
+            "/metrics",
+            headers={"Authorization": "Bearer fake_00000000000000000000000000000000"},
+        )
+        assert response.status_code == 401
+        assert response.json() == {"detail": "Invalid API Key"}
+        assert "guardian_" not in response.text
+
+    def test_capture_export_key_is_denied_like_ordinary_inference(self, metrics_client):
+        detail = _assert_scope_denial(
+            _call(metrics_client, "get", "/metrics", token=CAPTURE_TOKEN), "client"
+        )
+        assert detail["granted_scopes"] == ["capture-export"]
+
+    def test_client_key_gets_the_same_prometheus_payload(self, metrics_client):
+        response = _call(metrics_client, "get", "/metrics")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/plain")
+        assert "guardian_" in response.text
+        assert "# HELP" in response.text
+
+    def test_healthz_still_needs_no_key(self, metrics_client):
+        response = metrics_client.get("/healthz")
+        assert response.status_code == 200
+        assert response.json() == {"ok": True}
 
 
 # ── Grace window ───────────────────────────────────────────────────────

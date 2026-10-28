@@ -18,7 +18,10 @@ Guardian exposes both OpenAI-compatible and Ollama-compatible endpoints on the s
 On port `11434`, every endpoint requires authentication except:
 
 - `GET /healthz`
-- `GET /metrics`
+
+`GET /metrics` requires a key as well (scope `client`): it exposes model names,
+queue depth and process state, so a scraper must send the same header as any
+other client ([#46](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/46)).
 
 Guardian accepts any of these header styles:
 

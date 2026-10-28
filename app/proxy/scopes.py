@@ -91,13 +91,15 @@ def expand_scopes(scopes: frozenset[Scope] | set[Scope]) -> frozenset[Scope]:
 #: route that is missing here fails closed (typed ``403``), never open.
 ROUTE_SCOPES: dict[tuple[str, str], Scope] = {
     # ── Proxy surface (`app.proxy.server:app`) ─────────────────────────
-    # Framework documentation routes and unauthenticated probes.
+    # Framework documentation routes and the liveness probe. `/metrics` is not
+    # here: its payload names models, queue depth and process state, so it is
+    # key-holder data (`client`), not a public probe (issue #46, 2026-10-28).
     ("GET", "/openapi.json"): Scope.PUBLIC,
     ("GET", "/docs"): Scope.PUBLIC,
     ("GET", "/docs/oauth2-redirect"): Scope.PUBLIC,
     ("GET", "/redoc"): Scope.PUBLIC,
     ("GET", "/healthz"): Scope.PUBLIC,
-    ("GET", "/metrics"): Scope.PUBLIC,
+    ("GET", "/metrics"): Scope.CLIENT,
     # Ordinary inference, discovery and own-request queue control.
     ("POST", "/api/chat"): Scope.CLIENT,
     ("POST", "/api/generate"): Scope.CLIENT,
