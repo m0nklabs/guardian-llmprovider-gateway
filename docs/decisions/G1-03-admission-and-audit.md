@@ -570,15 +570,15 @@ Guardian's own log records at every level, `DEBUG` included.
 
 ### 11.3 The audit-without-payload demonstration, and the tests
 
-`tests/unit/test_audit_metadata.py` — **39 tests**, in five groups:
+`tests/unit/test_audit_metadata.py` — **41 tests**, in six groups:
 
-- **`TestAllowRecords` (7).** The record carries exactly `RECORD_FIELDS`; allow on
+- **`TestAllowRecords` (6).** The record carries exactly `RECORD_FIELDS`; allow on
   the inference catch-all route is audited by its template (`/v1/{path:path}`,
   `POST`, `499` from the wait budget); the grace window is marked `scope_grace`
   with the grandfathered envelope; the dashboard surface reports
   `surface="dashboard"`; `public` routes produce nothing; a mutating method is
   recorded as such.
-- **`TestDenyRecords` (9).** One test per denial path named in the acceptance
+- **`TestDenyRecords` (11).** One test per denial path named in the acceptance
   criteria — scope denial, invalid scope declaration, undeclared route, invalid
   key, missing key, **rate limit**, **queue depth**, queue `admission_misconfigured`,
   **body too large**, and **destination denied** (twice: once through a real
@@ -595,12 +595,18 @@ Guardian's own log records at every level, `DEBUG` included.
 - **`TestAuthHeaderInvariant` (4).** The exercised-path invariant (§11.2), the
   non-vacuity proof (leaky line must fail), the filter proof, and the
   filterless-handler proof.
-- **`TestBoundedStorage` (10) / `TestAuditConfiguration` (5).** The bounds of
+- **`TestBoundedStorage` (10) / `TestAuditConfiguration` (7).** The bounds of
   §11.2 and the fail-safe configuration directions, plus
   "shipped `config/global.settings.yaml` equals the module defaults".
 
-Full suite: **2155 passed, 20 deselected** (measured baseline in a clean
-`origin/main` (`f6b9bc0`) worktree: 2116 passed, same 20 deselected — the +39 is
+`TestAuditConfiguration` also carries a shadowing guard: it parses this module
+with `ast` and fails on any duplicate top-level attribute or method name, because
+a duplicated class silently replaces its namesake and its tests then never run —
+green coverage that proves nothing (the failure mode that this file's own review
+history produced once, PR-Piet round 2).
+
+Full suite: **2157 passed, 20 deselected** (measured baseline in a clean
+`origin/main` (`f6b9bc0`) worktree: 2116 passed, same 20 deselected — the +41 is
 exactly this file). `scripts/pre_restart_check.py` green.
 
 ### 11.4 Cost, consequences and what is not covered
