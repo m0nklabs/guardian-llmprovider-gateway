@@ -26,9 +26,11 @@ resolution is stubbed.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import logging
+import pathlib
 
 import pytest
 import yaml
@@ -618,8 +620,9 @@ class TestAuthHeaderInvariant:
             max_body_bytes=1024,
         )
 
-        # Every step is asserted: a step that silently stops exercising its path
-        # would otherwise leave the invariant looking broader than it is.
+        # Every step asserts its own status: a step that silently stops
+        # exercising its path would leave the invariant looking broader than it
+        # is (PR-Piet, review round 1).
 
         # 1. auth success; 2. invalid key; 3. missing header.
         assert proxy_client.get("/v1/queue/status", headers=_auth()).status_code == 200
@@ -661,97 +664,6 @@ class TestAuthHeaderInvariant:
         )
         # 8. destination denial.
         assert TestClient(_outbound_probe_app()).get("/outbound-probe").status_code == 502
-
-        lines = _gateway_lines(caplog)
-        assert lines, "no log lines captured — the demonstration would be vacuous"
-        for needle in self._needles():
-            assert needle not in serialized, f"audit record leaked {needle!r}: {serialized}"
-            for line in lines:
-                assert needle not in line, f"log line leaked {needle!r}: {line}"
-
-    def test_allow_direction(self, proxy_client, caplog):
-        caplog.set_level(logging.DEBUG)
-        # `/api/show` parses the body (so the payload really travels through the
-        # audited path) and answers locally; the model is unknown here, which is
-        # irrelevant — the authorization decision is what is audited.
-        response = proxy_client.post(
-            f"/api/show?trace={QUERY_MARKER}",
-            headers={
-                "Authorization": f"Bearer {CLIENT_TOKEN}",
-                "X-Request-Marker": HEADER_MARKER,
-            },
-            json=_payload(),
-        )
-        assert response.status_code == 404, response.text
-        record = _only_record()
-        assert record["decision"] == audit.ALLOW
-        assert record["key_fingerprint"] == _fingerprint(CLIENT_TOKEN)
-        self._assert_clean(record, caplog)
-
-    def test_deny_direction(self, proxy_client, caplog):
-        caplog.set_level(logging.DEBUG)
-        response = proxy_client.post(
-            f"/api/config/reload?trace={QUERY_MARKER}",
-            headers={
-                "Authorization": f"Bearer {CLIENT_TOKEN}",
-                "X-Request-Marker": HEADER_MARKER,
-            },
-            json=_payload(),
-        )
-        assert response.status_code == 403, response.text
-        record = _only_record()
-        assert record["decision"] == audit.DENY
-        assert record["reason"] == audit.REASON_INSUFFICIENT_SCOPE
-        self._assert_clean(record, caplog)
-
-    def test_the_record_cannot_carry_a_payload_by_construction(self):
-        """Schema closure: there is no field a payload could travel in."""
-        assert "body" not in audit.RECORD_FIELDS
-        assert "headers" not in audit.RECORD_FIELDS
-        assert "query" not in audit.RECORD_FIELDS
-        assert "prompt" not in audit.RECORD_FIELDS
-        assert "model" not in audit.RECORD_FIELDS
-
-
-# ── 4. The auth-header log invariant ──────────────────────────────────
-
-
-class TestAuthHeaderInvariant:
-    def test_no_bearer_reaches_a_log_line_on_any_exercised_path(
-        self, proxy_client, admission_config, test_queue, resolvable_models, caplog
-    ):
-        """Auth, scopes, rate, queue, admission and the destination guard."""
-        caplog.set_level(logging.DEBUG)
-        admission_config(
-            rate_limit={"requests_per_minute": 6, "burst": 2},
-            max_body_bytes=1024,
-        )
-
-        # 1. auth success, 2. auth failure (invalid), 3. missing header
-        proxy_client.get("/v1/queue/status", headers=_auth())
-        proxy_client.get("/v1/queue/status", headers=_auth(UNKNOWN_TOKEN))
-        proxy_client.get("/v1/queue/status")
-        # 4. scope denial
-        proxy_client.get("/api/keys", headers=_auth())
-        # 5. rate-limit denial (burst 2 already spent on 1-2)
-        proxy_client.get("/v1/queue/status", headers=_auth(OTHER_TOKEN))
-        # 6. body-too-large denial
-        proxy_client.post(
-            "/v1/chat/completions",
-            headers=_auth(ADMIN_TOKEN),
-            content=b"y" * 4096,
-        )
-        # 7. queue-depth denial
-        admission_config(
-            rate_limit={"requests_per_minute": 600, "burst": 600},
-            queue_max_depth=1,
-        )
-        queue = test_queue(max_concurrent=1, max_queue_depth=1, queue_timeout=5.0)
-        queue.submit("holder", "model", owner_id="holder")
-        proxy_client.post("/v1/chat/completions", headers=_auth(), json=_payload())
-        # 8. destination denial
-        client = TestClient(_outbound_probe_app())
-        client.get("/outbound-probe")
 
         lines = _gateway_lines(caplog)
         assert len(lines) >= 8, f"path coverage too thin: {len(lines)} lines"
@@ -1001,6 +913,33 @@ class TestAuditConfiguration:
             "status", "limit", "limit_value",
         }
         assert len(audit.RECORD_FIELDS) == 15
+
+    def test_no_test_class_or_method_is_shadowed(self):
+        """A duplicate name silently replaces its namesake — and the tests vanish.
+
+        Python rebinds the module attribute, so pytest collects only the later
+        class and the earlier tests never run: green coverage that proves
+        nothing. This module is edited by hand often enough to keep the guard
+        (PR-Piet, review round 2, found exactly that).
+        """
+        tree = ast.parse(pathlib.Path(__file__).read_text(encoding="utf-8"))
+
+        top_level = [
+            node.name
+            for node in tree.body
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        assert len(top_level) == len(set(top_level)), f"shadowed module attribute: {top_level}"
+
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            methods = [
+                item.name
+                for item in node.body
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+            ]
+            assert len(methods) == len(set(methods)), f"{node.name} redefines a method: {methods}"
 
     def test_reason_vocabulary_size_is_pinned_by_the_docs(self):
         """The record and API_REFERENCE both claim 2 x 13 = 26 metric series."""
