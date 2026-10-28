@@ -210,6 +210,33 @@ def parse_enforced_after(raw: Any) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+
+def _warn_absent(*, got_key: bool) -> None:
+    """Warn once that the deadline is being taken from the shipped default."""
+    marker = "absent:shipped-default"
+    if marker in _LOGGED_BAD_TIMESTAMPS:
+        return
+    _LOGGED_BAD_TIMESTAMPS.add(marker)
+    logger.warning(
+        "🛡️ auth.scopes_enforced_after is absent; using the shipped default %s. "
+        "Add the key to config/global.settings.yaml to make it explicit.",
+        SHIPPED_ENFORCED_AFTER,
+    )
+
+
+def _reject_malformed(reason: str) -> None:
+    """Log once and return ``None`` = "window closed" for a broken declaration."""
+    marker = f"malformed:{reason}"
+    if marker not in _LOGGED_BAD_TIMESTAMPS:
+        _LOGGED_BAD_TIMESTAMPS.add(marker)
+        logger.error(
+            "🛡️ auth.scopes_enforced_after is malformed (%s); privilege scopes are "
+            "enforced immediately (no grace window)",
+            reason,
+        )
+    return None
+
+
 def configured_enforced_after() -> datetime | None:
     """Return the live ``auth.scopes_enforced_after`` value, or ``None``.
 
@@ -224,20 +251,29 @@ def configured_enforced_after() -> datetime | None:
         logger.error("🛡️ Scope config unavailable (%s); enforcing scopes immediately", exc)
         return None
 
-    section = CONFIG.get(SCOPES_ENFORCED_AFTER_KEY[0])
-    raw = section.get(SCOPES_ENFORCED_AFTER_KEY[1]) if isinstance(section, dict) else None
-    if raw is None:
-        # Absent ≠ malformed: use the shipped deadline so an un-reconciled
-        # config keeps the documented grace window instead of enforcing today.
+    section_name, key_name = SCOPES_ENFORCED_AFTER_KEY
+    # Absent and malformed must not be conflated (PR-Piet, G1-02):
+    #   * the whole `auth` section missing, or the key missing from a mapping
+    #     section -> un-reconciled config -> shipped deadline, with a warning;
+    #   * `auth:` present but not a mapping, or the key present with a null or
+    #     unparseable value -> a broken declaration -> enforce immediately.
+    # Pathological configs (`auth: null`, `auth: []`, `scopes_enforced_after: null`)
+    # therefore cannot re-open the window for legacy keys.
+    if section_name not in CONFIG:
         raw = SHIPPED_ENFORCED_AFTER
-        marker = "absent"
-        if marker not in _LOGGED_BAD_TIMESTAMPS:
-            _LOGGED_BAD_TIMESTAMPS.add(marker)
-            logger.warning(
-                "🛡️ auth.scopes_enforced_after is absent; using the shipped default "
-                "%s. Add the key to config/global.settings.yaml to make it explicit.",
-                SHIPPED_ENFORCED_AFTER,
-            )
+        _warn_absent(got_key=False)
+    else:
+        section = CONFIG.get(section_name)
+        if not isinstance(section, Mapping):
+            return _reject_malformed(f"{section_name} is {type(section).__name__}, not a mapping")
+        if key_name not in section:
+            raw = SHIPPED_ENFORCED_AFTER
+            _warn_absent(got_key=False)
+        else:
+            candidate = section.get(key_name)
+            if candidate is None:
+                return _reject_malformed(f"{section_name}.{key_name} is null")
+            raw = candidate
     cache_key = (type(raw).__name__, repr(raw))
     if cache_key in _TIMESTAMP_CACHE:
         return _TIMESTAMP_CACHE[cache_key]

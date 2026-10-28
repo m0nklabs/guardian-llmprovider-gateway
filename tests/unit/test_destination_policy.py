@@ -759,3 +759,42 @@ def test_guarded_client_disables_environment_proxies(policy):
     """A proxy env var must not become a way around the destination guard."""
     client = dp.guarded_async_client(policy=policy, purpose="test")
     assert client.trust_env is False
+
+
+def test_long_lived_client_sees_a_reload_that_revokes_its_destination(dns):
+    """A reload must revoke an approval for an already-constructed client.
+
+    The caretaker client (and the copilot bridge) build one httpx client for the
+    process lifetime; resolving the policy once at construction would keep a
+    removed destination usable until the next restart (PR-Piet, G1-02).
+    """
+    old = dp.DestinationPolicy.from_config(
+        {"destination_policy": {"allow": [{"host": "caretaker.internal", "ports": [11441]}]}}
+    )
+    new = dp.DestinationPolicy.from_config(
+        {"destination_policy": {"allow": [{"host": "elsewhere.internal", "ports": [11441]}]}}
+    )
+    live = {"policy": old}
+    client = dp.guarded_async_client(purpose="t", policy=lambda: live["policy"])
+
+    transport = client._transport
+    assert isinstance(transport, dp.DestinationGuardTransport)
+    assert transport.policy is old
+
+    live["policy"] = new  # simulates POST /api/config/reload
+    assert transport.policy is new
+    with pytest.raises(dp.DestinationDenied) as excinfo:
+        transport.policy.check_structure("http://caretaker.internal:11441/ensure")
+    assert excinfo.value.reason == dp.REASON_HOST_NOT_ALLOWED
+
+
+def test_userinfo_password_never_reaches_the_log(caplog):
+    """A rejected URL with userinfo must be logged sanitized, not verbatim."""
+    policy = dp.DestinationPolicy.from_config(
+        {"destination_policy": {"allow": [{"host": "openrouter.ai", "ports": [443]}]}}
+    )
+    with pytest.raises(dp.DestinationDenied) as excinfo:
+        policy.check_structure("https://user:s3cr3t-pw@evil.example/api")
+    assert "s3cr3t-pw" not in caplog.text
+    assert "s3cr3t-pw" not in str(excinfo.value)
+    assert "s3cr3t-pw" not in repr(excinfo.value.to_detail())

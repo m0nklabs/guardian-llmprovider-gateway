@@ -39,7 +39,7 @@ import ipaddress
 import logging
 import socket
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 from urllib.parse import urlsplit
 
 import httpx
@@ -846,20 +846,25 @@ class DestinationGuardTransport(httpx.AsyncBaseTransport):
 
     def __init__(
         self,
-        policy: DestinationPolicy,
+        policy: DestinationPolicy | Callable[[], DestinationPolicy],
         *,
         purpose: str = "",
         credential_owner: str | None = None,
         inner: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        self._policy = policy
+        # A *callable* is resolved per request: a client that lives for the whole
+        # process (the caretaker client, the copilot bridge) must see a config
+        # reload that removes its destination, otherwise revoking an approval
+        # would silently keep working until the next restart (PR-Piet, G1-02).
+        self._policy_source = policy
         self._purpose = purpose
         self._owner = credential_owner
         self._inner = inner if inner is not None else httpx.AsyncHTTPTransport()
 
     @property
     def policy(self) -> DestinationPolicy:
-        return self._policy
+        source = self._policy_source
+        return source() if callable(source) else source
 
     async def aclose(self) -> None:  # pragma: no cover - delegation
         await self._inner.aclose()
@@ -868,7 +873,7 @@ class DestinationGuardTransport(httpx.AsyncBaseTransport):
         has_credential = any(
             name in request.headers for name in CREDENTIAL_HEADERS
         )
-        destination = await self._policy.check(
+        destination = await self.policy.check(
             str(request.url),
             purpose=self._purpose,
             owner=self._owner,
@@ -939,9 +944,11 @@ def guarded_async_client(
     if transport is not None:
         kwargs.setdefault("trust_env", False)
         return httpx.AsyncClient(transport=transport, **kwargs)
-    active_policy = policy if policy is not None else current_policy()
+    # ``current_policy`` (not ``current_policy()``): long-lived clients must
+    # re-resolve per request so a config reload takes effect immediately.
+    policy_source = policy if policy is not None else current_policy
     guard = DestinationGuardTransport(
-        active_policy, purpose=purpose, credential_owner=credential_owner
+        policy_source, purpose=purpose, credential_owner=credential_owner
     )
     kwargs.setdefault("trust_env", False)
     kwargs["follow_redirects"] = False

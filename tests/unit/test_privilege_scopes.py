@@ -596,3 +596,35 @@ class TestMinting:
         _assert_scope_denial(
             self._mint(proxy_client, CLIENT_TOKEN, {"name": "nope"}), "admin"
         )
+
+
+class TestMalformedVersusAbsentDeadline:
+    """`auth: null` / `auth: []` / a null timestamp are broken, not un-reconciled.
+
+    Absent keys fall back to the shipped deadline (reboot safety, PR-Piet G1-02
+    follow-up), but a *present* invalid shape must enforce immediately — else a
+    typo silently reopens the migration window for every legacy key.
+    """
+
+    @pytest.mark.parametrize(
+        "auth_value",
+        [None, [], {"scopes_enforced_after": None},
+         {"scopes_enforced_after": "not-a-timestamp"},
+         {"scopes_enforced_after": 12345}],
+        ids=["auth-null", "auth-list", "timestamp-null", "timestamp-garbage", "timestamp-number"],
+    )
+    def test_malformed_auth_config_enforces_immediately(self, monkeypatch, auth_value):
+        monkeypatch.setitem(CONFIG, "auth", auth_value)
+        assert scopes.configured_enforced_after() is None
+
+    def test_absent_auth_section_uses_the_shipped_deadline(self, monkeypatch):
+        monkeypatch.delitem(CONFIG, "auth", raising=False)
+        parsed = scopes.configured_enforced_after()
+        assert parsed is not None
+        assert parsed.isoformat().startswith("2026-11-11")
+
+    def test_absent_key_inside_a_present_section_uses_the_shipped_deadline(self, monkeypatch):
+        monkeypatch.setitem(CONFIG, "auth", {})
+        parsed = scopes.configured_enforced_after()
+        assert parsed is not None
+        assert parsed.isoformat().startswith("2026-11-11")

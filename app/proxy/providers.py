@@ -336,14 +336,17 @@ class ProviderRegistry:
                 field, denied = destination_errors[0]
                 provider.destination_error = denied.reason
                 provider.destination_error_field = field
+                # Never echo the configured URL: it may carry userinfo, and a
+                # URL password is not a registered provider secret, so the
+                # redaction filter would not catch it (PR-Piet, G1-02).
                 logger.error(
-                    "🛑 Provider '%s' rejected at configuration load: %s=%r is not "
+                    "🛑 Provider '%s' rejected at configuration load: %s=%s is not "
                     "an approved destination (%s). Add it to "
                     "destination_policy.allow — requests to this provider are "
                     "refused with destination_denied.",
                     provider_name,
                     field,
-                    cfg.get(field),
+                    denied.destination or "<unparseable>",
                     denied.reason,
                 )
             if not provider.is_configured:
