@@ -16,7 +16,7 @@ from fastapi import HTTPException, Request
 from starlette.status import HTTP_401_UNAUTHORIZED
 
 from app.proxy import admission as _admission
-from app.proxy.queue import QueueAdmissionRejected, QueueDepthExceeded, QueueRequestCancelled
+from app.proxy.queue import QueueDepthExceeded, QueueRequestCancelled
 
 logger = logging.getLogger("Guardian")
 
@@ -184,19 +184,6 @@ async def begin_queued_request(request: Request, client_id: str, model: str) -> 
         # the configured Retry-After; the request is refused before it is
         # registered, so the queue wait budget never applies to it.
         raise _admission.queue_depth_error(exc) from exc
-    except QueueAdmissionRejected as exc:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "error": "queue_admission_rejected",
-                "reason": exc.reason,
-                "message": exc.message,
-                "existing_request_id": exc.existing_request_id,
-                "existing_status": exc.existing_status,
-                "client_id": exc.client_id,
-            },
-        ) from exc
-
     _update_live_request_usage(request, queue_request_id=request_id, phase="queued")
     disconnect_task = asyncio.create_task(watch_request_disconnect(request, request_id, normalized_client_id))
     try:
