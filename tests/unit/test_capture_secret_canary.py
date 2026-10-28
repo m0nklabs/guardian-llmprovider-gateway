@@ -321,6 +321,15 @@ class TestCanaryInWrittenFiles:
             secret_tool_calls, secret_tool_results, secret_reasoning
         )
 
+        # Non-vacuity: the scanner used below must flag these very canaries when
+        # they are *not* redacted, otherwise "no findings" would prove nothing.
+        # (Issue #76 alert #10 dismisses this file as a test-only false positive
+        # on exactly this evidence.)
+        assert scan_for_secrets(secret_response), (
+            "canary fixture is invisible to the scanner — the assertion below "
+            "would pass vacuously"
+        )
+
         # Write to JSONL file
         jsonl_path = tmp_path / "capture_test.jsonl"
         with open(jsonl_path, "w") as f:

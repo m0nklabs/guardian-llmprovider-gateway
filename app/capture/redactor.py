@@ -26,6 +26,7 @@ import re
 import struct
 
 from app.capture.data_url import parse_data_url
+from app.log_safety import clean_log_value
 from typing import Any
 
 logger = logging.getLogger("Guardian.Capture.Redactor")
@@ -659,8 +660,12 @@ def _anthropic_content_block_to_openai(block: dict[str, Any]) -> dict[str, Any]:
     elif block_type == "thinking":
         # Anthropic thinking blocks
         return {"role": "assistant", "content": f"[Thinking] {block.get('thinking', '')}"}
-    # Unknown block type — skip
-    logger.warning(f"Unknown Anthropic content block type: {block_type}")
+    # Unknown block type — skip. ``block_type`` is the request's own ``type``
+    # field: it is request-derived, so it reaches the log only through the one
+    # sanitizer (G1-04) and only as a lazy ``%s`` argument.
+    logger.warning(
+        "Unknown Anthropic content block type: %s", clean_log_value(block_type)
+    )
     return {}
 
 

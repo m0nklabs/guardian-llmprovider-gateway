@@ -135,6 +135,25 @@ def _token_fingerprint(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
 
 
+def _loggable_key_name(user_data: object, token: str | None) -> str:
+    """Return the key's label for a log line — never credential material.
+
+    The label is the ``name`` field of a key-store entry, so it is a name and
+    not a secret (G1-03 §11.2: the token is the secret, a name cannot be
+    replayed). Two defences keep the §11.3 log invariant ("no bearer value in
+    any INFO/DEBUG line") true even for a store entry that names a key after
+    its own token, and keep a name from forging a second log line:
+    a label containing the presented token is dropped, and everything else
+    goes through the one sanitizer (G1-04).
+    """
+    name = user_data.get("name") if isinstance(user_data, dict) else None
+    if not isinstance(name, str) or not name.strip():
+        return "Unknown"
+    if token and token in name:
+        return "Unknown"
+    return clean_log_value(name)
+
+
 def _build_auth_context(
     request: Request,
     token: str | None,
@@ -691,7 +710,7 @@ async def verify_api_key(request: Request, creds: HTTPAuthorizationCredentials |
         # rate-limited request never enters the inference queue). Keyed on the
         # G1-01 identity fingerprint, never on the source IP.
         _admission.enforce_rate_limit(_token_fingerprint(token))
-        logger.info(f"🔑 Auth success: {user_data.get('name', 'Unknown')}")
+        logger.info("🔑 Auth success: %s", _loggable_key_name(user_data, token))
         return user_data["name"]  # Return client_id/name as expected by endpoints
 
     _audit.mark_denial(
@@ -712,13 +731,3 @@ async def verify_api_key(request: Request, creds: HTTPAuthorizationCredentials |
         detail="Invalid API Key",
         headers={"WWW-Authenticate": "Bearer"},
     )
-
-if __name__ == "__main__":
-    # Helper CLI to generate key
-    import sys
-    if len(sys.argv) > 1:
-        name = sys.argv[1]
-        key = generate_api_key(name)
-        print(f"Generated API Key for {name}: {key}")
-    else:
-        print("Usage: python3 -m app.proxy.auth <name>")

@@ -2,6 +2,7 @@
 
 import base64
 import json
+import logging
 
 import pytest
 
@@ -426,6 +427,36 @@ class TestAnthropicTranslation:
         block = {"type": "unknown_type", "foo": "bar"}
         result = _anthropic_content_block_to_openai(block)
         assert result == {}
+
+    def test_unknown_block_type_cannot_forge_a_log_line(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """``type`` is request data: it reaches the log only via clean_log_value (#76).
+
+        Removing the guard turns this into two log lines with an injected
+        ``event=allow`` line and a terminal reset sequence.
+        """
+        from app.capture.redactor import _anthropic_content_block_to_openai
+
+        hostile = (
+            "unknown\n"
+            "2026-10-28 12:00:00 INFO event=allow user=admin action=read\n"
+            "\x1b[2J\x1b[0m\x00"
+        )
+        with caplog.at_level(logging.WARNING, logger="Guardian.Capture.Redactor"):
+            assert _anthropic_content_block_to_openai({"type": hostile}) == {}
+
+        records = [
+            record
+            for record in caplog.records
+            if "Unknown Anthropic content block" in record.getMessage()
+        ]
+        assert len(records) == 1, "expected exactly one line for the skipped block"
+        message = records[0].getMessage()
+        for character in ("\n", "\r", "\x1b", "\x00"):
+            assert character not in message, f"control character {character!r} survived"
+        # Still diagnosable: only the line structure is removed (G1-04).
+        assert "unknown" in message
 
     def test_non_dict_block_returns_empty(self) -> None:
         from app.capture.redactor import _anthropic_content_block_to_openai

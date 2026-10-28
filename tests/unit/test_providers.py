@@ -852,3 +852,49 @@ class TestProviderServiceTierDefault:
         assert VALID_SERVICE_TIERS == frozenset(
             {"default", "flex", "priority", "fast", "ultrafast"}
         )
+
+
+# ── Catalog cache key: the credential fingerprint's contract ───────────
+# CodeQL alert #2 (`py/weak-sensitive-data-hashing`, providers.py:649) is
+# dismissed as a false positive: the truncated SHA-256 is a cache-scope
+# discriminator over a high-entropy credential, never password storage and
+# never verification. See docs/decisions/G1-05-sensitive-value-verdicts.md.
+# These tests pin the properties that dismissal relies on.
+
+
+class TestCatalogCacheKeyFingerprint:
+    @staticmethod
+    def _provider(api_key: str, name: str = "openrouter") -> CloudProvider:
+        return CloudProvider(
+            name=name,
+            base_url="https://openrouter.ai/api/v1",
+            api_key=api_key,
+            models=["openrouter/test/model"],
+        )
+
+    def test_is_stable_for_one_credential(self):
+        provider = self._provider("sk-or-v1-0123456789abcdef")
+        assert ProviderRegistry._catalog_cache_key(provider) == (
+            ProviderRegistry._catalog_cache_key(provider)
+        )
+
+    def test_two_credentials_never_share_a_cache_scope(self):
+        """A rotated key must not inherit the catalog fetched with the old one."""
+        old = self._provider("sk-or-v1-0123456789abcdef")
+        new = self._provider("sk-or-v1-fedcba9876543210")
+        assert ProviderRegistry._catalog_cache_key(old) != (
+            ProviderRegistry._catalog_cache_key(new)
+        )
+
+    def test_the_key_never_appears_in_the_cache_key(self):
+        secret = "sk-or-v1-0123456789abcdef"
+        cache_key = ProviderRegistry._catalog_cache_key(self._provider(secret))
+        assert secret not in cache_key
+        assert secret[:16] not in cache_key
+
+    def test_the_fingerprint_is_a_truncated_hex_digest(self):
+        cache_key = ProviderRegistry._catalog_cache_key(self._provider("sk-or-v1-abc"))
+        head, fingerprint = cache_key.rsplit(":", 1)
+        assert head == "openrouter:https://openrouter.ai/api/v1"
+        assert len(fingerprint) == 16
+        assert set(fingerprint) <= set("0123456789abcdef")

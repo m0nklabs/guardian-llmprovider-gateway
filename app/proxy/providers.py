@@ -645,7 +645,20 @@ class ProviderRegistry:
 
     @staticmethod
     def _catalog_cache_key(provider: CloudProvider) -> str:
-        """Return a non-secret cache key scoped to the effective credential."""
+        """Return a non-secret cache key scoped to the effective credential.
+
+        The hash is a *cache-scope discriminator*, not password storage and not
+        credential verification: it only has to make two different configured
+        credentials produce two different keys, so a rotated key cannot reuse a
+        catalog fetched with the old one. A fast hash is the right tool because
+        the input is a high-entropy provider credential (a low-entropy password
+        would need a slow KDF — irrelevant here), and the truncated digest is
+        never stored as a secret, never compared against a presented key, and
+        never logged. Authentication compares presented tokens against the key
+        store by exact lookup; nothing in the auth path reads this value. The
+        reasoning and the alert disposition are recorded in
+        ``docs/decisions/G1-05-sensitive-value-verdicts.md``.
+        """
         credential_fingerprint = hashlib.sha256(provider.api_key.encode("utf-8")).hexdigest()[:16]
         return f"{provider.name}:{provider.base_url}:{credential_fingerprint}"
 
