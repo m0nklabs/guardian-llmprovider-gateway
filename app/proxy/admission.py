@@ -720,20 +720,26 @@ async def _read_bounded_body(
     would hand an unauthenticated sender an allocation primitive (PR-Piet, #63).
     ``finished`` records whether the body actually ended, so a replay can keep a
     disconnect visible instead of pretending the truncated body was complete.
+    ``seen`` is the exact number of bytes the channel produced, so the ``413``
+    body reports the real size even when the crossing chunk was not retained.
     """
     buffer = bytearray()
+    seen = 0
     while True:
         message = await receive()
         if message.get("type") != "http.request":
             # The channel ended before the body did: keep the disconnect in the
             # tail so the replay still delivers it.
-            return bytes(buffer), len(buffer), False, [message], False
+            return bytes(buffer), seen, False, [message], False
         chunk = message.get("body") or b""
-        if len(buffer) + len(chunk) > limit_bytes:
-            return b"", limit_bytes + len(chunk), True, [], False
+        # Counted before the append: the crossing chunk is never retained, so a
+        # rejected request allocates nothing past the bound (PR-Piet, #63).
+        seen += len(chunk)
+        if seen > limit_bytes:
+            return b"", seen, True, [], False
         buffer += chunk
         if not message.get("more_body", False):
-            return bytes(buffer), len(buffer), False, [], True
+            return bytes(buffer), seen, False, [], True
 
 
 class _ReplayReceive:

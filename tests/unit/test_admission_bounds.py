@@ -749,7 +749,7 @@ class TestReaderDoesNotAmplifyOrLie:
         assert body == b""  # nothing retained, nothing to copy
         assert tail == []
         assert finished is False
-        assert seen >= 10_100
+        assert seen == 10_100  # exact: every received byte, buffered or not
 
     @pytest.mark.asyncio
     async def test_a_disconnect_mid_body_stays_visible_to_the_handler(self):

@@ -109,10 +109,17 @@ one error body:
 - a chunked or unlabelled body is read up to the bound and refused the moment it
   crosses it, with the observed byte count in the error.
 
-Neither path buffers more than the bound. The body is coalesced into one byte
-buffer, not kept as a list of ASGI messages: a sender delivering millions of
-one-byte messages must not be able to allocate per message, and the replay to the
-handler is a single message (linear, not quadratic).
+Neither path buffers more than the bound, and a rejection allocates nothing
+beyond it: the chunk that crosses the bound is not appended, so a huge single
+message is refused without a full-buffer copy. The body is coalesced into one
+byte buffer, not kept as a list of ASGI messages — a sender delivering millions
+of one-byte messages cannot allocate per message, and the replay to the handler
+is a single message (linear, not quadratic).
+
+A body cut short by a client disconnect is replayed as **unfinished**
+(`more_body: True` followed by the disconnect), so a truncated body that happens
+to look like valid JSON raises `ClientDisconnect` in the handler instead of being
+served as a complete request.
 
 The chunked path deliberately does **not** raise from the `receive` channel:
 route handlers on this gateway parse bodies with broad `except Exception` blocks
@@ -314,7 +321,7 @@ enforced".
 
 ## 10. Tests
 
-`tests/unit/test_admission_bounds.py` — **61 tests**, every bound exercised with a
+`tests/unit/test_admission_bounds.py` — **63 tests**, every bound exercised with a
 **non-default** configured value (a 1 KiB body bound, a queue depth of 1, a
 6 requests/minute budget), because "it works at the defaults" is what the
 rejection tests would otherwise accidentally prove:
@@ -327,12 +334,15 @@ rejection tests would otherwise accidentally prove:
 - **Body (positive):** a body under the bound reaches the handler with its exact
   byte count; an **8 MiB bound admits a 5 MiB body whole** (byte count on the
   handler proves no truncation).
-- **Body (framing, review follow-up):** a request carrying both
+- **Body (framing and buffering, review follow-ups):** a request carrying both
   `Transfer-Encoding: chunked` and a 10-byte `Content-Length` with a 2.1 KiB body
   is still refused with `413` (the encoding wins, so the length is not trusted);
   2000 one-byte ASGI messages cannot escape a 1 KiB bound; an allowed 500-message
-  body is delivered to the handler as **one** message; a disconnect before the
-  body is still delivered.
+  body is delivered to the handler as **one** message; an 8 MiB single message
+  against a 1 KiB bound is refused with **no buffered body** (the crossing chunk
+  is never appended); a disconnect before the body and a disconnect mid-body both
+  reach the handler as an **unfinished** body (`more_body: True`), never as a
+  complete truncated request.
 - **Queue depth:** a malformed `queue_full_retry_after_seconds` (with a valid
   depth) refuses the submission over HTTP with `503 admission_misconfigured` and
   registers nothing — the hint cannot silently vanish; depth 1 refuses the next
