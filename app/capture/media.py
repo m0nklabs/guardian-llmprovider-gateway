@@ -45,11 +45,11 @@ import base64
 import hashlib
 import logging
 import os
-import re
 from pathlib import Path
 from typing import Any
 
 from app.capture.config import CaptureConfig
+from app.capture.data_url import parse_data_url
 from app.capture.redactor import _try_extract_image_dimensions
 
 logger = logging.getLogger("Guardian.Capture.Media")
@@ -61,8 +61,6 @@ _MIME_EXT = {
     "image/gif": ".gif",
     "image/webp": ".webp",
 }
-
-_DATA_URL_RE = re.compile(r"data:([^;]+);base64,(.*)", re.DOTALL)
 
 MEDIA_SUBDIR = "media"
 
@@ -175,12 +173,12 @@ def _handle_openai_image_url(
     if not url.startswith("data:"):
         # Remote URL — no payload to extract; pass through unchanged.
         return block
-    match = _DATA_URL_RE.match(url)
-    if not match:
+    parsed = parse_data_url(url)
+    if parsed is None:
         return {"type": "image_media", "image_media": {"error": "malformed_data_url"}}
-    mime_type = match.group(1)
+    mime_type, payload = parsed
     try:
-        raw = base64.b64decode(match.group(2))
+        raw = base64.b64decode(payload)
     except Exception:
         logger.debug("Failed to decode image base64 — error reference only")
         return {"type": "image_media", "image_media": {"error": "decode_failed"}}
