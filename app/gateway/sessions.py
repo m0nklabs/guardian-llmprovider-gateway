@@ -8,6 +8,7 @@ lives here.
 from __future__ import annotations
 
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -34,7 +35,25 @@ def init(*, llama_server_url: str, session_slots_dir: Path) -> None:
 
 
 def sanitize_session_filename(raw: object) -> str:
-    """Return a safe basename for a session slot, or raise HTTP 400."""
+    """Return a safe basename for a session slot, or raise HTTP 400.
+
+    Two independent constraints, because llama-server joins whatever it is
+    handed onto its own ``--slot-save-path``:
+
+    1. the value is reduced to its final component and must be
+       ``[A-Za-z0-9_-]+.bin`` — no separator, no ``..`` component and no NUL
+       can survive that character class;
+    2. the joined path is normalised with ``os.path.realpath`` (which resolves
+       symlinks) and must still sit under the normalised slots directory, so a
+       symlink planted in the slots directory cannot redirect the write
+       outside it.
+
+    The containment shape — normalise, then a ``startswith`` prefix check on
+    the normalised form — is deliberate: it is the shape CodeQL's
+    ``py/path-injection`` model recognises as a barrier, the same way
+    ``clean_log_value``'s ``str.replace`` shape is what the log-injection model
+    recognises (see ``docs/decisions/G1-05-session-slot-path-containment.md``).
+    """
     if not isinstance(raw, str) or not raw:
         raise HTTPException(status_code=400, detail="Filename required")
     basename = Path(raw).name  # drop any directory components
@@ -43,8 +62,13 @@ def sanitize_session_filename(raw: object) -> str:
             status_code=400,
             detail="Invalid filename: use letters, digits, '_' or '-' with a .bin suffix",
         )
-    resolved = (_SESSION_SLOTS_DIR / basename).resolve()
-    if resolved.parent != _SESSION_SLOTS_DIR.resolve():
+    if _SESSION_SLOTS_DIR is None:
+        raise HTTPException(
+            status_code=500, detail="Session slots directory not configured"
+        )
+    slots_dir = os.path.realpath(str(_SESSION_SLOTS_DIR))
+    candidate = os.path.realpath(os.path.join(slots_dir, basename))
+    if not candidate.startswith(slots_dir + os.sep):
         raise HTTPException(status_code=400, detail="Invalid filename")
     return basename
 

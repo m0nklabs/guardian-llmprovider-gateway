@@ -29,7 +29,7 @@ def test_endpoint(name, method, url, data=None, headers=None, expect_status=200)
 
 print("🔍 Starting Comprehensive System Test for Llama Guardian")
 print(f"📍 Target: {BASE_URL}")
-print(f"🔑 Key: {API_KEY[:10]}...")
+print(f"🔑 Key: configured ({len(API_KEY)} characters, not printed)")
 print("-" * 50)
 
 # 1. Test Auth (No Key)

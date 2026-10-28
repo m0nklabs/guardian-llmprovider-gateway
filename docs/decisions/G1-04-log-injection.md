@@ -107,3 +107,37 @@ is the second half of this measurement:
   parent backlog and the base-comparison drift.
 - `docs/decisions/G1-03-admission-and-audit.md` §11.3 — the log-invariant test
   pattern this record's second guard follows.
+
+## Addendum — 2026-10-28: the last `py/log-injection` site, and three text sinks next to it
+
+[#76](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/76) took
+the one `py/log-injection` site this record deliberately left behind (that file
+was owned by the capture work, which has since merged) plus the text-sink alerts
+in the same neighbourhood. This adds to the decision above; it does not change
+it. The sanitizer, the "one guard, no local copies" rule and the per-site
+judgement are untouched.
+
+| Site | Verdict | Why |
+| --- | --- | --- |
+| `app/capture/redactor.py:663` — `logger.warning(f"Unknown Anthropic content block type: {block_type}")` | **Fixed** | `block_type` is the request's own `type` field on an Anthropic content block: caller-controlled, unvalidated, previously interpolated into an f-string. It now reaches the log as `clean_log_value(block_type)` in a lazy `%s` argument — rule 1 of "How to classify the next `py/log-injection` alert". |
+| `app/proxy/auth.py:694` — `logger.info(f"🔑 Auth success: {user_data.get('name', 'Unknown')}")` | **Fixed (label removed)** | The value was a key-store *label*, not credential material (§11.2 of G1-03), so the `py/clear-text-logging-sensitive-data` alert on this line is a false positive in substance (`G1-06-credential-fingerprint-hashing.md`). It is nevertheless store data of unbounded shape flowing into an INFO line, and the PR's own CodeQL analysis re-reported it at the moved line, so the line now identifies the key the way every other auth line does — `key_fingerprint=<sha256(token)[:12]>` — and the label stays where G1-03 §11.2 puts it: the audit record's bounded, cleaned `key_name`, which every allowed request already emits. §11.3 therefore holds by construction, not by sanitising. |
+| `app/proxy/auth.py:722` — `print(f"Generated API Key for {name}: {key}")` | **Removed** | The `if __name__ == "__main__"` helper minted a key and printed it: a second, undocumented minting CLI beside the documented `scripts/generate_key.py`. Deleting it removes a credential-print surface rather than arguing about it. |
+| `scripts/test_system.py:32` — `print(f"🔑 Key: {API_KEY[:10]}...")` | **Fixed** | The smoke test printed ten characters of a live key merely to show that one was resolved. It now prints that a key is configured and its length; nothing about the credential is disclosed, and the alert closes because the value no longer flows into the print. |
+
+Values that stay bare, for the same reason as before: `_token_fingerprint`
+(12 derived hex characters), status codes, counters and configured labels.
+
+Guards added with the fixes — each one fails if its guard is removed:
+
+- `tests/unit/test_capture_redactor.py::TestAnthropicTranslation::test_unknown_block_type_cannot_forge_a_log_line`
+- `tests/unit/test_auth.py::TestVerifyApiKey::test_auth_success_line_identifies_the_key_by_fingerprint`
+- `tests/unit/test_auth.py::TestVerifyApiKey::test_a_hostile_key_label_cannot_reach_the_auth_log`
+  (a label carrying a forged line, ANSI, a NUL and the token itself)
+
+The remaining five alerts are adjudicated in
+`G1-05-session-slot-path-containment.md` (the one real path sink) and
+`G1-06-credential-fingerprint-hashing.md` (the identity hash and the
+deliberate-output dismissals). Note that #76's table names eight alerts while
+**nine** are open outside `py/partial-ssrf`: alert **#4**, the `Prefix: {prefix}`
+print on `scripts/generate_key.py:82`, is the ninth and is adjudicated together
+with its neighbour #5.

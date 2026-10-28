@@ -691,7 +691,13 @@ async def verify_api_key(request: Request, creds: HTTPAuthorizationCredentials |
         # rate-limited request never enters the inference queue). Keyed on the
         # G1-01 identity fingerprint, never on the source IP.
         _admission.enforce_rate_limit(_token_fingerprint(token))
-        logger.info(f"🔑 Auth success: {user_data.get('name', 'Unknown')}")
+        # The key is identified by its G1-01 fingerprint, the same identity the
+        # rate bound, the audit record and the dashboard already use. The
+        # operator label ("name") deliberately does not appear here: it is key
+        # store data of unbounded shape, and G1-03 §11.2 puts it where it is
+        # bounded and cleaned — the audit record's `key_name`, which every
+        # allowed request already emits (`Guardian.Audit`, §11.3).
+        logger.info("🔑 Auth success: key_fingerprint=%s", _token_fingerprint(token))
         return user_data["name"]  # Return client_id/name as expected by endpoints
 
     _audit.mark_denial(
@@ -712,13 +718,3 @@ async def verify_api_key(request: Request, creds: HTTPAuthorizationCredentials |
         detail="Invalid API Key",
         headers={"WWW-Authenticate": "Bearer"},
     )
-
-if __name__ == "__main__":
-    # Helper CLI to generate key
-    import sys
-    if len(sys.argv) > 1:
-        name = sys.argv[1]
-        key = generate_api_key(name)
-        print(f"Generated API Key for {name}: {key}")
-    else:
-        print("Usage: python3 -m app.proxy.auth <name>")

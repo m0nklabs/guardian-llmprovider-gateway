@@ -160,6 +160,121 @@ class TestVerifyApiKey:
             _restore_auth_path(auth, orig)
 
     @pytest.mark.asyncio
+    async def test_auth_success_line_identifies_the_key_by_fingerprint(
+        self, api_keys_file: Path, caplog: pytest.LogCaptureFixture
+    ):
+        """The line carries the G1-01 fingerprint, never the key nor its label (#76).
+
+        The key store label is key-store data of unbounded shape; G1-03 §11.2
+        puts it where it is bounded and cleaned (the audit record's ``key_name``),
+        so the Auth INFO line must not carry it. Re-adding the label fails here.
+        """
+        token = "flip_aabbccdd11223344aabbccdd11223344"
+        auth, orig = _load_auth_with_path(api_keys_file)
+        try:
+            request = MagicMock()
+            request.state = MagicMock()
+            creds = MagicMock()
+            creds.credentials = token
+
+            with caplog.at_level(logging.INFO, logger="Auth"):
+                assert await auth.verify_api_key(request, creds) == "test-user"
+
+            success_lines = [
+                record
+                for record in caplog.records
+                if "Auth success" in record.getMessage()
+            ]
+            assert len(success_lines) == 1
+            message = success_lines[0].getMessage()
+            assert f"key_fingerprint={auth._token_fingerprint(token)}" in message
+            assert token not in message
+            assert "test-user" not in message
+        finally:
+            _restore_auth_path(auth, orig)
+
+    @pytest.mark.asyncio
+    async def test_a_hostile_key_label_cannot_reach_the_auth_log(
+        self, api_keys_file: Path, caplog: pytest.LogCaptureFixture
+    ):
+        """A label with a forged line, ANSI, a NUL and the token cannot get in (#76).
+
+        The label is not logged at all, so no part of it — and therefore no line
+        structure and no credential — can appear in the INFO line (G1-03 §11.3).
+        """
+        token = "flip_aabbccdd11223344aabbccdd11223344"
+        hostile_name = (
+            f"test-user {token}\n"
+            "2026-10-28 12:00:00 INFO event=allow user=admin action=read\n"
+            "\x1b[2J\x1b[0m\x07\x00"
+        )
+        auth, orig = _load_auth_with_path(api_keys_file)
+        try:
+            keys = auth.load_api_keys()
+            keys[token]["name"] = hostile_name
+            auth.save_api_keys(keys)
+
+            request = MagicMock()
+            request.state = MagicMock()
+            creds = MagicMock()
+            creds.credentials = token
+
+            with caplog.at_level(logging.INFO, logger="Auth"):
+                returned = await auth.verify_api_key(request, creds)
+
+            # The return value is unchanged: this is a log guard, not an auth change.
+            assert returned == hostile_name
+
+            success_lines = [
+                record
+                for record in caplog.records
+                if "Auth success" in record.getMessage()
+            ]
+            assert len(success_lines) == 1
+            message = success_lines[0].getMessage()
+            for character in ("\n", "\r", "\x1b", "\x07", "\x00"):
+                assert character not in message, (
+                    f"control character {character!r} survived into the log line"
+                )
+            assert token not in message
+            assert "test-user" not in message
+            assert "key_fingerprint=" in message
+        finally:
+            _restore_auth_path(auth, orig)
+
+    @pytest.mark.asyncio
+    async def test_the_identity_fingerprint_is_not_a_credential(
+        self, api_keys_file: Path
+    ):
+        """Pins the `py/weak-sensitive-data-hashing` verdict (#2, G1-06).
+
+        The truncated SHA-256 identifies a key; presenting it as a credential
+        must fail, so the hash never participates in verification.
+        """
+        from fastapi import HTTPException
+
+        token = "flip_aabbccdd11223344aabbccdd11223344"
+        auth, orig = _load_auth_with_path(api_keys_file)
+        try:
+            fingerprint = auth._token_fingerprint(token)
+            assert fingerprint != token
+
+            request = MagicMock()
+            request.state = MagicMock()
+            request.method = "GET"
+            request.url = MagicMock(path="/v1/models")
+            request.client = MagicMock(host="127.0.0.1", port=1234)
+            request.headers = {}
+            creds = MagicMock()
+            creds.credentials = fingerprint
+
+            with pytest.raises(HTTPException) as exc_info:
+                await auth.verify_api_key(request, creds)
+            assert exc_info.value.status_code == 401
+        finally:
+            _restore_auth_path(auth, orig)
+
+    @pytest.mark.asyncio
     async def test_invalid_key_raises_401(self, api_keys_file: Path):
         from fastapi import HTTPException
 
