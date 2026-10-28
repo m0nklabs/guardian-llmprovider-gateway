@@ -16,6 +16,7 @@ from starlette.status import HTTP_401_UNAUTHORIZED
 
 from app.log_safety import clean_log_value
 from app.paths import GUARDIAN_APIKEYS_FILE, LEGACY_APIKEYS_FILE
+from app.proxy import admission as _admission
 from app.proxy import scopes as _scopes
 
 logger = logging.getLogger("Auth")
@@ -646,6 +647,12 @@ async def verify_api_key(request: Request, creds: HTTPAuthorizationCredentials |
         # minting check, which must know which key is minting).
         request.state.user = user_data
         _enforce_route_scope(request, user_data)
+        # G1-03 admission: the per-key request rate is checked *after*
+        # authentication and authorization (so the bucket belongs to an
+        # identified, authorized caller) and *before* the handler runs (so a
+        # rate-limited request never enters the inference queue). Keyed on the
+        # G1-01 identity fingerprint, never on the source IP.
+        _admission.enforce_rate_limit(_token_fingerprint(token))
         logger.info(f"🔑 Auth success: {user_data.get('name', 'Unknown')}")
         return user_data["name"]  # Return client_id/name as expected by endpoints
 

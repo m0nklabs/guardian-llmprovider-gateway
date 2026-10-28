@@ -138,6 +138,18 @@ SCOPE_DENIALS = Counter(
 )
 
 
+# === Admission bounds (G1-03) ===
+# docs/decisions/G1-03-admission-and-audit.md: one counter per bound, so an
+# operator can see *which* bound is refusing traffic. A refused request is never
+# counted as queued/served anywhere else.
+
+ADMISSION_REJECTIONS = Counter(
+    "guardian_admission_rejections_total",
+    "Requests refused by an admission bound (413/429/503)",
+    ["limit"],
+)
+
+
 # === Capture Metrics ===
 
 CAPTURE_EVENTS_TOTAL = Counter(

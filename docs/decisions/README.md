@@ -31,3 +31,4 @@ decision records"); this directory is where they live.
 | Record | Title | Status | Decided |
 | --- | --- | --- | --- |
 | [G1-01](G1-01-privilege-scopes.md) | Privilege scopes and admin isolation | Accepted | 2026-10-28 |
+| [G1-03](G1-03-admission-and-audit.md) | Bounded admission (part 1) and metadata audit (part 2, reserved) | Accepted (part 1) | 2026-10-28 |

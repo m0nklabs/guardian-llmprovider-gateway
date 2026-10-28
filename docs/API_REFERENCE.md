@@ -113,9 +113,45 @@ guarantee. Both status fields are derived from the configured value at startup
 — never assumed — so operators can trust them. Changing the queue section
 requires a restart; it is not picked up by `POST /api/config/reload`.
 
-There is no token-bucket or per-client rate limiter in current code.
-Backpressure is enforced by the FIFO inference queue and model-size-dependent
-backend timeouts.
+Backpressure comes from the FIFO inference queue, the admission bounds below and
+model-size-dependent backend timeouts. There is no history of per-route quotas
+and no cloud-side rate limiting: cloud requests are limited by the provider.
+
+## Admission Limits (G1-03)
+
+Three bounds protect Guardian's ingress. Every one of them is configurable
+(`admission` in `config/global.settings.yaml`, see
+[CONFIG_SCHEMA.md](CONFIG_SCHEMA.md) §10) and every one has a stable typed error
+with an explicit retry contract. Source of record:
+[decisions/G1-03-admission-and-audit.md](decisions/G1-03-admission-and-audit.md).
+
+| Bound | Config key | Shipped default | Stable error | Retry-After |
+| --- | --- | --- | --- | --- |
+| Request body size | `admission.max_body_bytes` | `33554432` (32 MiB) | `413 request_too_large` | **no** — retrying the same body fails the same way |
+| Waiting queue depth | `admission.queue_max_depth` | `32` | `503 queue_full` | **yes** — `admission.queue_full_retry_after_seconds` (60 s) |
+| Per-key request rate | `admission.rate_limit.requests_per_minute` / `.burst` | `300` / `300` | `429 rate_limited` | **yes** — seconds until one token is available |
+
+The defaults are **safe but not tuned**: they sit far above every measurement in
+[G0_BASELINE.md](G0_BASELINE.md) (depth 1, ~9-20 requests/minute in the heaviest
+probe minute, kilobyte chat bodies), not at a load-tested optimum.
+
+**Which routes:**
+
+| Bound | Applies to | Does not apply to |
+| --- | --- | --- |
+| Body size | every route on both surfaces | — |
+| Per-key rate | every route that requires an API key ("every non-`public` row of the [G0-01 matrix](G0_ENDPOINT_AUTH_MATRIX.md)") | `/healthz`, `/`, `/favicon.ico`, `/static`, `/docs`, `/docs/oauth2-redirect`, `/openapi.json`, `/redoc` — no identity to key on |
+| Queue depth | `POST /v1/chat/completions`, `/v1/responses`, `/v1/completions`, `/v1/embeddings`, `/v1/messages`, `POST /api/chat`, `POST /api/generate` | cloud-only routes (cloud traffic never enters the local queue) and every non-inference route |
+
+The rate limiter is a **single-process** token bucket keyed on the authenticated
+identity (the key fingerprint), never on the source IP: two keys behind one NAT
+get two buckets, and a bucket resets with the service. Two Guardian replicas
+would each enforce its own budget — multi-replica accounting is out of scope.
+
+Queue depth and the wait budget answer different questions and never both charge
+one request: the depth bound refuses a request *before* it is registered (no
+request id, no wait budget involved), while an admitted request that waits too
+long still ends as the usual `499` / `queue_timeout` described above.
 
 ## Error Model
 
@@ -141,6 +177,31 @@ Common statuses:
   or the key's own scope list is unreadable, `403`).
 - `404`: model metadata lookup failed or inference requested an unserved model
 - `409`: queue admission rejected because the same API key already has a queued or running GPU request
+- `413`: the request body exceeds `admission.max_body_bytes`. No `Retry-After`.
+  Body shape:
+  ```json
+  {"detail": {"error": "request_too_large",
+              "limit": "admission.max_body_bytes",
+              "limit_bytes": 33554432,
+              "declared_bytes": 41943040,
+              "message": "request body exceeds admission.max_body_bytes (33554432 bytes); ..."}}
+  ```
+  A chunked (or otherwise unlabelled) body reports `observed_bytes` instead of
+  `declared_bytes`; a request that carries both `Transfer-Encoding: chunked` and a
+  `Content-Length` is counted rather than trusted, because the encoding wins when
+  both are present. The payload is never echoed. A body bound that cannot be
+  resolved (malformed config) refuses *every* request body with the `503`
+  `admission_misconfigured` below, even an empty one.
+- `429`: the caller's key exhausted its per-key request budget. `Retry-After` is
+  set to the whole seconds until one token is available. Body shape:
+  ```json
+  {"detail": {"error": "rate_limited",
+              "limit": "admission.rate_limit.requests_per_minute",
+              "requests_per_minute": 300, "burst": 300,
+              "retry_after_s": 1,
+              "message": "per-key request rate exceeded (300/min, burst 300); retry after 1s"}}
+  ```
+  A request refused here never enters the inference queue.
 - `422`: vision runtime unavailable or backend image path rejected
 - `499`: Guardian cancelled the request because the downstream client
   disconnected, the client explicitly cancelled its queue entry, or the queue
@@ -149,7 +210,23 @@ Common statuses:
   shape; `message` is the typed `cancel_reason` (`client_disconnected`,
   `client_requested_cancel`, `queue_timeout`, ...).
 - `500`: unexpected switch or proxy failure
-- `503`: model load, auto-reload, or backend recovery failure
+- `503`: model load, auto-reload, or backend recovery failure. Two admission
+  variants are also `503` and are distinguishable by `detail.error`:
+  - `queue_full` — the waiting queue is at `admission.queue_max_depth`; the
+    request was **not** queued. `Retry-After` is set
+    (`admission.queue_full_retry_after_seconds`). Body:
+    ```json
+    {"detail": {"error": "queue_full",
+                "limit": "admission.queue_max_depth",
+                "max_queue_depth": 32, "queue_length": 32, "max_concurrent": 1,
+                "retry_after_s": 60,
+                "message": "the inference queue is full (32 waiting, limit 32); the request was not queued; retry after 60s"}}
+    ```
+  - `admission_misconfigured` — an admission bound could not be resolved
+    (malformed `admission` configuration, see
+    [CONFIG_SCHEMA.md](CONFIG_SCHEMA.md) §10). **No** `Retry-After`: waiting
+    cannot fix a configuration. Body reports `limit` and `reason`, and the
+    refusal covers only the requests that bound guards.
 - `410`: legacy benchmark start/stop endpoints are disabled
 
 ## Proxy Surface (`:11434`)
@@ -768,6 +845,7 @@ Representative response:
   "queue_length": 1,
   "active_count": 1,
   "max_concurrent": 1,
+  "max_queue_depth": 32,
   "queue_timeout_s": 1800,
   "queue_timeout_enforced": true,
   "wait_policy": "disconnect_or_cancel",
@@ -785,6 +863,11 @@ Representative response:
   "your_request_id": "28b9fd72-8aed-4426-9645-156a43ec9074"
 }
 ```
+
+`max_queue_depth` is the configured waiting-depth bound
+(`admission.queue_max_depth`, G1-03) and is `null` when that bound could not be
+resolved — in which case every submission is refused with `503
+admission_misconfigured` rather than waiting unbounded.
 
 `queue_timeout_enforced` is derived from the configured
 `queue.queue_timeout_seconds`: `true` for a positive finite value, `false` for
@@ -1291,5 +1374,10 @@ longer a live control path.
   `admin`).
 - Model changes are governed by `guardian.pinned_model` and
   `guardian.switch_allowlist`.
+- Admission bounds (G1-03) cap the request body (32 MiB -> `413`), the waiting
+  queue depth (32 -> `503 queue_full`), and the per-key request rate (300/min ->
+  `429`) with retry hints; the rate limiter is keyed on the key fingerprint, is
+  single-process and is documented as such. See
+  [decisions/G1-03-admission-and-audit.md](decisions/G1-03-admission-and-audit.md).
 - Backpressure comes from the FIFO queue and model-size timeout tiers, not from
   per-client rate limiting.

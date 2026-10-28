@@ -52,6 +52,42 @@ queue:
   # absent key falls back to the built-in default, 1800.
   queue_timeout_seconds: 1800
   history_ttl: 300
+# Admission bounds (G1-03, docs/decisions/G1-03-admission-and-audit.md).
+# Three bounds, three stable errors: body size -> 413 request_too_large,
+# waiting queue depth -> 503 queue_full (with Retry-After), per-key request
+# rate -> 429 rate_limited (with Retry-After).  The defaults are "safe but not
+# tuned": generous enough that a busy agent session never trips them, and far
+# above every measurement in docs/G0_BASELINE.md.
+#
+# FAIL-CLOSED: an *absent* key falls back to the shipped default with a WARNING
+# (an older config file must not take admission down on restart); a *malformed*
+# value (wrong type, 0, negative, non-integer) refuses the requests that bound
+# guards, with the typed 503 `admission_misconfigured` naming the limit.  There
+# is deliberately NO "0 = unlimited" value.
+#
+# Hot reload: max_body_bytes, rate_limit.* and queue_full_retry_after_seconds are
+# re-read per request, so POST /api/config/reload applies them. queue_max_depth
+# is read when the queue object is built and therefore needs a restart (like the
+# rest of the `queue` section).
+admission:
+  # Request body ceiling in bytes (32 MiB). Chat with large prompts and inline
+  # images stays far below it; a declared Content-Length over the bound is
+  # refused without reading a byte, a chunked body is stopped at the byte.
+  max_body_bytes: 33554432
+  # Maximum number of requests *waiting* for a slot (32x the highest depth ever
+  # measured — 1, with queue.max_concurrent: 1). Beyond it: 503 queue_full.
+  queue_max_depth: 32
+  # Retry-After for that 503, in seconds: one local generation is tens of
+  # seconds, so a minute is the scale a client can usefully retry at.
+  queue_full_retry_after_seconds: 60
+  rate_limit:
+    # Per-key token bucket (single process): 300 requests/minute sustained with
+    # a 300-request burst, keyed on the G1-01 key fingerprint — never on IP.
+    # The heaviest minute in the G0 baseline is ~9-20 requests; this is an order
+    # of magnitude above it, and a whole minute's allowance can be spent at once
+    # so a reconnect storm or parallel tool calls do not trip it.
+    requests_per_minute: 300
+    burst: 300
 services:
   comfyui_url: http://127.0.0.1:8188
 # Caretaker-runtime poll windows (F5 follow-up; hot-reloadable via
