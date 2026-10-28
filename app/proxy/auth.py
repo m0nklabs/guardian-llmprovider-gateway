@@ -425,6 +425,14 @@ def _enforce_route_scope(request: Request, user_data: dict[str, Any]) -> None:
         auth_context["scope_mode"] = decision.key_scopes.mode
 
     if decision.allowed:
+        _audit.mark_allow(
+            request=request,
+            reason=(
+                _audit.REASON_SCOPE_GRACE
+                if decision.grace_used
+                else _audit.REASON_SCOPE_GRANTED
+            ),
+        )
         if decision.grace_used:
             deadline = _scopes.configured_enforced_after()
             logger.warning(

@@ -383,11 +383,13 @@ surfaces (`app.proxy.server:app` → `surface="proxy"`, `app.main:app` →
 ### 11.1 The record — one per decision, allow and deny
 
 **Who is audited, and who is not.** Every request that makes an authorization or
-admission decision is audited: an authenticated request (allow), and every
-refusal on the way to one (deny). A `public` route of the G0-01 matrix never
-presents a key and never decides anything, so it produces **no** record — which
-is what keeps `/healthz`, the four docs routes and the `/api/*` static mount out
-of the trail and out of the buffer. A request that is refused before routing
+admission decision is audited: an authorized request (allow) and every refusal
+on the way to one (deny). The record is driven by the **decision point**, not by
+the presence of a header: `_enforce_route_scope` marks the allow, and each
+refusal marks the deny, so a `public` route of the G0-01 matrix produces **no**
+record even when a caller sends an `Authorization` header to it — which is what
+keeps `/healthz`, the four docs routes and the `/api/*` static mount out of the
+trail and out of the buffer. A request that is refused before routing
 (the `413` body bound) is audited with `route: null` rather than a concrete path:
 the template is the only route form this record allows, and inventing a path
 would smuggle request data in.
@@ -448,8 +450,8 @@ called *before* the raise, so the middleware still emits exactly one record):
 
 | `reason` | Enforcement point | HTTP |
 | --- | --- | --- |
-| `scope_granted` | `app/proxy/auth.py:_enforce_route_scope` (allow) | — |
-| `scope_grace` | same, legacy key inside the G1-01 window (allow) | — |
+| `scope_granted` | `app/proxy/auth.py:_enforce_route_scope` (allow), or a graceful client-scope call | — |
+| `scope_grace` | same, legacy key whose G1-01 grace bought a *privileged* call (allow) | — |
 | `insufficient_scope` | `_enforce_route_scope` | `403` |
 | `invalid_scope_declaration` | `_enforce_route_scope` (malformed `metadata.scopes`) | `403` |
 | `scope_undeclared_route` | `_enforce_route_scope` (fail-closed inventory gap) | `403` |
@@ -489,7 +491,7 @@ receives the same dict.
 | --- | --- | --- |
 | Log line | one JSON object per decision on logger `Guardian.Audit` (`INFO` for allow, `WARNING` for deny), `"event":"audit"` | one line per request, no accumulation in-process; the file/handler rotation is the existing logging configuration's business |
 | Ring buffer | `collections.deque(maxlen=N)` of the newest records, `audit.recent()` | `audit.buffer_size`, default **256**, hard ceiling **1024** records |
-| Metric | `guardian_audit_records_total{decision,reason}` on `GET /metrics` | 2 decisions × 14 reasons = **28** series, whatever a caller passes (`reason` is mapped onto the vocabulary; anything else becomes `other`) |
+| Metric | `guardian_audit_records_total{decision,reason}` on `GET /metrics` | 2 decisions × 13 reasons = **26** series, whatever a caller passes (`reason` is mapped onto the vocabulary; anything else becomes `other`) |
 
 **The memory bound, stated and proved.** The buffer is a `deque` with a fixed
 `maxlen`, so appending past it evicts — it cannot grow. A record is a dict of 15

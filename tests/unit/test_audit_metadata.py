@@ -294,8 +294,14 @@ class TestAllowRecords:
         assert record["required_scope"] == "admin"
 
     def test_public_routes_make_no_authorization_decision(self, proxy_client):
-        """`/healthz` has no identity, so there is nothing to audit — and no growth."""
+        """`/healthz` decides nothing, so there is nothing to audit.
+
+        Even with an ``Authorization`` header: presenting a key to a route that
+        never checks one is not an authorization decision, and the record is
+        driven by the decision point, not by the presence of a header.
+        """
         assert proxy_client.get("/healthz").status_code == 200
+        assert proxy_client.get("/healthz", headers=_auth()).status_code == 200
         assert _records() == []
 
     def test_mutating_request_method_is_recorded(self, proxy_client):
@@ -886,3 +892,8 @@ class TestAuditConfiguration:
             "status", "limit", "limit_value",
         }
         assert len(audit.RECORD_FIELDS) == 15
+
+    def test_reason_vocabulary_size_is_pinned_by_the_docs(self):
+        """The record and API_REFERENCE both claim 2 x 13 = 26 metric series."""
+        assert len(audit.REASONS) == 13
+        assert audit.REASON_OTHER in audit.REASONS

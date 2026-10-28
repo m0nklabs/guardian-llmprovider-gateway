@@ -550,6 +550,30 @@ def state_for(
     return _CURRENT.get()
 
 
+def mark_allow(
+    *,
+    reason: str = REASON_SCOPE_GRANTED,
+    request: Any = None,
+    scope: Mapping[str, Any] | None = None,
+) -> None:
+    """Mark the current request as *allowed* at an authorization point.
+
+    Only a real decision point marks an allow, so "the request presented a key"
+    is not the same as "an authorization decision was made": a public route
+    stays out of the trail even when a caller sends an ``Authorization`` header
+    to it. A later ``mark_denial`` overwrites this (a scope allow followed by a
+    rate refusal is one request and one deny record).
+    """
+    try:
+        state = state_for(request=request, scope=scope)
+        if state is None or state.get("decision") == DENY:
+            return
+        state["decision"] = ALLOW
+        state["reason"] = _reason_token(reason)
+    except Exception:  # pragma: no cover - marking must never break a request
+        pass
+
+
 def mark_denial(
     *,
     reason: str,
@@ -593,12 +617,6 @@ def _route_template(scope: Mapping[str, Any]) -> str | None:
     return path if isinstance(path, str) and path else None
 
 
-def _allow_reason(required_scope: str | None, scope_mode: str | None) -> str:
-    if scope_mode == "grace":
-        return REASON_SCOPE_GRACE
-    return REASON_SCOPE_GRANTED
-
-
 def _record_for_request(
     scope: Mapping[str, Any],
     state: Mapping[str, Any],
@@ -608,10 +626,10 @@ def _record_for_request(
 ) -> dict[str, Any] | None:
     """Turn the request + its marked state into one record, or ``None``.
 
-    ``None`` means "this request made no authorization decision": a public
-    route (no ``verify_api_key`` dependency) never presents a key and never
-    marks a denial, so it is not audited. That is what keeps ``/healthz`` and
-    the docs routes out of the trail.
+    ``None`` means "this request made no authorization decision": nothing marked
+    an allow and nothing marked a denial (a public route never runs the auth
+    dependency), so there is nothing to audit. That is what keeps ``/healthz``
+    and the docs routes out of the trail.
 
     A denial can therefore carry a fingerprint without a name: the usage
     middleware records the *presented* token's fingerprint before
@@ -626,7 +644,7 @@ def _record_for_request(
         fingerprint = None
 
     decision = state.get("decision")
-    if decision != DENY and fingerprint is None:
+    if decision not in (ALLOW, DENY):
         return None
 
     method = scope.get("method")
@@ -641,20 +659,14 @@ def _record_for_request(
         except Exception:  # pragma: no cover - vocabulary is observability here
             required = None
 
-    if decision == DENY:
-        reason = str(state.get("reason") or REASON_OTHER)
-        detail = state.get("detail")
-        limit = state.get("limit")
-        limit_value = state.get("limit_value")
-    else:
-        reason = _allow_reason(required, auth_context.get("scope_mode"))
-        detail = None
-        limit = None
-        limit_value = None
+    reason = str(state.get("reason") or REASON_OTHER)
+    detail = state.get("detail") if decision == DENY else None
+    limit = state.get("limit") if decision == DENY else None
+    limit_value = state.get("limit_value") if decision == DENY else None
 
     return _build_record(
         surface=surface,
-        decision=decision or ALLOW,
+        decision=decision,
         reason=reason,
         status=status,
         method=method,

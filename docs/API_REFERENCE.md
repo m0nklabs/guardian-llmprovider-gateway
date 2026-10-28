@@ -236,7 +236,7 @@ journalctl -u guardian-llmprovider-gateway -o cat \
 `grep '"event":"audit"' guardian.log` works the same way when the service writes
 its log file. Aggregated counts are on `GET /metrics`
 (scope `client`): `guardian_audit_records_total{decision,reason}` — at most
-`2 × 14` series, so the metric cannot grow with traffic or with caller input.
+`2 × 13` = 26 series, so the metric cannot grow with traffic or with caller input.
 
 ## Error Model
 
