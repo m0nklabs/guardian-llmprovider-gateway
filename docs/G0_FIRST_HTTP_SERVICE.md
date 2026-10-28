@@ -335,10 +335,24 @@ There is **no cursor and no offset**. The only paging primitive is
   everything older — repeatedly raising `limit` with `since` set therefore never
   reaches earlier history. The response is the newest `limit` events of the
   filtered set in ascending order, so a larger `limit` means an earlier head.
-- If a follow-up poll wants only *new* events, the opposite applies: pin
-  `since` to the newest `ts` already consumed and leave `limit` small. Both
-  directions are string comparisons on `ts` (see 3.2.4), so the pinned value
-  must be copied verbatim from a response, never reformatted.
+- If a follow-up poll wants only *new* events, it must be **gap-safe**, because
+  the endpoint returns the newest `limit` events of the filtered set, *not* the
+  next `limit` events after `since`. With `since=<newest consumed>` and a small
+  `limit`, a burst larger than `limit` loses its oldest unseen events, and
+  advancing `since` to the newest consumed timestamp then excludes them
+  permanently. Two correct patterns:
+  - **fetch-complete:** request `limit >= total` (the whole filtered set) and
+    filter client-side on `ts > last_seen`; or
+  - **saturate-then-grow:** poll with `since=<newest consumed>` and a small
+    `limit`; treat the window as truncated when `len(events) == limit` **and**
+    `len(events) < total` — then raise `limit` and repeat before advancing
+    `since`. Never advance `since` past a truncated response. (The `total` half
+    of that condition matters: measured 2026-10-28, `limit=158` returned all
+    158 events, so `len == limit` alone would report a false truncation.)
+- Both directions compare `ts` as strings (see 3.2.4), so a pinned value must be
+  copied verbatim from a response, never reformatted, and a consumer that
+  cannot see its own pinned value in the returned page must treat the window as
+  broken rather than empty.
 - `total` (ignoring `limit`) is the only count available; there is no
   "has more" flag. A consumer therefore cannot cheaply confirm it has seen
   everything except by fetching with a `limit` at or above `total`.
