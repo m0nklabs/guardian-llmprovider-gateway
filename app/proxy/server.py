@@ -18,6 +18,7 @@ from app import config_loader as _config_loader
 
 # ── Capture subsystem (opt-in, fail-open, disabled by default) ───────
 from app.destination_policy import guarded_async_client
+from app.upstream_url import backend_v1_url
 from app.capture.integration import (
     capture_controller,
     get_capture_controller,
@@ -1548,8 +1549,12 @@ async def cancel_queue_request(request_id: str, request: Request, client_id: str
 # OpenAI-compatible /v1/ routes (used by OpenClaw and other OpenAI-compatible clients)
 @app.get("/v1/{path:path}")
 async def proxy_v1_get(path: str, request: Request, client_id: str = Depends(verify_api_key)):
+    # Same rule as the POST path (issue #75): a GET may only reach an endpoint
+    # under the backend's /v1 namespace. The query string is forwarded as typed
+    # parameters — it selects among endpoints, it cannot change which one.
+    upstream_url = backend_v1_url(LLAMA_SERVER_URL, path)
     async with guarded_async_client(purpose="v1-passthrough") as client:
-        resp = await client.get(f"{LLAMA_SERVER_URL}/v1/{path}", params=request.query_params)
+        resp = await client.get(upstream_url, params=request.query_params)
         return Response(content=resp.content, status_code=resp.status_code, headers=resp.headers)
 
 
