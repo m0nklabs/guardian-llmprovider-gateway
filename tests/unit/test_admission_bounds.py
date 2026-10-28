@@ -134,6 +134,64 @@ def _chat(client: TestClient, token: str = CLIENT_TOKEN, body: dict | None = Non
     return client.post("/v1/chat/completions", headers=_auth(token), json=payload)
 
 
+def _asgi_scope(headers=()) -> dict:
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/v1/chat/completions",
+        "raw_path": b"/v1/chat/completions",
+        "query_string": b"",
+        "root_path": "",
+        "headers": list(headers),
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+    }
+
+
+async def _drive_middleware(messages: list[dict], headers=()) -> tuple[int, bytes, list[dict]]:
+    """Run BodySizeLimitMiddleware over a canned receive channel.
+
+    Returns ``(status, payload, app_calls)`` where each app call records how the
+    inner app saw the body (``messages`` = http.request messages it had to read).
+    """
+    pending = list(messages)
+    app_calls: list[dict] = []
+    sent: list[dict] = []
+
+    async def receive() -> dict:
+        if pending:
+            return pending.pop(0)
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    async def inner_app(scope, receive, send_) -> None:
+        from starlette.responses import JSONResponse
+
+        body = b""
+        seen_messages = 0
+        while True:
+            message = await receive()
+            if message["type"] != "http.request":
+                break
+            seen_messages += 1
+            body += message.get("body") or b""
+            if not message.get("more_body", False):
+                break
+        app_calls.append({"messages": seen_messages, "body": body})
+        await JSONResponse({"ok": True})(scope, receive, send_)
+
+    middleware = admission.BodySizeLimitMiddleware(inner_app)
+    await middleware(_asgi_scope(headers), receive, send)
+    status = next(m["status"] for m in sent if m["type"] == "http.response.start")
+    payload = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+    return status, payload, app_calls
+
+
 # ── 1. Configuration resolution (fail-closed) ─────────────────────────
 
 
@@ -300,6 +358,64 @@ class TestBodySizeLimit:
         assert response.status_code == 200, response.text
         assert response.json()["received_bytes"] == len(payload)
 
+    async def test_chunked_framing_wins_over_a_small_content_length(self, admission_config):
+        """Review finding 1: both headers present => count the bytes.
+
+        RFC 7230 says a message with ``Transfer-Encoding`` *and* ``Content-Length``
+        is malformed and a server frames by the encoding (h11/uvicorn do), so a
+        small declared length must not be trusted to skip counting.
+        """
+        admission_config(max_body_bytes=1024)
+        headers = [
+            (b"transfer-encoding", b"chunked"),
+            (b"content-length", b"10"),
+            (b"content-type", b"application/json"),
+        ]
+        messages = [
+            {"type": "http.request", "body": b"x" * 700, "more_body": True},
+            {"type": "http.request", "body": b"x" * 700, "more_body": True},
+            {"type": "http.request", "body": b"x" * 700, "more_body": False},
+        ]
+        status, payload, app_calls = await _drive_middleware(messages, headers)
+        assert status == 413, payload
+        assert b"request_too_large" in payload
+        assert b"observed_bytes" in payload
+        assert app_calls == []  # the handler never ran
+
+    async def test_a_declared_length_is_still_trusted_without_a_transfer_encoding_marker(
+        self, admission_config
+    ):
+        admission_config(max_body_bytes=1024)
+        headers = [(b"content-length", str(4096).encode()), (b"content-type", b"application/json")]
+        status, payload, _app_calls = await _drive_middleware([], headers)
+        assert status == 413, payload
+        assert b"declared_bytes" in payload
+
+    async def test_many_tiny_messages_do_not_escape_the_bound(self, admission_config):
+        """Review finding 2: message count must not buy unbounded allocation."""
+        admission_config(max_body_bytes=1024)
+        messages = [{"type": "http.request", "body": b"x", "more_body": True} for _ in range(2000)]
+        messages.append({"type": "http.request", "body": b"", "more_body": False})
+        status, payload, app_calls = await _drive_middleware(messages)
+        assert status == 413, payload
+        assert b"observed_bytes" in payload
+        assert app_calls == []
+
+    async def test_an_allowed_chunked_body_is_coalesced_for_the_handler(self, admission_config):
+        """Review finding 2: the replay is one message, not one per input message."""
+        admission_config(max_body_bytes=1024)
+        messages = [{"type": "http.request", "body": b"y", "more_body": True} for _ in range(500)]
+        messages.append({"type": "http.request", "body": b"", "more_body": False})
+        status, _payload, app_calls = await _drive_middleware(messages)
+        assert status == 200
+        assert app_calls == [{"messages": 1, "body": b"y" * 500}]
+
+    async def test_a_disconnect_before_the_body_is_still_delivered(self, admission_config):
+        admission_config(max_body_bytes=1024)
+        status, _payload, app_calls = await _drive_middleware([{"type": "http.disconnect"}])
+        assert status == 200
+        assert app_calls == [{"messages": 1, "body": b""}]
+
     def test_dashboard_surface_has_the_same_bound(self, dashboard_client, admission_config):
         admission_config(max_body_bytes=1024)
         response = dashboard_client.post(
@@ -426,6 +542,21 @@ class TestQueueDepthBound:
         assert detail["message"] == "queue_timeout"
         # The wait budget, not the depth bound, ended it: nothing was 503.
         assert queue.get_status()["queue_length"] == 0
+
+    async def test_malformed_retry_hint_refuses_the_submission(
+        self, proxy_client, admission_config, test_queue, resolvable_models
+    ):
+        """Review finding 3: a broken hint refuses, it does not just vanish."""
+        admission_config(queue_max_depth=8, queue_full_retry_after_seconds="60")
+        queue = test_queue(max_concurrent=1, max_queue_depth=8, queue_timeout=30.0)
+        response = _chat(proxy_client)
+        assert response.status_code == 503, response.text
+        detail = response.json()["detail"]
+        assert detail["error"] == "admission_misconfigured"
+        assert detail["limit"] == LIMIT_QUEUE_DEPTH
+        assert "queue_full_retry_after_seconds" in detail["reason"]
+        assert "Retry-After" not in response.headers
+        assert queue.waiting_count == 0
 
     async def test_unresolvable_depth_refuses_over_http(self, proxy_client, test_queue, resolvable_models):
         test_queue(max_concurrent=1, max_queue_depth=None)

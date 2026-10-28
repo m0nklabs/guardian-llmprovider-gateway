@@ -168,6 +168,11 @@ async def begin_queued_request(request: Request, client_id: str, model: str) -> 
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    # G1-03: a queue-depth bound that cannot be resolved refuses the submission
+    # (checked live, so a malformed retry hint after a config reload is caught
+    # here rather than silently dropped when the queue fills).
+    _admission.check_queue_admission()
+
     try:
         request_id = _inference_queue.submit(
             normalized_client_id,

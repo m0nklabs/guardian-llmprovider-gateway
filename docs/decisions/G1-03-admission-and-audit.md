@@ -102,16 +102,23 @@ is 3-4 orders of magnitude above the measured payloads. Two enforcement paths,
 one error body:
 
 - a declared `Content-Length` over the bound is refused **without reading a
-  byte**;
-- an unlabelled (chunked) body is read up to the bound and refused the moment it
+  byte** — but only when no `Transfer-Encoding` is in play. A message that
+  carries both headers is malformed (RFC 7230) and servers frame by the encoding
+  (h11/uvicorn do), so a small declared length next to a chunked body is not
+  evidence of anything: those requests take the counting path;
+- a chunked or unlabelled body is read up to the bound and refused the moment it
   crosses it, with the observed byte count in the error.
 
-Neither path buffers more than the bound. The chunked path deliberately does
-**not** raise from the `receive` channel: route handlers on this gateway parse
-bodies with broad `except Exception` blocks (e.g.
-`app/gateway/model_discovery.py:show_model` → `400`), which would swallow the
-signal and turn a clean `413` into a misleading client error. Responding from the
-middleware cannot be swallowed.
+Neither path buffers more than the bound. The body is coalesced into one byte
+buffer, not kept as a list of ASGI messages: a sender delivering millions of
+one-byte messages must not be able to allocate per message, and the replay to the
+handler is a single message (linear, not quadratic).
+
+The chunked path deliberately does **not** raise from the `receive` channel:
+route handlers on this gateway parse bodies with broad `except Exception` blocks
+(e.g. `app/gateway/model_discovery.py:show_model` → `400`), which would swallow
+the signal and turn a clean `413` into a misleading client error. Responding from
+the middleware cannot be swallowed.
 
 ### 3.2 Queue depth — `admission.queue_max_depth`, default **32** → `503 queue_full`
 
@@ -233,7 +240,7 @@ admission:
 | one key **absent** | that bound takes its shipped default; one WARNING | same |
 | a key **malformed** — wrong type, `null`, a boolean, a float, a string, `0`, a negative number, a non-mapping `rate_limit` | the bound **refuses** the requests it guards with `503 admission_misconfigured` (per limit; the other bounds keep working) | a typo must never silently disable a bound, and it must not be guessed into a neighbouring value either |
 | `admission` **present but not a mapping** (`admission: "on"`) | every bound refuses | there is nothing to parse, and "no admission" is not a fallback |
-| `queue_full_retry_after_seconds` malformed | the **queue-depth** bound refuses (no `Retry-After` is emitted); the body and rate bounds are unaffected | a broken hint must not silently become "no hint" — one bound, one refusal |
+| `queue_full_retry_after_seconds` malformed | the **queue-depth** bound refuses with `503 admission_misconfigured` and no `Retry-After`; the body and rate bounds are unaffected. Validated **at submission time**, not only at startup, so a hot reload that breaks the hint is caught before a request is registered | a broken hint must not silently become "no hint" — one bound, one refusal |
 | numeric strings (`"33554432"`) | **malformed** | type-strict on purpose: an unquoted YAML number and a quoted string reach different code paths, and guessing which was meant is how limits end up wrong |
 
 There is **no `0 = unlimited`** value for any bound, unlike
@@ -307,7 +314,7 @@ enforced".
 
 ## 10. Tests
 
-`tests/unit/test_admission_bounds.py` — **55 tests**, every bound exercised with a
+`tests/unit/test_admission_bounds.py` — **61 tests**, every bound exercised with a
 **non-default** configured value (a 1 KiB body bound, a queue depth of 1, a
 6 requests/minute budget), because "it works at the defaults" is what the
 rejection tests would otherwise accidentally prove:
@@ -320,7 +327,16 @@ rejection tests would otherwise accidentally prove:
 - **Body (positive):** a body under the bound reaches the handler with its exact
   byte count; an **8 MiB bound admits a 5 MiB body whole** (byte count on the
   handler proves no truncation).
-- **Queue depth:** depth 1 refuses the next submission with `QueueDepthExceeded`
+- **Body (framing, review follow-up):** a request carrying both
+  `Transfer-Encoding: chunked` and a 10-byte `Content-Length` with a 2.1 KiB body
+  is still refused with `413` (the encoding wins, so the length is not trusted);
+  2000 one-byte ASGI messages cannot escape a 1 KiB bound; an allowed 500-message
+  body is delivered to the handler as **one** message; a disconnect before the
+  body is still delivered.
+- **Queue depth:** a malformed `queue_full_retry_after_seconds` (with a valid
+  depth) refuses the submission over HTTP with `503 admission_misconfigured` and
+  registers nothing — the hint cannot silently vanish; depth 1 refuses the next
+  submission with `QueueDepthExceeded`
   and over HTTP as `503 queue_full` + `Retry-After: 7` (non-default hint) with
   `max_queue_depth`/`queue_length`/`max_concurrent` in the body; the refused
   request never enters the queue; an unresolvable bound refuses with `503` and no

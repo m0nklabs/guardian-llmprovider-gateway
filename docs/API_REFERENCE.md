@@ -186,8 +186,10 @@ Common statuses:
               "declared_bytes": 41943040,
               "message": "request body exceeds admission.max_body_bytes (33554432 bytes); ..."}}
   ```
-  An unlabelled (chunked) body reports `observed_bytes` instead of
-  `declared_bytes`. The payload is never echoed. A body bound that cannot be
+  A chunked (or otherwise unlabelled) body reports `observed_bytes` instead of
+  `declared_bytes`; a request that carries both `Transfer-Encoding: chunked` and a
+  `Content-Length` is counted rather than trusted, because the encoding wins when
+  both are present. The payload is never echoed. A body bound that cannot be
   resolved (malformed config) refuses *every* request body with the `503`
   `admission_misconfigured` below, even an empty one.
 - `429`: the caller's key exhausted its per-key request budget. `Retry-After` is

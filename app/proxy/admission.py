@@ -432,6 +432,28 @@ def queue_full_retry_after_s() -> int | None:
     return limits.queue_full_retry_after_s
 
 
+def check_queue_admission() -> None:
+    """Refuse a submission when the queue-depth bound cannot be resolved.
+
+    Checked per submission (not only at startup) so that a malformed
+    ``queue_full_retry_after_seconds`` introduced by a hot reload still produces
+    the promised ``503 admission_misconfigured`` instead of quietly dropping the
+    retry hint — the queue object keeps a usable numeric depth, so the bound
+    itself cannot catch that case.
+    """
+    from fastapi import HTTPException
+
+    reason = resolve_limits().error(LIMIT_QUEUE_DEPTH)
+    if reason is None:
+        return
+    _bump_rejection(LIMIT_QUEUE_DEPTH)
+    logger.error(
+        "🛑 queue admission refused (configuration): %s",
+        reason,
+    )
+    raise HTTPException(status_code=503, detail=misconfigured_detail(LIMIT_QUEUE_DEPTH, reason))
+
+
 def queue_depth_error(exc: QueueDepthExceeded) -> "Exception":
     """Translate a refused queue submission into the stable ``503``.
 
@@ -665,46 +687,70 @@ async def _send_json(scope: Mapping[str, Any], send: Callable, status_code: int,
     await response(scope, _empty_receive, send)
 
 
-class _ReplayReceive:
-    """Replay a fully-read body, then delegate to the real receive channel."""
+def _has_transfer_encoding(scope: Mapping[str, Any]) -> bool:
+    """Whether the request declares a transfer encoding (i.e. chunked framing).
 
-    __slots__ = ("_messages", "_receive")
-
-    def __init__(self, messages: list[dict], receive: Callable[[], Awaitable[dict]]) -> None:
-        self._messages = messages
-        self._receive = receive
-
-    async def __call__(self) -> dict:
-        if self._messages:
-            return self._messages.pop(0)
-        return await self._receive()
+    RFC 7230: when both ``Transfer-Encoding`` and ``Content-Length`` are present
+    the message is malformed, and a server that accepts it frames by the transfer
+    encoding (h11/uvicorn do exactly that). A declared length is therefore only
+    trustworthy when the body is *not* chunked — see the middleware, which counts
+    the bytes instead of trusting the header in that case.
+    """
+    for raw_name, _raw_value in scope.get("headers") or []:
+        if raw_name.lower() == b"transfer-encoding":
+            return True
+    return False
 
 
 async def _read_bounded_body(
     receive: Callable[[], Awaitable[dict]],
     limit_bytes: int,
-) -> tuple[list[dict], int]:
-    """Read an unlabelled body up to ``limit_bytes`` -> ``(messages, seen)``.
+) -> tuple[bytes, int, bool, list[dict]]:
+    """Read an unlabelled body up to ``limit_bytes``.
 
-    Stops as soon as the bound is crossed (``seen > limit_bytes``) and returns
-    what it has; the caller answers ``413`` and never replays those messages. The
-    buffer is bounded by the limit, i.e. never more than the bound this code is
-    there to enforce.
+    Returns ``(body, seen, overflow, tail)``; ``tail`` holds any non-body message
+    the channel produced (a disconnect) so the replay can still deliver it.
+
+    The body is coalesced into one ``bytearray`` instead of a list of ASGI
+    messages: a sender that delivers millions of one-byte messages must not be
+    able to allocate per message, and replaying a coalesced body is linear.
     """
-    messages: list[dict] = []
-    seen = 0
+    buffer = bytearray()
     while True:
         message = await receive()
         if message.get("type") != "http.request":
-            messages.append(message)
-            break
-        seen += len(message.get("body") or b"")
+            return bytes(buffer), len(buffer), False, [message]
+        buffer += message.get("body") or b""
+        seen = len(buffer)
         if seen > limit_bytes:
-            return messages, seen
-        messages.append(message)
+            return bytes(buffer), seen, True, []
         if not message.get("more_body", False):
-            break
-    return messages, seen
+            return bytes(buffer), seen, False, []
+
+
+class _ReplayReceive:
+    """Replay a buffered body as one message, then delegate to the real channel.
+
+    A single ``http.request`` message with ``more_body: False`` is behaviourally
+    equivalent for every handler on this gateway (they all buffer the body) and
+    keeps the replay linear.
+    """
+
+    __slots__ = ("_body", "_tail", "_receive", "_sent")
+
+    def __init__(self, body: bytes, tail: list[dict], receive: Callable[[], Awaitable[dict]]) -> None:
+        self._body = body
+        self._tail = tail
+        self._receive = receive
+        self._sent = False
+
+    async def __call__(self) -> dict:
+        if not self._sent:
+            self._sent = True
+            return {"type": "http.request", "body": self._body, "more_body": False}
+        if self._tail:
+            return self._tail.pop(0)
+        return await self._receive()
 
 
 class BodySizeLimitMiddleware:
@@ -713,8 +759,9 @@ class BodySizeLimitMiddleware:
     Two paths, one error body, and neither of them buffers more than the bound:
 
     * a declared ``Content-Length`` over the bound is refused without reading a
-      byte;
-    * an unlabelled (chunked) body is read up to the bound and refused as soon
+      byte — but only when no transfer encoding is in play, because a chunked
+      body is framed by the encoding even if a (small, wrong) length is present;
+    * a chunked or unlabelled body is read up to the bound and refused as soon
       as it crosses it.
 
     Deliberately **not** an exception raised from ``receive``: handlers on this
@@ -741,8 +788,12 @@ class BodySizeLimitMiddleware:
         assert limits.max_body_bytes is not None
         limit_bytes = limits.max_body_bytes
         declared = _declared_length(scope)
+        # A Content-Length is only trustworthy when the body is not framed by a
+        # transfer encoding: with both headers present the encoding wins, so a
+        # small declared length next to a chunked body must not skip counting.
+        chunked = _has_transfer_encoding(scope)
 
-        if declared is not None and declared > limit_bytes:
+        if not chunked and declared is not None and declared > limit_bytes:
             await self._refuse(
                 scope,
                 send,
@@ -752,9 +803,9 @@ class BodySizeLimitMiddleware:
             )
             return
 
-        if declared is None:
-            messages, seen = await _read_bounded_body(receive, limit_bytes)
-            if seen > limit_bytes:
+        if chunked or declared is None:
+            body, seen, overflow, tail = await _read_bounded_body(receive, limit_bytes)
+            if overflow:
                 await self._refuse(
                     scope,
                     send,
@@ -763,7 +814,7 @@ class BodySizeLimitMiddleware:
                     observed_bytes=seen,
                 )
                 return
-            receive = _ReplayReceive(messages, receive)
+            receive = _ReplayReceive(body, tail, receive)
 
         await self.app(scope, receive, send)
 
