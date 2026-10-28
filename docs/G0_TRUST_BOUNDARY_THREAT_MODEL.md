@@ -210,9 +210,12 @@ Guardian sends it no credential and the backend requires none
   single-host deployment.
 - Residual risk **[judgement]**: the backend is an unauthenticated inference
   endpoint for any local user. It is also the path the G1 exit gate names: a
-  client AWS-style vantage must not reach it. `unverified:` whether any
-  container on this host currently reaches `:11440` via host networking — that
-  needs a container run, which this session did not perform.
+  client AWS-style vantage must not reach it.
+- **Verified 2026-10-27 (G0-03):** containers *do* reach it. Two containers on
+  this host run with `NetworkMode=host` and both answered
+  `GET 127.0.0.1:11440/health` with `200` — so "host network namespace" is not a
+  theoretical condition here but the current state. Method and output:
+  `docs/G0_BASELINE.md` §4.
 
 ### B-02 — Caretaker control API with `CARETAKER_KEY`
 
@@ -269,8 +272,13 @@ is the process umask. With `UMask=0077` (`20-tls.conf:2`) new files land `0600`
 (the majority: 5054 files), but 305 files are `-rw-r--r--` and the
 `data/capture/media/` directory itself is `drwxr-xr-x`. Prior to that umask, or
 from a differently-umasked caller, capture media was group/world-readable.
-**[judgement]** Any process that can read `data/capture/media/` reads user
-images verbatim. This is not a Guardian-auth bypass (B-01 style) but it is a
+**[judgement][corrected 2026-10-27]** A process that can read
+`data/capture/media/` reads user images verbatim — but the `0755` media
+directory does **not** by itself admit another Unix user: its parent
+`data/capture` is `0750` and `/home/flip` is `0750`, so traversal is denied for
+any uid other than `flip`/the `flip` group (verified with a
+`sudo -n -u nobody` negative control, `docs/G0_BASELINE.md` §4). The drift
+removes the *last* DAC layer rather than creating a second reader class. This is not a Guardian-auth bypass (B-01 style) but it is a
 data-path gap and is registered in [#38](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/38).
 
 ### B-07 — Guardian keeps direct backend lifecycle control
@@ -506,47 +514,63 @@ UTC. No daemon was POSTed to, nothing was restarted, no config was changed.
 Everything below is either a judgement **[judgement]** already marked inline or
 something this session could not check. Nothing here is stated as fact above.
 
-1. `unverified:` **Firewall or ACL between ai-kvm-2 and 192.168.1.245.** `ufw`
-   is inactive on this host; whether a switch/router ACL restricts the LAN hops
-   (B-04) was not tested. The roadmap already treats "firewall-restricted" as an
-   insufficient control regardless.
-2. `unverified:` **Whether any container reaches `:11440`.** The bind is
-   loopback-only, so only host-netns processes can; no container was run to
-   confirm or deny.
-3. `unverified:` **Which path produced the 305 world-readable media files.**
-   The writer sets no mode (`app/capture/media.py:71-72`); the current
-   `UMask=0077` yields `0600` for new files. The age/umask at creation time of
-   those 305 files was not reconstructed — the *mechanism* is verified, the
-   *history* is not.
-4. `unverified:` **`windows-gpu-local` is a placeholder.** The committed
-   provider file carries `http://192.168.1.W:{11440,11441,11450,11451}`
-   (`config/providers/windows-gpu-local.settings.yaml:11,18,21,23`) with
-   `enabled: true`. Whether a host named/aliased `192.168.1.W` exists (it is not
-   a valid IPv4 literal) was not resolved; if the config is inert it is dead
-   weight, if it resolves it is a second LAN bypass identical to B-03.
-5. `unverified:` **Authenticated behaviour of the speech endpoints on
-   `192.168.1.245`.** `:11450/` answered `404` without credentials, but the real
-   endpoints (`/tts/ensure`, `/audio/speech`) were not called: that would be a
-   POST to a live daemon, which this task forbids.
+**Triage status (G0-03, 2026-10-27):** every item below was re-checked; the
+verdict is in the heading and the evidence lives in `docs/G0_BASELINE.md` §4.
+`verified` means the claim above is now measured, `still unknown` means it
+remains unmeasured with the reason given.
+
+1. **Partly verified — host side measured, network side unknown.** `ufw` is
+   inactive; `iptables` INPUT/OUTPUT policy is `ACCEPT` with Docker chains only,
+   i.e. **no host firewall**. From this host, `192.168.1.245` answers on `11441`
+   and `11450`, and refuses `11440` and `11451` (~0.5 ms RTT). Switch/router ACLs
+   remain unobservable from here. The roadmap already treats
+   "firewall-restricted" as an insufficient control regardless.
+2. **Verified — yes.** Two containers on this host run with
+   `NetworkMode=host`; both received `200` from `127.0.0.1:11440/health`. See
+   B-01.
+3. **Verified (mechanism + timeline), one attribution inferred.** 5359 files:
+   5054 × `0600`, 305 × `0644`. Every `0644` file predates
+   `2026-09-01T22:10`; the `UMask=0077` drop-in landed `2026-08-31T23:36Z`; the
+   writer still sets no mode (`app/capture/media.py:68-74`). Ten `0644` files
+   created *after* the drop-in point to a non-service writer with umask `0022` —
+   that attribution is inferred, not proven. Exfiltration is blocked by the
+   `0750` parents (see B-06).
+4. **Verified — inert duplicate, not a bypass.** `192.168.1.W` does not
+   resolve (`gaierror -2`); a request routed to it returns
+   `503 "Caretaker unreachable at http://192.168.1.W:11441"`; it contributes 0
+   ids to `/v1/models` despite `enabled: true`
+   (`config/providers/windows-gpu-local.settings.yaml:11,18,21,23`). The real
+   LAN bypass remains its sibling `14700k-local` → `192.168.1.245` (B-03). Dead
+   config, registered for removal in [#38](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/38).
+5. **Still unknown — and one thing is now known.** `:11450/` answers `404`
+   unauthenticated, but `GET /health` answers `200 {"model":"model-design"}`
+   **without credentials**, i.e. the speech host leaks its model name
+   unauthenticated. `/tts/ensure` and `/audio/speech` were not called (a `POST`
+   to a live daemon is out of bounds), so the authenticated paths stay
+   unverified. `:11451` (STT) refused the connection.
 6. **[judgement]** All "reachable if this hop is compromised" statements are
    consequences reasoned from the verified configuration, not observed attacks.
 7. **[judgement]** Severity statements in §3/§4 (e.g. "top bypass",
    "equivalent to full client impersonation") are assessments, not measurements.
-8. `unverified:` **Behaviour of the public API under a LAN MITM.** The cleartext
-   `http://:11434` path (B-05) is verified as *accepted*; no capture of a real
-   client's key on the wire was performed.
-9. `unverified:` **Caretaker-repository claims.** `m0nklabs/caretaker-llamacpp`
-   is not in this workspace, so the `_yaml_vram_limit_mb()` / `OverflowError`
-   detail (§6.2) and the "watchdog never started" / "OOM reporting undecided"
-   statements (§6.1) are quoted from caretaker #17 and guardian #34, not read
-   here. The failure class itself is verified independently:
-   `int(float("inf"))` → `OverflowError: cannot convert float infinity to
-   integer`.
-10. `unverified:` **Exact route count behind the dependency count.** The 45
-    `Depends(verify_api_key)` lines are counted directly; reconciling them
-    one-to-one with the matrix's protected rows was not done (§4.1 treats the
-    matrix as the route authority, which its guard
-    `tests/unit/test_g0_endpoint_matrix.py` enforces).
+8. **Still unknown — no capture attempted, but the exposure is confirmed as
+   routine.** All 71 baseline samples were served over cleartext `:11434` while
+   carrying a Bearer key, i.e. cleartext is the normal path, not an edge case
+   (`docs/G0_BASELINE.md` §1). No MITM capture was performed.
+9. **Verified against the caretaker source.** `m0nklabs/caretaker-llamacpp` is
+   checked out at `/home/flip/caretaker-llamacpp` @ `6561f03`:
+   `_yaml_vram_limit_mb()` (`caretaker/manager.py:421-448`) calls `int(raw)`
+   inside `except (TypeError, ValueError)`, so `int(float("inf"))` raises
+   `OverflowError` — uncaught, exactly the boot abort reported in caretaker #17.
+   The watchdog/OOM statements match the code and stay tracked in guardian #34.
+   The failure class is also verified standalone:
+   `int(float("inf"))` → `OverflowError`.
+10. **Verified / reconciled.** The matrix's 57 rows split into 13 with no
+    auth dependency and 44 protected rows; the code search finds 45
+    `Depends(verify_api_key)` sites, and the extra one is `get_version`
+    (`app/proxy/server.py:1187`) — a function with no route decorator and no
+    registration, i.e. dead code, not a 45th protected route. The matrix stays
+    the route authority; its guard
+    (`tests/unit/test_g0_endpoint_matrix.py`, 8 tests) enforces that.
 
 ## 10. Deliberately out of scope
 
