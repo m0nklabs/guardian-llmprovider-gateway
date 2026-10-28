@@ -25,6 +25,7 @@ from fastapi.responses import StreamingResponse
 from app.capture.config import PROTOCOL_OLLAMA, ROUTE_LOCAL
 from app.capture.schema import BuildContext
 from app.capture.stream_assembler import StreamResponseAssembler
+from app.destination_policy import guarded_async_client
 from app.engine.manager import ModelLoadError
 from app.gateway import caretaker_runtime as _caretaker_runtime
 from app.gateway.streaming import StreamProgressWatchdog
@@ -206,6 +207,20 @@ def init(
     _inference_queue = inference_queue
     _capture_controller = capture_controller
     _grammar_enabled = grammar_enabled
+
+
+def _guarded_backend_client(request_timeout: httpx.Timeout | float) -> httpx.AsyncClient:
+    """Build the one client these bridges use for the llama-server hop.
+
+    Both bridges build the upstream request themselves and keep it streaming
+    (``build_request`` + ``send(stream=...)``, then hand the client to the
+    cancellation path), so they cannot use a buffering helper. Only the
+    construction goes through the G1-02 guard: the destination is checked and
+    pinned to the validated address, redirects are refused, and a refusal
+    leaves an audit record (issue #65). The timeout stays the caller's — the
+    guard never overrides it.
+    """
+    return guarded_async_client(timeout=request_timeout, purpose="local-inference")
 
 
 async def chat_ollama(request: Request, client_id: str):
@@ -422,7 +437,7 @@ async def chat_ollama(request: Request, client_id: str):
         # Forward to Llama Server (OpenAI Endpoint)
         timeout_sec = _get_model_timeout(model)
         request_timeout = _build_stream_timeout(timeout_sec) if stream else timeout_sec
-        client = httpx.AsyncClient(timeout=request_timeout)
+        client = _guarded_backend_client(request_timeout)
         
         req = client.build_request(
             "POST",
@@ -870,7 +885,7 @@ async def generate_ollama(request: Request, client_id: str):
 
         timeout_sec = _get_model_timeout(model)
         request_timeout = _build_stream_timeout(timeout_sec) if stream else timeout_sec
-        client = httpx.AsyncClient(timeout=request_timeout)
+        client = _guarded_backend_client(request_timeout)
         
         req = client.build_request(
             "POST",
