@@ -1,11 +1,13 @@
 """Tests for app.proxy.queue — FIFO inference queue."""
 
 import asyncio
+import math
 import time
 
 import pytest
 
-from app.proxy.queue import InferenceQueue, QueueEntry
+from app.gateway.queue_helpers import request_cancel_http_exception
+from app.proxy.queue import InferenceQueue, QueueEntry, QueueRequestCancelled
 
 # ── QueueEntry ─────────────────────────────────────────────────────────
 
@@ -39,7 +41,7 @@ class TestQueueInit:
     def test_defaults(self):
         q = InferenceQueue()
         assert q.max_concurrent == 1
-        assert q.queue_timeout == 300.0
+        assert q.queue_timeout == 1800.0  # shipped default in config/global.settings.yaml
         assert q.active_count == 0
         assert q.waiting_count == 0
 
@@ -216,22 +218,150 @@ class TestFIFOOrdering:
 
 class TestWaitingSemantics:
     @pytest.mark.asyncio
-    async def test_waiting_request_is_not_dropped_by_queue_timeout(self):
-        q = InferenceQueue(max_concurrent=1, queue_timeout=0.01)
+    async def test_waiting_request_is_not_dropped_when_timeout_disabled(self):
+        """``queue_timeout_s: 0`` keeps the unbounded wait_policy wait reachable."""
+        q = InferenceQueue(max_concurrent=1, queue_timeout=0)
         rid1 = await q.acquire("blocker", "m")
 
         waiter_task = asyncio.create_task(q.acquire("waiter", "m"))
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.1)
 
         assert not waiter_task.done()
         status = q.get_status(client_id="waiter")
         assert status["your_status"] == "queued"
+        assert status["queue_timeout_s"] == 0.0
         assert status["queue_timeout_enforced"] is False
         assert status["stats"]["total_timeouts"] == 0
 
         q.release(rid1)
         rid2 = await waiter_task
         q.release(rid2)
+
+
+# ── Queue wait-budget enforcement (issue #45) ──────────────────────────
+
+
+class TestQueueTimeoutEnforcement:
+    @pytest.mark.asyncio
+    async def test_queued_request_expires_at_wait_budget(self):
+        """A live waiter past ``queue_timeout_s`` is cancelled with a typed reason."""
+        q = InferenceQueue(max_concurrent=1, queue_timeout=0.2)
+        blocker_id = await q.acquire("blocker", "m", owner_id="key:blocker")
+
+        with pytest.raises(QueueRequestCancelled) as excinfo:
+            await q.acquire("waiter", "m", owner_id="key:waiter")
+
+        assert excinfo.value.reason == "queue_timeout"
+
+        # The waiting entry is finalized, not left dangling, and only the waiter
+        # is released — the running blocker keeps its slot.
+        assert q.waiting_count == 0
+        assert q.active_count == 1
+        snapshot = q.get_request_status(excinfo.value.request_id, owner_id="key:waiter")
+        assert snapshot["status"] == "expired"
+        assert snapshot["cancel_reason"] == "queue_timeout"
+        assert snapshot["position"] == -1
+
+        status = q.get_status(owner_id="key:waiter")
+        assert status["your_status"] == "expired"
+        assert status["your_cancel_reason"] == "queue_timeout"
+        assert status["your_position"] == -1
+        assert status["wait_policy"] == "disconnect_or_cancel"
+        assert status["stats"]["total_timeouts"] == 1
+        assert status["stats"]["total_expired"] == 1
+        assert status["stats"]["total_cancelled"] == 0
+
+        # Client-facing contract: the queue's existing typed 499 cancellation.
+        http_exc = request_cancel_http_exception(excinfo.value.request_id, excinfo.value.reason)
+        assert http_exc.status_code == 499
+        assert http_exc.detail == {
+            "error": "request_cancelled",
+            "request_id": excinfo.value.request_id,
+            "message": "queue_timeout",
+        }
+
+        # Slot accounting recovers: releasing the blocker empties the queue and a
+        # fresh request acquires normally.
+        q.release(blocker_id)
+        assert q.get_status()["active_count"] == 0
+        assert q.get_status()["queue_length"] == 0
+
+        fresh_id = await q.acquire("fresh", "m")
+        assert q.active_count == 1
+        assert q.get_status()["stats"]["total_timeouts"] == 1
+        q.release(fresh_id)
+
+    @pytest.mark.asyncio
+    async def test_request_served_before_budget_is_unaffected(self):
+        """A request granted its slot inside the budget never sees the expiry path."""
+        q = InferenceQueue(max_concurrent=1, queue_timeout=30.0)
+        blocker_id = await q.acquire("blocker", "m", owner_id="key:blocker")
+
+        waiter_task = asyncio.create_task(q.acquire("waiter", "m", owner_id="key:waiter"))
+        await asyncio.sleep(0.05)
+        assert q.waiting_count == 1
+
+        q.release(blocker_id)
+        waiter_id = await asyncio.wait_for(waiter_task, timeout=1.0)
+
+        snapshot = q.get_request_status(waiter_id, owner_id="key:waiter")
+        assert snapshot["status"] == "running"
+        assert "cancel_reason" not in snapshot
+
+        status = q.get_status()
+        assert status["queue_timeout_enforced"] is True
+        assert status["stats"]["total_timeouts"] == 0
+        assert status["stats"]["total_expired"] == 0
+        assert status["stats"]["total_completed"] == 1
+        q.release(waiter_id)
+
+    @pytest.mark.parametrize(
+        ("configured", "expected_enforced"),
+        [
+            (0, False),
+            (0.0, False),
+            (-1, False),
+            (-0.5, False),
+            (None, False),
+            (float("nan"), False),
+            (float("inf"), False),
+            (0.2, True),
+            (900, True),
+            (1800.0, True),
+        ],
+    )
+    def test_status_reports_enforcement_derived_from_config(self, configured, expected_enforced):
+        """``queue_timeout_enforced`` follows the configured budget, never a constant."""
+        q = InferenceQueue(queue_timeout=configured)
+        status = q.get_status()
+
+        assert status["queue_timeout_enforced"] is expected_enforced
+        assert status["queue_timeout_s"] == (float(configured) if expected_enforced else 0.0)
+        # The payload must stay JSON-serializable: never nan/inf.
+        assert math.isfinite(status["queue_timeout_s"])
+        assert status["wait_policy"] == "disconnect_or_cancel"
+
+    def test_default_budget_is_enforced(self):
+        """The absent-key default (shipped 1800 s) is a positive, enforced budget."""
+        status = InferenceQueue().get_status()
+        assert status["queue_timeout_s"] == 1800.0
+        assert status["queue_timeout_enforced"] is True
+
+    @pytest.mark.asyncio
+    async def test_client_cancel_reason_stays_distinct_from_queue_timeout(self):
+        """The expiry reason carries its own vocabulary and its own counters."""
+        q = InferenceQueue(max_concurrent=1, queue_timeout=0)
+        rid = q.submit("waiter", "m", owner_id="key:waiter")
+
+        snapshot = q.cancel(rid, owner_id="key:waiter", reason="client_requested_cancel")
+
+        assert snapshot["cancel_reason"] == "client_requested_cancel"
+        assert snapshot["cancel_reason"] != "queue_timeout"
+        assert snapshot["status"] == "cancelled"
+        stats = q.get_status()["stats"]
+        assert stats["total_cancelled"] == 1
+        assert stats["total_timeouts"] == 0
+        assert stats["total_expired"] == 0
 
 
 # ── Cancellation ───────────────────────────────────────────────────────

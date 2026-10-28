@@ -291,7 +291,7 @@ records `request_id` + `queue_wait_ms` (`0`) instead of two nulls.
 | Bound | Config key → live value | What was measured |
 |---|---|---|
 | Local concurrency | `queue.max_concurrent` → **1** (`config/global.settings.yaml:41-44`) | 1 active + 1 waiting observed; a second local request never overlaps the first |
-| Queue wait ceiling | `queue.queue_timeout_seconds` → **300**, but `queue_timeout_enforced: false` (live status) | No enforced ceiling observed; release is disconnect-or-cancel |
+| Queue wait ceiling | `queue.queue_timeout_seconds` → **300**, but `queue_timeout_enforced: false` (live status) | No enforced ceiling observed; release is disconnect-or-cancel. **Fixed 2026-10-28 by [#45](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/45)** (enforced, default `1800`); the row above stays as captured |
 | Queue history | `queue.history_ttl` → 300 s | 205 completed / 3 cancelled retained at probe time |
 | Model residency | `config/providers/ai-kvm2-local.settings.yaml:87` `idle_unload_minutes: 5` | Model absent when idle; cold load **55.9 s**; resident while used |
 | Backend slots | llama-server `total_slots: 4`, `-c 145000` | Guardian serialises to 1 under load, so 3 of 4 backend slots are unreachable through Guardian |
@@ -521,7 +521,12 @@ Flake loops after the fix: **20/20 PASS** (named test) and **20/20 PASS**
 2. `get_version` is an unrouted handler carrying an auth dependency — register
    or delete (§3.2 item 10).
 3. `queue_timeout_seconds: 300` is reported as *not enforced*; either enforce
-   it or stop advertising it (§2.4).
+   it or stop advertising it (§2.4). — **Resolved 2026-10-28 by
+   [#45](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/45):
+   the budget is now enforced (default `1800`), `queue_timeout_enforced` is
+   derived from config, and expiry cancels the waiter with
+   `cancel_reason: "queue_timeout"`. The §2.4 measurement above stays as
+   captured for 2026-10-27.**
 4. Three of the backend's four llama-server slots are unreachable through
    Guardian while `max_concurrent: 1`; that is a capacity decision for G1/G3,
    recorded here, not changed.

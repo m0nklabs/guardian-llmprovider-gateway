@@ -57,9 +57,29 @@ Queue admission is rejected before waiting if either of these is true:
 - the requested model is not served by Guardian
 - the same API key already owns a queued or running GPU request
 
-The configured `queue.queue_timeout_seconds` is surfaced as queue-budget
-telemetry in status responses, but Guardian no longer drops a healthy waiter
-just because that budget has elapsed.
+The configured `queue.queue_timeout_seconds` (shipped default: `1800`) is an
+**enforced** wait budget for a request sitting in the queue, connection or not.
+When it elapses, Guardian cancels the queued request:
+
+- the request finalizes as `expired` with
+  `cancel_reason: "queue_timeout"` (distinct from `client_requested_cancel`
+  and `client_disconnected`), and `stats.total_timeouts` /
+  `stats.total_expired` increment;
+- the waiting client receives the same typed cancellation as every other queue
+  cancellation: HTTP `499`, `error: "request_cancelled"`,
+  `message: "queue_timeout"`;
+- the slot accounting stays intact: the entry leaves `waiting`, the next
+  waiter is woken and promoted if a slot is free, and `your_status` /
+  `your_cancel_reason` report the final state.
+
+`queue_timeout_seconds: 0`, a negative value or a non-finite value (`.inf`)
+means **no queue timeout**: the wait is unbounded, as before,
+`queue_timeout_s` reports `0` and
+`queue_timeout_enforced` reports `false`. An absent key falls back to the
+built-in default (`1800`), so deleting the key does not silently disable the
+guarantee. Both status fields are derived from the configured value at startup
+— never assumed — so operators can trust them. Changing the queue section
+requires a restart; it is not picked up by `POST /api/config/reload`.
 
 There is no token-bucket or per-client rate limiter in current code.
 Backpressure is enforced by the FIFO inference queue and model-size-dependent
@@ -76,7 +96,11 @@ Common statuses:
 - `409`: queue admission rejected because the same API key already has a queued or running GPU request
 - `422`: vision runtime unavailable or backend image path rejected
 - `499`: Guardian cancelled the request because the downstream client
-  disconnected or the client explicitly cancelled its queue entry
+  disconnected, the client explicitly cancelled its queue entry, or the queue
+  wait budget (`queue_timeout_seconds`) expired. The body keeps the
+  `{"error": "request_cancelled", "request_id": ..., "message": <reason>}`
+  shape; `message` is the typed `cancel_reason` (`client_disconnected`,
+  `client_requested_cancel`, `queue_timeout`, ...).
 - `500`: unexpected switch or proxy failure
 - `503`: model load, auto-reload, or backend recovery failure
 - `410`: legacy benchmark start/stop endpoints are disabled
@@ -665,8 +689,8 @@ Representative response:
   "queue_length": 1,
   "active_count": 1,
   "max_concurrent": 1,
-  "queue_timeout_s": 300,
-  "queue_timeout_enforced": false,
+  "queue_timeout_s": 1800,
+  "queue_timeout_enforced": true,
   "wait_policy": "disconnect_or_cancel",
   "stats": {
     "total_queued": 12,
@@ -682,6 +706,15 @@ Representative response:
   "your_request_id": "28b9fd72-8aed-4426-9645-156a43ec9074"
 }
 ```
+
+`queue_timeout_enforced` is derived from the configured
+`queue.queue_timeout_seconds`: `true` for a positive finite value, `false` for
+`0`, a negative value, `None` or any non-finite value (each of which disables
+the timeout). An **absent** key is not a disable switch: it falls back to the
+enforced `1800`-second default. A request that expires reports
+`your_status: "expired"` with
+`your_cancel_reason: "queue_timeout"` and increments
+`stats.total_timeouts` / `stats.total_expired`.
 
 #### `GET /v1/queue/requests/{request_id}`
 

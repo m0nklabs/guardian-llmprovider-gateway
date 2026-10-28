@@ -267,8 +267,8 @@ This endpoint is **not queued** — it always responds immediately, even when in
   "queue_length": 2,
   "active_count": 1,
   "max_concurrent": 1,
-  "queue_timeout_s": 300,
-  "queue_timeout_enforced": false,
+  "queue_timeout_s": 1800,
+  "queue_timeout_enforced": true,
   "wait_policy": "disconnect_or_cancel",
   "your_position": 2,
   "your_status": "queued",
@@ -339,16 +339,25 @@ Authorization: Bearer <api_key>
 
 ### Queue Wait Budget and Cancellation
 
-`queue_timeout_seconds` is now a **server-advertised wait budget**, not an
-internal drop timer. Guardian keeps a healthy queued request alive until it can
-run, unless one of these happens first:
+`queue_timeout_seconds` (shipped default **1800 s**) is an **enforced wait
+budget**: a queued request that waits longer than the budget is cancelled by
+Guardian, live connection or not. A request leaves the queue only by running,
+or because one of these happens first:
 
-- the downstream client disconnects
-- the client explicitly cancels the request through `DELETE /v1/queue/requests/{request_id}`
+- it waited longer than `queue_timeout_seconds` (`cancel_reason: "queue_timeout"`)
+- the downstream client disconnects (`cancel_reason: "client_disconnected"`)
+- the client explicitly cancels the request through `DELETE /v1/queue/requests/{request_id}` (`cancel_reason: "client_requested_cancel"`)
 - a higher-level client policy aborts the request locally
 
-When Guardian cancels a request because the client disconnected or explicitly
-cancelled it, the request resolves as:
+`queue_timeout_seconds: 0` (or a negative/non-finite value) disables the
+timeout; the wait is then unbounded, and `queue_timeout_enforced` in
+`/v1/queue/status` is `false` with `queue_timeout_s: 0`. Removing the key does
+not disable it — an absent key falls back to the enforced `1800 s` default.
+When enforcement is off, size your client timeout from your own inference
+deadline instead of `queue_timeout_s`.
+
+When Guardian cancels a queued request, the response keeps one typed shape; the
+`message` field carries the reason:
 
 ```http
 HTTP/1.1 499 Client Closed Request
@@ -363,13 +372,15 @@ Content-Type: application/json
 }
 ```
 
-> **⚠️ Client timeout warning:** Your HTTP client timeout must still be
-> **longer than** `queue_timeout_seconds` (default: 300s) **plus** your expected
-> inference time, because the same HTTP request remains open across both phases.
+> **⚠️ Client timeout warning:** Your HTTP client timeout must be **longer
+> than** `queue_timeout_seconds` (default: 1800s) **plus** your expected
+> inference time, because the same HTTP request remains open across both phases
+> and Guardian now closes the wait at the budget boundary.
 >
 > **Rule of thumb:** `client_timeout = queue_timeout_seconds + max_inference_seconds + 30s buffer`
 >
-> With defaults: `300 + 120 + 30 = 450s` minimum. We recommend **600s** to be safe.
+> With defaults: `1800 + 120 + 30 = 1950s` minimum. Set your transport timeout
+> from the advertised `queue_timeout_s`, not from a hardcoded number.
 
 ---
 
@@ -419,9 +430,10 @@ Just send the request and wait. The queue is transparent — your request blocks
 
 Sufficient for **background tasks** and **batch jobs** where latency doesn't matter. This is the starting point — the other building blocks layer on top of this.
 
-**Timeout rule:** Set `timeout ≥ queue_timeout_seconds + max_inference_time`. The
-server no longer 429s healthy waiters, so this timeout is your transport safety
-net, not a mirror of Guardian's queue enforcement. Safe default: **600s**.
+**Timeout rule:** Set `timeout ≥ queue_timeout_seconds + max_inference_time`.
+Guardian enforces the queue budget itself (HTTP `499 request_cancelled` with
+`message: "queue_timeout"`), so this timeout is only your transport safety net
+covering both phases. Size it from the advertised `queue_timeout_s`.
 
 ```python
 import httpx
@@ -608,7 +620,7 @@ Dynamic timeout separates the request lifecycle into **two independent deadlines
      ↑ deadline 1       ↑ deadline 2    ← each phase has its own budget
 ```
 
-- **Queue deadline**: Match or derive from the server's `queue_timeout_s` (default 300s) as a client-side wait budget. Guardian will keep waiting beyond that if the request is still healthy, but using the server-advertised budget gives your client and operators a shared expectation.
+- **Queue deadline**: Match the server's enforced `queue_timeout_s` (default 1800s). Guardian cancels the queued request at that boundary with a typed `499` (`message: "queue_timeout"`), so a client-side deadline aligned with it sees the same boundary instead of a dead socket.
 - **Inference deadline**: Based on your expectations for the model and prompt size. A 50-token prompt on a 7B model finishes in seconds; a 4K-token prompt on a 30B model may need 2 minutes.
 
 **Why this beats static:**
@@ -653,18 +665,18 @@ async def chat_with_dynamic_timeout(
     """
     Send an inference request with adaptive per-phase timeouts.
 
-    - Queue deadline is read from the server's advertised `queue_timeout_s` wait budget.
+    - Queue deadline is read from the server's enforced `queue_timeout_s` wait budget.
     - Inference deadline is caller-defined (default: 120s).
     - The HTTP-level timeout is a safety net covering both phases.
     """
     headers = {"Authorization": f"Bearer {API_KEY}"}
 
-    # Step 1: Read the server's advertised queue wait budget to size the safety-net HTTP timeout
+    # Step 1: Read the server's enforced queue wait budget to size the safety-net HTTP timeout
     async with httpx.AsyncClient(timeout=10.0) as probe:
         status = (await probe.get(
             f"{GUARDIAN_URL}/v1/queue/status", headers=headers
         )).json()
-        server_queue_timeout = status.get("queue_timeout_s", 300)
+        server_queue_timeout = status.get("queue_timeout_s", 1800)
 
     # Safety-net: covers both phases + buffer
     http_timeout = server_queue_timeout + inference_deadline + 60
@@ -802,12 +814,12 @@ async def streaming_chat_with_dynamic_timeout(
     on_token = on_token or (lambda t: print(t, end="", flush=True))
     on_status = on_status or (lambda phase, detail: None)
 
-    # Read server's advertised queue wait budget for the safety-net HTTP timeout
+    # Read server's enforced queue wait budget for the safety-net HTTP timeout
     async with httpx.AsyncClient(timeout=10.0) as probe:
         status = (await probe.get(
             f"{GUARDIAN_URL}/v1/queue/status", headers=headers
         )).json()
-        server_queue_timeout = status.get("queue_timeout_s", 300)
+        server_queue_timeout = status.get("queue_timeout_s", 1800)
 
     http_timeout = server_queue_timeout + inference_deadline + 60
 
@@ -1162,5 +1174,5 @@ Queue behavior is configured in `config/settings.yaml`:
 ```yaml
 queue:
   max_concurrent: 1              # Simultaneous inference slots (match llama-server --parallel)
-  queue_timeout_seconds: 300     # Advertised queue wait budget for clients and status polling
+  queue_timeout_seconds: 1800    # Enforced per-request queue wait budget; 0 disables it
 ```

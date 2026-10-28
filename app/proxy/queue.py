@@ -2,8 +2,13 @@
 
 Serializes access to the single-slot llama-server backend while keeping a real
 request lifecycle: queued, running, cancelling, cancelled, completed, failed,
-or expired. Waiting clients are no longer dropped by Guardian's own queue
-timeout; they stay queued until they disconnect or the request is cancelled.
+or expired. A queued request that holds a live connection is bounded by the
+configured ``queue_timeout`` wait budget (``queue.queue_timeout_seconds``): once
+it elapses the request finalizes as ``expired`` with ``cancel_reason:
+"queue_timeout"`` and the waiting client receives the usual typed cancellation.
+A non-positive (or non-finite) budget disables enforcement and restores the
+unbounded wait, in which case the request stays queued until it disconnects or
+is cancelled.
 """
 
 import asyncio
@@ -16,6 +21,31 @@ logger = logging.getLogger("Queue")
 
 FINAL_STATES = {"completed", "cancelled", "failed", "expired"}
 ACTIVE_STATES = {"running", "cancelling"}
+
+#: Shipped default wait budget for a queued request, mirrored by
+#: ``queue.queue_timeout_seconds`` in ``config/global.settings.yaml``.
+DEFAULT_QUEUE_TIMEOUT_S = 1800.0
+
+#: Cancel reason recorded when a queued request exceeds its wait budget.
+QUEUE_TIMEOUT_REASON = "queue_timeout"
+
+
+def _normalize_queue_timeout(queue_timeout: object) -> float:
+    """Return the enforced queue wait budget in seconds.
+
+    ``0``, negative values, ``None``, non-finite values (``nan``, ``inf``) and
+    non-numeric input all mean "no queue timeout" and normalize to ``0.0``, so
+    the advertised enforcement flag and the status payload stay finite.
+    """
+    if queue_timeout is None or isinstance(queue_timeout, bool):
+        return 0.0
+    try:
+        timeout = float(queue_timeout)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0.0
+    if not 0 < timeout < float("inf"):  # catches 0, negatives and non-finite values
+        return 0.0
+    return timeout
 
 
 def _normalize_client_id(client_id: object) -> str | None:
@@ -126,11 +156,12 @@ class InferenceQueue:
     def __init__(
         self,
         max_concurrent: int = 1,
-        queue_timeout: float = 300.0,
+        queue_timeout: float | None = DEFAULT_QUEUE_TIMEOUT_S,
         history_ttl: float = 300.0,  # more aggressive pruning (was 900); overridable via settings.yaml queue.history_ttl
     ):
         self.max_concurrent = max_concurrent
-        self.queue_timeout = queue_timeout
+        # Normalized once here: 0.0 means "no queue timeout" (not enforced).
+        self.queue_timeout = _normalize_queue_timeout(queue_timeout)
         self.history_ttl = history_ttl
 
         self._waiting: list[str] = []
@@ -158,6 +189,11 @@ class InferenceQueue:
     def waiting_count(self) -> int:
         return len(self._waiting)
 
+    @property
+    def queue_timeout_enforced(self) -> bool:
+        """Whether the configured wait budget is actually enforced."""
+        return self.queue_timeout > 0
+
     def _signal_change(self) -> None:
         current = self._change_event
         current.set()
@@ -177,6 +213,36 @@ class InferenceQueue:
     def _get_entry(self, request_id: str) -> QueueEntry | None:
         self._prune_history()
         return self._entries.get(request_id)
+
+    def _queue_wait_remaining(self, entry: QueueEntry) -> float | None:
+        """Return seconds left on *entry*'s wait budget, or ``None`` when unenforced."""
+        if not self.queue_timeout_enforced:
+            return None
+        return max(entry.enqueued_at + self.queue_timeout - time.time(), 0.0)
+
+    def _expire_queued_request(self, request_id: str) -> str:
+        """Finalize a queued request whose wait budget elapsed; return its cancel reason.
+
+        Reuses ``finish(outcome="timeout")`` so the terminal state (``expired``),
+        the ``total_timeouts``/``total_expired`` counters and the
+        ``cancel_reason`` vocabulary stay exactly as the queue already defines
+        them. When another path (client cancel, disconnect) finalized the entry
+        first, that reason wins and nothing is counted twice.
+        """
+        entry = self._get_entry(request_id)
+        if entry is None:
+            return "unknown_request"
+        if entry.status != "queued":
+            return entry.cancel_reason or entry.status
+        self.finish(request_id, outcome="timeout")
+        reason = entry.cancel_reason or QUEUE_TIMEOUT_REASON
+        logger.info(
+            "⏰ [%s] Queue wait budget of %.0fs exceeded — cancelled (%s)",
+            request_id[:8],
+            self.queue_timeout,
+            reason,
+        )
+        return reason
 
     def _owner_has_active_request(self, owner_id: str) -> bool:
         """Return whether *owner_id* already owns a running GPU slot."""
@@ -246,6 +312,12 @@ class InferenceQueue:
                 self.cancel(request_id, reason=entry.cancel_reason or "cancelled")
                 raise QueueRequestCancelled(request_id, entry.cancel_reason or "cancelled")
 
+            # Wait budget: a live connection does not buy an unbounded wait, and
+            # an elapsed budget wins over a slot that frees at the same instant.
+            remaining = self._queue_wait_remaining(entry)
+            if remaining is not None and remaining <= 0:
+                raise QueueRequestCancelled(request_id, self._expire_queued_request(request_id))
+
             async with self._lock:
                 if (
                     entry.status == "queued"
@@ -271,6 +343,7 @@ class InferenceQueue:
                 try:
                     done, pending = await asyncio.wait(
                         {wait_task, cancel_task},
+                        timeout=remaining,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                 except asyncio.CancelledError:
@@ -371,7 +444,7 @@ class InferenceQueue:
             self._total_expired += 1
         elif outcome == "timeout":
             entry.status = "expired"
-            entry.cancel_reason = entry.cancel_reason or "queue_timeout"
+            entry.cancel_reason = entry.cancel_reason or QUEUE_TIMEOUT_REASON
             self._total_timeouts += 1
             self._total_expired += 1
         else:
@@ -439,7 +512,9 @@ class InferenceQueue:
             "active_count": len(self._active),
             "max_concurrent": self.max_concurrent,
             "queue_timeout_s": self.queue_timeout,
-            "queue_timeout_enforced": False,
+            # Derived from the configured budget: 0 (or absent/negative, which
+            # normalize to 0) means the wait is unbounded and thus unenforced.
+            "queue_timeout_enforced": self.queue_timeout_enforced,
             "wait_policy": "disconnect_or_cancel",
             "stats": {
                 "total_queued": self._total_queued,

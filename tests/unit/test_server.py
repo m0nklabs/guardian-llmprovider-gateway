@@ -376,6 +376,34 @@ async def test_begin_queued_request_cleans_up_waiter_on_disconnect():
 
 
 @pytest.mark.asyncio
+async def test_begin_queued_request_surfaces_queue_timeout_expiry():
+    """A live waiter past the wait budget reaches the client path as a typed cancel."""
+    queue = server.InferenceQueue(max_concurrent=1, queue_timeout=0.2)
+    blocker_id = await queue.acquire("blocker", "model-x")
+
+    class _LiveRequest:
+        # Never disconnects: only the wait budget can end this wait.
+        async def receive(self):
+            await asyncio.Event().wait()
+
+    with patch.object(server, "inference_queue", queue), patch.object(_queue_helpers, "_inference_queue", queue), patch.object(server._admin_api, "_inference_queue", queue):
+        with pytest.raises(server._GuardianRequestCancelled, match="queue_timeout"):
+            await asyncio.wait_for(
+                server._begin_queued_request(_LiveRequest(), "waiter-client", "model-x"),
+                timeout=2.0,
+            )
+
+        status = queue.get_status(client_id="waiter-client")
+        assert status["queue_timeout_enforced"] is True
+        assert status["your_status"] == "expired"
+        assert status["your_cancel_reason"] == "queue_timeout"
+        assert status["stats"]["total_timeouts"] == 1
+        assert queue.waiting_count == 0
+
+    queue.release(blocker_id)
+
+
+@pytest.mark.asyncio
 async def test_begin_queued_request_rejects_unauthenticated_client():
     queue = server.InferenceQueue(max_concurrent=1)
 
