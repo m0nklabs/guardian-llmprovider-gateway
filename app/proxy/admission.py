@@ -644,74 +644,6 @@ def enforce_rate_limit(identity: str | None) -> None:
 # ── Request/body size (ASGI middleware, both apps) ─────────────────────
 
 
-class RequestBodyTooLarge(Exception):
-    """Raised when a streamed request body crosses the configured bound.
-
-    Deliberately an exception raised from the ``receive`` channel: the handler
-    that is reading the body stops exactly where the limit is crossed, instead
-    of Guardian buffering an unbounded upload to measure it. Both FastAPI apps
-    register :func:`body_too_large_handler` for it.
-    """
-
-    def __init__(
-        self,
-        *,
-        limit_bytes: int,
-        observed_bytes: int | None = None,
-        declared_bytes: int | None = None,
-    ) -> None:
-        super().__init__(f"request body exceeds {limit_bytes} bytes")
-        self.limit_bytes = limit_bytes
-        self.observed_bytes = observed_bytes
-        self.declared_bytes = declared_bytes
-
-    def detail(self) -> dict[str, Any]:
-        return body_too_large_detail(
-            self.limit_bytes,
-            observed_bytes=self.observed_bytes,
-            declared_bytes=self.declared_bytes,
-        )
-
-
-async def body_too_large_handler(request: Any, exc: RequestBodyTooLarge) -> JSONResponse:
-    """FastAPI/Starlette exception handler for :class:`RequestBodyTooLarge`."""
-    _bump_rejection(LIMIT_BODY)
-    logger.warning(
-        "🛑 body-too-large %s",
-        json.dumps(
-            {
-                "event": "request_too_large",
-                "limit_bytes": exc.limit_bytes,
-                "observed_bytes": exc.observed_bytes,
-                "declared_bytes": exc.declared_bytes,
-                "path": getattr(request, "url", None).path if getattr(request, "url", None) else None,
-            },
-            sort_keys=True,
-        ),
-    )
-    return JSONResponse({"detail": exc.detail()}, status_code=413)
-
-
-class _CountingReceive:
-    """``receive`` wrapper that stops a streamed body at the configured bound."""
-
-    __slots__ = ("_receive", "_limit", "_seen")
-
-    def __init__(self, receive: Callable[[], Awaitable[dict]], limit_bytes: int) -> None:
-        self._receive = receive
-        self._limit = limit_bytes
-        self._seen = 0
-
-    async def __call__(self) -> dict:
-        message = await self._receive()
-        if message.get("type") == "http.request":
-            body = message.get("body") or b""
-            self._seen += len(body)
-            if self._seen > self._limit:
-                raise RequestBodyTooLarge(limit_bytes=self._limit, observed_bytes=self._seen)
-        return message
-
-
 def _declared_length(scope: Mapping[str, Any]) -> int | None:
     """Return the declared ``Content-Length`` of the request, or ``None``."""
     for raw_name, raw_value in scope.get("headers") or []:
@@ -724,22 +656,71 @@ def _declared_length(scope: Mapping[str, Any]) -> int | None:
     return None
 
 
+async def _empty_receive() -> dict:
+    return {"type": "http.disconnect"}
+
+
 async def _send_json(scope: Mapping[str, Any], send: Callable, status_code: int, detail: dict) -> None:
     response = JSONResponse({"detail": detail}, status_code=status_code)
     await response(scope, _empty_receive, send)
 
 
-async def _empty_receive() -> dict:
-    return {"type": "http.disconnect"}
+class _ReplayReceive:
+    """Replay a fully-read body, then delegate to the real receive channel."""
+
+    __slots__ = ("_messages", "_receive")
+
+    def __init__(self, messages: list[dict], receive: Callable[[], Awaitable[dict]]) -> None:
+        self._messages = messages
+        self._receive = receive
+
+    async def __call__(self) -> dict:
+        if self._messages:
+            return self._messages.pop(0)
+        return await self._receive()
+
+
+async def _read_bounded_body(
+    receive: Callable[[], Awaitable[dict]],
+    limit_bytes: int,
+) -> tuple[list[dict], int]:
+    """Read an unlabelled body up to ``limit_bytes`` -> ``(messages, seen)``.
+
+    Stops as soon as the bound is crossed (``seen > limit_bytes``) and returns
+    what it has; the caller answers ``413`` and never replays those messages. The
+    buffer is bounded by the limit, i.e. never more than the bound this code is
+    there to enforce.
+    """
+    messages: list[dict] = []
+    seen = 0
+    while True:
+        message = await receive()
+        if message.get("type") != "http.request":
+            messages.append(message)
+            break
+        seen += len(message.get("body") or b"")
+        if seen > limit_bytes:
+            return messages, seen
+        messages.append(message)
+        if not message.get("more_body", False):
+            break
+    return messages, seen
 
 
 class BodySizeLimitMiddleware:
-    """Reject an oversized request before (or while) its body is read.
+    """Reject an oversized request before its body reaches a handler.
 
-    Two paths, one error body: a declared ``Content-Length`` over the bound is
-    refused without reading a byte, and a chunked/unlabelled body is stopped by
-    :class:`_CountingReceive` at the exact byte. Neither path buffers the body
-    to measure it, and neither echoes any payload content.
+    Two paths, one error body, and neither of them buffers more than the bound:
+
+    * a declared ``Content-Length`` over the bound is refused without reading a
+      byte;
+    * an unlabelled (chunked) body is read up to the bound and refused as soon
+      as it crosses it.
+
+    Deliberately **not** an exception raised from ``receive``: handlers on this
+    gateway catch broad exceptions while parsing a body (``except Exception`` ->
+    ``400``), which would swallow the bound and turn a clean ``413`` into a
+    misleading client error. Responding from the middleware cannot be swallowed.
     """
 
     def __init__(self, app: Callable) -> None:
@@ -760,56 +741,57 @@ class BodySizeLimitMiddleware:
         assert limits.max_body_bytes is not None
         limit_bytes = limits.max_body_bytes
         declared = _declared_length(scope)
+
         if declared is not None and declared > limit_bytes:
-            _bump_rejection(LIMIT_BODY)
-            logger.warning(
-                "🛑 body-too-large %s",
-                json.dumps(
-                    {
-                        "event": "request_too_large",
-                        "limit_bytes": limit_bytes,
-                        "declared_bytes": declared,
-                        "path": scope.get("path"),
-                    },
-                    sort_keys=True,
-                ),
-            )
-            await _send_json(
+            await self._refuse(
                 scope,
                 send,
-                413,
                 body_too_large_detail(limit_bytes, declared_bytes=declared),
+                limit_bytes=limit_bytes,
+                declared_bytes=declared,
             )
             return
 
-        sent_start = {"started": False}
-
-        async def tracking_send(message: dict) -> None:
-            if message.get("type") == "http.response.start":
-                sent_start["started"] = True
-            await send(message)
-
-        try:
-            await self.app(scope, _CountingReceive(receive, limit_bytes), tracking_send)
-        except RequestBodyTooLarge as exc:
-            # The nested ExceptionMiddleware handles this for FastAPI apps; this
-            # branch keeps a bare ASGI app honest instead of turning a 413 into
-            # a connection reset.
-            if not sent_start["started"]:
-                _bump_rejection(LIMIT_BODY)
-                logger.warning(
-                    "🛑 body-too-large %s",
-                    json.dumps(
-                        {
-                            "event": "request_too_large",
-                            "limit_bytes": exc.limit_bytes,
-                            "observed_bytes": exc.observed_bytes,
-                            "path": scope.get("path"),
-                        },
-                        sort_keys=True,
-                    ),
+        if declared is None:
+            messages, seen = await _read_bounded_body(receive, limit_bytes)
+            if seen > limit_bytes:
+                await self._refuse(
+                    scope,
+                    send,
+                    body_too_large_detail(limit_bytes, observed_bytes=seen),
+                    limit_bytes=limit_bytes,
+                    observed_bytes=seen,
                 )
-                await _send_json(scope, send, 413, exc.detail())
+                return
+            receive = _ReplayReceive(messages, receive)
+
+        await self.app(scope, receive, send)
+
+    async def _refuse(
+        self,
+        scope: dict,
+        send: Callable,
+        detail: dict,
+        *,
+        limit_bytes: int,
+        declared_bytes: int | None = None,
+        observed_bytes: int | None = None,
+    ) -> None:
+        _bump_rejection(LIMIT_BODY)
+        logger.warning(
+            "🛑 body-too-large %s",
+            json.dumps(
+                {
+                    "event": "request_too_large",
+                    "limit_bytes": limit_bytes,
+                    "declared_bytes": declared_bytes,
+                    "observed_bytes": observed_bytes,
+                    "path": scope.get("path"),
+                },
+                sort_keys=True,
+            ),
+        )
+        await _send_json(scope, send, 413, detail)
 
 
 def install_body_limit(application: Any) -> None:
@@ -821,4 +803,3 @@ def install_body_limit(application: Any) -> None:
     the bound.
     """
     application.user_middleware.insert(1, Middleware(BodySizeLimitMiddleware))
-    application.add_exception_handler(RequestBodyTooLarge, body_too_large_handler)
