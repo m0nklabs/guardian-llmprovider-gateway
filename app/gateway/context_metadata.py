@@ -18,6 +18,7 @@ from typing import Any
 
 import httpx
 
+from app.destination_policy import guarded_async_client
 from app.proxy.providers import CloudProvider
 from app.gateway.metadata_enrichment import attach_parity_metadata, identity_key, local_model_facts
 
@@ -107,7 +108,7 @@ async def get_loaded_backend_context_window(canonical_name: str) -> int | None:
         if cached is not None and now - cached[0] < BACKEND_CONTEXT_CACHE_SECONDS:
             return cached[1]
         try:
-            async with httpx.AsyncClient(timeout=2.0) as client:
+            async with guarded_async_client(timeout=2.0, purpose="context-metadata") as client:
                 response = await client.get(f"{LLAMA_SERVER_URL}/props")
             response.raise_for_status()
             payload = response.json()

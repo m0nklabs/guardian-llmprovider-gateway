@@ -57,6 +57,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger("Guardian")
 
+# G1-02: no provider credential may reach the log at any level. The filter
+# scrubs registered secrets (config/env-derived) and Bearer/api-key shapes from
+# every record that reaches a handler.
+from app.log_safety import (  # noqa: E402 - after basicConfig by design
+    install_secret_redaction,
+    register_configured_secrets,
+)
+
+install_secret_redaction()
+register_configured_secrets()
+
 
 def _configure_static_mount(application: FastAPI, static_dir: pathlib.Path) -> None:
     if static_dir.is_dir():

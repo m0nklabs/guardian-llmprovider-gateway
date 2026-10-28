@@ -188,11 +188,11 @@ passing Guardian's authorization for that operation. Class is `approved`
 | --- | --- | --- | --- | --- |
 | B-01 | Direct `127.0.0.1:11440` (llama-server) | Guardian auth, queue, policy, capture | `approved` (loopback-only backend, no upstream key) — **but** see B-01 note | ROADMAP §G1 exit gate ("backend access is restricted from an ordinary client vantage", `docs/ROADMAP.md:237`) |
 | B-02 | Caretaker control API `:11441` with `CARETAKER_KEY` | Guardian's operator routes (`/admin/load`, `/admin/unload`, lifecycle) | `approved` destination, `gap` for identity | ROADMAP §5 row G1-01 (`docs/ROADMAP.md:337`) → gap register [#38](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/38) |
-| B-03 | LAN provider `http://192.168.1.245:11440` with `WINDOWS_LAN_KEY` | Guardian entirely (auth, queue, capture, cloud policy) | `gap` (documented F6 practice, cleartext) | G1-02 → [#38](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/38) |
-| B-04 | LAN management hops `:11441` `/ensure`, `/tts/ensure` and speech `:11450`/`:11451` with a Bearer over HTTP | Guardian's credential-isolation goal; the key is cleartext on the LAN | `gap` (named in `docs/ROADMAP.md:221-225`) | G1-02 → [#38](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/38) |
-| B-05 | Plain `http://…:11434` ingress (H1) | Transport confidentiality of *every* client Bearer key | `approved` design, `gap` for G1-02 | G1-02 → [#38](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/38) |
+| B-03 | LAN provider `http://192.168.1.245:11440` with `WINDOWS_LAN_KEY` | Guardian entirely (auth, queue, capture, cloud policy) | `gap` — destination now allowlisted and flagged, transport still cleartext (**G1-02, 2026-10-28**) | [#59](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/59) (TLS migration blocker; needs the Windows host) |
+| B-04 | LAN management hops `:11441` `/ensure`, `/tts/ensure` and speech `:11450`/`:11451` with a Bearer over HTTP | Guardian's credential-isolation goal; the key is cleartext on the LAN | `gap` — destinations allowlisted, credentials owner-bound, transport still cleartext (**G1-02, 2026-10-28**) | [#59](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/59) |
+| B-05 | Plain `http://…:11434` ingress (H1) | Transport confidentiality of *every* client Bearer key | `approved` design; **egress half closed 2026-10-28 (G1-02)** — ingress stays as designed | ingress TLS remains an operator choice; egress is enforced in `docs/decisions/G1-02-destination-and-credentials.md` |
 | B-06 | Capture/WAL data path on disk | Guardian auth (any `flip`-owned process, or any reader of the 0755 media dir) | `gap` | [#38](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/38) |
-| B-07 | `sudo systemctl stop` / `start llama-server` from Guardian | Caretaker ownership (F5 split) | `approved` transition fallback | `docs/ROADMAP.md:125` — "Backend lifecycle delegation … Caretaker owns backend execution, Guardian owns traffic policy" |
+| B-07 | `sudo systemctl stop` / `start llama-server` from Guardian | Caretaker ownership (F5 split) | `approved` transition fallback (**re-checked 2026-10-28, G1-02**: local lifecycle, not an outbound destination — unaffected) | `docs/ROADMAP.md:125` — "Backend lifecycle delegation … Caretaker owns backend execution, Guardian owns traffic policy" |
 | B-08 | Key minting `/api/keys` with **any** valid key | the admin/operator distinction; mints a key whose `cloud_gateway_access` is `True` | `gap` (verified gap in `docs/ROADMAP.md:215-218`) | G1-01 → [#38](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/38) |
 | B-09 | Dashboard LAN proxy `192.168.1.35:11437` | nothing (same flat key), but doubles the reachable admin surface | `approved` (LAN-perimeter + Bearer), `gap` for role separation | G1-01 → [#38](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/38) |
 | B-10 | `GET /healthz`, dashboard `/` and `/static` | authentication (public by design) | `approved` | matrix rows proxy 8, dashboard 5-7; `/metrics` removed from this row on 2026-10-28 ([#46](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/46)) |
@@ -251,6 +251,17 @@ encrypted transport — that is G1-02 work, not a fix here. Note also that
 `ufw` is inactive (§H1), so even the claimed restriction is not currently
 enforced on this host. `unverified:` whether a switch/router ACL supplies it.
 
+**[updated 2026-10-28 — G1-02]** Every outbound destination is now validated
+against a configured allowlist, re-checked after DNS resolution and pinned at
+connect time, and a provider credential may only travel to its own approved
+destination (`docs/decisions/G1-02-destination-and-credentials.md`). The four
+`192.168.1.245` hops are *approved but flagged*: `cleartext_credentials: true` on
+their allowlist entry, a `⚠️` line in every startup log naming the four URLs, and
+[#59](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/59) as the
+tracked blocker. What is **not** fixed here is the transport itself: the bytes
+are still cleartext, and that needs the Windows host (certificate, four TLS
+listeners, trust anchor). No firewall claim is used as a compensating control.
+
 ### B-05 — Plain HTTP ingress
 
 `http://…:11434` is a first-class path (H1). A LAN sniffer, or any switch port
@@ -280,6 +291,14 @@ any uid other than `flip`/the `flip` group (verified with a
 `sudo -n -u nobody` negative control, `docs/G0_BASELINE.md` §4). The drift
 removes the *last* DAC layer rather than creating a second reader class. This is not a Guardian-auth bypass (B-01 style) but it is a
 data-path gap and is registered in [#38](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/38).
+
+**[updated 2026-10-28 — G1-02]** The *egress* half of this row is now a
+controlled boundary: an outbound request to a destination outside the allowlist
+is refused before a socket is opened, so a client key can no longer be routed to
+an arbitrary host by a misconfigured provider or a redirect. The ingress itself
+(plain `http://` on `:11434` alongside TLS) is unchanged by G1-02 — it is an
+approved dual-protocol design and the client's choice of scheme decides whether
+its key crosses the LAN in cleartext.
 
 **[fixed 2026-10-28]** The writer no longer derives media permissions from the
 umask ([#49](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/49)):

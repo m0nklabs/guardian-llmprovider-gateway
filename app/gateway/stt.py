@@ -41,6 +41,7 @@ import httpx
 from fastapi import HTTPException, Request, Response
 
 from app.config_loader import CONFIG, load_stt_config
+from app.destination_policy import guarded_async_client
 from app.gateway.speech_routing import address_intent, parse_speech_model, resolve_speech_route
 from app.proxy.providers import _expand_env
 
@@ -205,7 +206,9 @@ async def _try_cloud_backend(
         endpoint = f"{route['base_url']}/audio/transcriptions"
         request_headers = {"Authorization": f"Bearer {route['api_key']}"}
     try:
-        async with httpx.AsyncClient(timeout=timeout_s) as client:
+        async with guarded_async_client(
+            timeout=timeout_s, purpose="stt-cloud", credential_owner=name
+        ) as client:
             resp = await client.post(
                 endpoint,
                 headers=request_headers,
@@ -254,7 +257,9 @@ async def _try_backend(
     started = time.monotonic()
     headers = {"Authorization": f"Bearer {backend['key']}"} if backend["key"] else {}
     try:
-        async with httpx.AsyncClient(timeout=ensure_timeout_s) as client:
+        async with guarded_async_client(
+            timeout=ensure_timeout_s, purpose="stt-ensure", credential_owner=name
+        ) as client:
             ensure_resp = await client.post(f"{mgmt_url}/stt/ensure", headers=headers)
         ensure_body: dict[str, Any] = {}
         try:
@@ -272,7 +277,9 @@ async def _try_backend(
         forward_headers["Content-Type"] = audio_content_type
         if language:
             forward_headers["X-Transcription-Language"] = language
-        async with httpx.AsyncClient(timeout=timeout_s) as client:
+        async with guarded_async_client(
+            timeout=timeout_s, purpose="stt-local", credential_owner=name
+        ) as client:
             resp = await client.post(
                 f"{stt_url}/transcriptions",
                 params={"language": language} if language else None,

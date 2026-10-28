@@ -20,6 +20,7 @@ from typing import Any
 
 import httpx
 
+from app.destination_policy import guarded_async_client
 from app.gateway.degeneration import log_cutoff, make_detector
 from fastapi import HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
@@ -276,8 +277,11 @@ async def _ensure_remote_candidate(
         bare_model = bare_model[len(brand) + 1:]
     headers = {"Authorization": f"Bearer {key}"} if key else {}
     try:
-        async with httpx.AsyncClient(
-            timeout=_remote_ensure_timeout_s(), transport=_transport
+        async with guarded_async_client(
+            timeout=_remote_ensure_timeout_s(),
+            transport=_transport,
+            purpose="remote-ensure",
+            credential_owner=provider_name,
         ) as client:
             resp = await client.post(
                 f"{mgmt_url}/ensure", json={"model": bare_model}, headers=headers
@@ -674,7 +678,11 @@ async def forward_to_cloud_provider(
 
             async def send_stream_request() -> httpx.Response:
                 nonlocal stream_client
-                stream_client = httpx.AsyncClient(timeout=timeout)
+                stream_client = guarded_async_client(
+                    timeout=timeout,
+                    purpose="cloud-forward",
+                    credential_owner=provider.name,
+                )
                 req = stream_client.build_request(
                     "POST",
                     forward_url,
@@ -854,7 +862,11 @@ async def forward_to_cloud_provider(
             break
 
         # Non-streaming
-        async with httpx.AsyncClient(timeout=timeout) as non_stream_http_client:
+        async with guarded_async_client(
+            timeout=timeout,
+            purpose="cloud-forward",
+            credential_owner=provider.name,
+        ) as non_stream_http_client:
             async def send_non_stream_request() -> httpx.Response:
                 return await non_stream_http_client.post(
                     forward_url,

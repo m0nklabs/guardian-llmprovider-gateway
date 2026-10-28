@@ -16,6 +16,7 @@ import struct
 import zlib
 from typing import Any
 
+from app.destination_policy import guarded_async_client
 import httpx
 from fastapi.responses import JSONResponse
 
@@ -206,7 +207,7 @@ async def probe_multimodal_runtime(model_name: str) -> dict[str, Any]:
     }
 
     timeout = httpx.Timeout(180.0, connect=10.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
+    async with guarded_async_client(timeout=timeout, purpose="vision-probe") as client:
         for attempt in range(3):
             resp = await client.post(f"{_llama_server_url}/v1/chat/completions", json=payload)
             message = extract_backend_error_message(resp.content)

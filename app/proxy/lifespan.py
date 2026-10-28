@@ -92,6 +92,17 @@ def init(
     globals()["_reference_catalog"] = reference_catalog
     globals()["_catalog_refresh_interval_s"] = float(catalog_refresh_interval_s)
 
+    # G1-02: make the effective outbound destination policy — and any still
+    # unmigrated cleartext credential hop (B-03/B-04) — visible at startup.
+    # Logging must never break startup: the policy itself fails closed on the
+    # request path regardless.
+    try:
+        from app.destination_policy import log_startup_summary
+
+        log_startup_summary()
+    except Exception as exc:  # noqa: BLE001 - diagnostic only
+        logger.warning("Destination policy summary unavailable: %s", exc)
+
 
 async def _catalog_refresh_loop() -> None:
     """Periodically refresh stale provider catalogs (fail-open).

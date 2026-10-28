@@ -283,3 +283,62 @@ tts:
 # immediately (fail-closed) — it never re-opens the window.
 auth:
   scopes_enforced_after: "2026-11-11T00:00:00Z"
+
+# Outbound destination policy (G1-02, docs/decisions/G1-02-
+# destination-and-credentials.md).  EVERY outbound request Guardian makes —
+# provider traffic, catalogs, management/speech hops, redirects — is validated
+# against this allowlist before a socket is opened, and the resolved address is
+# re-checked and pinned at connect time (DNS rebinding).  A host is reachable
+# only through an explicit entry here: loopback, link-local and RFC1918 targets
+# are NOT implicitly trusted, cloud metadata addresses (169.254.169.254 &c.)
+# are never approvable, and a URL with userinfo or a non-http(s) scheme is
+# refused.
+#
+# HOST ENTRY FIELDS
+#   host:    bare hostname or IP literal (no scheme, no port, no path)
+#   ports:   the only ports reachable on that host
+#   addresses:  optional pinned IP set.  When set, the resolver must stay inside
+#               it (use it for an internal hostname); when absent, a hostname
+#               may only resolve to PUBLIC addresses, so a public provider name
+#               cannot be re-pointed into the LAN.
+#   cleartext_credentials: true marks a hop that carries a Bearer key over
+#               plain http on the LAN (B-03/B-04).  It does not weaken any
+#               check; it keeps the unmigrated hop visible in the startup log.
+#
+# FAIL-CLOSED: an absent, non-mapping or empty `destination_policy` denies every
+# outbound destination with the typed error `destination_denied`
+# (reason `policy_unavailable`).  A malformed entry is dropped (loudly) and only
+# its host stays unreachable.  Add a host here before configuring a provider,
+# catalog or management URL that needs it; hot-reloadable via
+# POST /api/config/reload.
+destination_policy:
+  schemes: [http, https]
+  allow:
+    # ── This host (loopback): local llama-server, caretakers, speech engines,
+    #    the Copilot bridge and ComfyUI.  Cleartext stays on the loopback
+    #    interface, so these hops are not a LAN credential exposure.
+    - host: 127.0.0.1
+      ports: [4000, 4141, 8188, 11440, 11441, 11450]
+      note: local llama-server, caretaker, TTS, Copilot bridge, ComfyUI
+    # `proxy.target` is written as http://localhost:11440 in this file. An
+    # internal *name* must pin its addresses: an unpinned name may only resolve
+    # to public addresses (so a provider name cannot be re-pointed into the LAN).
+    - host: localhost
+      ports: [11440]
+      addresses: [127.0.0.1, "::1"]
+      note: proxy.target (local llama-server via the localhost name)
+    # ── LAN GPU/speech host (14700k-local, B-03/B-04).  Bearer keys travel over
+    #    http:// today; the hops are acknowledged, NOT approved as encrypted.
+    #    Migration requires the Windows host to serve TLS — tracked blocker.
+    - host: 192.168.1.245
+      ports: [11440, 11441, 11450, 11451]
+      cleartext_credentials: true
+      note: 14700k-local inference/caretaker/TTS/STT — cleartext Bearer (B-03/B-04)
+    # ── Cloud providers (https only; TLS verification is not configurable).
+    - {host: openrouter.ai, ports: [443]}
+    - {host: integrate.api.nvidia.com, ports: [443]}
+    - {host: api.groq.com, ports: [443]}
+    - {host: api.openai.com, ports: [443]}
+    - {host: generativelanguage.googleapis.com, ports: [443]}
+    - {host: inference.poolside.ai, ports: [443]}
+    - {host: api.fish.audio, ports: [443]}

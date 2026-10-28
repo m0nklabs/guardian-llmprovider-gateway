@@ -19,6 +19,7 @@ import httpx
 from fastapi import HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
+from app.destination_policy import guarded_async_client
 from app.capture.config import PROTOCOL_ANTHROPIC, PROTOCOL_OPENAI, ROUTE_LOCAL
 from app.capture.policy import PolicyResult
 from app.capture.redactor import (
@@ -249,7 +250,7 @@ async def route_v1_post(path: str, request: Request, client_id: str):
 
     if not is_inference:
         timeout = httpx.Timeout(600.0, connect=10.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with guarded_async_client(timeout=timeout, purpose="local-inference") as client:
             resp = await client.post(
                 f"{_llama_server_url}/v1/{path}",
                 content=body,
@@ -781,7 +782,7 @@ async def route_v1_post(path: str, request: Request, client_id: str):
             _set_request_usage_metadata(request, streamed=True)
             # Stream SSE chunks in real-time instead of buffering entire response
             stream_timeout = _build_stream_timeout(timeout_sec)
-            client = httpx.AsyncClient(timeout=stream_timeout)
+            client = guarded_async_client(timeout=stream_timeout, purpose="local-inference")
             req = client.build_request(
                 "POST",
                 f"{_llama_server_url}/v1/{path}",
@@ -799,7 +800,7 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                 await client.aclose()
                 await _reload_backend_after_connect_error(path, e)
 
-                client = httpx.AsyncClient(timeout=stream_timeout)
+                client = guarded_async_client(timeout=stream_timeout, purpose="local-inference")
                 req = client.build_request(
                     "POST",
                     f"{_llama_server_url}/v1/{path}",
@@ -1034,7 +1035,7 @@ async def route_v1_post(path: str, request: Request, client_id: str):
             _release_in_finally = False
             return response
         else:
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with guarded_async_client(timeout=timeout, purpose="local-inference") as client:
                 try:
                     post_task = asyncio.create_task(
                         client.post(

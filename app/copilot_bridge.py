@@ -21,6 +21,8 @@ import yaml
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
+from app.destination_policy import current_policy, guarded_async_client
+
 logger = logging.getLogger("guardian.copilot_bridge")
 BRANDS = {"azure openai": "openai", "xai": "x-ai", "moonshot ai": "moonshotai"}
 # Client payloads must never override LiteLLM's credentials, endpoint or provider.
@@ -168,7 +170,11 @@ def create_app(settings: Settings | None = None, client: httpx.AsyncClient | Non
         import litellm
         completion = completion or litellm.acompletion
         embedding = embedding or litellm.aembedding
-    upstream = client or httpx.AsyncClient()
+    upstream = client or guarded_async_client(
+        purpose="copilot-upstream",
+        credential_owner="copilot-bridge",
+        policy=current_policy().with_owner("copilot-bridge", [settings.upstream_url]),
+    )
     catalog = Catalog(settings, upstream)
 
     @asynccontextmanager

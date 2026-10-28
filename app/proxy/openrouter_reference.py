@@ -53,6 +53,7 @@ fetch.
 """
 
 from __future__ import annotations
+import httpx  # noqa: F401 — kept as a monkeypatch target (tests patch <module>.httpx.AsyncClient)
 
 import json
 import logging
@@ -60,8 +61,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-import httpx
 
+from app.destination_policy import guarded_async_client
 from app.config_loader import provider_settings_documents
 from app.paths import model_reference_catalog_file
 from app.proxy.cloud_catalog import CloudModelCatalog
@@ -358,7 +359,11 @@ class ModelReferenceCatalog:
         """Fetch one source; ``None`` on any failure (fail-open, never raises)."""
         name = str(source.get("name"))
         try:
-            async with httpx.AsyncClient(timeout=self._source_timeout(source)) as client:
+            async with guarded_async_client(
+                timeout=self._source_timeout(source),
+                purpose="reference-catalog",
+                credential_owner=str(source.get("provider") or "") or None,
+            ) as client:
                 response = await client.get(str(source.get("url")), headers=self._headers_for(source))
             response.raise_for_status()
             payload = response.json()

@@ -277,3 +277,12 @@ matrix, both sides of the grace timestamp (fixed timestamps, never a wall-clock
 wait), minting escalation, and every fail-closed row above.
 `tests/unit/test_g0_endpoint_matrix.py` keeps the matrix, the registered routes
 and the code declaration in sync (including "public iff no auth dependency").
+
+## Amendment 2026-10-28 — absent deadline now follows the shipped value
+
+§4 said an absent `auth.scopes_enforced_after` enforces immediately. It still
+does for a **malformed** value, but an **absent** key now falls back to the
+shipped `2026-11-11T00:00:00Z` with a WARNING, so a config file that predates
+this record does not strip every legacy key of its privileged access at the next
+restart. Recorded together with the same rule for `destination_policy` in
+`G1-02-destination-and-credentials.md` §9; a typo still fails closed.
