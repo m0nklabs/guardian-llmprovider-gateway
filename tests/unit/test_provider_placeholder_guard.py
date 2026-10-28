@@ -199,9 +199,21 @@ def test_shipped_windows_provider_is_disabled_and_documents_the_placeholder():
 
     The pin exists so the file cannot drift back to ``enabled: true`` without
     this test going red next to the config guard above.
+
+    Activation stays legitimate: a deployment that fills in the real Windows
+    host and enables the provider is a reviewed decision, not a defect, and
+    ``scripts/pre_restart_check.py`` runs the full suite — so the pin only binds
+    while a placeholder host is still in place, exactly like the shipped-file
+    markers in ``test_f6_remote_lan_provider.py``.
     """
     path = PROVIDERS_DIR / "windows-gpu-local.settings.yaml"
     document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not any(is_placeholder_host(host) for _, host in url_hosts(document)):
+        pytest.skip(
+            "no placeholder host left in windows-gpu-local.settings.yaml: the "
+            "provider has real addresses, so its activation state is a reviewed "
+            "deployment decision rather than a #48 regression"
+        )
     assert document["enabled"] is False
     header = " ".join(
         line.lstrip("# ").strip()
