@@ -578,9 +578,9 @@ def _load_api_keys_uncached() -> dict[str, dict]:
     # G1-03 §11.2: the credentials *this* service hands out are secrets too, so
     # the G1-02 redaction filter must know them. G1-02 registers provider
     # credentials and the caretaker key; the Guardian key store was the gap — a
-    # bare token in a log line had no Bearer prefix to match on. Registration is
-    # a set of the keys the process holds (tens of values), so it costs a fixed
-    # comparison per secret per log line, not memory that grows with traffic.
+    # bare token in a log line had no Bearer prefix to match on. The registered
+    # set is bounded by key history (tens of values, never by traffic), so it
+    # costs one comparison per secret per log line, not per-request memory.
     register_secrets(keys)
     return keys
 

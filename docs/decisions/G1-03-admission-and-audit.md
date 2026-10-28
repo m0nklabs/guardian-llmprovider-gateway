@@ -536,8 +536,11 @@ headers" (`docs/ROADMAP.md` §G1) — is enforced twice:
    (`auth._load_api_keys_uncached` → `register_secrets`, `generate_api_key` →
    `register_secret`): the tokens this service hands out were the one credential
    class the filter did not know, and a bare token has no `Bearer` prefix for a
-   shape pattern to catch. The registered set is the size of the key store, so it
-   costs a comparison per secret per line, not per-request memory.
+   shape pattern to catch. The registered set is the number of distinct keys the
+   process has loaded — tens in practice, and bounded by key *history* rather
+   than by traffic (a rotated key stays registered, which is what keeps an old
+   token unloggable) — so it costs one comparison per secret per log line, not
+   per-request memory.
 2. **Braces (this part).** `log_safety.contains_credentials()` is the detector
    built on the *same* two patterns, and `tests/unit/test_audit_metadata.py`
    drives every decision path — auth success, invalid key, missing key, scope
