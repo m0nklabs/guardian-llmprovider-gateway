@@ -432,6 +432,16 @@ class GuardianService:
         if self.scheduler_task:
             self.scheduler_task.cancel()
 
+# ── Metadata-only audit (G1-03 part 2) ────────────────────────────────
+# Same record shape as the proxy surface; ``surface="dashboard"`` tells the two
+# apart. Installed below the route definitions so the handler line numbers
+# pinned in docs/G0_ENDPOINT_AUTH_MATRIX.md stay valid (the stack is built at
+# startup).
+from app.proxy import audit as _audit  # noqa: E402 - deliberate late import
+
+_audit.install(app, surface="dashboard")
+
+
 if __name__ == "__main__":
     service = GuardianService()
     try:

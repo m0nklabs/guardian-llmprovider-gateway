@@ -14,9 +14,10 @@ from fastapi import HTTPException, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette.status import HTTP_401_UNAUTHORIZED
 
-from app.log_safety import clean_log_value
+from app.log_safety import clean_log_value, register_secret, register_secrets
 from app.paths import GUARDIAN_APIKEYS_FILE, LEGACY_APIKEYS_FILE
 from app.proxy import admission as _admission
+from app.proxy import audit as _audit
 from app.proxy import scopes as _scopes
 
 logger = logging.getLogger("Auth")
@@ -394,6 +395,11 @@ def _enforce_route_scope(request: Request, user_data: dict[str, Any]) -> None:
             ),
         )
         _bump_counter(denial_counter, scope="-", route=route_label)
+        _audit.mark_denial(
+            request=request,
+            reason=_audit.REASON_UNDECLARED_ROUTE,
+            status=403,
+        )
         _record_unauthorized_api_usage(request, status_code=403)
         raise _scope_error(
             error_type="authorization_misconfigured",
@@ -459,6 +465,16 @@ def _enforce_route_scope(request: Request, user_data: dict[str, Any]) -> None:
         ),
     )
     _bump_counter(denial_counter, scope=required.value, route=route_label)
+    _audit.mark_denial(
+        request=request,
+        reason=(
+            _audit.REASON_INVALID_SCOPE_DECLARATION
+            if reason == "invalid_scope_declaration"
+            else _audit.REASON_INSUFFICIENT_SCOPE
+        ),
+        status=403,
+        detail=reason,
+    )
     _record_unauthorized_api_usage(request, status_code=403)
     raise _scope_error(
         error_type="insufficient_scope",
@@ -547,10 +563,18 @@ def _load_api_keys_uncached() -> dict[str, dict]:
     else:
         raw = _migrate_legacy_keys()
 
-    return {
+    keys = {
         token: _normalize_key_entry(token, entry)
         for token, entry in raw.items()
     }
+    # G1-03 §11.2: the credentials *this* service hands out are secrets too, so
+    # the G1-02 redaction filter must know them. G1-02 registers provider
+    # credentials and the caretaker key; the Guardian key store was the gap — a
+    # bare token in a log line had no Bearer prefix to match on. Registration is
+    # a set of the keys the process holds (tens of values), so it costs a fixed
+    # comparison per secret per log line, not memory that grows with traffic.
+    register_secrets(keys)
+    return keys
 
 
 def save_api_keys(keys: dict[str, dict]):
@@ -595,6 +619,7 @@ def generate_api_key(
         "cloud_gateway_access": bool(cloud_gateway_access),
     }
     save_api_keys(keys)
+    register_secret(api_key)
     logger.info(f"Generated new API key for '{name}'")
     return api_key
 
@@ -613,6 +638,11 @@ async def verify_api_key(request: Request, creds: HTTPAuthorizationCredentials |
         ),
     )
     if not token:
+        _audit.mark_denial(
+            request=request,
+            reason=_audit.REASON_MISSING_API_KEY,
+            status=HTTP_401_UNAUTHORIZED,
+        )
         await asyncio.to_thread(
             _log_unauthorized_attempt,
             request,
@@ -656,6 +686,11 @@ async def verify_api_key(request: Request, creds: HTTPAuthorizationCredentials |
         logger.info(f"🔑 Auth success: {user_data.get('name', 'Unknown')}")
         return user_data["name"]  # Return client_id/name as expected by endpoints
 
+    _audit.mark_denial(
+        request=request,
+        reason=_audit.REASON_INVALID_API_KEY,
+        status=HTTP_401_UNAUTHORIZED,
+    )
     await asyncio.to_thread(
         _log_unauthorized_attempt,
         request,

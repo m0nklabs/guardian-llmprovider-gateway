@@ -1883,6 +1883,19 @@ async def list_sessions(client_id: str = Depends(verify_api_key)):
     return await _sessions.list_sessions(client_id)
 
 
+# ── Metadata-only audit (G1-03 part 2) ────────────────────────────────
+# One record per allow/deny decision on this surface; see
+# docs/decisions/G1-03-admission-and-audit.md §11. Installed below the route
+# definitions on purpose: the handler line numbers pinned in
+# docs/G0_ENDPOINT_AUTH_MATRIX.md stay valid, and Starlette builds the
+# middleware stack at startup, so registration order here is irrelevant —
+# ``install`` puts it at index 0, i.e. outermost, so it also sees the 413 from
+# the body bound and a 401 from the auth dependency.
+from app.proxy import audit as _audit  # noqa: E402 - deliberate late import
+
+_audit.install(app, surface="proxy")
+
+
 if __name__ == "__main__":
     import asyncio
     asyncio.run(start_proxy())

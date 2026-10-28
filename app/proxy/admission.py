@@ -1,7 +1,11 @@
 """Bounded admission for Guardian's ingress (G1-03, part 1).
 
-Decision record: ``docs/decisions/G1-03-admission-and-audit.md`` §2-§6.
-Part 2 (metadata audit) extends the same record and is not implemented here.
+Decision record: ``docs/decisions/G1-03-admission-and-audit.md`` §2-§6 for the
+bounds, §11 for the metadata audit this module marks on its refusals. The marks
+go through :func:`app.proxy.audit.mark_denial`, which resolves the record of the
+request being served from the ASGI request context — so no enforcement point
+here needs a ``Request`` parameter, and the call shapes from part 1 stay as they
+were.
 
 Three bounds, each with its own stable error:
 
@@ -50,6 +54,7 @@ from typing import Any
 from starlette.middleware import Middleware
 from starlette.responses import JSONResponse
 
+from app.proxy import audit as _audit
 from app.proxy.queue import DEFAULT_QUEUE_MAX_DEPTH, QueueDepthExceeded
 
 logger = logging.getLogger("Guardian.Admission")
@@ -447,6 +452,12 @@ def check_queue_admission() -> None:
     if reason is None:
         return
     _bump_rejection(LIMIT_QUEUE_DEPTH)
+    _audit.mark_denial(
+        reason=_audit.REASON_ADMISSION_MISCONFIGURED,
+        status=503,
+        limit=LIMIT_QUEUE_DEPTH,
+        detail=reason,
+    )
     logger.error(
         "🛑 queue admission refused (configuration): %s",
         reason,
@@ -464,6 +475,17 @@ def queue_depth_error(exc: QueueDepthExceeded) -> "Exception":
     from fastapi import HTTPException
 
     _bump_rejection(LIMIT_QUEUE_DEPTH)
+    _audit.mark_denial(
+        reason=(
+            _audit.REASON_ADMISSION_MISCONFIGURED
+            if exc.reason == "admission_misconfigured"
+            else _audit.REASON_QUEUE_FULL
+        ),
+        status=503,
+        limit=LIMIT_QUEUE_DEPTH,
+        limit_value=exc.max_queue_depth,
+        detail=exc.reason,
+    )
     if exc.reason == "admission_misconfigured":
         reason = resolve_limits().error(LIMIT_QUEUE_DEPTH) or "queue depth bound is not configured"
         logger.error(
@@ -610,6 +632,9 @@ RATE_LIMITER = TokenBucketRateLimiter()
 def enforce_rate_limit(identity: str | None) -> None:
     """Raise the typed ``429`` when *identity* exhausted its budget.
 
+    The audit record is marked through the request context (§11.1 of the record),
+    so this keeps the signature the part-1 tests pin.
+
     Called from :func:`app.proxy.auth.verify_api_key`, i.e. after the key is
     authenticated and authorized and **before** any handler runs — a
     rate-limited request therefore never reaches the inference queue.
@@ -621,6 +646,12 @@ def enforce_rate_limit(identity: str | None) -> None:
     if misconfigured is not None:
         limit = LIMIT_RATE if limits.error(LIMIT_RATE) else LIMIT_BURST
         _bump_rejection(limit)
+        _audit.mark_denial(
+            reason=_audit.REASON_ADMISSION_MISCONFIGURED,
+            status=503,
+            limit=limit,
+            detail=misconfigured,
+        )
         raise HTTPException(status_code=503, detail=misconfigured_detail(limit, misconfigured))
 
     assert limits.requests_per_minute is not None and limits.burst is not None
@@ -628,6 +659,12 @@ def enforce_rate_limit(identity: str | None) -> None:
         # No identity could be derived for an authenticated request: fail closed
         # rather than hand out an unlimited bucket.
         _bump_rejection(LIMIT_RATE)
+        _audit.mark_denial(
+            reason=_audit.REASON_ADMISSION_MISCONFIGURED,
+            status=503,
+            limit=LIMIT_RATE,
+            detail="authenticated request without an identity fingerprint",
+        )
         raise HTTPException(
             status_code=503,
             detail=misconfigured_detail(LIMIT_RATE, "authenticated request without an identity fingerprint"),
@@ -639,6 +676,12 @@ def enforce_rate_limit(identity: str | None) -> None:
         return
 
     _bump_rejection(LIMIT_RATE)
+    _audit.mark_denial(
+        reason=_audit.REASON_RATE_LIMITED,
+        status=429,
+        limit=LIMIT_RATE,
+        limit_value=limits.requests_per_minute,
+    )
     logger.warning(
         "🛑 rate-limited %s",
         json.dumps(
@@ -812,6 +855,13 @@ class BodySizeLimitMiddleware:
         misconfigured = limits.error(LIMIT_BODY)
         if misconfigured is not None:
             _bump_rejection(LIMIT_BODY)
+            _audit.mark_denial(
+                scope=scope,
+                reason=_audit.REASON_ADMISSION_MISCONFIGURED,
+                status=503,
+                limit=LIMIT_BODY,
+                detail=misconfigured,
+            )
             await _send_json(scope, send, 503, misconfigured_detail(LIMIT_BODY, misconfigured))
             return
 
@@ -861,6 +911,13 @@ class BodySizeLimitMiddleware:
         observed_bytes: int | None = None,
     ) -> None:
         _bump_rejection(LIMIT_BODY)
+        _audit.mark_denial(
+            scope=scope,
+            reason=_audit.REASON_REQUEST_TOO_LARGE,
+            status=413,
+            limit=LIMIT_BODY,
+            limit_value=limit_bytes,
+        )
         logger.warning(
             "🛑 body-too-large %s",
             json.dumps(

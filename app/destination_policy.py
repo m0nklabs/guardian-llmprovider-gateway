@@ -44,6 +44,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from app.proxy import audit as _audit
+
 logger = logging.getLogger("Guardian.Destinations")
 
 #: Stable machine code carried by :class:`DestinationDenied`.
@@ -873,12 +875,24 @@ class DestinationGuardTransport(httpx.AsyncBaseTransport):
         has_credential = any(
             name in request.headers for name in CREDENTIAL_HEADERS
         )
-        destination = await self.policy.check(
-            str(request.url),
-            purpose=self._purpose,
-            owner=self._owner,
-            has_credential=has_credential,
-        )
+        try:
+            destination = await self.policy.check(
+                str(request.url),
+                purpose=self._purpose,
+                owner=self._owner,
+                has_credential=has_credential,
+            )
+        except DestinationDenied as exc:
+            # G1-03 §11: a refused outbound hop is a deny decision like any
+            # other. Marked through the audit ContextVar, so it lands on the
+            # inbound request's record (route, key, status 502) when one is
+            # being served, and is a no-op at configuration-load time.
+            _audit.mark_denial(
+                reason=_audit.REASON_DESTINATION_DENIED,
+                status=exc.http_status,
+                detail=exc.reason,
+            )
+            raise
         addresses = destination.connect_addresses()
         if not addresses:
             return await self._inner.handle_async_request(request)
