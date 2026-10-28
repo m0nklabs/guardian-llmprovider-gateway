@@ -329,10 +329,16 @@ Note how the example itself demonstrates the `total` semantics: 2 events,
 There is **no cursor and no offset**. The only paging primitive is
 `limit` + `total` + client-side `since`:
 
-- To page backwards, take the oldest `ts` of the current page and ask for
-  `since=<that ts>` — but because the store is returned *newest-tail-first*, a
-  `since` query returns *at most* the whole filtered tail; to walk history you
-  must grow `limit` and take the head, there is no "before `<ts>`" parameter.
+- To page backwards (older events), **omit `since` entirely and grow `limit`**.
+  `since` is a *lower* bound (`ts >= since`), so pinning it to the oldest `ts`
+  of the current page keeps exactly that page and its successors and excludes
+  everything older — repeatedly raising `limit` with `since` set therefore never
+  reaches earlier history. The response is the newest `limit` events of the
+  filtered set in ascending order, so a larger `limit` means an earlier head.
+- If a follow-up poll wants only *new* events, the opposite applies: pin
+  `since` to the newest `ts` already consumed and leave `limit` small. Both
+  directions are string comparisons on `ts` (see 3.2.4), so the pinned value
+  must be copied verbatim from a response, never reformatted.
 - `total` (ignoring `limit`) is the only count available; there is no
   "has more" flag. A consumer therefore cannot cheaply confirm it has seen
   everything except by fetching with a `limit` at or above `total`.
