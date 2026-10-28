@@ -150,6 +150,18 @@ ADMISSION_REJECTIONS = Counter(
 )
 
 
+# === Metadata audit (G1-03 part 2) ===
+# docs/decisions/G1-03-admission-and-audit.md §11: ``reason`` is drawn from the
+# closed vocabulary in ``app/proxy/audit.py`` (anything else becomes ``other``),
+# so the series count stays bounded no matter what a caller passes.
+
+AUDIT_RECORDS = Counter(
+    "guardian_audit_records_total",
+    "Metadata-only audit records emitted, by decision and reason",
+    ["decision", "reason"],
+)
+
+
 # === Capture Metrics ===
 
 CAPTURE_EVENTS_TOTAL = Counter(

@@ -2,11 +2,11 @@
 
 | Field | Value |
 | --- | --- |
-| **Status** | Accepted (part 1). Part 2 reserves §11 and is not in this record yet. |
+| **Status** | Accepted (parts 1 and 2). §1-§10 admission, §11 metadata audit. |
 | **Decided** | 2026-10-28 |
 | **Supersedes** | none |
 | **Superseded by** | none |
-| **Issue** | [#57](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/57) — this record covers **the admission half only** |
+| **Issue** | [#57](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/57) — parts 1 (admission) and 2 (metadata audit) |
 | **Roadmap** | `docs/ROADMAP.md` §G1, third enforcement block; backlog row G1-03 |
 | **Baseline** | `docs/G0_BASELINE.md` §2.4/§2.5 (measured queue depth 1, `max_concurrent: 1`, 55.9 s cold start), `docs/G0_TRUST_BOUNDARY_THREAT_MODEL.md` |
 | **Follows** | [`G1-01-privilege-scopes.md`](G1-01-privilege-scopes.md) (identity surface), [`G1-02-destination-and-credentials.md`](G1-02-destination-and-credentials.md) (same fail-closed shape: one enforcement point, typed refusal, absent ≠ malformed) |
@@ -371,24 +371,272 @@ rejection tests would otherwise accidentally prove:
 Full suite: **2108 passed, 20 deselected** (baseline on `origin/main`: 2053
 passed, same 20 deselected). `scripts/pre_restart_check.py` green.
 
-## 11. Reserved for part 2 — metadata audit (not implemented here)
+## 11. Metadata audit and the auth-header log invariant (part 2)
 
-Part 2 of [#57](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/57)
-extends **this same record**. Sections are append-only: part 2 fills §11 and may
-add §12+, it must not renumber §1-§10.
+Part 1 reserved this section and shipped no audit code. This is its fill:
+§1-§10 above are unchanged. Implementation: `app/proxy/audit.py` (record schema,
+sinks, bounds) plus one `mark_denial` call per enforcement point, and one
+`AuditMiddleware` that emits exactly one record per request decision on both
+surfaces (`app.proxy.server:app` → `surface="proxy"`, `app.main:app` →
+`surface="dashboard"`).
 
-- **§11.1 Audit record shape.** One metadata-only record per authorization
-  decision (allowed *and* denied): identity fingerprint, route, required scope,
-  outcome, reason, timestamp. No payload, no prompt text, no headers, no raw
-  token.
-- **§11.2 The auth-header log invariant.** An automated test asserting that a
-  `Bearer`/`api-key` value never appears in a log line at INFO/DEBUG — the
-  promise G1-02's redaction filter makes (`app/log_safety.py`) is the belt; part 2
-  adds the braces and the test.
-- **§11.3 Audit tests.** Allow and deny both produce a record; no payload/prompt
-  content is included; a captured-log assertion for §11.2.
+### 11.1 The record — one per decision, allow and deny
 
-What part 1 already contributes to that work: the rejection log lines in §8 use
-identity fingerprints (never tokens or headers), and the three admission
-decisions are exactly the kind of event the audit record will carry — part 2 can
-attach to the same call sites instead of re-deriving the decision.
+**Who is audited, and who is not.** Every request that makes an authorization or
+admission decision is audited: an authorized request (allow) and every refusal
+on the way to one (deny). The record is driven by the **decision point**, not by
+the presence of a header: `_enforce_route_scope` marks the allow, and each
+refusal marks the deny, so a `public` route of the G0-01 matrix produces **no**
+record even when a caller sends an `Authorization` header to it — which is what
+keeps `/healthz`, the four docs routes and the `/api/*` static mount out of the
+trail and out of the buffer. A request that is refused before routing
+(the `413` body bound) is audited with `route: null` rather than a concrete path:
+the template is the only route form this record allows, and inventing a path
+would smuggle request data in.
+
+The record has exactly 15 fields — `RECORD_FIELDS` in `app/proxy/audit.py`, and a
+test fails if the producer and that tuple ever disagree:
+
+| Field | Value | Why it is metadata, not data |
+| --- | --- | --- |
+| `ts` | UTC ISO-8601, milliseconds, `Z` | when the decision happened; carries nothing from the request |
+| `event` | always `"audit"` | routing marker for the aggregator/`grep` |
+| `surface` | `proxy` \| `dashboard` | which listener answered — deployment fact |
+| `decision` | `allow` \| `deny` | the outcome, from a two-value vocabulary |
+| `reason` | one code from §11.1's table | *why*, from a closed vocabulary (never a free-form message) |
+| `detail` | a bounded machine code (≤ 64 chars), e.g. the G1-02 `REASON_*` of a destination denial | the typed sub-reason, never prose and never a payload |
+| `method` | `GET`, `POST`, … (validated shape) | part of the route identity |
+| `route` | the FastAPI **template**, e.g. `/v1/{path:path}` | the route, not the request: no model name, no id, no query string |
+| `required_scope` | `client`, `operator`, `admin`, `capture-export`, `public` | policy vocabulary (G1-01) |
+| `scopes` | the key's resolved scopes, sorted | what the key may do — the key's *envelope*, not its secret |
+| `key_fingerprint` | `sha256(token)[:12]`, the G1-01 identity | stable identity, one-way; the token itself is not recoverable from it |
+| `key_name` | the operator-assigned key name, cleaned, ≤ 64 chars — `null` when `audit.include_key_name: false` | a label from the key store, not credential material; see below |
+| `status` | the HTTP status the client received | the outcome the caller saw |
+| `limit` | the config key of the bound that refused (`admission.max_body_bytes`, `admission.queue_max_depth`, `admission.rate_limit.requests_per_minute`) | names a configured limit, never a request value |
+| `limit_value` | that bound's configured number | a deployment constant |
+
+**`key_name`: included, with an off switch.** The name is *not* a secret — the
+token is, and a name cannot be replayed as a credential — and it is the label the
+operator, the dashboard and the G1-01 `scope_denied`/`scope_grace` lines already
+use. An audit trail that only carried 12 hex characters would be unreadable for
+attribution: "which client was refused" is the first question anyone asks of it.
+But a key can be *named* after a person or a mailbox, and a record shipped to a
+shared aggregator then carries personal data. So the inclusion is configurable
+(`audit.include_key_name`, default `true`) and the failure direction is privacy:
+an unreadable value omits the name instead of guessing (§11.2). The fingerprint
+stays either way, so identity is never lost.
+
+**`key_fingerprint` identifies the key that was *presented*.** For an unvalidated
+denial (an unknown token, or a `413` refused before authentication) the record
+carries the fingerprint of the token in the `Authorization`/`x-api-key` header —
+that is what makes failed attempts correlatable — while `key_name` and `scopes`
+stay `null` because the key store never resolved them. A validated, allowed
+request carries all three.
+
+**Decision vs status.** `decision` records the *authorization/admission* answer;
+`status` records what the client then received. The two differ legitimately and
+the record states both instead of pretending they are one thing:
+
+| Situation | `decision` | `reason` | `status` |
+| --- | --- | --- | --- |
+| allowed, served | `allow` | `scope_granted` | `200` (or whatever the route produced) |
+| allowed by the G1-01 grace window | `allow` | `scope_grace` | route status |
+| allowed, wait budget expired (#45) | `allow` | `scope_granted` | `499` |
+| allowed, handler failed | `allow` | `scope_granted` | `5xx` |
+| refused by an outbound destination guard that the handler swallowed | `deny` | `destination_denied` | the status the handler still returned |
+
+Reason vocabulary and the enforcement point that marks it (`mark_denial` is
+called *before* the raise, so the middleware still emits exactly one record):
+
+| `reason` | Enforcement point | HTTP |
+| --- | --- | --- |
+| `scope_granted` | `app/proxy/auth.py:_enforce_route_scope` (allow), or a graceful client-scope call | — |
+| `scope_grace` | same, legacy key whose G1-01 grace bought a *privileged* call (allow) | — |
+| `insufficient_scope` | `_enforce_route_scope` | `403` |
+| `invalid_scope_declaration` | `_enforce_route_scope` (malformed `metadata.scopes`) | `403` |
+| `scope_undeclared_route` | `_enforce_route_scope` (fail-closed inventory gap) | `403` |
+| `missing_api_key` | `app/proxy/auth.py:verify_api_key` | `401` |
+| `invalid_api_key` | `verify_api_key` | `401` |
+| `rate_limited` | `app/proxy/admission.py:enforce_rate_limit` | `429` |
+| `queue_full` | `app/proxy/admission.py:queue_depth_error` | `503` |
+| `admission_misconfigured` | `admission.py` (body, rate and queue bounds) | `503` |
+| `request_too_large` | `admission.py:BodySizeLimitMiddleware` | `413` |
+| `destination_denied` | `app/destination_policy.py:DestinationGuardTransport` | `502` (or the handler's status) |
+| `other` | reserved: a caller passed a code outside the vocabulary | — |
+
+**Absent by construction** — the field set has no room for them, and the
+producer validates every value (`RECORD_FIELDS`, length caps, character classes):
+
+- **Payload / prompt / model output / completion text** — never read by the audit
+  path; it is only given the decision.
+- **Headers** — a header *value* (including `Authorization`, `x-api-key`,
+  `Cookie`) never reaches the producer; only the derived fingerprint does.
+- **Query string** — the record carries the route template, so `?trace=…` has no
+  field to land in.
+- **Client IP, user agent, referer, forwarded-for** — deliberately excluded: an
+  IP is not an identity behind a NAT (G1-03 keys the rate bound on the
+  fingerprint for the same reason) and it is personal data in an aggregator.
+  Authentication failures already keep the local-process attribution in
+  `Auth`'s WARNING line, which is a different (operator-local) sink.
+- **Model name / request id** — route-level audit; a model is routing data that
+  the capture subsystem (a separate, opt-in surface) already covers.
+- **Raw token, key prefix, header name** — the fingerprint replaces them.
+
+### 11.2 Sinks, bounds, and the auth-header log invariant
+
+**Three sinks, one source.** `_build_record` is the only producer; every sink
+receives the same dict.
+
+| Sink | What it is | Bound |
+| --- | --- | --- |
+| Log line | one JSON object per decision on logger `Guardian.Audit` (`INFO` for allow, `WARNING` for deny), `"event":"audit"` | one line per request, no accumulation in-process; the file/handler rotation is the existing logging configuration's business |
+| Ring buffer | `collections.deque(maxlen=N)` of the newest records, `audit.recent()` | `audit.buffer_size`, default **256**, hard ceiling **1024** records |
+| Metric | `guardian_audit_records_total{decision,reason}` on `GET /metrics` | 2 decisions × 13 reasons = **26** series, whatever a caller passes (`reason` is mapped onto the vocabulary; anything else becomes `other`) |
+
+**The memory bound, stated and proved.** The buffer is a `deque` with a fixed
+`maxlen`, so appending past it evicts — it cannot grow. A record is a dict of 15
+fixed fields with every string capped (route ≤ 120, name ≤ 64, detail ≤ 64,
+surface ≤ 16 chars, at most 5 validated scope tokens, integers bounded), which
+gives a ceiling of **1024 bytes per serialized record** (`_MAX_RECORD_BYTES`) —
+a test asserts that ceiling against pathological input (50 000-character route,
+name, detail and limit, a 500-character "fingerprint", `limit_value=10**30`).
+Worst case at the shipped default: 256 × 1 KiB = **256 KiB**; at the hard ceiling
+1024 × 1 KiB = **1 MiB**. Nothing else in the module is keyed on request data: no
+dict, set or list grows with traffic, only the `deque` (fixed) and two integers
+(`emitted_count`, the counter). A million requests ⇒ a million log lines and the
+same fixed buffer. Tests: `test_ring_buffer_stops_at_its_bound` (60 requests,
+bound 8 → 8 retained, 60 emitted), `test_a_huge_configured_buffer_is_clamped`,
+`test_metric_reason_labels_stay_bounded` (200 attacker-shaped reasons → only
+`other`), `test_one_record_has_a_fixed_size_ceiling`,
+`test_records_are_never_retained_from_a_public_flood` (25 unauthenticated
+requests → nothing retained).
+
+**Configuration is fail-safe, per key, toward the safe side.** A broken audit
+block must not refuse traffic: the sink is observability, and refusing a request
+because its *audit line* is misconfigured is an availability attack on the
+operator. This is the one G1 row that does **not** fail closed, and the deviation
+is deliberate:
+
+| Condition | Behaviour | Why that direction |
+| --- | --- | --- |
+| section absent | shipped defaults, one WARNING | a config file that predates this record keeps auditing |
+| `buffer_size` not a positive integer | default 256, one ERROR | a typo must not silently shrink the trail |
+| `buffer_size` above 1024 | clamped to 1024, one ERROR | the bound is a memory guarantee and cannot be configured away |
+| `log_decisions` not a boolean | stays `true`, one ERROR | losing the aggregator sink silently is worse than a stray line |
+| `include_key_name` not a boolean | **`false`**, one ERROR | privacy: a typo must never *add* a name to a record |
+| section present but not a mapping | shipped settings with names **off**, one ERROR | nothing parseable, so the conservative reading wins |
+
+**The invariant: no credential in a log line.** The promise — "do not log auth
+headers" (`docs/ROADMAP.md` §G1) — is enforced twice:
+
+1. **Belt (G1-02, reused, not rebuilt).** `app/log_safety.py`'s
+   `SecretRedactionFilter` is installed on the root handlers at startup; it
+   scrubs every registered secret and every `Bearer`/`Authorization`/`x-api-key`
+   shaped value. Part 2 **adds the Guardian key store to the registered secrets**
+   (`auth._load_api_keys_uncached` → `register_secrets`, `generate_api_key` →
+   `register_secret`): the tokens this service hands out were the one credential
+   class the filter did not know, and a bare token has no `Bearer` prefix for a
+   shape pattern to catch. The registered set is the number of distinct keys the
+   process has loaded — tens in practice, and bounded by key *history* rather
+   than by traffic (a rotated key stays registered, which is what keeps an old
+   token unloggable) — so it costs one comparison per secret per log line, not
+   per-request memory.
+2. **Braces (this part).** `log_safety.contains_credentials()` is the detector
+   built on the *same* two patterns, and `tests/unit/test_audit_metadata.py`
+   drives every decision path — auth success, invalid key, missing key, scope
+   denial, rate denial, body denial, queue denial, destination denial — with
+   `caplog` at `DEBUG` and fails if **any** captured line carries a credential.
+   Because pytest attaches its capture handler *after* `install_secret_redaction()`
+   ran, the records scanned are the pre-filter messages the gateway actually
+   tried to write: the test fails on an attempted leak even when the filter would
+   have saved the line in production.
+
+**Not vacuous, proved.** `test_the_guard_is_not_vacuous` feeds the assertion
+helper a line containing `Authorization: Bearer <token>` and requires the
+`AssertionError`, plus `x-api-key:` / `Authorization=` / `bearer …` spellings.
+`test_a_filterless_handler_would_leak` logs through a handler without the filter
+and requires the scan to fire on what a handler really emitted.
+`test_the_g1_02_filter_makes_a_leak_unloggable` puts the real
+`SecretRedactionFilter` on a probe handler, logs the same token twice and requires
+`***redacted***` with the credential gone — so the pair (detector + filter) is
+demonstrated, not asserted. `contains_credentials` ignores values that are
+already `***redacted***`, so a correctly scrubbed production log is not reported
+as a leak.
+
+**What the invariant does not claim.** `uvicorn.access` logs the request line
+(path and query, no headers) on its own handlers; that is transport logging, not
+this gateway's logging, and it is unchanged here. The invariant is stated for
+Guardian's own log records at every level, `DEBUG` included.
+
+### 11.3 The audit-without-payload demonstration, and the tests
+
+`tests/unit/test_audit_metadata.py` — **41 tests**, in six groups:
+
+- **`TestAllowRecords` (6).** The record carries exactly `RECORD_FIELDS`; allow on
+  the inference catch-all route is audited by its template (`/v1/{path:path}`,
+  `POST`, `499` from the wait budget); the grace window is marked `scope_grace`
+  with the grandfathered envelope; the dashboard surface reports
+  `surface="dashboard"`; `public` routes produce nothing; a mutating method is
+  recorded as such.
+- **`TestDenyRecords` (11).** One test per denial path named in the acceptance
+  criteria — scope denial, invalid scope declaration, undeclared route, invalid
+  key, missing key, **rate limit**, **queue depth**, queue `admission_misconfigured`,
+  **body too large**, and **destination denied** (twice: once through a real
+  guarded client on a probe route, once through a real Guardian request where the
+  denial lands on that request's record).
+- **`TestAuditWithoutPayload` (3).** The demonstration itself: one allowed and one
+  denied request, each carrying a recognisable payload marker, a recognisable
+  `X-Request-Marker` header, a recognisable `Authorization: Bearer …` value and a
+  recognisable query marker. The record (as JSON) and **every** captured gateway
+  log line are asserted to contain none of: the payload marker, the header
+  marker, the token, the token's random part, `Bearer <token>`, the query marker,
+  and a distinctive phrase from the prompt. A third test pins the schema closure
+  (`body`, `headers`, `query`, `prompt`, `model` are not fields).
+- **`TestAuthHeaderInvariant` (4).** The exercised-path invariant (§11.2), the
+  non-vacuity proof (leaky line must fail), the filter proof, and the
+  filterless-handler proof.
+- **`TestBoundedStorage` (10) / `TestAuditConfiguration` (7).** The bounds of
+  §11.2 and the fail-safe configuration directions, plus
+  "shipped `config/global.settings.yaml` equals the module defaults".
+
+`TestAuditConfiguration` also carries a shadowing guard: it parses this module
+with `ast` and fails on any duplicate top-level attribute or method name, because
+a duplicated class silently replaces its namesake and its tests then never run —
+green coverage that proves nothing (the failure mode that this file's own review
+history produced once, PR-Piet round 2).
+
+Full suite: **2157 passed, 20 deselected** (measured baseline in a clean
+`origin/main` (`f6b9bc0`) worktree: 2116 passed, same 20 deselected — the +41 is
+exactly this file). `scripts/pre_restart_check.py` green.
+
+### 11.4 Cost, consequences and what is not covered
+
+- **Per decision:** one `deque` append, one `json.dumps` of a ≤ 1 KiB dict, one
+  counter increment, one log line through the existing handler. No I/O of its own,
+  no lock held across an `await`, no task. A refusal is audited on the way out, so
+  an attacker who sends a million refused requests costs a million log lines —
+  the same cost the existing rejection lines already had — and a bounded buffer.
+- **The log is the durable sink.** The ring buffer is volatile by design: it
+  resets with the process and it is bounded, so the operator's aggregator (or
+  `guardian.log`) is the record of truth. `audit.recent()` exists for a
+  post-incident look without log shipping and for the tests; there is deliberately
+  **no HTTP endpoint** for it — that would add a 58th route to the pinned G0-01
+  matrix to serve data the log already ships, and an audit surface with its own
+  access-control question is a bigger decision than this record makes.
+- **How the operator queries it:** `journalctl -u guardian-llmprovider-gateway |
+  grep '"event":"audit"'` (or `grep '"event":"audit"' guardian.log`), filtered by
+  `"decision":"deny"`, `"reason":"rate_limited"`, `"key_fingerprint":"…"`; the
+  counter `guardian_audit_records_total{decision,reason}` on `GET /metrics` gives
+  the rate. `docs/API_REFERENCE.md` "Audit records" documents the line format and
+  the queries.
+- **Single process, single sink.** No Redis, no queue, no file of its own: two
+  replicas would each keep its own buffer (same scope statement as §2.2).
+- **Not covered:** audit of *payload capture* decisions (capture stays as it is,
+  §"Out of scope" of the issue); audit of the `/metrics` scrape itself beyond its
+  ordinary allow record; retention/rotation of the log file (the existing
+  logging configuration owns that); and any tamper-evidence (a local log is not
+  append-only evidence — that would need an external sink).
+- **Known adjacent gap, not fixed here:** `app/local_inference/ollama.py` builds
+  two bare `httpx.AsyncClient(...)` clients, which bypass the G1-02 destination
+  guard. It is a G1-02 scope defect (no audit record is produced for those hops
+  either), and it belongs in its own issue rather than in this record's diff.

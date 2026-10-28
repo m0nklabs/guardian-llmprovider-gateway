@@ -104,6 +104,26 @@ def redact_secrets(text: str) -> str:
     return redacted
 
 
+def contains_credentials(text: str) -> bool:
+    """True when *text* still carries a credential shape or a registered secret.
+
+    The enforcement side of the G1-02 promise, and the primitive the G1-03
+    auth-header invariant is written against: it reuses the same two patterns as
+    :func:`redact_secrets`, so a test cannot drift away from the filter that
+    makes a leak unloggable. Call it on what a handler *would* emit.
+    """
+    if not text:
+        return False
+    # A value that is already ``***redacted***`` is not a credential: the guard
+    # must not fire on material the filter already scrubbed, or a correctly
+    # redacted production log would look like a leak.
+    if any(match.group(2) != REDACTED for match in _BEARER.finditer(text)):
+        return True
+    if any(match.group(3) != REDACTED for match in _HEADER_SECRET.finditer(text)):
+        return True
+    return any(secret and secret in text for secret in _KNOWN_SECRETS)
+
+
 class SecretRedactionFilter(logging.Filter):
     """Scrub credentials from every log record it sees.
 

@@ -52,7 +52,7 @@ turns "Guardian calls a URL from configuration" into "Guardian fetches
    because they never open a socket.
 2. **The allowlist is configuration, and it is the only approval.** The source
    of truth is `destination_policy` in `config/global.settings.yaml`
-   (documented in `docs/CONFIG_SCHEMA.md` §10). An outbound URL is approved only
+   (documented in `docs/CONFIG_SCHEMA.md` §11). An outbound URL is approved only
    when its `(scheme, host, port)` matches an explicit entry. There are no
    wildcards and no host-class shortcuts: subdomain patterns and "private
    networks are fine" rules are exactly what an SSRF exploits.

@@ -88,6 +88,29 @@ admission:
     # so a reconnect storm or parallel tool calls do not trip it.
     requests_per_minute: 300
     burst: 300
+# Metadata-only audit (G1-03 part 2, docs/decisions/G1-03-admission-and-audit.md
+# §11). One record per authorization/admission decision — allow AND deny — with
+# the key fingerprint, route template, resolved scopes, decision, reason code,
+# status and (when a bound refused it) that limit. No payload, no headers, no
+# query string, no prompt text, no model output: safe to ship to the operator's
+# log aggregator.
+#
+# FAIL-SAFE (not fail-closed): a broken key never refuses traffic — the audit
+# sink is observability. Each key falls back to the safe side (see
+# docs/CONFIG_SCHEMA.md §12) and the problem is logged at ERROR once.
+audit:
+  # One structured JSON line per decision on logger `Guardian.Audit`
+  # (`"event":"audit"`) — the sink that ships to an aggregator. `false` keeps
+  # the bounded in-process buffer and the metric, and stops the lines.
+  log_decisions: true
+  # Bounded in-process ring buffer of the newest records (post-incident look
+  # without log shipping). Hard ceiling 1024: the bound is a memory guarantee,
+  # so a bigger configured value is clamped, never obeyed.
+  buffer_size: 256
+  # Set to false when key *names* are personal data: the record then carries the
+  # 12-hex fingerprint only. Names are operator-assigned labels, not secrets —
+  # the token is the secret — but they can identify a person.
+  include_key_name: true
 services:
   comfyui_url: http://127.0.0.1:8188
 # Caretaker-runtime poll windows (F5 follow-up; hot-reloadable via

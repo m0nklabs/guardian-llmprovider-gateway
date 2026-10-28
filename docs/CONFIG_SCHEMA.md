@@ -292,7 +292,182 @@ Rules:
   process from unbounded bodies, unbounded waiting and unbounded arrival; they
   are not a capacity plan.
 
-Related: `destination_policy` (G1-02) is **not** documented in this file yet —
-its source of record is
-`docs/decisions/G1-02-destination-and-credentials.md` §2-§5. That gap predates
-this section and is tracked as a documentation follow-up rather than fixed here.
+Related: `destination_policy` (G1-02) is documented in §11.
+
+## 11. `destination_policy` — outbound allowlist and credential isolation (G1-02, 2026-10-28)
+
+Source of record: `docs/decisions/G1-02-destination-and-credentials.md`;
+implementation: `app/destination_policy.py`. A **config-file section** in
+`config/global.settings.yaml`, not a per-provider file key. The policy is
+rebuilt from the live configuration on every check (`current_policy()`), so a
+change is live for the next outbound request after
+`POST /api/config/reload` (admin scope, §9) — including clients that were
+constructed once for the whole process; `log_startup_summary()` logs the
+effective policy and any still-cleartext credential hop at startup and after
+each reload.
+
+```yaml
+destination_policy:
+  schemes: [http, https]
+  allow:
+    - host: 127.0.0.1
+      ports: [4000, 4141, 8188, 11440, 11441, 11450]
+      note: local llama-server, caretaker, TTS, Copilot bridge, ComfyUI
+    - host: localhost
+      ports: [11440]
+      addresses: [127.0.0.1, "::1"]
+      note: proxy.target (local llama-server via the localhost name)
+    - host: 192.168.1.245
+      ports: [11440, 11441, 11450, 11451]
+      cleartext_credentials: true
+      note: 14700k-local inference/caretaker/TTS/STT — cleartext Bearer (B-03/B-04)
+    - {host: openrouter.ai, ports: [443]}
+    - {host: integrate.api.nvidia.com, ports: [443]}
+    - {host: api.groq.com, ports: [443]}
+    - {host: api.openai.com, ports: [443]}
+    - {host: generativelanguage.googleapis.com, ports: [443]}
+    - {host: inference.poolside.ai, ports: [443]}
+    - {host: api.fish.audio, ports: [443]}
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `destination_policy.schemes` | non-empty list (a bare string is accepted) of `http` / `https` | `[http, https]` | Schemes the guard accepts. Any other scheme is refused with `scheme_not_allowed`; an unsupported value *inside* this list closes the whole policy (`policy_unavailable`). |
+| `destination_policy.allow` | non-empty list of entry mappings | the shipped allowlist (`SHIPPED_ALLOW`) — only when the section itself is absent | The complete approval set. There are no wildcards and no host-class shortcuts, so every reachable destination is spelled out here. |
+| `allow[].host` | string: bare hostname or IP literal (no scheme, port or path) | required | The only host this entry approves, compared lowercased without a trailing dot. A host declared twice keeps its **first** entry: a later duplicate cannot widen the approved port set. |
+| `allow[].ports` | integer or non-empty list of integers `1`-`65535` | required | The only ports reachable on that host. A URL without a port is checked at its scheme default (`80`/`443`). |
+| `allow[].addresses` | list of IP literals (a bare string is accepted) | `[]` | Pinned resolve set. When set, every address the name resolves to must stay inside it. When empty, a *name* entry may only resolve to public addresses. A value that is not an IP literal drops the entry. |
+| `allow[].cleartext_credentials` | boolean | `false` | Marks a hop that carries a Bearer key over plain `http` on the LAN (B-03/B-04). It documents and surfaces the hop; it weakens no check. |
+| `allow[].note` | string | `""` | Free-text operator label; no enforcement effect. |
+
+Rules:
+
+- **One enforcement point, below the call sites.** Provider, catalog,
+  management, speech and bridge traffic is built with `guarded_async_client(...)`,
+  whose transport (`DestinationGuardTransport`) validates each request before a
+  socket is opened; because the check sits in the transport, redirects, retries
+  and future dynamic URLs pass the same code.
+- **Only listed `(host, port)` pairs are reachable.** A URL is approved only
+  when its scheme is listed, it carries no userinfo (`user:pass@` fails with
+  `userinfo_not_allowed`), and its `(host, port)` matches an entry above.
+- **Cloud-metadata addresses are never approvable.** `169.254.169.254`,
+  `169.254.169.253`, `169.254.170.2`, `100.100.100.200` and `fd00:ec2::254`
+  are refused with `metadata_host_blocked` — as a URL literal and as a resolved
+  answer. An allowlist entry for one gains nothing.
+- **Loopback, link-local and RFC1918 are not implicitly trusted.** They are
+  usable only through an explicit entry; without one the refusal names the
+  class (`loopback_not_approved`, `link_local_not_approved`,
+  `private_network_not_approved`), so a misconfigured catalog URL cannot reach
+  an internal admin port and an unlisted port on an approved host still fails
+  with `port_not_allowed`.
+- **A name entry must pin `addresses` or resolve to public addresses only.** The
+  resolver is asked again at request time, every returned address is validated,
+  and the connection is pinned to the validated address with `Host` and TLS SNI
+  kept at the approved hostname. An answer outside a pin, or a public name
+  answering with an internal address, fails with `dns_address_not_allowed`; a
+  failed or empty resolution fails with `dns_resolution_failed` (never a
+  fallback to connecting by name). An IP-literal entry is its own approval.
+- **Redirects are never followed.** `follow_redirects=True` is refused at
+  client construction (`ValueError`), the transport refuses a hop whose origin
+  differs from the previous destination (`redirect_not_allowed`), and a `3xx`
+  is returned to the caller untouched. A credential therefore cannot be carried
+  to a new destination.
+- **A credential header is bound to its own provider's destination.** A request
+  carrying `authorization`, `proxy-authorization`, `x-api-key`, `api-key` or
+  `x-goog-api-key` is refused unless the client was built for an owning
+  provider (`credential_owner`) *and* the destination is one of that provider's
+  own configured URLs (`base_url`, `management_url`, `tts_url`, `stt_url`, an
+  absolute `catalog_url`) — otherwise `credential_foreign_destination`. A
+  credentialed request without a declared owner fails closed
+  (`credential_without_owner`). Provider A's key can never reach provider B.
+- **TLS verification is mandatory.** The guard never sets `verify`, so httpx's
+  default certificate and hostname verification stays in force, and SNI is the
+  approved hostname even when the connection is pinned to an address. There is
+  no skip-verification knob. `trust_env` defaults to `False`, so a proxy
+  environment variable cannot route traffic around the guard.
+- **Configuration load rejects, request time refuses.** Each enabled provider's
+  URL fields are checked structurally at load (no DNS); an unapproved field
+  flags the provider (`destination_error`, `destination_status` in
+  `GET /api/cloud/providers`) with one error log line, and every request that
+  would reach it still fails with the typed `502 destination_denied`.
+
+Fail-closed rules:
+
+- **Absent is not malformed.** A configuration without a `destination_policy`
+  section falls back to the shipped allowlist (`SHIPPED_ALLOW` in
+  `app/destination_policy.py`: the same hosts, ports and pins as the block
+  above, without the informational `note` labels) and logs a WARNING, so a
+  config file written before G1-02 does not turn the gateway into a closed
+  relay on the next restart.
+- **A broken policy denies everything.** A non-mapping section, a `schemes`
+  value that is not a non-empty list of `http`/`https`, a missing or empty
+  `allow`, or an `allow` in which no entry survives parsing yields a closed
+  policy: every outbound request fails with `destination_denied` / reason
+  `policy_unavailable`, and startup logs one error line naming the cause. A
+  broken policy never degrades into "no policy".
+- **A malformed entry is dropped loudly and only refuses its own host.** A
+  missing `host`, a `ports` value that is not a non-empty integer list, an
+  out-of-range port or a non-IP `addresses` value rejects that entry with one
+  error log line; its host stays unreachable (a name as `host_not_allowed`, an
+  address literal with its class reason) while every other entry keeps
+  enforcing. A single typo neither approves what it cannot parse nor takes the
+  rest of the deployment down.
+
+Reason codes (`REASON_*` in `app/destination_policy.py`; the `reason` field of
+the typed error is part of the contract, so values are added, never renamed):
+
+| Reason | Meaning |
+| --- | --- |
+| `policy_unavailable` | No usable policy: the section is not a mapping, or `allow` is missing, empty or has no valid entry. Everything is refused. |
+| `scheme_not_allowed` | The URL scheme is not in `destination_policy.schemes`. |
+| `userinfo_not_allowed` | The URL carries `user:pass@` (allowlist-confusion trick). |
+| `host_not_allowed` | The host is not an explicit entry (also used for an unparseable URL or a URL without a host). |
+| `port_not_allowed` | The host is approved, the port is not (also used for an unparseable port). |
+| `loopback_not_approved` | A loopback address without an entry of its own. |
+| `link_local_not_approved` | A link-local address without an entry of its own. |
+| `private_network_not_approved` | An RFC1918 or reserved address without an entry of its own. |
+| `metadata_host_blocked` | A cloud-metadata address, as a literal or as a resolved answer. Never approvable. |
+| `dns_resolution_failed` | The name did not resolve, or resolved to no address. No fallback to connecting by name. |
+| `dns_address_not_allowed` | An answer outside the pinned `addresses` set, or a public name answering with a non-public address. |
+| `credential_foreign_destination` | A credentialed request to a destination that is not its owning provider's own. |
+| `credential_without_owner` | A credentialed request whose client declares no owner. |
+| `redirect_not_allowed` | A hop to a different origin was attempted. |
+
+## 12. `audit` — metadata-only decision audit (G1-03 part 2, 2026-10-28)
+
+Source of record: `docs/decisions/G1-03-admission-and-audit.md` §11.
+Implementation: `app/proxy/audit.py`. Added to `config/global.settings.yaml`; all
+three keys are re-read from the shared configuration per decision, so
+`POST /api/config/reload` applies them without a restart.
+
+```yaml
+audit:
+  log_decisions: true
+  buffer_size: 256
+  include_key_name: true
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `audit.log_decisions` | boolean | `true` | Emit one structured JSON line per decision (allow `INFO`, deny `WARNING`) on logger `Guardian.Audit` with `"event":"audit"` — the sink that ships to the operator's log aggregator. `false` keeps the in-process buffer and the metric, and stops the lines. |
+| `audit.buffer_size` | positive integer | `256` | Records kept in the in-process ring buffer (`audit.recent()`), **hard ceiling 1024** — a larger value is clamped, because the bound is the memory guarantee. 1024 records × ≤ 1 KiB = ≤ 1 MiB worst case. |
+| `audit.include_key_name` | boolean | `true` | Include the operator-assigned key name next to the 12-hex fingerprint. Set `false` where key names are personal data (a person, a mailbox): the record then carries the fingerprint only. |
+
+Rules — note that this section is **fail-safe, not fail-closed** (the one G1 row
+that is, §11.2 of the record): a broken audit block must never refuse traffic.
+Each key falls back toward its safe side, logs one `ERROR`/`WARNING`, and the
+decision is still counted in `guardian_audit_records_total{decision,reason}`.
+
+| Condition | Behaviour |
+| --- | --- |
+| section absent | shipped defaults, one `WARNING` |
+| `buffer_size` not a positive integer | default `256`, one `ERROR` |
+| `buffer_size` above `1024` | clamped to `1024`, one `ERROR` |
+| `log_decisions` not a boolean | stays `true`, one `ERROR` |
+| `include_key_name` not a boolean | **`false`** (omit names), one `ERROR` — a typo must never add a name |
+| section present but not a mapping | shipped settings with key names omitted, one `ERROR` |
+
+What a record contains, and what it can never contain, is stated in
+`docs/API_REFERENCE.md` ("Audit records") and in the decision record §11.1. There
+is no key to disable the audit itself: `log_decisions: false` only removes the
+log line, and the bounded buffer plus the metric keep the decision observable.
