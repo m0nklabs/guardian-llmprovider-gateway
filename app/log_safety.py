@@ -22,6 +22,13 @@ from typing import Any, Iterable, Mapping
 #: explicitly in :func:`clean_log_value` so the removal is visible.
 _CONTROL_CHARACTERS = re.compile(r"[\x00-\x09\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
+#: Line and paragraph separators that are **not** C0/C1 and therefore survived
+#: the control-character scrub: NEL, LINE SEPARATOR and PARAGRAPH SEPARATOR.  A
+#: Unicode-aware log reader (journald, anything decoding before display) renders
+#: these as line breaks, so an attacker could forge a second line on a path that
+#: used to be protected by ``str.isprintable()`` (PR-Piet on #74).
+_LINE_SEPARATORS = re.compile("[\u0085\u2028\u2029]")
+
 #: Values that are scrubbed wherever they appear in a log record.
 _KNOWN_SECRETS: set[str] = set()
 
@@ -41,7 +48,8 @@ def clean_log_value(value: Any, limit: int = 160) -> str:
     """Bound *value* to a single printable log line.
 
     Line breaks go first (``\\r``, then ``\\n``), then the rest of the C0/C1
-    control range — NUL, TAB, ESC (which is what makes a terminal sequence
+    control range and the Unicode line/paragraph separators (NEL, U+2028, U+2029)
+    which are not in that range but render as line breaks — NUL, TAB, ESC (which is what makes a terminal sequence
     executable), DEL and the C1 block.  The length is capped so one value cannot
     flood a log record.
 
@@ -56,7 +64,11 @@ def clean_log_value(value: Any, limit: int = 160) -> str:
     remain unchanged.
     """
     text = str(value).replace("\r", " ").replace("\n", " ")
-    return _CONTROL_CHARACTERS.sub(" ", text).strip()[:limit]
+    text = _CONTROL_CHARACTERS.sub(" ", text)
+    # NEL/LS/PS are line breaks to a Unicode-aware reader; the C0/C1 scrub above
+    # cannot see them (PR-Piet on #74).
+    text = _LINE_SEPARATORS.sub(" ", text)
+    return text.strip()[:limit]
 
 
 def register_secret(value: str | None) -> None:

@@ -56,3 +56,31 @@ def test_the_line_break_removal_is_the_modelled_sanitizer():
     """
     source = inspect.getsource(clean_log_value)
     assert '.replace("\\r", " ").replace("\\n", " ")' in source
+
+
+@pytest.mark.parametrize(
+    "separator",
+    ["\u2028", "\u2029", "\u0085"],
+    ids=["line-separator-U2028", "paragraph-separator-U2029", "next-line-U0085"],
+)
+def test_unicode_line_separators_are_removed(separator):
+    """NEL/LS/PS are line breaks to a Unicode-aware reader (PR-Piet on #74).
+
+    They are outside the C0/C1 range, so the control-character scrub alone let
+    them through — while the helper this replaced used ``str.isprintable()`` and
+    removed them. A reader that decodes before display (journald, a terminal, a
+    log UI) would render the value on a second line.
+    """
+    cleaned = clean_log_value(f"model-a{separator}event=deny")
+    for bad in ("\u2028", "\u2029", "\u0085", "\n", "\r"):
+        assert bad not in cleaned
+    assert cleaned == "model-a event=deny"
+
+
+def test_a_forged_line_through_a_separator_cannot_survive():
+    """End to end: the segmented value reaches one line, prefix intact."""
+    value = "request-42\u2028🛑 forged deny record"
+    cleaned = clean_log_value(value)
+    assert "\u2028" not in cleaned
+    assert cleaned.startswith("request-42 ")
+    assert "🛑" in cleaned  # the content is preserved, only the break is defused
