@@ -1,0 +1,24 @@
+[
+  {
+    "port": 7994,
+    "protocol": "tcp",
+    "ip": "192.168.1.2",
+    "description": "MoniFuse Backend",
+    "notes": "Primary FastAPI control and registry API"
+  },
+  {
+    "port": 11440,
+    "protocol": "tcp",
+    "ip": "127.0.0.1",
+    "host": "ai-kvm2",
+    "description": "llama-server backend",
+    "notes": "Guardian-managed backend port; keep internal unless debugging Guardian itself"
+  },
+  {
+    "port": 7993,
+    "protocol": "tcp",
+    "ip": "127.0.0.1",
+    "description": "Dev Web Server",
+    "notes": "Vite frontend paired with backend port 7994"
+  }
+]

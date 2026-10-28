@@ -1,0 +1,41 @@
+{
+  "events": [
+    {
+      "agent_id": "dsh-ai-kvm2-guardian",
+      "agent_type": "dsh",
+      "host": "192.168.1.35",
+      "workspace": "/home/flip/guardian-llmprovider-gateway",
+      "project": "guardian-llmprovider-gateway",
+      "event": "task_achieved",
+      "title": "Roadmap G0-02 threat model merged (1f2d813); model has merge authority via gate; G0-03 baseline started",
+      "details": "",
+      "artifacts": [
+        "https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/40"
+      ],
+      "outcome": "success",
+      "model": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+      "metrics": {},
+      "id": "20261027232037502623-bd78d5",
+      "ts": "2026-10-27T23:20:37.502715+00:00"
+    },
+    {
+      "agent_id": "dsh-ai-kvm2-guardian",
+      "agent_type": "dsh",
+      "host": "192.168.1.35",
+      "workspace": "/home/flip/guardian-llmprovider-gateway",
+      "project": "guardian-llmprovider-gateway",
+      "event": "task_achieved",
+      "title": "G0-03 merged (60c5632); loop ops rules merged; G0-04 candidate survey delivered, target decision pending with operator",
+      "details": "",
+      "artifacts": [
+        "https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/43"
+      ],
+      "outcome": "success",
+      "model": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+      "metrics": {},
+      "id": "20261028082047638886-c0870b",
+      "ts": "2026-10-28T08:20:47.638941+00:00"
+    }
+  ],
+  "total": 158
+}
