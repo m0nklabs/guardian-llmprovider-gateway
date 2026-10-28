@@ -371,7 +371,6 @@ async def _complete_remote(
         logger.warning(
             "F5: caretaker loaded '%s' instead of requested '%s' — "
             "failing closed to avoid a second controller on the backend",
-            loaded,
             clean_log_value(loaded),
             clean_log_value(model),
         )
