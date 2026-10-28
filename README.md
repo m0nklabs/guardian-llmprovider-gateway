@@ -333,8 +333,15 @@ contracts, polling, and timeout behavior.
 
 On port `11434`, every endpoint requires authentication except:
 
-- `GET /healthz`
-- `GET /metrics`
+- `GET /healthz` (liveness probe)
+
+`GET /metrics` also requires a key: the payload names the loaded models and
+exposes queue depth and process state, so it is key-holder data rather than a
+public probe. Any valid Guardian key (`client` scope) can scrape it:
+
+```bash
+curl -s -H "Authorization: Bearer $GUARDIAN_API_KEY" http://127.0.0.1:11434/metrics
+```
 
 Port `11434` serves both plain HTTP and TLS: an nginx stream multiplexer
 pre-reads the TLS ClientHello and passes TLS unchanged to Guardian on

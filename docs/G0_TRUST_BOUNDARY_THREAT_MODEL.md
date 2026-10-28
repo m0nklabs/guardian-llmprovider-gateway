@@ -195,7 +195,7 @@ passing Guardian's authorization for that operation. Class is `approved`
 | B-07 | `sudo systemctl stop` / `start llama-server` from Guardian | Caretaker ownership (F5 split) | `approved` transition fallback | `docs/ROADMAP.md:125` — "Backend lifecycle delegation … Caretaker owns backend execution, Guardian owns traffic policy" |
 | B-08 | Key minting `/api/keys` with **any** valid key | the admin/operator distinction; mints a key whose `cloud_gateway_access` is `True` | `gap` (verified gap in `docs/ROADMAP.md:215-218`) | G1-01 → [#38](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/38) |
 | B-09 | Dashboard LAN proxy `192.168.1.35:11437` | nothing (same flat key), but doubles the reachable admin surface | `approved` (LAN-perimeter + Bearer), `gap` for role separation | G1-01 → [#38](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/38) |
-| B-10 | `GET /metrics`, `GET /healthz`, dashboard `/` and `/static` | authentication (public by design) | `approved` | matrix rows proxy 8/27, dashboard 5-7 |
+| B-10 | `GET /healthz`, dashboard `/` and `/static` | authentication (public by design) | `approved` | matrix rows proxy 8, dashboard 5-7; `/metrics` removed from this row on 2026-10-28 ([#46](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/46)) |
 | B-11 | Default listen `0.0.0.0` when the TLS pair is absent | loopback confinement of the API | `approved` default, documented risk | `app/main.py:326-327` |
 
 ### B-01 — Direct `:11440` reachability
@@ -327,12 +327,14 @@ verified by reading the code:
 - **B-09:** the LAN dashboard proxy adds a second reachable admin surface with
   the same flat key and a LAN CIDR perimeter (`guardian-…-dashboard.conf:23-24`).
   The static shell is intentionally public.
-- **B-10:** `GET /healthz` and `GET /metrics` are unauthenticated (matrix proxy
-  rows 8 and 27); verified live (`200` for both without a key). `/metrics`
-  discloses the loaded model name and GPU/VRAM figures
-  (`guardian_model_current_info{name="qwen3.8-27b-uncensored-ymq",…}`,
-  `guardian_vram_used_mb`). **[judgement]** Minor information disclosure; keep
-  it public for scrapers unless G1 decides otherwise.
+- **B-10:** `GET /healthz` is unauthenticated (matrix proxy row 8), verified live
+  (`200` without a key) and returns only `{"ok": true}`.
+  **Changed 2026-10-28:** `GET /metrics` used to be anonymous too (matrix proxy
+  row 27, `200` without a key) and disclosed the loaded model name and GPU/VRAM
+  figures (`guardian_model_current_info{name="qwen3.8-27b-uncensored-ymq",…}`,
+  `guardian_vram_used_mb`). It is now gated at the **`client`** scope
+  ([#46](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/46)): an
+  anonymous request gets the typed `401`, any valid key gets the same payload.
 - **B-11:** without the TLS pair, Guardian listens on `0.0.0.0:11434` by default
   (`app/main.py:326-327`). A mis-rendered drop-in would silently expose the API
   on the LAN without the nginx hop. `approved` default, worth a G1 config test.
@@ -373,11 +375,19 @@ rows — link to them.
 
 | Client class | Can reach | Cannot reach |
 | --- | --- | --- |
-| **Unauthenticated** (matrix `public` rows) | proxy `GET /healthz`, `GET /metrics`, the four FastAPI docs routes; dashboard `/`, `/static`, `/favicon.ico`, its docs routes | everything else → `401` (verified live for `/api/status` and `/api/stats`) |
-| **Any valid key** ("client" in intent) | all 41 proxy routes and all 16 dashboard routes except the `public` ones: inference (local *and* cloud, subject to `cloud_gateway_access`), model discovery, queue status/cancel, `/admin/load`, `/admin/unload`, `/api/config/reload`, `/api/keys` (mint), `/api/capture/*`, `/api/scaler/*`, `/api/session/*`, `/api/crashes`, `/api/status` | nothing on Guardian's surface is held back |
+| **Unauthenticated** (matrix `public` rows) | proxy `GET /healthz`, the four FastAPI docs routes; dashboard `/`, `/static`, `/favicon.ico`, its docs routes | everything else → `401` (verified live for `/api/status` and `/api/stats`; `/metrics` since 2026-10-28) |
+| **Any valid key** ("client" in intent) | all 41 proxy routes and all 16 dashboard routes except the `public` ones: inference (local *and* cloud, subject to `cloud_gateway_access`), model discovery, queue status/cancel, `/metrics` (scrape), `/admin/load`, `/admin/unload`, `/api/config/reload`, `/api/keys` (mint), `/api/capture/*`, `/api/scaler/*`, `/api/session/*`, `/api/crashes`, `/api/status` | nothing on Guardian's surface is held back |
 | **Key with `cloud_gateway_access: false`** | local inference and every local/admin/operator route | cloud models: hidden from `/v1/models` and rejected on routing (`routing.py:100`) — **unless** it mints a new key (B-08) |
 | **Holder of `CARETAKER_KEY`** | caretaker `/ensure`, `/unload`, `/status` (`:11441`) | prompt data |
 | **Host-local process** (filesystem access depends on Unix identity) | `:11440` unauthenticated inference; `:11441` only with the caretaker key. Processes running as `flip`, or otherwise authorized by Unix DAC, can also read the applicable credentials and the capture files. | files denied by Unix DAC (`0600` key store, `0640` WAL, `0750` capture dir); caretaker operations without its key |
+
+**Changed 2026-10-28:** `GET /metrics` left the unauthenticated set and now
+requires a `client` key ([#46](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/46)).
+It was the only anonymous route returning operational detail — model names,
+queue depth, process and GPU state — and no consumer scraped it, so nothing lost
+access. Loopback binding was rejected (it needs an nginx path split and would
+block a later LAN scraper) and so was payload reduction (the detail is exactly
+what a key holder wants from a scrape target).
 
 ### 4.3 Where a compromise escalates
 
@@ -397,6 +407,13 @@ rows — link to them.
    merely LAN connectivity.
 5. **nginx/host compromise → everything.** Plaintext on the `:11436` path
    (H2), `.env` and the key store readable as `flip` (H9).
+
+**Changed 2026-10-28:** the reconnaissance step that needed no credential at all
+— an anonymous `GET /metrics` from any LAN host — is closed; it requires a
+`client` key since
+[#46](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/46). Escalation
+paths 1-3 therefore all start from a valid key, and an unauthenticated LAN host
+can now read `/healthz` and the docs routes only.
 
 ---
 

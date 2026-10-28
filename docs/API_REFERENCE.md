@@ -15,7 +15,7 @@ migration window, rotation design — is
 
 | Port | Surface | Auth in current code |
 | --- | --- | --- |
-| `11434` | Guardian proxy and control plane | Required except `/healthz`, `/metrics` and the FastAPI docs routes (`/docs`, `/redoc`, `/openapi.json`, `/docs/oauth2-redirect`) |
+| `11434` | Guardian proxy and control plane | Required except `/healthz` and the FastAPI docs routes (`/docs`, `/redoc`, `/openapi.json`, `/docs/oauth2-redirect`); `/metrics` requires a key with the `client` scope |
 | `11437` | Dashboard UI and stats API | UI assets are unauthenticated; every `/api/*` route requires a Bearer key with the route's scope (`admin`) |
 | `11440` | Raw `llama-server` backend | Private Guardian-managed backend |
 
@@ -159,12 +159,44 @@ Common statuses:
 | Method | Path | Queued | Purpose |
 | --- | --- | --- | --- |
 | `GET` | `/healthz` | No | Liveness probe for the Guardian process only |
-| `GET` | `/metrics` | No | Prometheus scrape target |
 
 Notes:
 
 - `/healthz` does not validate backend health. Use `/api/status` for that.
-- `/metrics` is intentionally unauthenticated in current code.
+
+### Metrics endpoint
+
+| Method | Path | Queued | Scope | Purpose |
+| --- | --- | --- | --- | --- |
+| `GET` | `/metrics` | No | `client` | Prometheus scrape target |
+
+`/metrics` requires a key, like every other route except `/healthz` and the
+FastAPI docs routes ([#46](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/46)):
+its payload names the loaded models and exposes queue depth and process state, so
+it is key-holder data rather than a public probe. Any valid Guardian key with the
+`client` scope can scrape it (`operator` and `admin` imply `client`); an
+unauthenticated request returns `401`, and a `capture-export`-only key returns the
+typed `403`.
+
+Scrape it like this:
+
+```bash
+curl -s -H "Authorization: Bearer $GUARDIAN_API_KEY" http://127.0.0.1:11434/metrics
+```
+
+The body, content type (`text/plain; version=0.0.4`) and metric families are
+unchanged; only the credential requirement was added. Prometheus configuration
+therefore needs a bearer token (or `x-api-key` header) on the scrape target:
+
+```yaml
+scrape_configs:
+  - job_name: guardian
+    scheme: http
+    authorization:
+      credentials_file: /etc/prometheus/guardian.key
+    static_configs:
+      - targets: ["127.0.0.1:11434"]
+```
 
 ### Model metadata and compatibility endpoints
 
@@ -1247,7 +1279,9 @@ longer a live control path.
 
 ## Security and Backpressure Summary
 
-- Auth is enforced on `:11434` except for `/healthz` and `/metrics`.
+- Auth is enforced on `:11434` except for `/healthz` and the FastAPI docs routes;
+  `/metrics` requires a key with the `client` scope since
+  [#46](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/46).
 - Authorization is enforced per route (G1-01): the caller's key must hold the
   route's declared scope; `client` keys are refused on `/api/keys`,
   `/api/config/reload`, `/admin/*` and the capture routes. See

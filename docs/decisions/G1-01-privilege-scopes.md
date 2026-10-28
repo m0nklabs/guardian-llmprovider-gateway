@@ -82,6 +82,14 @@ This is the enforced mapping; it encodes the G0-01 inventory and is duplicated i
 this table honest). `HEAD` is folded into `GET`; the dashboard `/static` mount is
 declared as `MOUNT`.
 
+**Amended 2026-10-28:** `GET /metrics` moved from `public` to `client`
+([#46](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/46)). Its
+payload names the loaded models and exposes queue depth and process state, i.e.
+reconnaissance for any anonymous LAN host, while loopback binding (nginx path
+split; blocks a later LAN scraper) and payload reduction (the detail is what a
+key holder wants) were rejected. `/healthz` stays `public` so a liveness probe
+needs no key.
+
 
 | Method | Path | Scope | Rationale |
 | --- | --- | --- | --- |
@@ -119,7 +127,7 @@ declared as `MOUNT`.
 | `GET` | `/docs/oauth2-redirect` | `public` | No key by design (probe/docs/static asset). |
 | `GET` | `/favicon.ico` | `public` | No key by design (probe/docs/static asset). |
 | `GET` | `/healthz` | `public` | No key by design (probe/docs/static asset). |
-| `GET` | `/metrics` | `public` | No key by design (probe/docs/static asset). |
+| `GET` | `/metrics` | `client` | Operational internals (model names, queue depth, process state) belong to key holders, not anonymous LAN hosts — see issue [#46](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/46). |
 | `GET` | `/openapi.json` | `public` | No key by design (probe/docs/static asset). |
 | `GET` | `/redoc` | `public` | No key by design (probe/docs/static asset). |
 | `MOUNT` | `/static` | `public` | No key by design (probe/docs/static asset). |
