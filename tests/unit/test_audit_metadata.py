@@ -618,6 +618,115 @@ class TestAuthHeaderInvariant:
             max_body_bytes=1024,
         )
 
+        # Every step is asserted: a step that silently stops exercising its path
+        # would otherwise leave the invariant looking broader than it is.
+
+        # 1. auth success; 2. invalid key; 3. missing header.
+        assert proxy_client.get("/v1/queue/status", headers=_auth()).status_code == 200
+        assert (
+            proxy_client.get("/v1/queue/status", headers=_auth(UNKNOWN_TOKEN)).status_code
+            == 401
+        )
+        assert proxy_client.get("/v1/queue/status").status_code == 401
+        # 4. scope denial (no token spent: the rate check runs after authorization).
+        assert proxy_client.get("/api/keys", headers=_auth()).status_code == 403
+        # 5. rate-limit denial: burst 2, one token spent by step 1, the next call
+        #    spends the last, the one after it is refused.
+        assert proxy_client.get("/v1/queue/status", headers=_auth()).status_code == 200
+        rate_limited = proxy_client.get("/v1/queue/status", headers=_auth())
+        assert rate_limited.status_code == 429, rate_limited.text
+        assert rate_limited.headers.get("Retry-After")
+        # 6. body-too-large denial (the body bound runs before auth).
+        assert (
+            proxy_client.post(
+                "/v1/chat/completions",
+                headers=_auth(ADMIN_TOKEN),
+                content=b"y" * 4096,
+            ).status_code
+            == 413
+        )
+        # 7. queue-depth denial; changing the rate budget also resets the buckets,
+        #    so this step reaches admission instead of the limiter.
+        admission_config(
+            rate_limit={"requests_per_minute": 600, "burst": 600},
+            queue_max_depth=1,
+        )
+        queue = test_queue(max_concurrent=1, max_queue_depth=1, queue_timeout=5.0)
+        queue.submit("holder", "model", owner_id="holder")
+        assert (
+            proxy_client.post(
+                "/v1/chat/completions", headers=_auth(), json=_payload()
+            ).status_code
+            == 503
+        )
+        # 8. destination denial.
+        assert TestClient(_outbound_probe_app()).get("/outbound-probe").status_code == 502
+
+        lines = _gateway_lines(caplog)
+        assert lines, "no log lines captured — the demonstration would be vacuous"
+        for needle in self._needles():
+            assert needle not in serialized, f"audit record leaked {needle!r}: {serialized}"
+            for line in lines:
+                assert needle not in line, f"log line leaked {needle!r}: {line}"
+
+    def test_allow_direction(self, proxy_client, caplog):
+        caplog.set_level(logging.DEBUG)
+        # `/api/show` parses the body (so the payload really travels through the
+        # audited path) and answers locally; the model is unknown here, which is
+        # irrelevant — the authorization decision is what is audited.
+        response = proxy_client.post(
+            f"/api/show?trace={QUERY_MARKER}",
+            headers={
+                "Authorization": f"Bearer {CLIENT_TOKEN}",
+                "X-Request-Marker": HEADER_MARKER,
+            },
+            json=_payload(),
+        )
+        assert response.status_code == 404, response.text
+        record = _only_record()
+        assert record["decision"] == audit.ALLOW
+        assert record["key_fingerprint"] == _fingerprint(CLIENT_TOKEN)
+        self._assert_clean(record, caplog)
+
+    def test_deny_direction(self, proxy_client, caplog):
+        caplog.set_level(logging.DEBUG)
+        response = proxy_client.post(
+            f"/api/config/reload?trace={QUERY_MARKER}",
+            headers={
+                "Authorization": f"Bearer {CLIENT_TOKEN}",
+                "X-Request-Marker": HEADER_MARKER,
+            },
+            json=_payload(),
+        )
+        assert response.status_code == 403, response.text
+        record = _only_record()
+        assert record["decision"] == audit.DENY
+        assert record["reason"] == audit.REASON_INSUFFICIENT_SCOPE
+        self._assert_clean(record, caplog)
+
+    def test_the_record_cannot_carry_a_payload_by_construction(self):
+        """Schema closure: there is no field a payload could travel in."""
+        assert "body" not in audit.RECORD_FIELDS
+        assert "headers" not in audit.RECORD_FIELDS
+        assert "query" not in audit.RECORD_FIELDS
+        assert "prompt" not in audit.RECORD_FIELDS
+        assert "model" not in audit.RECORD_FIELDS
+
+
+# ── 4. The auth-header log invariant ──────────────────────────────────
+
+
+class TestAuthHeaderInvariant:
+    def test_no_bearer_reaches_a_log_line_on_any_exercised_path(
+        self, proxy_client, admission_config, test_queue, resolvable_models, caplog
+    ):
+        """Auth, scopes, rate, queue, admission and the destination guard."""
+        caplog.set_level(logging.DEBUG)
+        admission_config(
+            rate_limit={"requests_per_minute": 6, "burst": 2},
+            max_body_bytes=1024,
+        )
+
         # 1. auth success, 2. auth failure (invalid), 3. missing header
         proxy_client.get("/v1/queue/status", headers=_auth())
         proxy_client.get("/v1/queue/status", headers=_auth(UNKNOWN_TOKEN))
