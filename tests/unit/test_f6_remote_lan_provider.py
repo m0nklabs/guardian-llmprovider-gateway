@@ -119,8 +119,13 @@ def test_shipped_homelab_provider_file_markers():
     # Activation switches: only pinned while the placeholder address is still
     # present.  Once the operator fills in the real Windows host (HANDOFF F6),
     # the deployed checkout legitimately diverges — otherwise the full-suite
-    # pre-restart gate would fail on every later restart.
-    if "192.168.1.x" in cfg.get("base_url", ""):
+    # pre-restart gate would fail on every later restart.  The shape test (not a
+    # literal such as "192.168.1.x") is what makes this pin bite on the shipped
+    # "192.168.1.W" template.
+    from tests.unit.test_provider_placeholder_guard import is_placeholder_host, url_host
+
+    host = url_host(cfg.get("base_url", ""))
+    if host and is_placeholder_host(host):
         assert cfg["enabled"] is False, "placeholder config must stay disabled"
     # Secret hygiene applies REGARDLESS of activation state: api_key stays
     # ${VAR}-referenced, never an inline secret in the committed file.

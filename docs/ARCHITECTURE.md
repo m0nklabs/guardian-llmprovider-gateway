@@ -149,7 +149,8 @@ Guardian supports three routing dimensions:
 Guardian exposes both:
 
 - OpenAI-compatible `/v1/*`
-- Ollama-compatible `/api/chat`, `/api/generate`, `/api/tags`, `/api/version`
+- Ollama-compatible `/api/chat`, `/api/generate`, `/api/tags` and `/api/show`
+  (`/api/version` is deliberately not served; see `docs/API_REFERENCE.md`)
 
 Ollama requests are translated into OpenAI-style backend requests and then
 translated back to Ollama-style responses.

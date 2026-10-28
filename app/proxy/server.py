@@ -1184,10 +1184,6 @@ async def proxy_generate_ollama(request: Request, client_id: str = Depends(verif
     """
     return await _local_ollama.generate_ollama(request, client_id)
 
-async def get_version(client_id: str = Depends(verify_api_key)):
-    """Mimic Ollama version endpoint"""
-    return {"version": "0.1.27"}
-
 @app.get("/api/tags")
 async def proxy_tags_ollama(client_id: str = Depends(verify_api_key)):
     """Simulate Ollama /api/tags endpoint (Phase 5: delegated)."""
