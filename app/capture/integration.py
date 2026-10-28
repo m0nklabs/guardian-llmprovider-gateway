@@ -149,8 +149,7 @@ class CaptureController:
         # historical files is an operator-audited one-shot).
         try:
             ensure_media_directory(
-                Path(self._config.capture_root),
-                directory_mode=self._config.directory_mode,
+                Path(self._config.capture_root), self._config
             )
         except OSError as exc:
             logger.warning("Media directory mode could not be enforced: %s", exc)
@@ -340,8 +339,7 @@ class CaptureController:
                     request_messages,
                     Path(self._config.capture_root),
                     request_id,
-                    file_mode=self._config.file_mode,
-                    directory_mode=self._config.directory_mode,
+                    self._config,
                 )
 
             event = build_request_received_event(

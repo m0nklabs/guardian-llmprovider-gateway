@@ -36,8 +36,11 @@ DEFAULT_MAX_FILE_AGE_SECONDS = 3600  # 1 hour
 #: (``file_mode``/``directory_mode``) *and* the media extraction writer
 #: (``media/`` and the image files inside it): both hold user content and
 #: neither may depend on the process umask.  World access is never granted;
-#: :meth:`CaptureConfig._validate` enforces that for overrides too.
-DEFAULT_FILE_MODE = 0o640  # owner rw, group r
+#: :meth:`CaptureConfig._validate` enforces that for overrides too.  Group read
+#: is deliberate: the WAL and the media files it references must stay readable by
+#: the same flip-group consumer (Keanu), so media follows the WAL pair instead of
+#: being owner-only.
+DEFAULT_FILE_MODE = 0o640  # owner rw, group r (the WAL pair)
 DEFAULT_DIRECTORY_MODE = 0o750  # owner rwx, group rx
 
 #: Inbound request headers consulted for caller correlation (C6).  Lowercase
