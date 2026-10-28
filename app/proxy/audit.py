@@ -78,7 +78,6 @@ DEFAULT_INCLUDE_KEY_NAME = True
 
 ALLOW = "allow"
 DENY = "deny"
-DECISIONS = (ALLOW, DENY)
 
 #: Reason codes. Closed vocabulary: the record and the metric label both draw
 #: from it, so no request value can widen either.
@@ -588,10 +587,6 @@ def mark_denial(
 # ── Decision-point helpers ─────────────────────────────────────────────
 
 
-def _surface_of(scope: Mapping[str, Any] | None) -> str:
-    return str((scope or {}).get("guardian_audit_surface") or "unknown")
-
-
 def _route_template(scope: Mapping[str, Any]) -> str | None:
     route = scope.get("route")
     path = getattr(route, "path", None)
@@ -698,7 +693,6 @@ class AuditMiddleware:
 
         state: dict[str, Any] = {}
         scope[_STATE_KEY] = state
-        scope.setdefault("guardian_audit_surface", self.surface)
         token = _CURRENT.set(state)
         status: int | None = None
 
