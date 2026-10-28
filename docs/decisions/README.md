@@ -33,3 +33,4 @@ decision records"); this directory is where they live.
 | [G1-01](G1-01-privilege-scopes.md) | Privilege scopes and admin isolation | Accepted | 2026-10-28 |
 | [G1-02](G1-02-destination-and-credentials.md) | Destination allowlist, credential isolation and SSRF resistance | Accepted | 2026-10-28 |
 | [G1-03](G1-03-admission-and-audit.md) | Bounded admission and metadata audit | Accepted | 2026-10-28 |
+| [G1-04](G1-04-log-injection.md) | Log-injection guard: one sanitizer, and a model that can see it | Accepted | 2026-10-28 |
