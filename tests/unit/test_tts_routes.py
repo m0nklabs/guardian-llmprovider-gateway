@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 
 from app.gateway import speech_routing as sr
 from app.gateway import tts as tts_mod
+from app.log_safety import clean_log_value
 
 
 def _is_cloud_host(url: str) -> bool:
@@ -326,8 +327,10 @@ async def test_fish_upstream_content_type_sanitized(monkeypatch):
     }
     _patch(monkeypatch, docs=docs)
     # httpx rejects raw CRLF headers itself; the sanitizer is the second
-    # layer — pin it directly on a hostile token value.
-    assert tts_mod._clean_log("audio/mpeg\r\nX-Injected: yes", 64) == "audio/mpeg X-Injected: yes"
+    # layer — pin it directly on a hostile token value.  The shared helper
+    # replaces CR and then LF with a space, so the forged line cannot start;
+    # the two spaces are that removal, not a formatting accident.
+    assert clean_log_value("audio/mpeg\r\nX-Injected: yes", 64) == "audio/mpeg  X-Injected: yes"
     _patch_client(monkeypatch, lambda url, j, c, p, h, f=None, d=None: httpx.Response(
         200, content=b"x", headers={"content-type": "audio/mpeg; boundary=weird"}))
     resp = await tts_mod.handle_audio_speech(_FakeRequest(_body(
