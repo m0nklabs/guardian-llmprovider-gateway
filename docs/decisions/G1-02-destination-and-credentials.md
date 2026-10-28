@@ -458,7 +458,7 @@ call a URL built by interpolating a request path (`path`, `*_path`) — the clas
 of bug behind all four alerts is a CI failure now, with a planted pre-fix
 snippet proving the scan is not vacuous. Configuration-derived interpolations
 (`self.server_url`, `route['base_url']`) are out of that rule's scope.
-`tests/unit/test_v1_path_bound.py` (12 tests) drives the four real handlers.
+`tests/unit/test_v1_path_bound.py` (11 tests) drives the four real handlers.
 
 ### Known limits, recorded
 
