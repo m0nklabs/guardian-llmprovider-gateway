@@ -51,6 +51,16 @@ Anything else is out of scope, even when it looks related.
 Anything short of that stays a PR for the operator. When in doubt, do not
 merge — ask in the report.
 
+**A red CodeQL check is not yet a finding.** Before treating it as one, look at
+*which lines* the alert annotations name: GitHub counts alerts on a PR against a
+base analysis, and when the branch was cut before other merges landed the
+comparison reports standing alerts as new. Observed on #69, where the check
+claimed "32 new alerts including 1 high" for a PR whose four changed files
+contained none of them — merging current `main` into the branch turned it green
+with no change to the flagged files. So: if the flagged lines are outside your
+diff, merge `main` in and re-run; only investigate the alerts when they are
+actually yours. Never dismiss an alert to make a check go green.
+
 **Not granted (hard stops):**
 
 1. **Never merge outside the gate.** Never approve a PR (no self-approval),
