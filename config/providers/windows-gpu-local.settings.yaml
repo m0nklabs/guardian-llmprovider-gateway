@@ -3,11 +3,26 @@
 # caretaker (operator-managed, NSSM service on Windows); Guardian only forwards
 # traffic — NO lifecycle / idle-unload / VRAM scheduler / auto-switch for this GPU.
 #
-# ACTIVATED 2026-09-11 (guardian session): host 192.168.1.W, caretaker live on
+# 192.168.1.W IS A PER-DEPLOYMENT PLACEHOLDER, NOT AN ADDRESS.  It is not an IP
+# literal and does not resolve (gaierror -2): every URL below is unresolved
+# template text that each deployment fills in with the real Windows host.  The
+# provider ships DISABLED (issue #48) because enabled-with-a-placeholder makes
+# every catalog and health pass carry a provider that can never answer, and
+# because "fixing" the address by guessing turns it into a second LAN provider
+# that carries cleartext Bearer keys over four hops on :11440/:11441/:11450/
+# :11451 — the real one is 14700k-local → 192.168.1.245, documented as B-03 in
+# docs/G0_TRUST_BOUNDARY_THREAT_MODEL.md.
+# Enabling it is a DELIBERATE, reviewed decision: fill in the real address, then
+# set enabled: true.  Never guess an address to make a check green.
+# tests/unit/test_provider_placeholder_guard.py fails an enabled provider file
+# whose URLs still carry a placeholder host.
+#
+# ACTIVATED 2026-09-11 (guardian session) on the operator's Windows host, then
+# DEACTIVATED because this checkout only ever held the placeholder: caretaker on
 # :11441 (NSSM), llama-server b10964 CUDA 13.3 on :11440, model qwen3.5-9b
-# (ngl 24, 16k ctx — display-GPU VRAM-realistic, see the Windows models file).
+# (ngl 24, 16k ctx — display-GPU VRAM-realistic; see the Windows models file).
 local: false
-enabled: true
+enabled: false
 base_url: http://192.168.1.W:11440/v1
 api_key: ${WINDOWS_LAN_KEY}
 brand: windows
