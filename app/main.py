@@ -20,6 +20,7 @@ if _ENV_FILE.exists():
 load_dotenv(_ENV_FILE)
 
 from app.gateway import admin_api as _admin_api
+from app.proxy import admission as _admission
 from app.proxy.auth import (
     _token_fingerprint,
     generate_api_key,
@@ -79,6 +80,10 @@ def _configure_static_mount(application: FastAPI, static_dir: pathlib.Path) -> N
 
 # Main App (UI + API)
 app = FastAPI()
+
+# G1-03 admission: the same request-body bound as the proxy surface, so an
+# oversized upload cannot bypass it by arriving on :11437.
+_admission.install_body_limit(app)
 
 # Serve UI
 _configure_static_mount(app, pathlib.Path("app/ui/static"))

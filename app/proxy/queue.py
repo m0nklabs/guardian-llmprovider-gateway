@@ -9,6 +9,14 @@ it elapses the request finalizes as ``expired`` with ``cancel_reason:
 A non-positive (or non-finite) budget disables enforcement and restores the
 unbounded wait, in which case the request stays queued until it disconnects or
 is cancelled.
+
+**Waiting depth** is bounded independently (G1-03): ``max_queue_depth`` caps how
+many requests may be *waiting*; a submission beyond it raises
+:class:`QueueDepthExceeded` before any entry is registered and is reported to
+the client as the stable ``503 queue_full`` (``app/proxy/admission.py``). The
+two bounds answer different questions — the depth bound keeps Guardian from
+accumulating waiting clients, the wait budget keeps one waiting client from
+waiting forever — and neither replaces the other.
 """
 
 import asyncio
@@ -25,6 +33,11 @@ ACTIVE_STATES = {"running", "cancelling"}
 #: Shipped default wait budget for a queued request, mirrored by
 #: ``queue.queue_timeout_seconds`` in ``config/global.settings.yaml``.
 DEFAULT_QUEUE_TIMEOUT_S = 1800.0
+
+#: Shipped default bound on *waiting* requests (G1-03), mirrored by
+#: ``admission.queue_max_depth`` in ``config/global.settings.yaml``. Thirty-two
+#: times the highest depth ever measured (``docs/G0_BASELINE.md`` §2.5: depth 1).
+DEFAULT_QUEUE_MAX_DEPTH = 32
 
 #: Cancel reason recorded when a queued request exceeds its wait budget.
 QUEUE_TIMEOUT_REASON = "queue_timeout"
@@ -89,6 +102,32 @@ class QueueAdmissionRejected(Exception):
         self.existing_status = existing_status
         self.reason = reason
         self.message = message
+
+
+class QueueDepthExceeded(Exception):
+    """Raised when the waiting queue is at its configured bound.
+
+    ``reason`` is the stable error name the HTTP layer reports: ``queue_full``
+    for a reached bound, ``admission_misconfigured`` when the bound could not be
+    resolved at startup (``max_queue_depth is None``) — the request is refused
+    either way, so a broken configuration can never mean "unbounded".
+    """
+
+    def __init__(
+        self,
+        *,
+        max_queue_depth: int | None,
+        queue_length: int,
+        max_concurrent: int,
+        reason: str = "queue_full",
+    ):
+        super().__init__(
+            f"queue admission refused: {queue_length} waiting, limit {max_queue_depth}"
+        )
+        self.max_queue_depth = max_queue_depth
+        self.queue_length = queue_length
+        self.max_concurrent = max_concurrent
+        self.reason = reason
 
 
 class QueueRequestCancelled(Exception):
@@ -158,8 +197,18 @@ class InferenceQueue:
         max_concurrent: int = 1,
         queue_timeout: float | None = DEFAULT_QUEUE_TIMEOUT_S,
         history_ttl: float = 300.0,  # more aggressive pruning (was 900); overridable via settings.yaml queue.history_ttl
+        max_queue_depth: int | None = DEFAULT_QUEUE_MAX_DEPTH,
     ):
         self.max_concurrent = max_concurrent
+        # None means "the configured bound could not be resolved": refuse, never
+        # fall back to unbounded (see QueueDepthExceeded).
+        if max_queue_depth is not None and (
+            isinstance(max_queue_depth, bool) or not isinstance(max_queue_depth, int) or max_queue_depth < 1
+        ):
+            raise ValueError(
+                f"max_queue_depth must be a positive integer or None, got {max_queue_depth!r}"
+            )
+        self.max_queue_depth = max_queue_depth
         # Normalized once here: 0.0 means "no queue timeout" (not enforced).
         self.queue_timeout = _normalize_queue_timeout(queue_timeout)
         self.history_ttl = history_ttl
@@ -270,6 +319,20 @@ class InferenceQueue:
         normalized_owner_id = _normalize_owner_id(owner_id, normalized_client_id)
         if normalized_owner_id is None:
             raise ValueError("authenticated owner_id required for queue submission")
+
+        if self.max_queue_depth is None:
+            raise QueueDepthExceeded(
+                max_queue_depth=None,
+                queue_length=len(self._waiting),
+                max_concurrent=self.max_concurrent,
+                reason="admission_misconfigured",
+            )
+        if len(self._waiting) >= self.max_queue_depth:
+            raise QueueDepthExceeded(
+                max_queue_depth=self.max_queue_depth,
+                queue_length=len(self._waiting),
+                max_concurrent=self.max_concurrent,
+            )
 
         request_id = request_id or str(uuid.uuid4())
         if request_id in self._entries:
@@ -511,6 +574,7 @@ class InferenceQueue:
             "queue_length": len(self._waiting),
             "active_count": len(self._active),
             "max_concurrent": self.max_concurrent,
+            "max_queue_depth": self.max_queue_depth,
             "queue_timeout_s": self.queue_timeout,
             # Derived from the configured budget: 0 (or absent/negative, which
             # normalize to 0) means the wait is unbounded and thus unenforced.

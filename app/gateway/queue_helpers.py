@@ -15,7 +15,8 @@ from typing import Any
 from fastapi import HTTPException, Request
 from starlette.status import HTTP_401_UNAUTHORIZED
 
-from app.proxy.queue import QueueAdmissionRejected, QueueRequestCancelled
+from app.proxy import admission as _admission
+from app.proxy.queue import QueueAdmissionRejected, QueueDepthExceeded, QueueRequestCancelled
 
 logger = logging.getLogger("Guardian")
 
@@ -173,6 +174,11 @@ async def begin_queued_request(request: Request, client_id: str, model: str) -> 
             model,
             owner_id=queue_owner_id,
         )
+    except QueueDepthExceeded as exc:
+        # G1-03: the waiting queue is at its bound. Stable 503 `queue_full` with
+        # the configured Retry-After; the request is refused before it is
+        # registered, so the queue wait budget never applies to it.
+        raise _admission.queue_depth_error(exc) from exc
     except QueueAdmissionRejected as exc:
         raise HTTPException(
             status_code=409,

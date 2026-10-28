@@ -85,6 +85,7 @@ from app.local_inference import ollama as _local_ollama
 from app.paths import LLAMA_SLOTS_DIR
 
 # ── Proxy lifespan (Phase 5 extraction) ──────────────────────────────
+from app.proxy import admission as _admission
 from app.proxy import lifespan as _lifespan
 
 # ── Proxy process management (Phase 5 extraction) ───────────────────
@@ -787,6 +788,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# G1-03 admission: bound the request body on this surface too. Installed behind
+# CORS (an oversized browser request still gets readable CORS headers on its
+# typed 413) and ahead of the router (the body is never buffered past the
+# bound). The dashboard surface gets the same middleware in app/main.py.
+_admission.install_body_limit(app)
+
 model_manager = ModelManager()
 
 # Initialize gateway context_metadata with singleton dependencies
@@ -1058,10 +1065,17 @@ def _load_queue_config() -> dict:
 
 
 _queue_cfg = _load_queue_config()
+# G1-03: the waiting depth is an admission bound (`admission.queue_max_depth`),
+# resolved once here because the queue object is built at startup — restart-only,
+# exactly like the rest of the queue section. `None` means "the configured bound
+# could not be resolved"; the queue then refuses every submission (fail-closed)
+# instead of silently waiting unbounded.
+_admission_limits = _admission.resolve_limits()
 inference_queue = InferenceQueue(
     max_concurrent=_queue_cfg.get("max_concurrent", 1),
     queue_timeout=_queue_cfg.get("queue_timeout_seconds", DEFAULT_QUEUE_TIMEOUT_S),
     history_ttl=_queue_cfg.get("history_ttl", 300),
+    max_queue_depth=_admission_limits.queue_max_depth,
 )
 
 # Build the remote caretaker control-API client (F5 GATEWAY_MANAGER_SPLIT).
