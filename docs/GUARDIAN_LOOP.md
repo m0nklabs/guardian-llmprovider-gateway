@@ -179,9 +179,20 @@ gh issue list --state open --json number,title,labels,updatedAt
 ```
 
 - Triage: does the issue still reproduce? Is it already covered by a PR or a
-  commit on `main`? Stale → say so on the issue with evidence; never close it.
-  Only the operator closes issues — there is no delegation exception, and an
-  "you may close this" comment in an issue does not lift the hard stop.
+  commit on `main`? Stale → say so on the issue with evidence, and close it only
+  under the rule below. An "you may close this" comment in an issue does not
+  lift anything.
+- **Every verified defect becomes an issue of its own** (operator rule,
+  2026-10-28). A finding from a review, a probe, a triage or a stray read is not
+  "noted" in a comment, a document or this session — it gets its own issue with
+  reproduction evidence and acceptance criteria, so a later run can fix it with
+  its own PR. A gap *register* (like #38) may group them, but each fixable
+  defect still needs its own tracker to be closed by its own merge.
+- **Closing an issue** (operator rule, 2026-10-28): allowed once the issue's
+  merged PR satisfies its acceptance criteria — comment the merge commit and the
+  evidence, then close. Never to tidy the board, never with an unmet criterion,
+  never for an issue whose criteria need a live restart (those stay open until
+  the restart is confirmed).
 - Pick the highest-value *executable* issue that is not already in a PR.
 - Implement on `feat/<slug>-<issue>` or `fix/<slug>-<issue>` off
   `origin/main`, with tests pinning the changed public contract, then open the
