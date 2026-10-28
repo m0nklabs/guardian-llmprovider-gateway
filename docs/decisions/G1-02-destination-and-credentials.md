@@ -376,3 +376,99 @@ converted paths: refusal for an unapproved destination, refusal for a resolver
 answer outside a pin, the pinned-address connect on the allowed path, the
 preserved streaming/plain timeouts, and the audit record for a refused hop.
 This class of omission can no longer reach `main` unreviewed.
+
+## Amendment 2026-10-28 — the allowlist cannot see a path (#75)
+
+§2.2 says the policy "deliberately does not model HTTP method or path policy
+beyond the URL". That boundary is correct and stays: the guard decides *where*
+a request goes, not *which endpoint of an approved destination* it reaches. Four
+`py/partial-ssrf` alerts sat exactly on that boundary, all the same shape — a
+client-supplied `{path:path}` route parameter spliced onto a configured base
+URL (`f"{_llama_server_url}/v1/{path}"`). This amendment records what each site
+actually exposes, what the guard does and does not absorb, and the explicit
+bound that now covers the part the guard cannot see.
+
+**What was true.** All four sites already used
+`destination_policy.guarded_async_client(...)`, so every hop was validated as a
+destination: the assembled URL's scheme, host and port were checked against the
+allowlist, the connection was pinned to a validated address, and a refused hop
+wrote a G1-03 audit record. The client could not choose the host: `path` is
+appended *after* the authority, and no tested component (`..`, `%2e`, `@`,
+`//`, `\`, NUL, `#`) moves it — `tests/unit/test_upstream_url.py::test_a_hostile_component_can_never_move_the_destination`.
+The destination half of #75 was genuinely absorbed.
+
+**What was missed.** The client could still choose the *endpoint*.
+`httpx` normalizes dot segments before the request leaves the process, so
+`POST /v1/../slots` is sent as `POST /slots` — the configured backend's
+slot-management endpoint, at the approved host and port, with an approved
+`Host`. The guard validated that hop and allowed it
+(`tests/unit/test_upstream_url.py::test_the_guard_accepts_the_escape_the_builder_refuses`).
+Both `/v1/{path:path}` routes are `Scope.CLIENT` (`app/proxy/scopes.py`), so any
+onboarded key could reach the backend endpoints Guardian uses *internally* —
+`/props`, `/slots/0?action=save|restore` (`app/gateway/sessions.py`,
+`app/gateway/context_metadata.py`), `/slots` (live prompt state of other
+requests), `/metrics`, `/health`, `/tokenize`, `/apply-template`. That is
+endpoint confusion and cross-client prompt exposure, not SSRF: no new host, no
+new credential, no redirect. Same class at the GET passthrough, which also
+forwarded arbitrary query parameters to whatever endpoint the path selected.
+
+### The four sites, before and after
+
+| Site (now) | Who controls what | What stops it | Test that proves it |
+| --- | --- | --- | --- |
+| `app/gateway/routing.py:216` (alert #13, `:255`) — POST, non-inference passthrough | `path` → the whole path after `/v1/`; the authority is `_llama_server_url` from `config/global.settings.yaml` and is not reachable from the request | `backend_v1_url()` before the body is read: dot segments (`..`, `%2e%2e`, `%252e…`), backslash, absolute path, `?`/`#`, control characters → `400 path_not_allowed` with a specific `path_reason`; the assembled URL is re-parsed and must stay under `/v1/`. Destination: the guard, unchanged | `test_v1_path_bound.py::test_post_passthrough_refuses_a_dot_segment_before_reading_the_body`, `::test_post_passthrough_forwards_a_legitimate_path_unchanged`, `::test_post_passthrough_refuses_an_unapproved_backend_port` |
+| `app/gateway/routing.py:1057` (alert #14, `:1048`) — POST, non-streaming inference hop | same `path`; same base URL | the same single validated `upstream_url`, used for the hop (no second assembly); the guard still owns the destination, and its refusal reaches the client as this branch's 502 detail | `test_v1_path_bound.py::test_nonstreaming_inference_hop_sends_the_validated_v1_url`, `::test_inference_hop_surfaces_the_guards_refusal` |
+| `app/gateway/routing.py:1072` (alert #15, `:1063`) — the retry after `httpx.ConnectError` | same `path` | the retry reuses that same validated URL object; a reload cannot re-introduce an unvalidated string | `test_v1_path_bound.py::test_the_reload_retry_reuses_the_same_validated_url` |
+| `app/proxy/server.py:1555` (alert #12, `:1552`) — GET passthrough | `path` → the endpoint; `request.query_params` → the query of that same endpoint | `backend_v1_url()` before the client is built; the query is forwarded as typed parameters and can only select among results of the already-chosen `/v1/…` endpoint, never its path or destination | `test_v1_path_bound.py::test_get_passthrough_refuses_a_dot_segment`, `::test_get_passthrough_forwards_a_legitimate_path_and_its_query`, `::test_get_route_refuses_an_unapproved_backend_destination` |
+
+Two sibling constructions with the same shape (`routing.py:803`, `:821`, the
+streaming branch and its retry) were converted to the same builder; they never
+carried their own alert.
+
+### What was constrained, and how
+
+`app/upstream_url.py` is the one builder for this shape:
+`backend_v1_url(base_url, path)` for the local backend (`/v1` prefix) and
+`build_upstream_url(base_url, path, prefix=...)` for a base that already
+carries its own API prefix. It validates the component (no dot segment after
+repeated percent-decoding, no `\`, `?`, `#`, control characters, no absolute
+path), formats the URL in one named function, then **re-parses the result** and
+refuses it unless scheme, host and port are the base's and the path is still
+inside the template's prefix (`path_escape`, `destination_changed`,
+`query_in_path`). The second layer is not decoration: it fires when the
+component check is bypassed, and it is the check that would catch a "cleaner"
+`urljoin`-based join, which treats `//host/x` as a new authority
+(`test_the_second_layer_refuses_an_escape_the_first_layer_missed`,
+`test_the_invariant_catches_a_join_that_would_move_the_destination`).
+
+Deliberately **not** done: no endpoint-name allowlist (endpoint *names* are the
+backend's contract; bounding the shape keeps every legitimate `/v1/…` call,
+pinned by `test_legitimate_v1_paths_still_build_the_same_url`), and no change to
+the destination allowlist — that is policy, not an SSRF fix.
+
+### Where it is enforced now
+
+`tests/unit/test_upstream_url.py` pins the builder, the guard's blindness to the
+path, and a recurrence guard: no module under `app/` may hand an outbound httpx
+call a URL built by interpolating a request path (`path`, `*_path`) — the class
+of bug behind all four alerts is a CI failure now, with a planted pre-fix
+snippet proving the scan is not vacuous. Configuration-derived interpolations
+(`self.server_url`, `route['base_url']`) are out of that rule's scope.
+`tests/unit/test_v1_path_bound.py` (12 tests) drives the four real handlers.
+
+### Known limits, recorded
+
+- **`ProviderRegistry.build_forward_url`** (`app/proxy/providers.py:774`,
+  `f"{provider.base_url}/{path}"`) has the same shape and is *not* one of the
+  four #75 alerts. It is left unchanged: the destination there is the provider
+  the caller's own key already belongs to and the traversal can only reach that
+  provider's own API surface. `build_upstream_url(provider.base_url, path)` is
+  the drop-in bound if a follow-up wants it
+  (`test_the_provider_base_shape_is_bounded_by_the_same_builder` shows the
+  primitive already covers it).
+- **Refusal surface unchanged.** The inference branch wraps upstream failures in
+  its own 502, so a guard refusal reaches the client as that 502's detail
+  (message carries `destination denied (<reason>)`) rather than as a typed
+  `destination_denied` body; the passthrough branches raise the typed error
+  unchanged. Shaping the client-facing error is G1-03 admission work, not part
+  of this bound.

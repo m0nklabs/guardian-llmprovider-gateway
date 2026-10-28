@@ -20,6 +20,7 @@ from fastapi import HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
 from app.destination_policy import guarded_async_client
+from app.upstream_url import backend_v1_url
 from app.capture.config import PROTOCOL_ANTHROPIC, PROTOCOL_OPENAI, ROUTE_LOCAL
 from app.capture.policy import PolicyResult
 from app.capture.redactor import (
@@ -206,6 +207,13 @@ def init(
 
 
 async def route_v1_post(path: str, request: Request, client_id: str):
+    # Validate the client-supplied path *before* anything is read or routed
+    # (issue #75): `path` may only select an endpoint under the backend's /v1
+    # namespace. The destination allowlist below the transport cannot see this
+    # — `httpx` normalizes `/v1/../props` to `/props` on the approved host — so
+    # the URL is built once here, from the template plus this validated
+    # component, and every local hop reuses it.
+    upstream_url = backend_v1_url(_llama_server_url, path)
     body = await request.body()
     _set_request_usage_metadata(request, streamed=False)
 
@@ -253,7 +261,7 @@ async def route_v1_post(path: str, request: Request, client_id: str):
         timeout = httpx.Timeout(600.0, connect=10.0)
         async with guarded_async_client(timeout=timeout, purpose="local-inference") as client:
             resp = await client.post(
-                f"{_llama_server_url}/v1/{path}",
+                upstream_url,
                 content=body,
                 headers={"Content-Type": request.headers.get("Content-Type", "application/json")}
             )
@@ -792,7 +800,7 @@ async def route_v1_post(path: str, request: Request, client_id: str):
             client = guarded_async_client(timeout=stream_timeout, purpose="local-inference")
             req = client.build_request(
                 "POST",
-                f"{_llama_server_url}/v1/{path}",
+                upstream_url,
                 content=body,
                 headers={"Content-Type": request.headers.get("Content-Type", "application/json")},
             )
@@ -810,7 +818,7 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                 client = guarded_async_client(timeout=stream_timeout, purpose="local-inference")
                 req = client.build_request(
                     "POST",
-                    f"{_llama_server_url}/v1/{path}",
+                    upstream_url,
                     content=body,
                     headers={"Content-Type": request.headers.get("Content-Type", "application/json")},
                 )
@@ -1046,7 +1054,7 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                 try:
                     post_task = asyncio.create_task(
                         client.post(
-                            f"{_llama_server_url}/v1/{path}",
+                            upstream_url,
                             content=body,
                             headers={"Content-Type": request.headers.get("Content-Type", "application/json")},
                         )
@@ -1061,7 +1069,7 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                     try:
                         post_task = asyncio.create_task(
                             client.post(
-                                f"{_llama_server_url}/v1/{path}",
+                                upstream_url,
                                 content=body,
                                 headers={"Content-Type": request.headers.get("Content-Type", "application/json")},
                             )
