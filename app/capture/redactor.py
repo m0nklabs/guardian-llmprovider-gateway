@@ -24,6 +24,8 @@ import json
 import logging
 import re
 import struct
+
+from app.capture.data_url import parse_data_url
 from typing import Any
 
 logger = logging.getLogger("Guardian.Capture.Redactor")
@@ -482,13 +484,13 @@ def _extract_image_metadata(data_url: str) -> dict[str, Any] | None:
     if not data_url or not isinstance(data_url, str):
         return None
 
-    # Parse data URL: data:<mime>;base64,<data>
-    match = re.match(r"data:([^;]+);base64,(.*)", data_url, re.DOTALL)
-    if not match:
+    # Parse data URL through the one shared parser (app/capture/data_url.py): the
+    # duplicated regex here was the second half of the ReDoS shape in issue #71.
+    parsed = parse_data_url(data_url)
+    if parsed is None:
         return None
 
-    mime_type = match.group(1)
-    b64_data = match.group(2)
+    mime_type, b64_data = parsed
 
     try:
         image_bytes = base64.b64decode(b64_data)
