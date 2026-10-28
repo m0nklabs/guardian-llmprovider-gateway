@@ -577,7 +577,7 @@ async def reload_config(client_id: str) -> Any:
 
     logger.info(
         "🔄 Config reload by admin '%s': reloaded=%s errors=%s",
-        client_id, reloaded, errors or "none",
+        clean_log_value(client_id), reloaded, errors or "none",
     )
     finalized_not_reloaded = sorted(set(not_reloaded))
     return {
@@ -735,8 +735,12 @@ async def scaler_recommend(request: Request, client_id: str) -> Any:
 
     if _state.scaler.config.get("log_decisions"):
         logger.info(
-            f"📋 [{client_id}] Scaler recommend: profile={profile_name} "
-            f"pressure={pressure} → thinking_budget={thinking_budget}, max_tokens={max_tokens}"
+            "📋 [%s] Scaler recommend: profile=%s pressure=%s → thinking_budget=%s, max_tokens=%s",
+            clean_log_value(client_id),
+            profile_name,
+            pressure,
+            thinking_budget,
+            max_tokens,
         )
 
     return {

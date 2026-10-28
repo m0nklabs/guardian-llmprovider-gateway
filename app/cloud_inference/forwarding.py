@@ -41,21 +41,10 @@ from app.gateway.queue_helpers import (
     watch_client_disconnect,
 )
 from app.gateway.streaming import StreamProgressWatchdog
+from app.log_safety import clean_log_value
 from app.proxy.providers import ProviderRegistry, _expand_env
 
 logger = logging.getLogger("Guardian")
-
-
-def _log_safe(value: object, limit: int = 200) -> str:
-    """Render a possibly user-provided value for one log line.
-
-    Control characters (newline, CR, …) are collapsed to spaces so a request
-    field cannot forge log entries (CodeQL log-injection), and the result is
-    hard-capped so a hostile payload cannot bloat the log.
-    """
-    text = str(value)
-    cleaned = "".join(ch if ch.isprintable() else " " for ch in text)
-    return cleaned[:limit]
 
 
 # ── Injected (set once at startup by init()) ─────────────────────────
@@ -586,7 +575,7 @@ async def forward_to_cloud_provider(
             logger.warning(
                 "🔀 Failover: %s candidate '%s/%s' could not be ensured (%s) — next candidate",
                 "local" if getattr(provider, "managed", False) else "remote",
-                provider.name, upstream_model, ensure_error,
+                provider.name, clean_log_value(upstream_model), clean_log_value(ensure_error),
             )
             if not is_last_attempt:
                 continue
@@ -626,7 +615,7 @@ async def forward_to_cloud_provider(
         except ResponsesRequestError as exc:
             logger.info(
                 "🌉 Responses bridge: rejecting /v1/responses request for '%s': %s",
-                _log_safe(model_name), _log_safe(exc),
+                clean_log_value(model_name), clean_log_value(exc),
             )
             _finish_live_request_usage(request, status_code=400, response_bytes=0)
             _dispatch_capture_request_failed(
@@ -659,17 +648,17 @@ async def forward_to_cloud_provider(
         if failover_group is not None:
             logger.info(
                 "🔀 Failover group '%s': attempt %d/%d via '%s'",
-                failover_group,
+                clean_log_value(failover_group),
                 attempt_index + 1,
                 len(attempts),
                 provider.name,
             )
         logger.info(
             "☁️  Cloud route: client '%s' → %s /v1/%s (model: %s, stream: %s)",
-            client_id,
+            clean_log_value(client_id),
             provider.name,
-            path,
-            model_name,
+            clean_log_value(path),
+            clean_log_value(model_name),
             is_stream,
         )
 
@@ -1054,8 +1043,8 @@ async def forward_to_cloud_provider(
                     ) if capture_ctx is not None else None
                     logger.warning(
                         "⚠️  Upstream '%s' answered 200 with an unusable body (%s); returning 502",
-                        model_name,
-                        _upstream_invalid,
+                        clean_log_value(model_name),
+                        clean_log_value(_upstream_invalid),
                     )
                     raise HTTPException(
                         status_code=502,

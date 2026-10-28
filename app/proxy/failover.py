@@ -46,6 +46,7 @@ from typing import Callable
 
 import yaml
 
+from app.log_safety import clean_log_value
 from app.paths import global_settings_file
 
 logger = logging.getLogger("Guardian.Failover")
@@ -168,7 +169,7 @@ class ProviderHealthTracker:
                     "🔴 Failover: '%s/%s' tripped after %d consecutive failures; "
                     "skipping for %.0fs",
                     provider,
-                    model,
+                    clean_log_value(model),
                     count,
                     self._cooldown_seconds,
                 )
@@ -212,7 +213,7 @@ class ProviderHealthTracker:
                 "🟡 Failover: '%s/%s' rate-limited (429); skipping for %.0fs "
                 "— concurrent requests use next candidate",
                 provider,
-                model,
+                clean_log_value(model),
                 self._rate_limit_cooldown_seconds,
             )
 

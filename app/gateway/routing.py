@@ -33,6 +33,7 @@ from app.engine.manager import ModelLoadError
 from app.gateway import caretaker_runtime as _caretaker_runtime
 from app.gateway.normalization import openai_error_response
 from app.gateway.streaming import StreamProgressWatchdog
+from app.log_safety import clean_log_value
 from app.proxy.anthropic_bridge import _format_sse_event
 from app.proxy.responses_bridge import (
     responses_capture_request,
@@ -594,7 +595,9 @@ async def route_v1_post(path: str, request: Request, client_id: str):
 
                     if needs_model_switch and not _model_manager.is_switch_allowed(client_id):
                         logger.warning(
-                            f"🔒 Client '{client_id}' not in switch_allowlist, blocked switch to '{desired_model}'. Forwarding to current model."
+                            "🔒 Client '%s' not in switch_allowlist, blocked switch to '%s'. Forwarding to current model.",
+                            clean_log_value(client_id),
+                            clean_log_value(desired_model),
                         )
                     elif needs_model_switch or needs_runtime_reload or ctx_hint_int is not None:
                         phase = "auto_switch" if needs_model_switch else "runtime_reload"
@@ -620,11 +623,11 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                             if needs_model_switch or needs_runtime_reload or ctx_hint_int is not None:
                                 logger.info(
                                     "🔄 Adjusting backend from %s [%s] to %s [%s] (client: %s)",
-                                    current_model,
+                                    clean_log_value(current_model),
                                     "vision" if current_vision else "text",
-                                    desired_model,
+                                    clean_log_value(desired_model),
                                     "vision" if desired_vision else "text",
-                                    client_id,
+                                    clean_log_value(client_id),
                                 )
                                 try:
                                     if needs_model_switch or ctx_hint_int is not None:
@@ -736,7 +739,11 @@ async def route_v1_post(path: str, request: Request, client_id: str):
 
         timeout_sec = float(_get_model_timeout(active_model_for_request))
         timeout = httpx.Timeout(timeout_sec, connect=10.0)
-        logger.info(f"OpenAI-compat request from client '{client_id}': POST /v1/{path}")
+        logger.info(
+            "OpenAI-compat request from client '%s': POST /v1/%s",
+            clean_log_value(client_id),
+            clean_log_value(path),
+        )
 
         # Detect streaming requests — must proxy SSE in real-time. Applies to
         # chat/completions, messages, and responses (all use "stream": true).

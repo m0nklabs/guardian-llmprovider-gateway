@@ -29,6 +29,7 @@ from app.destination_policy import guarded_async_client
 from app.engine.manager import ModelLoadError
 from app.gateway import caretaker_runtime as _caretaker_runtime
 from app.gateway.streaming import StreamProgressWatchdog
+from app.log_safety import clean_log_value
 
 logger = logging.getLogger("Guardian")
 
@@ -237,7 +238,10 @@ async def chat_ollama(request: Request, client_id: str):
     current_model = await _model_manager.get_current_model()
     model = _resolve_or_reject_inference_model(model, current_model)
 
-    logger.info(f"bridge: Ollama chat request for '{model}' -> Translating to OpenAI format")
+    logger.info(
+        "bridge: Ollama chat request for '%s' -> Translating to OpenAI format",
+        clean_log_value(model),
+    )
 
     # ── Cloud LLM router: forward to OpenRouter / NVIDIA / … ─────────
     # Ollama-style requests are translated to OpenAI format and forwarded
@@ -309,7 +313,7 @@ async def chat_ollama(request: Request, client_id: str):
         # Auto-reload if unloaded
         if _model_manager.is_unloaded:
             reload_model = _resolve_auto_reload_model(model)
-            logger.info(f"🔄 Auto-reloading '{reload_model}'...")
+            logger.info("🔄 Auto-reloading '%s'...", clean_log_value(reload_model))
             generation = _reset_startup_check_status(
                 source="proxy",
                 phase="auto_reload",
@@ -343,7 +347,11 @@ async def chat_ollama(request: Request, client_id: str):
         if model != current_model and model in _model_manager.models:
             # SECURITY: Check client permission and pin
             if not _model_manager.is_switch_allowed(client_id):
-                logger.warning(f"🔒 Client '{client_id}' not in switch_allowlist, blocked Ollama switch to '{model}'")
+                logger.warning(
+                    "🔒 Client '%s' not in switch_allowlist, blocked Ollama switch to '%s'",
+                    clean_log_value(client_id),
+                    clean_log_value(model),
+                )
             else:
                 generation = _reset_startup_check_status(
                     source="proxy",
@@ -765,7 +773,7 @@ async def generate_ollama(request: Request, client_id: str):
         # Auto-reload if unloaded
         if _model_manager.is_unloaded:
             reload_model = _resolve_auto_reload_model(model)
-            logger.info(f"🔄 Auto-reloading '{reload_model}'...")
+            logger.info("🔄 Auto-reloading '%s'...", clean_log_value(reload_model))
             generation = _reset_startup_check_status(
                 source="proxy",
                 phase="auto_reload",
@@ -798,7 +806,11 @@ async def generate_ollama(request: Request, client_id: str):
         current_model = await _model_manager.get_current_model()
         if model != current_model and model in _model_manager.models:
             if not _model_manager.is_switch_allowed(client_id):
-                logger.warning(f"🔒 Client '{client_id}' not in switch_allowlist, blocked switch to '{model}'")
+                logger.warning(
+                    "🔒 Client '%s' not in switch_allowlist, blocked switch to '%s'",
+                    clean_log_value(client_id),
+                    clean_log_value(model),
+                )
             else:
                 generation = _reset_startup_check_status(
                     source="proxy",

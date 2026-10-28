@@ -17,6 +17,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from app.gateway import caretaker_runtime as _caretaker_runtime
+from app.log_safety import clean_log_value
 
 logger = logging.getLogger("Guardian")
 
@@ -265,11 +266,22 @@ def get_model_timeout(model_name: str) -> int:
         timeout = tier_config.get("timeout_seconds", default_timeout)
         
         if size >= min_size:
-            logger.debug(f"Model {model_name} ({size}MB) matched tier '{tier_name}' -> {timeout}s timeout")
+            logger.debug(
+                "Model %s (%sMB) matched tier '%s' -> %ss timeout",
+                clean_log_value(model_name),
+                size,
+                tier_name,
+                timeout,
+            )
             return timeout
     
     # Fallback to default
-    logger.debug(f"Model {model_name} ({size}MB) using default timeout -> {default_timeout}s")
+    logger.debug(
+        "Model %s (%sMB) using default timeout -> %ss",
+        clean_log_value(model_name),
+        size,
+        default_timeout,
+    )
     return default_timeout
 
 

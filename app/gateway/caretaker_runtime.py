@@ -90,6 +90,7 @@ from app.gateway.caretaker_client import (
     CaretakerUnavailable,
     CaretakerVramExceeded,
 )
+from app.log_safety import clean_log_value
 
 logger = logging.getLogger("Guardian")
 
@@ -370,8 +371,8 @@ async def _complete_remote(
         logger.warning(
             "F5: caretaker loaded '%s' instead of requested '%s' — "
             "failing closed to avoid a second controller on the backend",
-            loaded,
-            model,
+            clean_log_value(loaded),
+            clean_log_value(model),
         )
         raise ModelLoadError(
             f"Caretaker loaded '{loaded}' instead of requested '{model}'"
@@ -573,7 +574,7 @@ async def _ensure_with_retry(
                         logger.info(
                             "F5: /ensure timed out but backend now serves "
                             "'%s' — adopting loaded state",
-                            model,
+                            clean_log_value(model),
                         )
                         return adopted
                     raise ModelLoadError(
@@ -607,7 +608,7 @@ async def _ensure_with_retry(
                     logger.info(
                         "F5: /ensure re-probe timed out but backend now serves "
                         "'%s' — adopting loaded state",
-                        model,
+                        clean_log_value(model),
                     )
                     return adopted
                 raise ModelLoadError(
@@ -658,8 +659,8 @@ async def verify_requested_model_served(model: str) -> str | None:
     logger.error(
         "🚨 Requested model '%s' was not loaded — backend serves '%s'; "
         "failing the request closed (model_switch_failed)",
-        model,
-        actual,
+        clean_log_value(model),
+        clean_log_value(actual),
     )
     return actual
 
@@ -732,7 +733,7 @@ async def ensure_backend(
                 "F5: /ensure cannot confirm fresh_load — remote switch to "
                 "'%s' SAVES context but will NOT restore it until the daemon "
                 "ships the field",
-                model,
+                clean_log_value(model),
             )
         await _model_manager.save_current_context()
 
@@ -813,7 +814,7 @@ async def ensure_backend(
             logger.warning(
                 "F5: caretaker unreachable but backend already serves '%s' — "
                 "adopting loaded state without respawn",
-                model,
+                clean_log_value(model),
             )
             effective_vision = (
                 _model_manager.current_runtime_uses_mmproj(model)
@@ -901,7 +902,7 @@ async def ensure_backend(
                         "F5: caretaker management port closed and the daemon "
                         "was never observed up in this process — running the "
                         "local lifecycle immediately for '%s'",
-                        model,
+                        clean_log_value(model),
                     )
                 else:
                     # Poll windows are hot-reloadable config (caretaker
@@ -955,7 +956,7 @@ async def ensure_backend(
                     logger.info(
                         "F5: caretaker re-bound after restart window — "
                         "completing remote ensure for '%s'",
-                        model,
+                        clean_log_value(model),
                     )
                     return await _complete_remote(
                         model,
@@ -967,7 +968,7 @@ async def ensure_backend(
                 logger.warning(
                     "F5: caretaker management port closed (connection refused) "
                     "— running local lifecycle fallback for '%s'",
-                    model,
+                    clean_log_value(model),
                 )
             else:
                 raise ModelLoadError(
@@ -1004,7 +1005,7 @@ async def ensure_backend(
             "F5: caretaker unavailable and backend %s — local load fallback "
             "for '%s'",
             "not serving the requested model" if backend_healthy else "down",
-            model,
+            clean_log_value(model),
         )
         await local_fallback()
         return "local"

@@ -15,6 +15,7 @@ from typing import Any
 from fastapi import HTTPException, Request
 from starlette.status import HTTP_401_UNAUTHORIZED
 
+from app.log_safety import clean_log_value
 from app.proxy import admission as _admission
 from app.proxy.queue import QueueDepthExceeded, QueueRequestCancelled
 
@@ -143,7 +144,7 @@ async def watch_request_disconnect(request: Request, request_id: str, client_id:
         logger.info(
             "🔌 [%s] Client '%s' disconnected (%s)",
             request_id[:8],
-            client_id,
+            clean_log_value(client_id),
             (snapshot or {}).get("status", "unknown"),
         )
 

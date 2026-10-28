@@ -33,7 +33,6 @@ chain (``stt.providers``) serves, unchanged.
 from __future__ import annotations
 
 import logging
-import re
 import time
 from typing import Any
 
@@ -43,19 +42,11 @@ from fastapi import HTTPException, Request, Response
 from app.config_loader import CONFIG, load_stt_config
 from app.destination_policy import guarded_async_client
 from app.gateway.speech_routing import address_intent, parse_speech_model, resolve_speech_route
+from app.log_safety import clean_log_value
 from app.proxy.providers import _expand_env
 
 logger = logging.getLogger("Guardian.STT")
 
-_LOG_UNSAFE = re.compile(r"[\r\n\t\x00-\x1f]+")
-
-
-def _clean_log(value: Any, limit: int = 160) -> str:
-    """Log-injection guard: collapse control characters (fake log lines via
-    user-provided model ids, upstream response bodies, exception texts) and
-    cap the length.  Response-bodies-in-502-details are JSON-escaped by
-    FastAPI; only log sinks need this."""
-    return _LOG_UNSAFE.sub(" ", str(value)).strip()[:limit]
 
 # OpenAI ISO-639-1 codes -> the language names Qwen3-ASR understands (it is a
 # decoder prompt, not a tag; the example uses names like "Korean", "English").
@@ -140,8 +131,8 @@ async def handle_audio_transcriptions(request: Request, client_id: str) -> Respo
                 return result
             logger.warning(
                 "STT: exact route '%s' failed for client '%s': %s",
-                _clean_log(requested_model, 96), _clean_log(client_id, 64),
-                _clean_log(result),
+                clean_log_value(requested_model, 96), clean_log_value(client_id, 64),
+                clean_log_value(result),
             )
             raise HTTPException(status_code=502, detail=result)
         # explicit local route: this provider's engine only
@@ -161,7 +152,7 @@ async def handle_audio_transcriptions(request: Request, client_id: str) -> Respo
         failures.append(result)
     logger.warning(
         "STT: all providers failed for client '%s': %s",
-        _clean_log(client_id, 64), _clean_log("; ".join(failures)),
+        clean_log_value(client_id, 64), clean_log_value("; ".join(failures)),
     )
     raise HTTPException(status_code=502, detail="; ".join(failures))
 
@@ -217,7 +208,7 @@ async def _try_cloud_backend(
             )
     except httpx.HTTPError as exc:
         logger.warning(
-            "STT cloud provider '%s' unreachable: %s", _clean_log(name), _clean_log(exc)
+            "STT cloud provider '%s' unreachable: %s", clean_log_value(name), clean_log_value(exc)
         )
         # Client detail is structured-only: the exception text may carry
         # internal hosts/proxy details — the guarded log line keeps the full
@@ -226,7 +217,7 @@ async def _try_cloud_backend(
     if resp.status_code != 200:
         logger.warning(
             "STT cloud provider '%s' HTTP %s: %s",
-            _clean_log(name), resp.status_code, _clean_log(resp.text),
+            clean_log_value(name), resp.status_code, clean_log_value(resp.text),
         )
         return f"{name}: cloud HTTP {resp.status_code}"
     duration_ms = (time.monotonic() - started) * 1000
@@ -236,7 +227,7 @@ async def _try_cloud_backend(
         text_len = -1
     logger.info(
         "🎙 STT: client '%s' served by cloud '%s' (%s) -> %s chars in %.1fs",
-        _clean_log(client_id, 64), _clean_log(name, 64), _clean_log(route["upstream_model"], 64),
+        clean_log_value(client_id, 64), clean_log_value(name, 64), clean_log_value(route["upstream_model"], 64),
         text_len, duration_ms / 1000,
     )
     return Response(content=resp.content, status_code=200, media_type="application/json")
@@ -270,8 +261,11 @@ async def _try_backend(
             pass
         if ensure_resp.status_code != 200 or ensure_body.get("ok") is False:
             reason = str(ensure_body.get("reason") or ensure_resp.text)[:160]
-            return f"{name}: ensure failed (HTTP {ensure_resp.status_code}): {_clean_log(reason)}"
-        logger.info("🎙 STT ensure via %s: cold_start=%s", name, ensure_body.get("cold_start", False))
+            return f"{name}: ensure failed (HTTP {ensure_resp.status_code}): {clean_log_value(reason)}"
+        logger.info(
+            "🎙 STT ensure via %s: cold_start=%s",
+            clean_log_value(name), ensure_body.get("cold_start", False),
+        )
 
         forward_headers = dict(headers)
         forward_headers["Content-Type"] = audio_content_type
@@ -288,14 +282,15 @@ async def _try_backend(
             )
         if resp.status_code != 200:
             logger.warning(
-                "STT engine '%s' HTTP %s: %s", _clean_log(name), resp.status_code, _clean_log(resp.text)
+                "STT engine '%s' HTTP %s: %s", clean_log_value(name), resp.status_code, clean_log_value(resp.text)
             )
             return f"{name}: engine HTTP {resp.status_code}"
         duration_ms = (time.monotonic() - started) * 1000
         body = resp.json()
         logger.info(
             "🎙 STT: client '%s' served by '%s' -> %s chars in %.1fs",
-            client_id, name, len(body.get("text") or ""), duration_ms / 1000,
+            clean_log_value(client_id), clean_log_value(name),
+            len(body.get("text") or ""), duration_ms / 1000,
         )
         return Response(
             content=resp.content,
@@ -303,5 +298,5 @@ async def _try_backend(
             media_type="application/json",
         )
     except httpx.HTTPError as exc:
-        logger.warning("STT provider '%s' unreachable: %s", _clean_log(name), _clean_log(exc))
+        logger.warning("STT provider '%s' unreachable: %s", clean_log_value(name), clean_log_value(exc))
         return f"{name}: unreachable ({type(exc).__name__})"

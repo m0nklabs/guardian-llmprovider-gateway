@@ -26,6 +26,7 @@ from typing import Any
 
 import yaml
 
+from app.log_safety import clean_log_value
 from app.paths import local_models_file
 
 logger = logging.getLogger("model-registry")
@@ -243,15 +244,25 @@ class ModelRegistry:
         if name in aliases:
             target = aliases[name]
             if target in self.models:
-                logger.info(f"🏷️  Resolved alias {name!r} → {target!r}")
+                logger.info(
+                    "🏷️  Resolved alias %s → %s", clean_log_value(repr(name)), repr(target)
+                )
                 return target
-            logger.warning(f"⚠️ Alias {name!r} points to {target!r} which is not in models config")
+            logger.warning(
+                "⚠️ Alias %s points to %s which is not in models config",
+                clean_log_value(repr(name)),
+                repr(target),
+            )
 
         # 3. Case-insensitive fallback
         name_lower = name.lower()
         for model_name in self.models:
             if model_name.lower() == name_lower:
-                logger.info(f"🏷️  Resolved case-insensitive {name!r} → {model_name!r}")
+                logger.info(
+                    "🏷️  Resolved case-insensitive %s → %s",
+                    clean_log_value(repr(name)),
+                    repr(model_name),
+                )
                 return model_name
 
         raise ValueError(f"Model '{name}' not found in configuration (no alias match)")

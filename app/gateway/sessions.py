@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from app.destination_policy import guarded_async_client
+from app.log_safety import clean_log_value
 import httpx  # noqa: F401 — kept as a monkeypatch target (tests patch <module>.httpx.AsyncClient)
 from fastapi import HTTPException, Request
 
@@ -49,7 +50,7 @@ def sanitize_session_filename(raw: object) -> str:
 
 async def save_session(request: Request, client_id: str) -> Any:
     """Save the current llama-server slot state to a session file."""
-    logger.info(f"💾 Session SAVE request from {client_id}")
+    logger.info("💾 Session SAVE request from %s", clean_log_value(client_id))
     try:
         data = await request.json()
         filename = sanitize_session_filename(data.get("filename"))
@@ -74,7 +75,7 @@ async def save_session(request: Request, client_id: str) -> Any:
 
 async def load_session(request: Request, client_id: str) -> Any:
     """Restore a llama-server slot state from a session file."""
-    logger.info(f"📂 Session LOAD request from {client_id}")
+    logger.info("📂 Session LOAD request from %s", clean_log_value(client_id))
     try:
         data = await request.json()
         filename = sanitize_session_filename(data.get("filename"))
@@ -99,7 +100,7 @@ async def load_session(request: Request, client_id: str) -> Any:
 
 async def list_sessions(client_id: str) -> Any:
     """List available session files."""
-    logger.debug(f"📜 Session LIST request from {client_id}")
+    logger.debug("📜 Session LIST request from %s", clean_log_value(client_id))
     try:
         save_path = _SESSION_SLOTS_DIR
         if not save_path.exists():

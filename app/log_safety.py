@@ -18,7 +18,16 @@ import os
 import re
 from typing import Any, Iterable, Mapping
 
-_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+#: C0/C1 control characters, minus CR and LF: line breaks are removed
+#: explicitly in :func:`clean_log_value` so the removal is visible.
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x09\x0b\x0c\x0e-\x1f\x7f-\x9f]")
+
+#: Line and paragraph separators that are **not** C0/C1 and therefore survived
+#: the control-character scrub: NEL, LINE SEPARATOR and PARAGRAPH SEPARATOR.  A
+#: Unicode-aware log reader (journald, anything decoding before display) renders
+#: these as line breaks, so an attacker could forge a second line on a path that
+#: used to be protected by ``str.isprintable()`` (PR-Piet on #74).
+_LINE_SEPARATORS = re.compile("[\u0085\u2028\u2029]")
 
 #: Values that are scrubbed wherever they appear in a log record.
 _KNOWN_SECRETS: set[str] = set()
@@ -36,14 +45,30 @@ REDACTED = "***redacted***"
 
 
 def clean_log_value(value: Any, limit: int = 160) -> str:
-    """Remove line/control characters and truncate identifiers and exceptions.
+    """Bound *value* to a single printable log line.
 
-    Mirrors the existing speech handlers' log-injection guard without importing
-    an inference handler into discovery code. Returned text is diagnostic only;
-    request values and response payloads remain unchanged.
+    Line breaks go first (``\\r``, then ``\\n``), then the rest of the C0/C1
+    control range and the Unicode line/paragraph separators (NEL, U+2028, U+2029)
+    which are not in that range but render as line breaks — NUL, TAB, ESC (which is what makes a terminal sequence
+    executable), DEL and the C1 block.  The length is capped so one value cannot
+    flood a log record.
+
+    Line-break removal is deliberately a ``str.replace`` on the value itself:
+    that is the operation CodeQL's ``py/log-injection`` model recognises as a
+    sanitizer (``ReplaceLineBreaksSanitizer`` in
+    ``python/ql/lib/semmle/python/security/dataflow/LogInjectionCustomizations.qll``).
+    Because this helper is the only route a request value takes to a log call,
+    the model and the runtime guard agree instead of drifting apart.
+
+    Returned text is diagnostic only; request values and response payloads
+    remain unchanged.
     """
     text = str(value).replace("\r", " ").replace("\n", " ")
-    return _CONTROL_CHARACTERS.sub(" ", text).strip()[:limit]
+    text = _CONTROL_CHARACTERS.sub(" ", text)
+    # NEL/LS/PS are line breaks to a Unicode-aware reader; the C0/C1 scrub above
+    # cannot see them (PR-Piet on #74).
+    text = _LINE_SEPARATORS.sub(" ", text)
+    return text.strip()[:limit]
 
 
 def register_secret(value: str | None) -> None:
