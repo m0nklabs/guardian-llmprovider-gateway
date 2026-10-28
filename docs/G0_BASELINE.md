@@ -532,7 +532,27 @@ Flake loops after the fix: **20/20 PASS** (named test) and **20/20 PASS**
    recorded here, not changed.
 5. The ten `0644` capture files created after the `UMask=0077` drop-in were
    written by a non-service process; if a documented ad-hoc replay path exists,
-   it should set the mode explicitly (§3.2 item 3).
+   it should set the mode explicitly (§3.2 item 3). — **Writer fixed
+   2026-10-28 by [#49](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/49):
+   media modes now come from configuration, so no caller's umask can leak
+   again. Attribution of the ten files, extended from §3.2 item 3: the mode is
+   perfectly correlated with `guardian_instance_id` in the WAL, and umask is
+   per-process, so two *processes* produced the two modes. The ten files fall
+   in only two instance windows — `4f21d542` (21:11:44–21:15:16, 5 files) and
+   `30341f11` (22:08:51–22:10:07, 5 files) — both short-lived (4 min, 2 min),
+   both writing a byte-identical 488508-byte image, each sandwiched between
+   long `0600` windows (`d40d0879` …21:11, `fca31e89` 21:16–22:08,
+   `0c865257` 22:19…). Those two windows match the restart-race incidents at
+   21:12 and 22:09 documented in
+   `docs/AGENT_JOURNAL_ARCHIVE.md` (2026-09-02 entries): an out-of-cgroup
+   `-m app.main` generation served `:11435`, and the second one started
+   `22:08:47` — four seconds before the first `0644` file. Conclusion: the
+   writer was a Gateway process launched **outside the systemd unit** (hence
+   umask `0022`, not the drop-in's `0077`), not a separate replay script —
+   nothing in the repository writes `data/capture/media` outside
+   `app/capture/integration.py`. Residual uncertainty: the journal records the
+   orphan's *origin* as not hard-established (CI-runner hypothesis weakened),
+   so which launcher started it stays open.**
 6. `google` route: no baseline sample possible during this window (retired
    model, 503, and a >180 s stall). Re-measure before relying on a cloud p95.
 
