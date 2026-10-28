@@ -247,6 +247,18 @@ just happens to be today's only issuer.
   `/api/crashes`, `/api/session/*`, `/api/scaler/*` and the dashboard `/api/*`
   control routes return the typed `403`. The PR that ships this record lists the
   affected key names and the scopes each needs.
+- **Operator tooling that needs a scope before the deadline** (audited in this
+  change): the dashboard's stored `guardian_dashboard_api_key` (`:11437`
+  `/api/*`, including capture panel status/rotate) needs `admin`;
+  `scripts/guardianctl.py` (`status`, `rotate`, `export`) and
+  `scripts/verify_post_restart.py` (`GET /api/capture/status`) need
+  `capture-export` (or `admin`); anything driving `/admin/load`,
+  `/admin/unload` needs `operator`; anything driving `/api/config/reload` or
+  `/api/keys` needs `admin`. Which existing named keys those are is visible in
+  the grace log — every privileged call an unscoped key makes during the window
+  is logged with the key name, route and missing scope, so the window itself
+  produces the exact scoping list:
+  `grep 'scope-grace' guardian.log`.
 - **No effect** on request/response bodies of allowed calls, on cloud routing
   semantics, on capture policy, on ports, or on TLS.
 
