@@ -205,6 +205,26 @@ guard keeps the `none` list below in sync with the `none` cells above.
 - `POST` `/api/keys` — dashboard
 - `GET` `/api/cloud/providers` — dashboard
 
+## G1-03 changes — which rows are admission-bounded (2026-10-28)
+
+No route changed its auth dependency or its scope class for G1-03, so the table
+above is unchanged in shape. What changed is that three admission bounds now sit
+in front of the rows; the rule is stated once here instead of as a 57-row column
+(decision record: `docs/decisions/G1-03-admission-and-audit.md` §7).
+
+| Bound | Rows it covers | Rows it does not cover |
+| --- | --- | --- |
+| Request body size (`413`) | all 57 rows on both surfaces — the middleware is installed on `app.proxy.server:app` and `app.main:app` | none |
+| Per-key request rate (`429`) | the 45 rows whose auth dependency is `verify_api_key` (36 proxy, 9 dashboard) | the 12 `public` rows: `/docs`, `/docs/oauth2-redirect`, `/openapi.json`, `/redoc` on each surface, plus `/healthz`, and on the dashboard `/`, `/favicon.ico`, `/static` |
+| Waiting queue depth (`503 queue_full`) | the rows that enqueue inference: `POST /v1/{path:path}` for `chat/completions`, `completions`, `embeddings`, `messages`, `responses`; `POST /api/chat`; `POST /api/generate` | every other row, including `POST /v1/{path:path}` for non-inference paths and all cloud-only rows (cloud traffic never enters the local queue) |
+
+How to read the second row: the rate bucket is keyed on the G1-01 identity
+(`key_fingerprint`), and it is checked inside `verify_api_key` **after** the
+route's scope has been authorized. A route without that dependency has no
+identity, so it has no bucket — `/healthz` and the docs surfaces stay reachable
+for a liveness probe. A caller that is denied with `403` does not consume budget
+(it is refused before the rate check and cannot do work either way).
+
 ## Provenance
 
 Collected from `app.proxy.server:app` and `app.main:app` at import time

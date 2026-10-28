@@ -237,3 +237,62 @@ Rules:
   scripts, export tooling) without an unattended break. Change the date in place
   when the migration is scheduled; the value is documented in the file's own
   comments as well.
+
+## 10. `admission` — bounded ingress (G1-03, 2026-10-28)
+
+Source of record: `docs/decisions/G1-03-admission-and-audit.md`. Added to
+`config/global.settings.yaml`. `max_body_bytes`, `rate_limit.*` and
+`queue_full_retry_after_seconds` are re-read per request and therefore
+hot-reloadable through `POST /api/config/reload`; `queue_max_depth` is read when
+the queue object is built and needs a restart (like the rest of `queue`).
+
+```yaml
+admission:
+  max_body_bytes: 33554432                 # 32 MiB
+  queue_max_depth: 32
+  queue_full_retry_after_seconds: 60
+  rate_limit:
+    requests_per_minute: 300
+    burst: 300
+```
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `admission.max_body_bytes` | positive integer (bytes) | `33554432` (32 MiB) | Request body ceiling. Over it: `413 request_too_large` — a declared `Content-Length` is refused without reading, an unlabelled body is stopped at the byte. |
+| `admission.queue_max_depth` | positive integer | `32` | Maximum number of requests *waiting* for a slot (`max_concurrent` still bounds execution). Over it: `503 queue_full`, refused before the entry is registered. **Restart-only.** |
+| `admission.queue_full_retry_after_seconds` | positive integer (seconds) | `60` | `Retry-After` sent with that `503`. One local generation is tens of seconds, so a minute is the useful retry scale. |
+| `admission.rate_limit.requests_per_minute` | positive integer | `300` | Sustained per-key budget of the token bucket (one token per request). Over it: `429 rate_limited` with `Retry-After`. |
+| `admission.rate_limit.burst` | positive integer | `300` | Tokens available at rest, i.e. how much of a minute's allowance can be spent at once (reconnect storms, parallel tool calls). |
+
+Rules:
+
+- **Keyed on identity, not IP.** The bucket belongs to the authenticated key's
+  G1-01 fingerprint (`sha256(token)[:12]`). Two keys behind one NAT get two
+  buckets; one key shares its bucket across every route it calls.
+- **Single process.** Buckets live in memory and reset with the service; two
+  Guardian replicas would each enforce its own budget (multi-replica accounting
+  is out of scope for G1-03).
+- **Absent ≠ malformed** (same rule as §9 and G1-02): a missing section or key
+  falls back to the shipped default with a WARNING, so a config file that
+  predates this record does not take admission down on the next restart. A
+  **malformed** value (wrong type, `null`, boolean, float, numeric string, `0`,
+  negative, non-mapping `rate_limit`) refuses the requests that bound guards
+  with `503 admission_misconfigured` naming the `limit` and the `reason`; the
+  other bounds keep working.
+- **No "off" value.** Unlike `queue.queue_timeout_seconds` (`0` = unbounded,
+  kept as #45 shipped it), `0`/`-1` are malformed here: a bound that one digit
+  can switch off is a bound nobody can rely on. Raise the number instead.
+- A malformed `queue_full_retry_after_seconds` refuses the **queue-depth** bound
+  (a broken hint never silently becomes "no hint").
+- Shipped default rationale — **safe but not tuned**: 32 MiB admits large
+  multimodal prompts and speech uploads with orders of magnitude of headroom;
+  depth 32 is 32× the highest depth ever measured (1, with `max_concurrent: 1`);
+  300 requests/minute is an order of magnitude above the heaviest measured
+  minute (~9-20 requests) with a full minute spendable at once. These protect the
+  process from unbounded bodies, unbounded waiting and unbounded arrival; they
+  are not a capacity plan.
+
+Related: `destination_policy` (G1-02) is **not** documented in this file yet —
+its source of record is
+`docs/decisions/G1-02-destination-and-credentials.md` §2-§5. That gap predates
+this section and is tracked as a documentation follow-up rather than fixed here.
