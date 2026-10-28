@@ -39,6 +39,7 @@ provider/brand changes without a restart.
 """
 
 from __future__ import annotations
+import httpx  # noqa: F401 — kept as a monkeypatch target (tests patch <module>.httpx.AsyncClient)
 
 import json
 import logging
@@ -46,7 +47,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-import httpx
 import yaml
 
 from app.config_loader import provider_settings_documents

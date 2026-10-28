@@ -53,6 +53,7 @@ fetch.
 """
 
 from __future__ import annotations
+import httpx  # noqa: F401 — kept as a monkeypatch target (tests patch <module>.httpx.AsyncClient)
 
 import json
 import logging
@@ -60,7 +61,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-import httpx
 
 from app.destination_policy import guarded_async_client
 from app.config_loader import provider_settings_documents

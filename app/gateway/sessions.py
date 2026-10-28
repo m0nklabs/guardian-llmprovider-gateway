@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from app.destination_policy import guarded_async_client
-import httpx
+import httpx  # noqa: F401 — kept as a monkeypatch target (tests patch <module>.httpx.AsyncClient)
 from fastapi import HTTPException, Request
 
 logger = logging.getLogger("Guardian")
