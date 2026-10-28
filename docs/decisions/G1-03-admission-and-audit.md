@@ -145,8 +145,10 @@ The bound is **global per process, not per key**: one aggressive client can fill
 all 32 slots, and its next request then gets the same `503 queue_full` as everyone
 else's. That is deliberate — the point is that the waiting list cannot grow, not
 that every caller is guaranteed a fair share; the rate bound is what limits one
-client's arrival rate, and the per-key "one running request" rule (`409
-queue_admission_rejected`) is what stops one key from occupying a slot twice.
+client's arrival rate. There is deliberately **no** per-key "one slot" rule: a
+key may hold more than one waiting slot, because legitimate parallel use (an
+agent fanning out, a batch job) would otherwise be refused for no capacity
+reason. See the amendment at the end of this record.
 
 The retry hint is `admission.queue_full_retry_after_seconds`, default **60 s**:
 one local generation is tens of seconds (`docs/G0_BASELINE.md`: ~7 s for 256
@@ -200,9 +202,8 @@ numbers an operator needs, and every extra header is a contract someone will
 depend on. `Retry-After` is the only retry surface this record adds.
 
 Existing codes are unchanged: `403 insufficient_scope` (G1-01), `404
-model_not_served`, `409 queue_admission_rejected` (one running request per key),
-`499 request_cancelled` (disconnect, explicit cancel, or the wait budget), `502
-destination_denied` (G1-02).
+model_not_served`, `499 request_cancelled` (disconnect, explicit cancel, or the
+wait budget), `502 destination_denied` (G1-02).
 
 ## 5. Interaction with the enforced queue wait budget (#45)
 
@@ -640,3 +641,20 @@ exactly this file). `scripts/pre_restart_check.py` green.
   two bare `httpx.AsyncClient(...)` clients, which bypass the G1-02 destination
   guard. It is a G1-02 scope defect (no audit record is produced for those hops
   either), and it belongs in its own issue rather than in this record's diff.
+
+## Amendment 2026-10-28 — `409 queue_admission_rejected` removed as dead code
+
+The error model above used to list `409 queue_admission_rejected`, described as
+"one running request per key", and `app/gateway/queue_helpers.py` carried a
+handler that mapped `QueueAdmissionRejected` to that 409. The exception was
+**never raised anywhere** — the class, its import and the handler existed, no
+code path produced it. It was decoration, and the docs promised a guarantee the
+gateway did not implement ([#66](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/66)).
+
+Decision: **remove, do not implement.** A per-key one-slot rule would refuse a
+legitimate second request from the same key (an agent fanning out, a batch job)
+even when capacity is free, while the resource concern it was invented for is
+already bounded by `admission.queue_max_depth` (number of waiters),
+`max_concurrent` (running slots) and `admission.rate_limit` (arrival rate). The
+class, the handler, the import and both documentation claims are gone; the code
+and the API reference now tell the same story.

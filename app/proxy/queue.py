@@ -82,28 +82,6 @@ def _normalize_owner_id(owner_id: object, fallback_client_id: object = None) -> 
     return _normalize_client_id(fallback_client_id)
 
 
-class QueueAdmissionRejected(Exception):
-    """Raised when Guardian rejects queue admission before registration."""
-
-    def __init__(
-        self,
-        *,
-        owner_id: str,
-        client_id: str,
-        existing_request_id: str,
-        existing_status: str,
-        reason: str,
-        message: str,
-    ):
-        super().__init__(message)
-        self.owner_id = owner_id
-        self.client_id = client_id
-        self.existing_request_id = existing_request_id
-        self.existing_status = existing_status
-        self.reason = reason
-        self.message = message
-
-
 class QueueDepthExceeded(Exception):
     """Raised when the waiting queue is at its configured bound.
 
