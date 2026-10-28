@@ -39,16 +39,17 @@ Consequences that must hold, and are now pinned by tests:
    is a 16-character hex digest
    (`tests/unit/test_providers.py::TestCatalogCacheKeyFingerprint`, four tests).
 3. The audit record keeps the fingerprint and, separately, the *name* — a label
-   that is not a secret (G1-03 §11.2). The name reaches the INFO line only
-   through `clean_log_value` and never when it contains the presented token
-   (G1-04 addendum).
+   that is not a secret (G1-03 §11.2), bounded and cleaned by the audit producer.
+   The name does **not** reach the `Auth` INFO line at all: that line carries
+   `key_fingerprint=<sha256(token)[:12]>`, so no label of unbounded shape and no
+   credential-derived string can forge a line there (G1-04 addendum).
 
 ## The alerts this record dismisses, and why
 
 | Alert | Site | Dismissal reason | Argument |
 | --- | --- | --- | --- |
 | #2 | `app/proxy/providers.py:649` | **false positive** | The query calls the input a *password* and objects that SHA-256 is not computationally expensive. The input is a 128-bit random credential used as a cache-scope discriminator (see the table above): there is no password storage and no password verification in the path. The docstring at the site now states what the hash protects and what it must never be used for. |
-| #7 | `app/proxy/auth.py:694` | **false positive** | The logged expression is `user_data["name"]` — the operator-assigned label of a key-store entry, not the entry's key and not the dict itself. CodeQL's taint arrives at the whole metadata dict (`keys.get(token)`), so it cannot distinguish the label from the credential; a name cannot be replayed as a key. The log line is additionally sanitised and drops a label containing the presented token (G1-04 addendum), so the §11.3 invariant holds even for a mislabelled entry. |
+| #7 | `app/proxy/auth.py:694` | **false positive** (the code was changed too) | The logged expression was `user_data["name"]` — the operator-assigned label of a key-store entry, not the entry's key and not the dict itself. CodeQL's taint arrives at the whole metadata dict (`keys.get(token)`), so the query cannot distinguish the label from the credential; a name cannot be replayed as a key. Because the label is still store data of unbounded shape, the auth-success line now identifies the key by this record's own subject — `key_fingerprint=<sha256(token)[:12]>` — and the label stays in the audit record's bounded, cleaned `key_name` (G1-03 §11.2). The claim is refuted *and* the value is gone, so §11.3 holds by construction. |
 | #4, #5 | `scripts/generate_key.py:82`, `:83` | **won't fix** | This script's entire purpose is to mint a Guardian key and hand it to its owner once, on stdout, in the operator's own terminal. The value is created in that process by `secrets.token_hex(16)` and is not read from storage. Suppressing the print would make the tool useless; writing it to a file instead would *create* a clear-text storage problem. `scripts/generate_key.py` is the documented minter (`README.md`, `scripts/install.sh`, `AGENTS.md`), so this is a deliberate disclosure channel, not a leak. |
 | #10 | `tests/unit/test_capture_secret_canary.py:327` | **used in tests** | The file is a test. The "sensitive data" is a synthetic canary (`sk-proj-abc…`, `nvapi-0KeCv…`) and the assertion under test is that the *redacted* event written to a `tmp_path` JSONL contains none of it. The dismissal is pinned by a non-vacuity assertion added at the sink: `scan_for_secrets(secret_response)` must find the canary, so "no findings in the written file" cannot pass vacuously. |
 

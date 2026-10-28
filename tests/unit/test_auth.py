@@ -160,19 +160,53 @@ class TestVerifyApiKey:
             _restore_auth_path(auth, orig)
 
     @pytest.mark.asyncio
-    async def test_auth_success_line_cannot_forge_a_second_log_line(
+    async def test_auth_success_line_identifies_the_key_by_fingerprint(
         self, api_keys_file: Path, caplog: pytest.LogCaptureFixture
     ):
-        """The key *name* is store data and reaches the INFO line sanitised (#76).
+        """The line carries the G1-01 fingerprint, never the key nor its label (#76).
 
-        Removing ``clean_log_value`` from that call turns the hostile name into
-        a second, forged ``event=allow`` line plus a terminal escape sequence.
+        The key store label is key-store data of unbounded shape; G1-03 §11.2
+        puts it where it is bounded and cleaned (the audit record's ``key_name``),
+        so the Auth INFO line must not carry it. Re-adding the label fails here.
+        """
+        token = "flip_aabbccdd11223344aabbccdd11223344"
+        auth, orig = _load_auth_with_path(api_keys_file)
+        try:
+            request = MagicMock()
+            request.state = MagicMock()
+            creds = MagicMock()
+            creds.credentials = token
+
+            with caplog.at_level(logging.INFO, logger="Auth"):
+                assert await auth.verify_api_key(request, creds) == "test-user"
+
+            success_lines = [
+                record
+                for record in caplog.records
+                if "Auth success" in record.getMessage()
+            ]
+            assert len(success_lines) == 1
+            message = success_lines[0].getMessage()
+            assert f"key_fingerprint={auth._token_fingerprint(token)}" in message
+            assert token not in message
+            assert "test-user" not in message
+        finally:
+            _restore_auth_path(auth, orig)
+
+    @pytest.mark.asyncio
+    async def test_a_hostile_key_label_cannot_reach_the_auth_log(
+        self, api_keys_file: Path, caplog: pytest.LogCaptureFixture
+    ):
+        """A label with a forged line, ANSI, a NUL and the token cannot get in (#76).
+
+        The label is not logged at all, so no part of it — and therefore no line
+        structure and no credential — can appear in the INFO line (G1-03 §11.3).
         """
         token = "flip_aabbccdd11223344aabbccdd11223344"
         hostile_name = (
-            "test-user\n"
+            f"test-user {token}\n"
             "2026-10-28 12:00:00 INFO event=allow user=admin action=read\n"
-            "\x1b[2J\x1b[0m\x07"
+            "\x1b[2J\x1b[0m\x07\x00"
         )
         auth, orig = _load_auth_with_path(api_keys_file)
         try:
@@ -198,41 +232,13 @@ class TestVerifyApiKey:
             ]
             assert len(success_lines) == 1
             message = success_lines[0].getMessage()
-            for character in ("\n", "\r", "\x1b", "\x07"):
+            for character in ("\n", "\r", "\x1b", "\x07", "\x00"):
                 assert character not in message, (
                     f"control character {character!r} survived into the log line"
                 )
-            assert "test-user" in message
-        finally:
-            _restore_auth_path(auth, orig)
-
-    @pytest.mark.asyncio
-    async def test_auth_success_line_never_carries_the_presented_token(
-        self, api_keys_file: Path, caplog: pytest.LogCaptureFixture
-    ):
-        """A store entry named after its own key cannot smuggle it into INFO (#76).
-
-        This is the G1-03 §11.3 invariant at its narrowest: no bearer value in
-        an INFO/DEBUG line, whatever the key store was labelled with.
-        """
-        token = "flip_aabbccdd11223344aabbccdd11223344"
-        auth, orig = _load_auth_with_path(api_keys_file)
-        try:
-            keys = auth.load_api_keys()
-            keys[token]["name"] = f"prod {token}"
-            auth.save_api_keys(keys)
-
-            request = MagicMock()
-            request.state = MagicMock()
-            creds = MagicMock()
-            creds.credentials = token
-
-            with caplog.at_level(logging.INFO, logger="Auth"):
-                returned = await auth.verify_api_key(request, creds)
-
-            assert returned == f"prod {token}"  # behaviour unchanged
-            assert token not in caplog.text
-            assert "Auth success: Unknown" in caplog.text
+            assert token not in message
+            assert "test-user" not in message
+            assert "key_fingerprint=" in message
         finally:
             _restore_auth_path(auth, orig)
 
