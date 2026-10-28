@@ -52,7 +52,7 @@ def sanitize_session_filename(raw: object) -> str:
     the normalised form — is deliberate: it is the shape CodeQL's
     ``py/path-injection`` model recognises as a barrier, the same way
     ``clean_log_value``'s ``str.replace`` shape is what the log-injection model
-    recognises (see ``docs/decisions/G1-05-sensitive-value-verdicts.md``).
+    recognises (see ``docs/decisions/G1-05-session-slot-path-containment.md``).
     """
     if not isinstance(raw, str) or not raw:
         raise HTTPException(status_code=400, detail="Filename required")

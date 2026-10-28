@@ -246,7 +246,7 @@ class TestVerifyApiKey:
     async def test_the_identity_fingerprint_is_not_a_credential(
         self, api_keys_file: Path
     ):
-        """Pins the `py/weak-sensitive-data-hashing` verdict (#2, G1-05).
+        """Pins the `py/weak-sensitive-data-hashing` verdict (#2, G1-06).
 
         The truncated SHA-256 identifies a key; presenting it as a credential
         must fail, so the hash never participates in verification.

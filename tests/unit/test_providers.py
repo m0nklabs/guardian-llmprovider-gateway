@@ -858,7 +858,7 @@ class TestProviderServiceTierDefault:
 # CodeQL alert #2 (`py/weak-sensitive-data-hashing`, providers.py:649) is
 # dismissed as a false positive: the truncated SHA-256 is a cache-scope
 # discriminator over a high-entropy credential, never password storage and
-# never verification. See docs/decisions/G1-05-sensitive-value-verdicts.md.
+# never verification. See docs/decisions/G1-06-credential-fingerprint-hashing.md.
 # These tests pin the properties that dismissal relies on.
 
 

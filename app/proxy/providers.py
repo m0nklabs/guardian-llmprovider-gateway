@@ -657,7 +657,7 @@ class ProviderRegistry:
         never logged. Authentication compares presented tokens against the key
         store by exact lookup; nothing in the auth path reads this value. The
         reasoning and the alert disposition are recorded in
-        ``docs/decisions/G1-05-sensitive-value-verdicts.md``.
+        ``docs/decisions/G1-06-credential-fingerprint-hashing.md``.
         """
         credential_fingerprint = hashlib.sha256(provider.api_key.encode("utf-8")).hexdigest()[:16]
         return f"{provider.name}:{provider.base_url}:{credential_fingerprint}"
