@@ -208,10 +208,12 @@ checks and known failures recorded; first service and smoke-test fixtures define
 
 ### G1 — Security and admission foundation
 
-**Priority:** P0. **Depends on:** G0. **Status:** 2 of 3 rows merged, live verification
-outstanding — #55 (scopes, admin isolation) and #60 (destination allowlists, credential
-isolation) are on `main` and enter the operator restart batch; #57 (bounded admission +
-metadata audit) is in flight. G1's exit gate needs a restart before it can be claimed.
+**Priority:** P0. **Depends on:** G0. **Status:** **3 of 3 rows merged (2026-10-28),
+live verification outstanding.** #55 (scopes, admin isolation), #60 (destination
+allowlists, address pinning, credential isolation) and #63+#64 (admission bounds with
+stable 413/429/503, metadata-only audit and the auth-header log invariant) are on `main`
+and enter the operator restart batch. G1's exit gate is a restart plus the post-restart
+checks in `docs/decisions/G1-0*-*.md`; it is deliberately **not** claimed yet.
 
 - Extend identities with explicit service, route and operation scopes; separate
   admin, lifecycle and capture-export permissions. Plan key rotation/revocation
@@ -340,7 +342,7 @@ production expansion or tool execution from this roadmap alone.
 | G0-04 | First general HTTP service contract | P0 | G0-02 | Selected service, methods/paths, read-only fixture and owner | **done** #44 (target: MoniFuse read API) |
 | G1-01 | Service/operation authorization and admin isolation | P0 | G0-02 | Positive/negative compatibility and privilege tests | **merged** #55 — needs restart to verify live |
 | G1-02 | Destination/credential/header enforcement | P0 | G0-02 | SSRF, redirect, DNS and credential-leak tests | **merged** #60 — needs restart to verify live |
-| G1-03 | Bounded admission and metadata audit | P0 | G0-03 | Non-default limit tests and audit-without-payload demonstration | in flight #57 |
+| G1-03 | Bounded admission and metadata audit | P0 | G0-03 | Non-default limit tests and audit-without-payload demonstration | **merged** #63 + #64 — needs restart to verify live |
 | G2-01 | Registered HTTP adapter vertical slice | P1 | G0-04, G1 exit | Real non-AI call and existing API regression suite | blocked: G1 exit (restart) + #44 target confirmed |
 | G3-01 | Explicit pools and weighted selection | P1 | G2 exit | Distribution/compatibility tests and measured comparison | blocked: G2 exit |
 
