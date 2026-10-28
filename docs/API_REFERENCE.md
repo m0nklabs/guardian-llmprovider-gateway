@@ -4,16 +4,19 @@ For client-side integration patterns, queue ownership rules, and recommended
 error handling, start with [CLIENT_INTEGRATION.md](CLIENT_INTEGRATION.md). This
 document stays focused on the raw surface contract.
 
-Per-route linkage (handler, auth dependency, privilege class, covering test) for
+Per-route linkage (handler, auth dependency, enforced scope, covering test) for
 every registered route is in [G0_ENDPOINT_AUTH_MATRIX.md](G0_ENDPOINT_AUTH_MATRIX.md);
-`tests/unit/test_g0_endpoint_matrix.py` keeps the two in sync.
+`tests/unit/test_g0_endpoint_matrix.py` keeps the two in sync with the code
+declaration in `app/proxy/scopes.py`. The scope model itself — vocabulary,
+migration window, rotation design — is
+[decisions/G1-01-privilege-scopes.md](decisions/G1-01-privilege-scopes.md).
 
 ## Ports and Auth Boundaries
 
 | Port | Surface | Auth in current code |
 | --- | --- | --- |
 | `11434` | Guardian proxy and control plane | Required except `/healthz`, `/metrics` and the FastAPI docs routes (`/docs`, `/redoc`, `/openapi.json`, `/docs/oauth2-redirect`) |
-| `11437` | Dashboard UI and stats API | UI assets are unauthenticated; every `/api/*` route requires a Bearer key |
+| `11437` | Dashboard UI and stats API | UI assets are unauthenticated; every `/api/*` route requires a Bearer key with the route's scope (`admin`) |
 | `11440` | Raw `llama-server` backend | Private Guardian-managed backend |
 
 ## Authentication
@@ -24,9 +27,38 @@ Guardian accepts any of these request styles on `:11434`:
 - `x-api-key: <token>`
 - `api-key: <token>`
 
-Keys live in [../config/api_keys.json](../config/api_keys.json).
+Keys live in [../config/guardian.keys.yaml](../config/guardian.keys.yaml) (legacy
+`api_keys.json` / `guardian_apikeys.yaml` are read as aliases).
 
 Missing or invalid keys return `401 Unauthorized`.
+
+### Privilege scopes (G1-01)
+
+Every key carries zero or more scopes in its `metadata.scopes` list:
+
+| Scope | Authorizes |
+| --- | --- |
+| `client` | inference, model discovery, own-request queue status/cancel |
+| `operator` | `/admin/load`, `/admin/unload` (implies `client`) |
+| `admin` | `/api/keys`, `/api/config/reload`, cloud catalog/scaler/session/status diagnostics (implies `operator`, `client`, `capture-export`) |
+| `capture-export` | `/api/capture/status`, `/api/capture/rotate`, capture WAL export |
+
+A request whose key lacks the route's scope returns a stable typed `403`
+(see the error model). A key with **no** `metadata.scopes` list is a legacy key:
+it keeps the old flat access until `auth.scopes_enforced_after`
+(`config/global.settings.yaml`, shipped default `2026-11-11T00:00:00Z`,
+hot-reloadable) and is a `client` key from that instant on. Each privileged call
+it makes inside the window is logged (`scope-grace …`) and counted in
+`guardian_scope_grace_calls_total`.
+
+Example key entry:
+
+```yaml
+flip_0123456789abcdef0123456789abcdef:
+  name: dashboard
+  metadata:
+    scopes: [admin]
+```
 
 ## Common Queue Behavior
 
@@ -92,6 +124,21 @@ Common statuses:
 - `200`: success
 - `400`: bad admin load override, malformed JSON body, or missing required request fields
 - `401`: missing or invalid API key
+- `403`: authenticated, but not authorized — the key lacks the route's required
+  scope. Body shape:
+  ```json
+  {"detail": {"type": "insufficient_scope",
+              "message": "key 'dashboard' lacks the required scope 'admin' for GET /api/keys",
+              "required_scope": "admin",
+              "granted_scopes": ["client"],
+              "key": "dashboard",
+              "route": "GET /api/keys"}}
+  ```
+  `WWW-Authenticate: Bearer error="insufficient_scope", scope="admin"` is set.
+  Other `type` values: `scope_escalation` (minting a key with more privilege than
+  the minting key holds), `invalid_scope` (mint request naming an unknown scope,
+  `400`), `authorization_misconfigured` (a protected route has no declared scope,
+  or the key's own scope list is unreadable, `403`).
 - `404`: model metadata lookup failed or inference requested an unserved model
 - `409`: queue admission rejected because the same API key already has a queued or running GPU request
 - `422`: vision runtime unavailable or backend image path rejected
@@ -810,11 +857,20 @@ Representative response:
 
 | Method | Path | Queued | Purpose |
 | --- | --- | --- | --- |
-| `GET` | `/api/keys` | No | List all Guardian keys (tokens masked, fingerprints shown) |
+| `GET` | `/api/keys` | No | List all Guardian keys (tokens masked, fingerprints, declared and effective scopes) |
 | `POST` | `/api/keys` | No | Generate a new Guardian API key (returns the full key once) |
 
-`POST /api/keys` body: `{"name": "my-app", "prefix": "myapp", "metadata": {"client": "my-app"}}`.
+Scope: **`admin`** for both. `POST /api/keys` body:
+`{"name": "my-app", "prefix": "myapp", "metadata": {"client": "my-app", "scopes": ["client"]}}`.
 The full key is returned only once — store it immediately.
+
+Minting rule (B-08, decision record §7): the new key inherits the minting key's
+`cloud_gateway_access` and its declared `metadata.scopes`; requested scopes must
+be a subset of the minting key's declared scopes (`403 scope_escalation`
+otherwise), unknown scopes are `400 invalid_scope`, and a request that tries to
+upgrade `cloud_gateway_access` is refused. `GET /api/keys` additionally reports
+`scopes` (declared, `null` when absent), `effective_scopes` and `scope_mode`
+(`explicit`, `grace`, `unscoped`, `invalid`) so the migration window is visible.
 
 ### Cloud credential endpoints (per-key cloud routing)
 
@@ -835,6 +891,10 @@ The full key is returned only once — store it immediately.
 | `POST` | `/api/cloud/credentials/claim` | No | Adopt an owner-less (legacy) credential — caller must already hold a link |
 | `POST` | `/api/config/reload` | No | Hot-reload settings.yaml + cloud_keys.json without restart |
 
+Scope: **`admin`** for the live `/api/cloud/*` routes in this section and for
+`POST /api/config/reload` (G1-01). A `client` or `operator` key receives the
+typed `403 insufficient_scope`.
+
 Credentials and links are **owner-scoped**: only the Guardian key that created
 a credential can manage or share it (403/404 otherwise). Google credentials
 automatically fetch their model catalog on create/refresh.
@@ -848,8 +908,9 @@ permanent owner and can link the credential to other keys.
 **Hot config reload (`POST /api/config/reload`):** re-reads settings.yaml +
 cloud_keys.json (providers, failover_groups, credential links, capture
 cloud_capture/prefixes/policies, failover_health, cloud_retry) and swaps them
-live without a restart. Port/pid/TLS remain restart-only. Any valid Guardian
-key can trigger it. Response lists what was reloaded and what could not be.
+live without a restart. Port/pid/TLS remain restart-only. Only a key with scope
+`admin` can trigger it (G1-01); a `client` or `operator` key gets the typed
+`403 insufficient_scope`. Response lists what was reloaded and what could not be.
 
 ### Capture management endpoints (admin)
 
@@ -857,6 +918,9 @@ key can trigger it. Response lists what was reloaded and what could not be.
 | --- | --- | --- | --- |
 | `GET` | `/api/capture/status` | No | Capture subsystem status, config summary, writer metrics, disk usage |
 | `POST` | `/api/capture/rotate` | No | Force rotation of the active WAL file |
+
+Scope: **`capture-export`** for both. `admin` reaches them through scope
+implication; a `client` or `operator` key gets the typed `403`.
 
 The capture subsystem stores **raw request/response events** in a JSONL WAL under
 `data/capture/` (the active file `guardian_capture_current.jsonl` is plain JSONL so
@@ -898,6 +962,9 @@ the active WAL file and opens a new one (returns the rotated + active paths). Se
 
 #### `POST /admin/load`
 
+Scope: **`operator`** (G1-01) — process/model lifecycle with restart-equivalent
+impact. `client` keys are refused with the typed `403`.
+
 Request body:
 
 ```json
@@ -934,6 +1001,8 @@ Representative success response:
 ```
 
 #### `POST /admin/unload`
+
+Scope: **`operator`** (G1-01), like `/admin/load`.
 
 Representative response when backend was active:
 
@@ -1130,13 +1199,15 @@ field policy defaults to `strip`).
 
 These endpoints are served by the separate UI app in `app/main.py`.
 
-| Method | Path | Auth | Purpose |
-| --- | --- | --- | --- |
-| `GET` | `/` | No | Serve static dashboard UI |
-| `GET` | `/api/stats` | No | Aggregate VRAM, cached models, and API usage snapshot |
-| `GET` | `/api/benchmark` | No | Read-only benchmark summary |
-| `POST` | `/api/benchmark/start` | No | Returns `410 Gone` |
-| `POST` | `/api/benchmark/stop` | No | Returns `410 Gone` |
+| Method | Path | Auth | Scope | Purpose |
+| --- | --- | --- | --- | --- |
+| `GET` | `/` | No | `public` | Serve static dashboard UI |
+| `GET` | `/api/stats` | Bearer | `admin` | Aggregate VRAM, cached models, and API usage snapshot |
+| `GET` | `/api/benchmark` | Bearer | `admin` | Read-only benchmark summary |
+| `POST` | `/api/benchmark/start` | Bearer | `admin` | Returns `410 Gone` |
+| `POST` | `/api/benchmark/stop` | Bearer | `admin` | Returns `410 Gone` |
+| `GET` `POST` | `/api/keys` | Bearer | `admin` | List / mint keys (same rule as the proxy surface) |
+| `GET` | `/api/cloud/providers` `catalog` | Bearer | `admin` | Cloud provider/catalog state |
 
 ### `GET /api/stats`
 
@@ -1177,7 +1248,13 @@ longer a live control path.
 ## Security and Backpressure Summary
 
 - Auth is enforced on `:11434` except for `/healthz` and `/metrics`.
-- The dashboard/UI port `:11437` is unauthenticated in current code.
+- Authorization is enforced per route (G1-01): the caller's key must hold the
+  route's declared scope; `client` keys are refused on `/api/keys`,
+  `/api/config/reload`, `/admin/*` and the capture routes. See
+  [decisions/G1-01-privilege-scopes.md](decisions/G1-01-privilege-scopes.md).
+- The dashboard UI assets on `:11437` are unauthenticated; every `/api/*` route
+  on that surface requires a Bearer key with the route's scope (all of them
+  `admin`).
 - Model changes are governed by `guardian.pinned_model` and
   `guardian.switch_allowlist`.
 - Backpressure comes from the FIFO queue and model-size timeout tiers, not from

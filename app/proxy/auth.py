@@ -14,7 +14,9 @@ from fastapi import HTTPException, Request, Security
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from starlette.status import HTTP_401_UNAUTHORIZED
 
+from app.log_safety import clean_log_value
 from app.paths import GUARDIAN_APIKEYS_FILE, LEGACY_APIKEYS_FILE
+from app.proxy import scopes as _scopes
 
 logger = logging.getLogger("Auth")
 
@@ -295,6 +297,181 @@ def _record_unauthorized_api_usage(request: Request, *, status_code: int = HTTP_
     )
     state_obj.guardian_usage_finished = True
 
+
+# ── Privilege scopes (G1-01, docs/decisions/G1-01-privilege-scopes.md) ──
+#
+# The route -> scope inventory lives in ``app.proxy.scopes.ROUTE_SCOPES``; this
+# is the single enforcement point. Authorization is resolved from the matched
+# FastAPI route template, so a parameterised or catch-all path can never pair
+# with another route's scope. Both side effects of a wrong answer are
+# deliberate: an undeclared protected route denies (fail-closed), and a
+# malformed scope declaration denies privilege while leaving ordinary
+# ``client`` inference working.
+
+
+def _route_template(request: Request) -> str | None:
+    """Return the matched route's path template, or ``None`` without a route."""
+    scope = getattr(request, "scope", None)
+    if not isinstance(scope, dict):
+        return None
+    route = scope.get("route")
+    path = getattr(route, "path", None)
+    return path if isinstance(path, str) and path else None
+
+
+def _scope_counters():
+    """Return ``(grace, denials)`` counters, or ``(None, None)`` when unavailable."""
+    try:
+        from app.proxy.metrics import SCOPE_DENIALS, SCOPE_GRACE_CALLS
+
+        return SCOPE_GRACE_CALLS, SCOPE_DENIALS
+    except Exception:  # pragma: no cover - metrics are observability, not policy
+        return None, None
+
+
+def _bump_counter(counter, **labels: str) -> None:
+    if counter is None:
+        return
+    try:
+        counter.labels(**labels).inc()
+    except Exception:  # pragma: no cover - never let metrics break a request
+        pass
+
+
+def _scope_error(
+    *,
+    error_type: str,
+    message: str,
+    required: str | None,
+    granted: list[str],
+    key_name: str | None,
+    route: str | None,
+) -> HTTPException:
+    """Build the stable typed 403 body used for every scope denial."""
+    detail: dict[str, Any] = {
+        "type": error_type,
+        "message": message,
+        "required_scope": required,
+        "granted_scopes": granted,
+        "key": clean_log_value(key_name) if key_name else None,
+        "route": route,
+    }
+    headers = {"WWW-Authenticate": 'Bearer error="insufficient_scope"'}
+    if required:
+        headers["WWW-Authenticate"] = (
+            f'Bearer error="insufficient_scope", scope="{required}"'
+        )
+    return HTTPException(status_code=403, detail=detail, headers=headers)
+
+
+def _enforce_route_scope(request: Request, user_data: dict[str, Any]) -> None:
+    """Authorize one authenticated request against its route's required scope.
+
+    A request that carries no route template (a direct ``verify_api_key`` call
+    in a unit test) has no route to protect and is left to the caller.
+    """
+    template = _route_template(request)
+    if template is None:
+        return
+
+    method = (_request_method(request) or "-").upper()
+    route_label = f"{method} {template}"
+    required = _scopes.required_scope_for(method, template)
+    key_name = user_data.get("name") if isinstance(user_data, dict) else None
+    grace_counter, denial_counter = _scope_counters()
+
+    if required is None:
+        logger.error(
+            "🛡️ scope-denied %s",
+            _scopes.structured_event(
+                {
+                    "event": "scope_undeclared_route",
+                    "key": key_name,
+                    "route": route_label,
+                    "reason": "route has no declared scope; denying (fail-closed)",
+                }
+            ),
+        )
+        _bump_counter(denial_counter, scope="-", route=route_label)
+        _record_unauthorized_api_usage(request, status_code=403)
+        raise _scope_error(
+            error_type="authorization_misconfigured",
+            message=(
+                f"route {route_label} has no declared privilege scope; "
+                "access denied (fail-closed)"
+            ),
+            required=None,
+            granted=[],
+            key_name=key_name,
+            route=route_label,
+        )
+
+    if required == _scopes.Scope.PUBLIC:
+        return
+
+    decision = _scopes.authorize_key(user_data, required)
+    auth_context = get_request_auth_context(request)
+    if isinstance(auth_context, dict):
+        auth_context["scopes"] = sorted(
+            scope.value for scope in decision.key_scopes.granted
+        )
+        auth_context["scope_mode"] = decision.key_scopes.mode
+
+    if decision.allowed:
+        if decision.grace_used:
+            deadline = _scopes.configured_enforced_after()
+            logger.warning(
+                "⏳ scope-grace %s",
+                _scopes.structured_event(
+                    {
+                        "event": "scope_grace",
+                        "key": key_name,
+                        "route": route_label,
+                        "missing_scope": required.value,
+                        "granted_scopes": ",".join(
+                            sorted(scope.value for scope in decision.key_scopes.granted)
+                        ),
+                        "enforced_after": deadline.isoformat() if deadline else "none",
+                    }
+                ),
+            )
+            _bump_counter(grace_counter, scope=required.value, route=route_label)
+        return
+
+    reason = "insufficient_scope"
+    if decision.key_scopes.mode == "invalid":
+        reason = "invalid_scope_declaration"
+    logger.warning(
+        "🛡️ scope-denied %s",
+        _scopes.structured_event(
+            {
+                "event": "scope_denied",
+                "key": key_name,
+                "route": route_label,
+                "required_scope": required.value,
+                "granted_scopes": ",".join(
+                    sorted(scope.value for scope in decision.key_scopes.granted)
+                ),
+                "mode": decision.key_scopes.mode,
+                "reason": reason,
+            }
+        ),
+    )
+    _bump_counter(denial_counter, scope=required.value, route=route_label)
+    _record_unauthorized_api_usage(request, status_code=403)
+    raise _scope_error(
+        error_type="insufficient_scope",
+        message=(
+            f"key '{clean_log_value(key_name) if key_name else 'unknown'}' lacks the "
+            f"required scope '{required.value}' for {route_label}"
+        ),
+        required=required.value,
+        granted=sorted(scope.value for scope in decision.key_scopes.granted),
+        key_name=key_name,
+        route=route_label,
+    )
+
+
 def _migrate_legacy_keys() -> dict[str, dict]:
     """Load keys from the legacy ``api_keys.json`` if the new file is absent.
 
@@ -391,8 +568,20 @@ def save_api_keys(keys: dict[str, dict]):
 
 _ensure_api_keys_file_permissions()
 
-def generate_api_key(name: str, metadata: dict = None, prefix: str | None = None) -> str:
-    """Generate a new API key with a normalized prefix."""
+def generate_api_key(
+    name: str,
+    metadata: dict = None,
+    prefix: str | None = None,
+    *,
+    cloud_gateway_access: bool = True,
+) -> str:
+    """Generate a new API key with a normalized prefix.
+
+    ``cloud_gateway_access`` is inherited from the minting key by the admin API
+    (B-08: minting never upgrades cloud access). The CLI/offline default stays
+    ``True`` — a host-local operator minting a key by hand is not constrained by
+    another key's envelope.
+    """
     prefix = _normalize_api_key_prefix(prefix)
     random_part = secrets.token_hex(16)
     api_key = f"{prefix}{random_part}"
@@ -402,7 +591,7 @@ def generate_api_key(name: str, metadata: dict = None, prefix: str | None = None
         "name": name,
         "created_at": time.time(),
         "metadata": metadata or {},
-        "cloud_gateway_access": True,
+        "cloud_gateway_access": bool(cloud_gateway_access),
     }
     save_api_keys(keys)
     logger.info(f"Generated new API key for '{name}'")
@@ -453,8 +642,10 @@ async def verify_api_key(request: Request, creds: HTTPAuthorizationCredentials |
         ),
     )
     if user_data:
-        # Attach user info to request state for logging
+        # Attach user info to request state for logging (and for the admin API's
+        # minting check, which must know which key is minting).
         request.state.user = user_data
+        _enforce_route_scope(request, user_data)
         logger.info(f"🔑 Auth success: {user_data.get('name', 'Unknown')}")
         return user_data["name"]  # Return client_id/name as expected by endpoints
 

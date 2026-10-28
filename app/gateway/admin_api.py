@@ -19,6 +19,7 @@ from fastapi import HTTPException, Request
 from app.gateway.context_metadata import enrich_model_context_metadata
 from app.gateway.metadata_enrichment import attach_parity_metadata
 from app.log_safety import clean_log_value
+from app.proxy import scopes as _scopes
 
 logger = logging.getLogger("Guardian")
 
@@ -94,16 +95,66 @@ def init(
     globals().update({k: v for k, v in locals().items() if k != "_init"})
 
 
+def _minting_key_entry(request: Request) -> dict[str, Any] | None:
+    """Return the authenticated key entry that is minting, if resolvable."""
+    state = getattr(request, "state", None)
+    entry = getattr(state, "user", None)
+    return entry if isinstance(entry, dict) else None
+
+
+def resolve_mint_grant(
+    request: Request,
+    metadata: Any,
+    cloud_gateway_access: Any = None,
+    *,
+    source: str = "api",
+) -> "_scopes.MintGrant":
+    """Apply the B-08 minting rule and map a rejection to a typed HTTP error.
+
+    Shared by the proxy (``:11434``) and dashboard (``:11437``) key-minting
+    routes so both surfaces enforce the same envelope.
+    """
+    try:
+        return _scopes.mint_metadata(
+            _minting_key_entry(request),
+            metadata,
+            requested_cloud_access=cloud_gateway_access,
+            source=source,
+        )
+    except _scopes.ScopeError as exc:
+        status = 400 if exc.code == "invalid_scope" else 403
+        minter = _minting_key_entry(request)
+        raise HTTPException(
+            status_code=status,
+            detail={
+                "type": exc.code,
+                "message": str(exc),
+                "scope": exc.scope,
+                "key": clean_log_value(minter.get("name")) if minter else None,
+            },
+        ) from exc
+
+
 async def list_api_keys(client_id: str) -> Any:
     keys = _load_api_keys()
     result = []
     for token, data in keys.items():
+        metadata = data.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        scopes = _scopes.resolve_key_scopes(data)
         result.append({
             "key_fingerprint": _token_fingerprint(token),
             "key_prefix": token.split("_")[0] if "_" in token else "legacy",
             "name": data.get("name"),
             "created_at": data.get("created_at"),
-            "metadata": data.get("metadata", {}),
+            "cloud_gateway_access": bool(data.get("cloud_gateway_access", True)),
+            "metadata": metadata,
+            # Migration visibility: an absent ``scopes`` list marks a key the
+            # grace window still covers; ``effective`` is what it holds now.
+            "scopes": metadata.get("scopes"),
+            "effective_scopes": sorted(scope.value for scope in scopes.granted),
+            "scope_mode": scopes.mode,
         })
     result.sort(key=lambda x: x.get("created_at", 0), reverse=True)
     return {"keys": result}
@@ -116,13 +167,31 @@ async def create_api_key(request: Request, client_id: str) -> Any:
     if not name:
         raise HTTPException(status_code=400, detail="name is required")
     prefix = body.get("prefix")
-    metadata = body.get("metadata")
-    api_key = _generate_api_key(name, metadata=metadata, prefix=prefix)
-    logger.info("🔑 Admin '%s' generated new API key for '%s'", client_id, name)
+    grant = resolve_mint_grant(
+        request,
+        body.get("metadata"),
+        body.get("cloud_gateway_access"),
+        source="proxy",
+    )
+    api_key = _generate_api_key(
+        name,
+        metadata=grant.metadata,
+        prefix=prefix,
+        cloud_gateway_access=grant.cloud_gateway_access,
+    )
+    logger.info(
+        "🔑 Admin '%s' generated new API key for '%s' (scopes=%s, cloud_gateway_access=%s)",
+        clean_log_value(client_id),
+        clean_log_value(name),
+        clean_log_value(grant.metadata.get("scopes", "inherit/unscoped")),
+        grant.cloud_gateway_access,
+    )
     return {
         "api_key": api_key,
         "key_fingerprint": _token_fingerprint(api_key),
         "name": name,
+        "scopes": grant.metadata.get("scopes"),
+        "cloud_gateway_access": grant.cloud_gateway_access,
         "message": "Store this key securely — it will not be shown again.",
     }
 

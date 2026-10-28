@@ -2,11 +2,12 @@
 
 Baseline inventory required by `docs/ROADMAP.md` §4 G0 and backlog row G0-01. It
 links every route registered on both FastAPI apps to the handler that serves it,
-the authentication dependency the code applies, the privilege class the handler's
-semantics require, and the test that invokes it.
+the authentication dependency the code applies, the required privilege scope
+(enforced since G1-01), and the test that invokes it.
 
 **Guard:** `tests/unit/test_g0_endpoint_matrix.py` collects both apps and fails
-when this file and the code disagree.
+when this file and the code disagree — including the `Scope` column, which must
+equal the declaration in `app/proxy/scopes.py:ROUTE_SCOPES`.
 
 **Route count: 57 — 41 proxy, 16 dashboard.** One row per `(method, path)` of a
 registered route object; `HEAD` is folded into `GET` (Starlette adds it to every
@@ -21,14 +22,22 @@ are reachable, not because they belong to the Guardian API.
   graph. `none` means the handler takes no auth dependency at all.
 - **Privilege class** — the class the handler's semantics require:
   `public` = reachable without a key by design; `client` = an authenticated
-  caller acting on its own models and requests; `admin` = reads or mutates
-  shared state (keys, catalogs, capture, scaler, sessions, diagnostics);
-  `operator` = process/model lifecycle and runtime configuration, i.e.
-  restart-equivalent impact.
-  **The code does not enforce these classes.** Every protected route uses the
-  same flat `verify_api_key`, so one valid key reaches `admin` and `operator`
-  routes alike — the verified gap recorded in `docs/ROADMAP.md` §G1. This column
-  is the target classification for G1-01, not a claim about current enforcement.
+  caller acting on its own models and requests; `operator` = process/model
+  lifecycle (restart-equivalent impact); `admin` = the key store, runtime
+  configuration and shared control state (keys, catalogs, scaler, sessions,
+  diagnostics); `capture-export` = capture payload data (WAL status/rotation and
+  export), i.e. prompt content.
+  Since G1-01 the class **is** the required scope and the code enforces it: the
+  single `verify_api_key` dependency resolves the matched route's declaration
+  from `app/proxy/scopes.py:ROUTE_SCOPES` and authorizes the caller's key against
+  it (`docs/decisions/G1-01-privilege-scopes.md`). A key holds its declared
+  scopes; `admin` implies `operator`, `client` and `capture-export`, and
+  `operator` implies `client`. A legacy key with no `metadata.scopes` keeps the
+  old flat access only until `auth.scopes_enforced_after`.
+- **Scope** — the enforced requirement, identical to the privilege class. `public`
+  routes take no auth dependency; every other row is an entry in
+  `ROUTE_SCOPES`, keyed by the route **template**, so a parameterised or
+  catch-all path cannot borrow another route's privilege.
 - **Covering tests** — up to three tests that invoke the route: an HTTP request
   through the app, or a direct `await` of the endpoint function. `none` means no
   test invokes it. Two markers:
@@ -46,70 +55,81 @@ are reachable, not because they belong to the Guardian API.
 
 ## Proxy surface — `app.proxy.server:app` (`:11434`)
 
-| # | Surface | Method | Path | Handler | Auth dependency | Privilege | Covering tests |
-|---|---------|--------|------|---------|-----------------|-----------|----------------|
-| 1 | proxy | GET | `/openapi.json` | `fastapi/applications.py` | none | public | none |
-| 2 | proxy | GET | `/docs` | `fastapi/applications.py` | none | public | none |
-| 3 | proxy | GET | `/docs/oauth2-redirect` | `fastapi/applications.py` | none | public | none |
-| 4 | proxy | GET | `/redoc` | `fastapi/applications.py` | none | public | none |
-| 5 | proxy | POST | `/api/chat` | `app/proxy/server.py:1171` | `verify_api_key` | client | `tests/unit/test_model_switch_verification.py::test_ollama_chat_fails_closed_when_backend_serves_other_model`<br>`tests/unit/test_model_switch_verification.py::test_ollama_chat_same_model_reload_still_succeeds` |
-| 6 | proxy | POST | `/api/generate` | `app/proxy/server.py:1179` | `verify_api_key` | client | `tests/unit/test_model_switch_verification.py::test_ollama_generate_fails_closed_when_backend_serves_other_model` |
-| 7 | proxy | GET | `/api/tags` | `app/proxy/server.py:1187` | `verify_api_key` | client | `tests/integration/test_live_inference.py::TestRestartRace::test_api_tags` |
-| 8 | proxy | GET | `/healthz` | `app/proxy/server.py:1196` | none | public | none |
-| 9 | proxy | GET | `/v1/models` | `app/proxy/server.py:1243` | `verify_api_key` | client | `tests/unit/test_server.py::test_list_models_includes_cloud_models`<br>`tests/unit/test_server.py::test_list_models_includes_vision_metadata`<br>`tests/unit/test_server.py::test_list_models_includes_failover_groups` |
-| 10 | proxy | GET | `/v1/models/{model_id:path}/endpoints` | `app/proxy/server.py:1249` | `verify_api_key` | client | `tests/unit/test_model_endpoints.py::test_cloud_model_served_by_two_providers_yields_two_endpoints` †<br>`tests/unit/test_model_endpoints.py::test_unserved_model_gets_no_fabricated_endpoint` †<br>`tests/unit/test_model_endpoints.py::test_cloud_access_disabled_returns_403` † |
-| 11 | proxy | GET | `/v1/models/{model_id:path}` | `app/proxy/server.py:1264` | `verify_api_key` | client | `tests/unit/test_server.py::test_get_model_metadata_resolves_public_alias`<br>`tests/unit/test_server.py::test_get_model_metadata_returns_cloud_model`<br>`tests/unit/test_server.py::test_get_model_metadata_returns_404_for_unknown_failover_group` |
-| 12 | proxy | POST | `/api/show` | `app/proxy/server.py:1274` | `verify_api_key` | client | `tests/unit/test_server.py::test_ollama_show_reports_context_for_cloud_model`<br>`tests/unit/test_server.py::test_show_model_failover_address_stays_cloud_branch` |
-| 13 | proxy | POST | `/admin/unload` | `app/proxy/server.py:1282` | `verify_api_key` | operator | `tests/unit/test_lifespan_caretaker.py::test_admin_unload_delegates_to_caretaker`<br>`tests/unit/test_lifespan_caretaker.py::test_admin_unload_falls_back_to_local_unload_on_caretaker_unavailable`<br>`tests/unit/test_lifespan_caretaker.py::test_admin_unload_503_on_definitive_caretaker_refusal` |
-| 14 | proxy | POST | `/admin/load` | `app/proxy/server.py:1376` | `verify_api_key` | operator | `tests/unit/test_server.py::test_admin_load_returns_400_for_runtime_override_validation_error`<br>`tests/unit/test_server.py::test_admin_load_passes_kv_type_runtime_override` |
-| 15 | proxy | GET | `/api/keys` | `app/proxy/server.py:1385` | `verify_api_key` | admin | none |
-| 16 | proxy | POST | `/api/keys` | `app/proxy/server.py:1391` | `verify_api_key` | admin | none |
-| 17 | proxy | GET | `/api/cloud/ratelimit-stats` | `app/proxy/server.py:1398` | `verify_api_key` | admin | none |
-| 18 | proxy | GET | `/api/cloud/providers` | `app/proxy/server.py:1404` | `verify_api_key` | admin | none |
-| 19 | proxy | GET | `/api/cloud/catalog` | `app/proxy/server.py:1410` | `verify_api_key` | admin | `tests/unit/test_server.py::test_list_cloud_catalog_admin_reports_provider_state` |
-| 20 | proxy | POST | `/api/cloud/catalog/refresh` | `app/proxy/server.py:1416` | `verify_api_key` | admin | `tests/unit/test_server.py::test_refresh_cloud_catalog_admin_force_refresh` |
-| 21 | proxy | POST | `/api/config/reload` | `app/proxy/server.py:1422` | `verify_api_key` | operator | `tests/unit/test_config_reload.py::test_admin_reload_config_orchestrates_all_subsystems` †<br>`tests/unit/test_config_reload.py::test_reload_config_skips_retry_defaulting_when_settings_failed` † |
-| 22 | proxy | GET | `/api/cloud/models` | `app/proxy/server.py:1434` | `verify_api_key` | admin | none |
-| 23 | proxy | GET | `/api/crashes` | `app/proxy/server.py:1441` | `verify_api_key` | admin | none |
-| 24 | proxy | GET | `/api/status` | `app/proxy/server.py:1447` | `verify_api_key` | admin | `tests/integration/test_live_inference.py::TestStatus::test_api_status`<br>`tests/integration/test_live_inference.py::TestRestartRace::test_api_status_vram_fields` |
-| 25 | proxy | GET | `/api/capture/status` | `app/proxy/server.py:1453` | `verify_api_key` | admin | none |
-| 26 | proxy | POST | `/api/capture/rotate` | `app/proxy/server.py:1459` | `verify_api_key` | admin | none |
-| 27 | proxy | GET | `/metrics` | `app/proxy/server.py:1468` | none | public | `tests/integration/test_live_inference.py::TestRestartRace::test_metrics_endpoint` |
-| 28 | proxy | GET | `/api/scaler` | `app/proxy/server.py:1484` | `verify_api_key` | admin | none |
-| 29 | proxy | PUT | `/api/scaler` | `app/proxy/server.py:1490` | `verify_api_key` | admin | none |
-| 30 | proxy | POST | `/api/scaler/reset` | `app/proxy/server.py:1496` | `verify_api_key` | admin | none |
-| 31 | proxy | POST | `/api/scaler/recommend` | `app/proxy/server.py:1502` | `verify_api_key` | admin | none |
-| 32 | proxy | GET | `/v1/queue/status` | `app/proxy/server.py:1511` | `verify_api_key` | client | `tests/integration/test_live_inference.py::TestQueueBehavior::test_status_shows_active_during_inference`<br>`tests/integration/test_live_inference.py::TestRestartRace::test_queue_status` |
-| 33 | proxy | GET | `/v1/queue/requests/{request_id}` | `app/proxy/server.py:1517` | `verify_api_key` | client | `tests/unit/test_server.py::test_queue_request_status_endpoint_returns_snapshot`<br>`tests/unit/test_server.py::test_queue_request_status_endpoint_is_isolated_per_api_key` |
-| 34 | proxy | DELETE | `/v1/queue/requests/{request_id}` | `app/proxy/server.py:1523` | `verify_api_key` | client | `tests/unit/test_server.py::test_cancel_queue_request_endpoint_marks_running_request` |
-| 35 | proxy | GET | `/v1/{path:path}` | `app/proxy/server.py:1531` | `verify_api_key` | client | none |
-| 36 | proxy | POST | `/v1/audio/speech` | `app/proxy/server.py:1643` | `verify_api_key` | client | `tests/unit/test_tts_route.py::test_success_primary_provider_and_expanded_keys` †<br>`tests/unit/test_tts_routes.py::test_cloud_route_forwards_canonical_payload` †<br>`tests/unit/test_tts_routes.py::test_cloud_route_failure_is_exact_no_local_fallback` † |
-| 37 | proxy | POST | `/v1/audio/transcriptions` | `app/proxy/server.py:1649` | `verify_api_key` | client | `tests/unit/test_stt_routes.py::test_cloud_route_forwards_brand_model_id_and_language` †<br>`tests/unit/test_stt_routes.py::test_unknown_provider_returns_404_model_not_served` †<br>`tests/unit/test_stt_routes.py::test_cloud_error_body_never_reaches_client_detail` † |
-| 38 | proxy | POST | `/v1/{path:path}` | `app/proxy/server.py:1655` | `verify_api_key` | client | `tests/unit/test_model_switch_verification.py::test_v1_switch_verify_fails_closed_when_backend_serves_other_model`<br>`tests/unit/test_grammar_passthrough.py::test_local_passthrough_preserves_all_gcd_fields_byte_identical`<br>`tests/unit/test_server.py::test_v1_post_forwards_cloud_model_to_provider_not_local` |
-| 39 | proxy | POST | `/api/session/save` | `app/proxy/server.py:1850` | `verify_api_key` | admin | none |
-| 40 | proxy | POST | `/api/session/load` | `app/proxy/server.py:1856` | `verify_api_key` | admin | none |
-| 41 | proxy | GET | `/api/session/list` | `app/proxy/server.py:1862` | `verify_api_key` | admin | none |
+| # | Surface | Method | Path | Handler | Auth dependency | Privilege | Scope | Covering tests |
+|---|---------|--------|------|---------|-----------------|-----------|-------|----------------|
+| 1 | proxy | GET | `/openapi.json` | `fastapi/applications.py` | none | public | public | none |
+| 2 | proxy | GET | `/docs` | `fastapi/applications.py` | none | public | public | none |
+| 3 | proxy | GET | `/docs/oauth2-redirect` | `fastapi/applications.py` | none | public | public | none |
+| 4 | proxy | GET | `/redoc` | `fastapi/applications.py` | none | public | public | none |
+| 5 | proxy | POST | `/api/chat` | `app/proxy/server.py:1171` | `verify_api_key` | client | client | `tests/unit/test_model_switch_verification.py::test_ollama_chat_fails_closed_when_backend_serves_other_model`<br>`tests/unit/test_model_switch_verification.py::test_ollama_chat_same_model_reload_still_succeeds` |
+| 6 | proxy | POST | `/api/generate` | `app/proxy/server.py:1179` | `verify_api_key` | client | client | `tests/unit/test_model_switch_verification.py::test_ollama_generate_fails_closed_when_backend_serves_other_model` |
+| 7 | proxy | GET | `/api/tags` | `app/proxy/server.py:1187` | `verify_api_key` | client | client | `tests/integration/test_live_inference.py::TestRestartRace::test_api_tags` |
+| 8 | proxy | GET | `/healthz` | `app/proxy/server.py:1196` | none | public | public | none |
+| 9 | proxy | GET | `/v1/models` | `app/proxy/server.py:1243` | `verify_api_key` | client | client | `tests/unit/test_server.py::test_list_models_includes_cloud_models`<br>`tests/unit/test_server.py::test_list_models_includes_vision_metadata`<br>`tests/unit/test_server.py::test_list_models_includes_failover_groups` |
+| 10 | proxy | GET | `/v1/models/{model_id:path}/endpoints` | `app/proxy/server.py:1249` | `verify_api_key` | client | client | `tests/unit/test_model_endpoints.py::test_cloud_model_served_by_two_providers_yields_two_endpoints` †<br>`tests/unit/test_model_endpoints.py::test_unserved_model_gets_no_fabricated_endpoint` †<br>`tests/unit/test_model_endpoints.py::test_cloud_access_disabled_returns_403` † |
+| 11 | proxy | GET | `/v1/models/{model_id:path}` | `app/proxy/server.py:1264` | `verify_api_key` | client | client | `tests/unit/test_server.py::test_get_model_metadata_resolves_public_alias`<br>`tests/unit/test_server.py::test_get_model_metadata_returns_cloud_model`<br>`tests/unit/test_server.py::test_get_model_metadata_returns_404_for_unknown_failover_group` |
+| 12 | proxy | POST | `/api/show` | `app/proxy/server.py:1274` | `verify_api_key` | client | client | `tests/unit/test_server.py::test_ollama_show_reports_context_for_cloud_model`<br>`tests/unit/test_server.py::test_show_model_failover_address_stays_cloud_branch` |
+| 13 | proxy | POST | `/admin/unload` | `app/proxy/server.py:1282` | `verify_api_key` | operator | operator | `tests/unit/test_lifespan_caretaker.py::test_admin_unload_delegates_to_caretaker`<br>`tests/unit/test_lifespan_caretaker.py::test_admin_unload_falls_back_to_local_unload_on_caretaker_unavailable`<br>`tests/unit/test_lifespan_caretaker.py::test_admin_unload_503_on_definitive_caretaker_refusal` |
+| 14 | proxy | POST | `/admin/load` | `app/proxy/server.py:1376` | `verify_api_key` | operator | operator | `tests/unit/test_server.py::test_admin_load_returns_400_for_runtime_override_validation_error`<br>`tests/unit/test_server.py::test_admin_load_passes_kv_type_runtime_override` |
+| 15 | proxy | GET | `/api/keys` | `app/proxy/server.py:1385` | `verify_api_key` | admin | admin | none |
+| 16 | proxy | POST | `/api/keys` | `app/proxy/server.py:1391` | `verify_api_key` | admin | admin | none |
+| 17 | proxy | GET | `/api/cloud/ratelimit-stats` | `app/proxy/server.py:1398` | `verify_api_key` | admin | admin | none |
+| 18 | proxy | GET | `/api/cloud/providers` | `app/proxy/server.py:1404` | `verify_api_key` | admin | admin | none |
+| 19 | proxy | GET | `/api/cloud/catalog` | `app/proxy/server.py:1410` | `verify_api_key` | admin | admin | `tests/unit/test_server.py::test_list_cloud_catalog_admin_reports_provider_state` |
+| 20 | proxy | POST | `/api/cloud/catalog/refresh` | `app/proxy/server.py:1416` | `verify_api_key` | admin | admin | `tests/unit/test_server.py::test_refresh_cloud_catalog_admin_force_refresh` |
+| 21 | proxy | POST | `/api/config/reload` | `app/proxy/server.py:1422` | `verify_api_key` | admin | admin | `tests/unit/test_config_reload.py::test_admin_reload_config_orchestrates_all_subsystems` †<br>`tests/unit/test_config_reload.py::test_reload_config_skips_retry_defaulting_when_settings_failed` † |
+| 22 | proxy | GET | `/api/cloud/models` | `app/proxy/server.py:1434` | `verify_api_key` | admin | admin | none |
+| 23 | proxy | GET | `/api/crashes` | `app/proxy/server.py:1441` | `verify_api_key` | admin | admin | none |
+| 24 | proxy | GET | `/api/status` | `app/proxy/server.py:1447` | `verify_api_key` | admin | admin | `tests/integration/test_live_inference.py::TestStatus::test_api_status`<br>`tests/integration/test_live_inference.py::TestRestartRace::test_api_status_vram_fields` |
+| 25 | proxy | GET | `/api/capture/status` | `app/proxy/server.py:1453` | `verify_api_key` | capture-export | capture-export | none |
+| 26 | proxy | POST | `/api/capture/rotate` | `app/proxy/server.py:1459` | `verify_api_key` | capture-export | capture-export | none |
+| 27 | proxy | GET | `/metrics` | `app/proxy/server.py:1468` | none | public | public | `tests/integration/test_live_inference.py::TestRestartRace::test_metrics_endpoint` |
+| 28 | proxy | GET | `/api/scaler` | `app/proxy/server.py:1484` | `verify_api_key` | admin | admin | none |
+| 29 | proxy | PUT | `/api/scaler` | `app/proxy/server.py:1490` | `verify_api_key` | admin | admin | none |
+| 30 | proxy | POST | `/api/scaler/reset` | `app/proxy/server.py:1496` | `verify_api_key` | admin | admin | none |
+| 31 | proxy | POST | `/api/scaler/recommend` | `app/proxy/server.py:1502` | `verify_api_key` | admin | admin | none |
+| 32 | proxy | GET | `/v1/queue/status` | `app/proxy/server.py:1511` | `verify_api_key` | client | client | `tests/integration/test_live_inference.py::TestQueueBehavior::test_status_shows_active_during_inference`<br>`tests/integration/test_live_inference.py::TestRestartRace::test_queue_status` |
+| 33 | proxy | GET | `/v1/queue/requests/{request_id}` | `app/proxy/server.py:1517` | `verify_api_key` | client | client | `tests/unit/test_server.py::test_queue_request_status_endpoint_returns_snapshot`<br>`tests/unit/test_server.py::test_queue_request_status_endpoint_is_isolated_per_api_key` |
+| 34 | proxy | DELETE | `/v1/queue/requests/{request_id}` | `app/proxy/server.py:1523` | `verify_api_key` | client | client | `tests/unit/test_server.py::test_cancel_queue_request_endpoint_marks_running_request` |
+| 35 | proxy | GET | `/v1/{path:path}` | `app/proxy/server.py:1531` | `verify_api_key` | client | client | none |
+| 36 | proxy | POST | `/v1/audio/speech` | `app/proxy/server.py:1643` | `verify_api_key` | client | client | `tests/unit/test_tts_route.py::test_success_primary_provider_and_expanded_keys` †<br>`tests/unit/test_tts_routes.py::test_cloud_route_forwards_canonical_payload` †<br>`tests/unit/test_tts_routes.py::test_cloud_route_failure_is_exact_no_local_fallback` † |
+| 37 | proxy | POST | `/v1/audio/transcriptions` | `app/proxy/server.py:1649` | `verify_api_key` | client | client | `tests/unit/test_stt_routes.py::test_cloud_route_forwards_brand_model_id_and_language` †<br>`tests/unit/test_stt_routes.py::test_unknown_provider_returns_404_model_not_served` †<br>`tests/unit/test_stt_routes.py::test_cloud_error_body_never_reaches_client_detail` † |
+| 38 | proxy | POST | `/v1/{path:path}` | `app/proxy/server.py:1655` | `verify_api_key` | client | client | `tests/unit/test_model_switch_verification.py::test_v1_switch_verify_fails_closed_when_backend_serves_other_model`<br>`tests/unit/test_grammar_passthrough.py::test_local_passthrough_preserves_all_gcd_fields_byte_identical`<br>`tests/unit/test_server.py::test_v1_post_forwards_cloud_model_to_provider_not_local` |
+| 39 | proxy | POST | `/api/session/save` | `app/proxy/server.py:1850` | `verify_api_key` | admin | admin | none |
+| 40 | proxy | POST | `/api/session/load` | `app/proxy/server.py:1856` | `verify_api_key` | admin | admin | none |
+| 41 | proxy | GET | `/api/session/list` | `app/proxy/server.py:1862` | `verify_api_key` | admin | admin | none |
 
 ## Dashboard surface — `app.main:app` (`127.0.0.1:11437`)
 
-| # | Surface | Method | Path | Handler | Auth dependency | Privilege | Covering tests |
-|---|---------|--------|------|---------|-----------------|-----------|----------------|
-| 1 | dashboard | GET | `/openapi.json` | `fastapi/applications.py` | none | public | none |
-| 2 | dashboard | GET | `/docs` | `fastapi/applications.py` | none | public | none |
-| 3 | dashboard | GET | `/docs/oauth2-redirect` | `fastapi/applications.py` | none | public | none |
-| 4 | dashboard | GET | `/redoc` | `fastapi/applications.py` | none | public | none |
-| 5 | dashboard | MOUNT | `/static` | `app/main.py:73` | none | public | none |
-| 6 | dashboard | GET | `/` | `app/main.py:75` | none | public | none |
-| 7 | dashboard | GET | `/favicon.ico` | `app/main.py:79` | none | public | none |
-| 8 | dashboard | GET | `/api/stats` | `app/main.py:85` | `verify_api_key` | admin | `tests/unit/test_main.py::test_get_stats_includes_api_usage` |
-| 9 | dashboard | GET | `/api/benchmark` | `app/main.py:172` | `verify_api_key` | admin | none |
-| 10 | dashboard | POST | `/api/benchmark/start` | `app/main.py:236` | `verify_api_key` | admin | none |
-| 11 | dashboard | POST | `/api/benchmark/stop` | `app/main.py:241` | `verify_api_key` | admin | none |
-| 12 | dashboard | GET | `/api/keys` | `app/main.py:249` | `verify_api_key` | admin | none |
-| 13 | dashboard | POST | `/api/keys` | `app/main.py:264` | `verify_api_key` | admin | none |
-| 14 | dashboard | GET | `/api/cloud/providers` | `app/main.py:280` | `verify_api_key` | admin | none |
-| 15 | dashboard | GET | `/api/cloud/catalog` | `app/main.py:288` | `verify_api_key` | admin | `tests/unit/test_main.py::test_both_surfaces_serve_the_same_catalog_payload`<br>`tests/unit/test_main.py::test_dashboard_cloud_catalog_delegates_to_the_shared_implementation` |
-| 16 | dashboard | POST | `/api/cloud/catalog/refresh` | `app/main.py:303` | `verify_api_key` | admin | `tests/unit/test_main.py::test_dashboard_cloud_catalog_refresh_delegates` |
+| # | Surface | Method | Path | Handler | Auth dependency | Privilege | Scope | Covering tests |
+|---|---------|--------|------|---------|-----------------|-----------|-------|----------------|
+| 1 | dashboard | GET | `/openapi.json` | `fastapi/applications.py` | none | public | public | none |
+| 2 | dashboard | GET | `/docs` | `fastapi/applications.py` | none | public | public | none |
+| 3 | dashboard | GET | `/docs/oauth2-redirect` | `fastapi/applications.py` | none | public | public | none |
+| 4 | dashboard | GET | `/redoc` | `fastapi/applications.py` | none | public | public | none |
+| 5 | dashboard | MOUNT | `/static` | `app/main.py:73` | none | public | public | none |
+| 6 | dashboard | GET | `/` | `app/main.py:75` | none | public | public | none |
+| 7 | dashboard | GET | `/favicon.ico` | `app/main.py:79` | none | public | public | none |
+| 8 | dashboard | GET | `/api/stats` | `app/main.py:85` | `verify_api_key` | admin | admin | `tests/unit/test_main.py::test_get_stats_includes_api_usage` |
+| 9 | dashboard | GET | `/api/benchmark` | `app/main.py:172` | `verify_api_key` | admin | admin | none |
+| 10 | dashboard | POST | `/api/benchmark/start` | `app/main.py:236` | `verify_api_key` | admin | admin | none |
+| 11 | dashboard | POST | `/api/benchmark/stop` | `app/main.py:241` | `verify_api_key` | admin | admin | none |
+| 12 | dashboard | GET | `/api/keys` | `app/main.py:249` | `verify_api_key` | admin | admin | none |
+| 13 | dashboard | POST | `/api/keys` | `app/main.py:264` | `verify_api_key` | admin | admin | none |
+| 14 | dashboard | GET | `/api/cloud/providers` | `app/main.py:302` | `verify_api_key` | admin | admin | none |
+| 15 | dashboard | GET | `/api/cloud/catalog` | `app/main.py:310` | `verify_api_key` | admin | admin | `tests/unit/test_main.py::test_both_surfaces_serve_the_same_catalog_payload`<br>`tests/unit/test_main.py::test_dashboard_cloud_catalog_delegates_to_the_shared_implementation` |
+| 16 | dashboard | POST | `/api/cloud/catalog/refresh` | `app/main.py:325` | `verify_api_key` | admin | admin | `tests/unit/test_main.py::test_dashboard_cloud_catalog_refresh_delegates` |
+
+## G1-01 changes to this matrix
+
+Three rows changed privilege class when the classes became enforced scopes:
+
+- `POST /api/config/reload` — `operator` → `admin`: it re-reads provider
+  credentials, capture policy and failover configuration at runtime, i.e. a
+  broader lever than a model load (issue #52 requires `admin`).
+- `GET /api/capture/status` and `POST /api/capture/rotate` — `admin` →
+  `capture-export`: capture data is user payload, so exporting/rotating it is
+  its own privilege. `admin` still reaches them through scope implication.
 
 ## Uncovered routes
 
