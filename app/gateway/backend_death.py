@@ -137,11 +137,14 @@ def _parsed_timestamp(value: str) -> datetime | None:
     """
     try:
         parsed = datetime.fromisoformat(_ISO_WITH_Z.sub("+00:00", value))
-    except ValueError:
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        # ``astimezone`` is inside the guard: a boundary date with a non-UTC
+        # offset (``0001-01-01T00:00:00+01:00``) underflows and raises
+        # OverflowError, and that must read as "malformed", not propagate.
+        return parsed.astimezone(UTC)
+    except (ValueError, OverflowError):
         return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
 
 
 def _valid_timestamp(value: str) -> bool:
@@ -446,7 +449,14 @@ class BackendDeathObserver:
             )
             return self._unavailable(DEATH_SIGNAL_UNAVAILABLE)
 
-        death_signal, report = parse_death_signal(status)
+        try:
+            death_signal, report = parse_death_signal(status)
+        except Exception as exc:  # noqa: BLE001 — a parser defect must not break /api/status
+            self._log.error(
+                "Could not parse the caretaker death signal (%s); treating it as malformed",
+                clean_log_value(exc),
+            )
+            death_signal, report = DEATH_SIGNAL_MALFORMED, None
         if death_signal == DEATH_SIGNAL_MALFORMED:
             self._log.warning(
                 "Caretaker /status carried an unusable %s record (needs cause, "

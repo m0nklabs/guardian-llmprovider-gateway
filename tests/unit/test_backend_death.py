@@ -721,6 +721,41 @@ async def test_newest_death_comparison_handles_mixed_timestamp_forms(
     assert len(mgr.crash_history) == 2
 
 
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        "0001-01-01T00:00:00+01:00",  # UTC conversion underflows year 1
+        "9999-12-31T23:59:59-01:00",  # UTC conversion overflows year 9999
+    ],
+)
+async def test_boundary_timestamps_are_malformed_not_a_crash(tmp_path, timestamp):
+    """Review #81: UTC normalization must not raise on boundary dates."""
+    mgr = _make_manager(tmp_path)
+    client = _StubCaretaker({"last_death": _death_payload(timestamp=timestamp)})
+    observer = BackendDeathObserver(client, mgr, cache_seconds=0)
+
+    observation = await observer.observe()
+
+    assert observation.death_signal == DEATH_SIGNAL_MALFORMED
+    assert observation.death is None
+    assert mgr.crash_history == []
+    assert observer.last_report is None
+    assert parse_death_signal({"last_death": _death_payload(timestamp=timestamp)}) == (
+        DEATH_SIGNAL_MALFORMED,
+        None,
+    )
+
+
+def test_naive_boundary_timestamp_is_accepted():
+    """A naive boundary date parses without a UTC conversion, so it is valid."""
+    state, report = parse_death_signal(
+        {"last_death": _death_payload(timestamp="0001-01-01T00:00:00")}
+    )
+    assert state == DEATH_SIGNAL_REPORTED
+    assert report is not None
+    assert report.timestamp == "0001-01-01T00:00:00"
+
+
 async def test_observation_uses_a_short_bounded_timeout(tmp_path):
     mgr = _make_manager(tmp_path)
     client = _StubCaretaker({"is_unloaded": False})
