@@ -77,6 +77,19 @@ def response(status: int = 200, payload=None, *, text: str | None = None, header
     return verify.Response(status=status, headers=headers or {}, body=body)
 
 
+class Completed:
+    """Minimal ``subprocess.CompletedProcess`` stand-in."""
+
+    def __init__(self, stdout: str, returncode: int = 0, stderr: str = "") -> None:
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+
+
+def completed(stdout: str, returncode: int = 0, stderr: str = "") -> Completed:
+    return Completed(stdout, returncode, stderr)
+
+
 def key_choice(name: str = "test-key", token: str = "token-value", declared=None, mode: str = "explicit"):
     return verify.KeyChoice(
         token=token,
@@ -906,6 +919,89 @@ def test_key_selection_prefers_scoped_keys_and_keeps_legacy_separate(monkeypatch
     assert picked["legacy"] is not None and picked["legacy"].name == "legacy"
     assert picked["legacy"].is_legacy is True
     assert warnings == []
+
+
+# ── review-fix regressions (PR #83) ────────────────────────────────────
+
+
+def test_request_headers_emit_exactly_one_host():
+    """``http.client`` adds a Host unless told not to: assert we add one, not two."""
+    ctx = make_ctx()
+    headers = verify.request_headers(ctx, key="tok", body=b"{}")
+    hosts = [value for name, value in headers if name.lower() == "host"]
+    assert hosts == ["localhost"]  # the TLS SAN, not the connect address
+    assert [name for name, _ in headers].count("Content-Length") == 1
+
+
+def test_request_headers_keep_a_caller_supplied_host():
+    headers = verify.request_headers(make_ctx(), headers={"Host": "example.invalid"})
+    hosts = [value for name, value in headers if name.lower() == "host"]
+    assert hosts == ["example.invalid"]
+
+
+def test_request_headers_carry_the_declared_length_without_a_body():
+    headers = dict(verify.request_headers(make_ctx(), declared_content_length=42))
+    assert headers["Content-Length"] == "42"
+
+
+def test_parse_unix_timestamp_accepts_the_systemd_at_prefix():
+    """``systemctl show --timestamp=unix`` prints ``@1792938421``, not digits."""
+    assert verify._parse_unix_timestamp("@1792938421") == 1792938421.0
+    assert verify._parse_unix_timestamp("1792938421") == 1792938421.0
+    assert verify._parse_unix_timestamp("") is None
+    assert verify._parse_unix_timestamp("n/a") is None
+    assert verify._parse_unix_timestamp("Sun 2026-10-25 14:27:01 UTC") is None
+
+
+def test_prepare_reads_the_at_prefixed_restart_time(monkeypatch):
+    ctx = make_ctx(
+        http=FakeHTTP({("GET", "/healthz"): response(200, {"ok": True})}),
+        systemctl=lambda unit, props, unix: {"ActiveState": "active", "MainPID": "1",
+                                             "ActiveEnterTimestamp": "@1792938421"},
+    )
+    monkeypatch.setattr("app.config_loader.load_config", lambda: dict(BASE_CONFIG))
+    monkeypatch.setattr("app.proxy.auth.load_api_keys", lambda: {})
+    verify.prepare(ctx)
+    assert ctx.service_start == 1792938421.0
+
+
+def test_listener_pids_filters_by_address_not_only_by_port(monkeypatch):
+    """A stale owner of ``[::1]:11435`` must not "own" the 127.0.0.1 listener."""
+    output = (
+        "LISTEN 0 2048 127.0.0.1:11435 0.0.0.0:* users:(('python3.14',pid=4242,fd=9))\n"
+        "LISTEN 0 2048 [::1]:11435 [::]:* users:(('python3.14',pid=999,fd=7))\n"
+    )
+    monkeypatch.setattr(
+        verify, "_run", lambda cmd, timeout=15.0: completed(output)
+    )
+    pids, method = verify.listener_pids("127.0.0.1", 11435)
+    assert pids == [4242]
+    assert method == "ss"
+
+
+def test_listener_pids_accepts_a_wildcard_bind(monkeypatch):
+    output = "LISTEN 0 2048 0.0.0.0:11435 0.0.0.0:* users:(('python3.14',pid=4242,fd=9))\n"
+    monkeypatch.setattr(verify, "_run", lambda cmd, timeout=15.0: completed(output))
+    pids, _method = verify.listener_pids("127.0.0.1", 11435)
+    assert pids == [4242]
+
+
+def test_listener_pids_reports_nobody_when_ss_names_no_owner(monkeypatch):
+    monkeypatch.setattr(
+        verify, "_run", lambda cmd, timeout=15.0: completed("LISTEN 0 2048 127.0.0.1:11435 0.0.0.0:*\n")
+    )
+    monkeypatch.setattr(verify, "_socket_inodes_for_port", lambda port, host: {"111"})
+    monkeypatch.setattr(verify, "_pids_owning_inodes", lambda inodes: [])
+    pids, method = verify.listener_pids("127.0.0.1", 11435)
+    assert pids == []
+    assert method == "proc"
+
+
+def test_listener_pids_reports_nobody_when_no_one_listens(monkeypatch):
+    monkeypatch.setattr(verify, "_run", lambda cmd, timeout=15.0: completed(""))
+    monkeypatch.setattr(verify, "_socket_inodes_for_port", lambda port, host: set())
+    monkeypatch.setattr(verify, "_pids_owning_inodes", lambda inodes: [])
+    assert verify.listener_pids("127.0.0.1", 11435) == ([], "proc")
 
 
 def test_json_document_carries_every_check(monkeypatch, capsys):

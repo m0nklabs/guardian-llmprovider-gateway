@@ -381,11 +381,33 @@ def _pids_owning_inodes(inodes: Iterable[str]) -> list[int]:
     return sorted(owners)
 
 
+#: Addresses that answer for every address on the host.
+_WILDCARD_ADDRESSES = frozenset({"*", "0.0.0.0", "::", "[::]", ""})
+
+
+def _listener_line_matches_host(local_address: str, host: str) -> bool:
+    """True when an ``ss`` ``Local Address:Port`` value serves *host*.
+
+    ``ss`` filters by port only, so a stale process on ``[::1]:11435`` would
+    otherwise be reported as an owner of the ``127.0.0.1:11435`` listener the
+    verifier probes.  A wildcard bind answers for every address and therefore
+    matches; a different concrete address does not.
+    """
+    address = local_address.rsplit(":", 1)[0].strip()
+    if address.startswith("[") and address.endswith("]"):
+        address = address[1:-1]
+    if address in _WILDCARD_ADDRESSES:
+        return True
+    return address == host
+
+
 def listener_pids(host: str, port: int) -> tuple[list[int], str]:
     """Return ``(pids, method)`` for the process listening on ``host:port``.
 
-    ``ss`` is asked first because it names the owner directly; when it reports
-    no owner (permissions, or no ``ss`` at all) the script falls back to
+    ``ss`` is asked first because it names the owner directly, and its lines are
+    filtered by the local address as well as the port (a listener on another
+    address of the same port is a different listener).  When ``ss`` reports no
+    owner (permissions, or no ``ss`` at all) the script falls back to
     ``/proc/net/tcp`` plus a scan of ``/proc/<pid>/fd``.  An empty list means
     "nobody is listening", which the identity check treats as a failure.
     """
@@ -394,9 +416,14 @@ def listener_pids(host: str, port: int) -> tuple[list[int], str]:
     except (OSError, subprocess.SubprocessError):
         proc = None
     if proc is not None and proc.returncode == 0:
-        pids = sorted({int(match) for match in re.findall(r"pid=(\d+)", proc.stdout)})
+        pids: set[int] = set()
+        for line in proc.stdout.splitlines():
+            fields = line.split()
+            if len(fields) < 4 or not _listener_line_matches_host(fields[3], host):
+                continue
+            pids.update(int(match) for match in re.findall(r"pid=(\d+)", line))
         if pids:
-            return pids, "ss"
+            return sorted(pids), "ss"
     inodes = _socket_inodes_for_port(port, host)
     return _pids_owning_inodes(inodes), "proc"
 
@@ -511,6 +538,37 @@ class _SNIConnection(HTTPSConnection):
             raise
 
 
+def request_headers(
+    ctx: "Context",
+    *,
+    key: str | None = None,
+    headers: Mapping[str, str] | None = None,
+    body: bytes | None = None,
+    declared_content_length: int | None = None,
+) -> list[tuple[str, str]]:
+    """Build the request headers, with exactly one ``Host``.
+
+    ``http.client`` would add a ``Host`` of its own (hence ``skip_host=True`` at
+    the call site), and adding ours on top of that emitted *two* ``Host``
+    headers — invalid per RFC 7230 §5.4 and accepted only because this
+    uvicorn/h11 tolerates it.  A caller-supplied ``Host`` wins; nothing else is
+    ever duplicated.
+    """
+    supplied = {name.lower() for name in (headers or {})}
+    built: list[tuple[str, str]] = []
+    if "host" not in supplied:
+        built.append(("Host", ctx.tls_server_name if ctx.scheme == "https" else ctx.host))
+    built.append(("Connection", "close"))
+    if key:
+        built.append(("Authorization", f"Bearer {key}"))
+    built.extend((name, value) for name, value in (headers or {}).items())
+    if declared_content_length is not None:
+        built.append(("Content-Length", str(declared_content_length)))
+    elif body is not None:
+        built.append(("Content-Length", str(len(body))))
+    return built
+
+
 def make_http(ctx: "Context") -> Callable[..., Response]:
     """Return the probe callable bound to *ctx* (raw paths, no normalization)."""
 
@@ -537,17 +595,16 @@ def make_http(ctx: "Context") -> Callable[..., Response]:
         else:
             conn = HTTPConnection(ctx.host, ctx.port, timeout=timeout_s)
         try:
-            conn.putrequest(method, path, skip_accept_encoding=True)
-            conn.putheader("Host", ctx.tls_server_name if ctx.scheme == "https" else ctx.host)
-            conn.putheader("Connection", "close")
-            if key:
-                conn.putheader("Authorization", f"Bearer {key}")
-            for name, value in (headers or {}).items():
+            # skip_host: request_headers() owns the single Host header.
+            conn.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+            for name, value in request_headers(
+                ctx,
+                key=key,
+                headers=headers,
+                body=body,
+                declared_content_length=declared_content_length,
+            ):
                 conn.putheader(name, value)
-            if declared_content_length is not None:
-                conn.putheader("Content-Length", str(declared_content_length))
-            elif body is not None:
-                conn.putheader("Content-Length", str(len(body)))
             conn.endheaders()
             if body:
                 conn.send(body)
@@ -635,6 +692,25 @@ def _pick_keys(keys: Mapping[str, Any], warnings: list[str]) -> dict[str, KeyCho
     return picked
 
 
+def _parse_unix_timestamp(raw: Any) -> float | None:
+    """Parse a ``systemctl show --timestamp=unix`` value.
+
+    systemd prints UNIX timestamps with an ``@`` prefix (``@1792938421``), so a
+    bare ``str.isdigit()`` check would silently lose the restart boundary and
+    turn the post-restart file window into "no files since" — a quiet SKIP where
+    a real check belongs.  ``systemd`` also prints ``n/a`` for a unit that never
+    started; that returns ``None``.
+    """
+    text = str(raw or "").strip().lstrip("@").strip()
+    if not text:
+        return None
+    try:
+        value = float(text)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
 def prepare(ctx: Context) -> None:
     """Collect the shared facts every check reads.  Never raises."""
     try:
@@ -654,9 +730,9 @@ def prepare(ctx: Context) -> None:
         ctx.warnings.append(f"systemd facts unavailable: {_clean(exc)}")
 
     for prop in ("ExecMainStartTimestamp", "ActiveEnterTimestamp"):
-        raw = str(ctx.service.get(prop) or "").strip()
-        if raw.isdigit():
-            ctx.service_start = float(raw)
+        parsed = _parse_unix_timestamp(ctx.service.get(prop))
+        if parsed is not None:
+            ctx.service_start = parsed
             break
 
     # The listener is the authority on "is the service there", not systemd.
