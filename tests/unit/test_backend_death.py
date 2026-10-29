@@ -92,6 +92,19 @@ def _death_payload(**overrides) -> dict:
     return payload
 
 
+async def _fields(
+    observer: BackendDeathObserver, *, probe_healthy: bool, gateway_unloaded: bool = False
+) -> dict:
+    """Mirror the admin API's composition: observe, then build the fields."""
+    observation = await observer.observe()
+    return status_fields(
+        observation,
+        probe_healthy=probe_healthy,
+        gateway_unloaded=gateway_unloaded,
+        last_report=observer.last_report,
+    )
+
+
 def _install_admin_runtime(monkeypatch, mgr, observer, *, probe_healthy: bool) -> None:
     """Point the admin API at fakes for everything ``get_server_status`` reads."""
     monkeypatch.setattr(admin_api, "_model_manager", mgr)
@@ -242,7 +255,7 @@ async def test_absent_signal_with_dead_backend_is_unknown_not_alive(tmp_path):
     client = _StubCaretaker({"loaded_model": "Qwen3-30B-A3B", "is_unloaded": False})
     observer = BackendDeathObserver(client, mgr, cache_seconds=0)
 
-    fields = await observer.status_fields(probe_healthy=False, gateway_unloaded=False)
+    fields = await _fields(observer, probe_healthy=False)
 
     assert fields["backend_state"] == BACKEND_STATE_UNKNOWN
     assert fields["backend_state"] != BACKEND_STATE_ALIVE
@@ -279,7 +292,7 @@ async def test_unreachable_caretaker_is_unknown_never_alive(tmp_path):
     # The failure is observability, not a crash record.
     assert mgr.crash_history == []
 
-    fields = await observer.status_fields(probe_healthy=False, gateway_unloaded=False)
+    fields = await _fields(observer, probe_healthy=False)
     assert fields["backend_state"] == BACKEND_STATE_UNKNOWN
     assert fields["backend_state"] != BACKEND_STATE_ALIVE
     assert fields["backend_death"] is None
@@ -324,7 +337,7 @@ async def test_malformed_record_is_not_recorded_and_not_alive(tmp_path):
     observer = BackendDeathObserver(client, mgr, cache_seconds=0)
 
     observation = await observer.observe()
-    fields = await observer.status_fields(probe_healthy=False, gateway_unloaded=False)
+    fields = await _fields(observer, probe_healthy=False)
 
     assert observation.death_signal == DEATH_SIGNAL_MALFORMED
     assert mgr.crash_history == []
@@ -549,7 +562,7 @@ async def test_observer_without_client_is_not_configured(tmp_path):
     assert observation.configured is False
     assert observation.death_signal == DEATH_SIGNAL_NOT_CONFIGURED
 
-    fields = await observer.status_fields(probe_healthy=True, gateway_unloaded=False)
+    fields = await _fields(observer, probe_healthy=True)
     assert fields["backend_state"] == BACKEND_STATE_ALIVE
     assert fields["backend_death"] is None
 

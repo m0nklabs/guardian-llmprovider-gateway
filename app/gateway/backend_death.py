@@ -346,13 +346,13 @@ class BackendDeathObserver:
         model_manager: Any | None,
         *,
         cache_seconds: float = DEFAULT_OBSERVE_CACHE_SECONDS,
-        logger_: logging.Logger | None = None,
+        logger: logging.Logger | None = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._client = client
         self._model_manager = model_manager
         self._cache_seconds = float(cache_seconds)
-        self._log = logger_ or logging.getLogger("Guardian.BackendDeathObserver")
+        self._log = logger or logging.getLogger("Guardian.BackendDeathObserver")
         self._monotonic = monotonic
         self._last: CaretakerObservation | None = None
         self._last_at: float | None = None
@@ -377,18 +377,6 @@ class BackendDeathObserver:
         self._last = observation
         self._last_at = self._monotonic()
         return observation
-
-    async def status_fields(
-        self, *, probe_healthy: bool, gateway_unloaded: bool
-    ) -> dict:
-        """Observe and return the additive ``/api/status`` fields."""
-        observation = await self.observe()
-        return status_fields(
-            observation,
-            probe_healthy=probe_healthy,
-            gateway_unloaded=gateway_unloaded,
-            last_report=self.last_report,
-        )
 
     # ── internals ───────────────────────────────────────────────────────
 
