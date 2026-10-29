@@ -362,10 +362,6 @@ class BackendDeathObserver:
         #: lifetime (also the source for ``/api/status.backend_death``).
         self.last_report: BackendDeathReport | None = None
 
-    @property
-    def configured(self) -> bool:
-        return self._client is not None
-
     async def observe(self) -> CaretakerObservation:
         """Return the (cached) caretaker observation; never raises."""
         if self._client is None:

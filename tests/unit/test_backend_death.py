@@ -556,7 +556,6 @@ async def test_crashes_without_a_death_keep_last_reported_death_null(
 async def test_observer_without_client_is_not_configured(tmp_path):
     mgr = _make_manager(tmp_path)
     observer = BackendDeathObserver(None, mgr)
-    assert observer.configured is False
 
     observation = await observer.observe()
     assert observation.configured is False
