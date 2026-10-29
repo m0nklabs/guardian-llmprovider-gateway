@@ -1005,6 +1005,15 @@ Representative top-level fields:
 {
   "current_model": "Qwen3.6-35B-A3B-HauhauCS-Aggressive",
   "backend_healthy": true,
+  "backend_state": "alive",
+  "backend_death": null,
+  "caretaker": {
+    "configured": true,
+    "reachable": true,
+    "death_signal": "empty",
+    "backend_alive": true,
+    "status_read_at": "2026-10-29T04:12:00.114275+00:00"
+  },
   "is_unloaded": false,
   "idle_seconds": 17,
   "idle_unload_minutes": 5,
@@ -1028,23 +1037,165 @@ Important subtrees:
 - `proxy`: PID, listener ownership, PID file state
 - `routing`: preferred tool model and reasoning model
 
+Backend-death fields ([#34](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/34), additive):
+
+- `backend_healthy`: unchanged — the result of a direct `/health` probe of
+  the managed backend (`true`/`false`), independent of the caretaker.
+- `backend_state`: the combined judgement, `alive` | `dead` | `unloaded` |
+  `unknown`. See [the derivation rules](#backendstate-derivation) below.
+- `backend_death`: the last backend death Guardian has observed, or `null`.
+  Shape is the caretaker death record plus Guardian's provenance fields:
+  `{cause, model, timestamp, exit_code, signal, detail, event_id, origin,
+  observed_at}`. It is history: it survives a later successful reload, and it
+  is `null` when no death has been observed (including every pre-#34 daemon).
+- `caretaker`: how the death-signal read went — `configured` (a caretaker
+  client exists), `reachable` (this read succeeded), `death_signal`
+  (`reported` | `empty` | `unsupported` | `malformed` | `unavailable` |
+  `not_configured`), `backend_alive` (the daemon's own tri-state view:
+  `true`/`false`/`null`), and `status_read_at` (ISO-8601 of the last
+  *successful* read; `null` if the daemon has never answered).
+
+`/api/status` is the **only** place Guardian reads the caretaker death signal.
+The read is coalesced for 5 s and uses `min(2 s, caretaker.client_timeout_seconds)`,
+so a hung daemon cannot stall the endpoint. Inference requests never read it.
+
+<a id="backendstate-derivation"></a>
+##### `backend_state` derivation
+
+Evaluated in order, first match wins:
+
+| # | Condition | `backend_state` |
+| --- | --- | --- |
+| 1 | gateway `is_unloaded` or caretaker `is_unloaded: true` | `unloaded` |
+| 2 | caretaker `backend_alive: false` | `dead` |
+| 3 | direct `/health` probe returned 200 | `alive` |
+| 4 | probe failed and the caretaker reported a death | `dead` |
+| 5 | everything else (unreachable daemon, conflicting evidence, …) | `unknown` |
+
+Consequences that matter for monitoring:
+
+- An **unreachable** caretaker never produces `alive` on its own: with a
+  failing probe the state is `unknown`, not healthy. The daemon's silence is
+  not evidence of health.
+- A **death record is not a liveness claim**: `backend_death` keeps the last
+  death even after a successful reload (the record is history), while
+  `backend_state` returns to `alive` as soon as the probe answers again.
+- A daemon that reports `backend_alive: false` wins over a probe that still
+  answers, and a daemon claiming `backend_alive: true` with a failing probe
+  yields `unknown` — conflicting evidence fails closed.
+- `backend_healthy` keeps its pre-#34 meaning for existing clients; use
+  `backend_state` when you need the combined answer.
+
 #### `GET /api/crashes`
 
-Representative response:
+Representative response (one load failure and one caretaker-reported death):
 
 ```json
 {
-  "total_crashes": 3,
+  "total_crashes": 2,
   "last_crash": {
-    "timestamp": "2026-05-25T12:00:00",
+    "timestamp": "2026-10-28T21:14:03+00:00",
     "model": "Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved",
-    "error_message": "CUDA error ...",
-    "exit_code": 1,
-    "config_snapshot": {}
+    "error_message": "caretaker reported backend death: cause=oom, signal=SIGKILL, exit_code=137",
+    "exit_code": 137,
+    "config_snapshot": null,
+    "origin": "reported_death",
+    "cause": "oom"
   },
-  "history": []
+  "last_reported_death": {
+    "timestamp": "2026-10-28T21:14:03+00:00",
+    "model": "Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved",
+    "error_message": "caretaker reported backend death: cause=oom, signal=SIGKILL, exit_code=137",
+    "exit_code": 137,
+    "config_snapshot": null,
+    "origin": "reported_death",
+    "cause": "oom"
+  },
+  "history": [
+    {
+      "timestamp": "2026-10-28T20:00:00+00:00",
+      "model": "Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved",
+      "error_message": "failed to fit params to free device memory",
+      "exit_code": 1,
+      "config_snapshot": {"ngl": 99},
+      "origin": "load_failure",
+      "cause": null
+    },
+    {
+      "timestamp": "2026-10-28T21:14:03+00:00",
+      "model": "Qwen3.6-35B-A3B-Heretic-Native-MTP-Preserved",
+      "error_message": "caretaker reported backend death: cause=oom, signal=SIGKILL, exit_code=137",
+      "exit_code": 137,
+      "config_snapshot": null,
+      "origin": "reported_death",
+      "cause": "oom"
+    }
+  ]
 }
 ```
+
+Provenance fields (added for [#34](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/34)):
+
+- `origin`: `load_failure` — Guardian's own load/switch health wait, or the
+  caretaker's `503 model_load_failed` `crash_details` on `/ensure`;
+  `reported_death` — a death the caretaker reported outside `/ensure`
+  (the `/status` death signal). Defaults to `load_failure`, so every
+  pre-#34 record keeps its meaning.
+- `cause`: the reported cause (`oom` | `signal` | `exit_code`, or any newer
+  value the daemon sends, lower-cased) for a `reported_death`; always `null`
+  for a `load_failure`, which Guardian never gives a cause it did not observe.
+- `last_reported_death`: the newest `reported_death` entry, or `null` when the
+  history holds only load failures.
+
+So a crash record answers two different questions: `origin` says *where
+Guardian learned about the death*, `cause` says *why the process stopped* when
+the reporter knows it.
+
+#### Caretaker death signal (the contract Guardian consumes)
+
+Guardian used to learn about a backend death only through the **next**
+`POST /ensure`. A llama-server crash or an OOM kill during a live-but-idle
+session was invisible until then. The caretaker control API
+(`GET {management_url}/status`, Bearer `CARETAKER_KEY`) therefore **MAY**
+carry the following optional members. Nothing here is required, and no existing
+field changes meaning.
+
+Response members Guardian reads (all optional):
+
+| Field | Type | Required | Semantics |
+| --- | --- | --- | --- |
+| `last_death` | object \| null | no | The most recent backend death the daemon observed that did **not** happen during an `/ensure` it served. `null` = the daemon implements the field and has nothing to report. Absent = the daemon predates this contract. |
+| `last_death.cause` | string | yes, when `last_death` is an object | Why the backend stopped: `oom` (OOM-killed), `signal` (killed by a signal, name in `signal`), `exit_code` (exited on its own; code in `exit_code`). A newer daemon may send another cause; Guardian records it verbatim, lower-cased. |
+| `last_death.model` | string | yes | The model the dead backend was serving. Guardian does not substitute its own `current_model`. |
+| `last_death.timestamp` | string | yes | ISO-8601 when the daemon observed the death (`Z` or an explicit offset; naive values are accepted). Unparsable ⇒ the record is malformed. |
+| `last_death.exit_code` | int \| numeric string | no | Process exit status when known. |
+| `last_death.signal` | string | no | Signal name, e.g. `SIGKILL` (for `cause: "signal"`). |
+| `last_death.detail` | string | no | One-line daemon reason, carried into `error_message`. |
+| `last_death.event_id` | string | no | Stable identity for the death. When present, Guardian dedupes on it; when absent, Guardian dedupes on `(timestamp, cause, model, exit_code, signal)`. Supply it if two byte-identical deaths can share a timestamp and both must be visible. |
+| `backend_alive` | bool | no | The daemon's own current view of the backend process. `false` means "not running and not deliberately stopped"; `true` means "running". Only a real JSON boolean counts — `"true"`/`"false"` strings read as unknown. |
+
+Guardian's handling of every case:
+
+| Situation | `caretaker.death_signal` | Crash record | `backend_state` contribution |
+| --- | --- | --- | --- |
+| `last_death` omitted (daemon predates #34) | `unsupported` | none | no contribution — exactly today's behaviour |
+| `last_death: null` | `empty` | none | no death |
+| valid `last_death` object | `reported` | one record per death (deduped) | `dead` while the probe fails |
+| `last_death` present but unusable (not an object; missing `cause`/`model`/`timestamp`; unparsable timestamp) | `malformed` | none (logged, never a bogus record) | none — cannot claim alive |
+| timeout, connection error, non-200, non-JSON/non-object body | `unavailable` | none | `unknown`, never `alive` |
+| no caretaker configured | `not_configured` | none | probe only |
+
+The reported death becomes a `CrashRecord` with `origin: "reported_death"`,
+`cause` from the daemon, `timestamp`/`model`/`exit_code` from the record,
+`config_snapshot: null` (Guardian did not launch that process), and an
+`error_message` that summarises cause/signal/exit code/detail. It is visible
+through `GET /api/crashes` and as `backend_death` in `GET /api/status`.
+
+A caretaker that does not implement this contract is fully supported. A
+caretaker that implements it but claims health while the backend is dead
+cannot produce a false `alive`: `backend_state` requires the direct `/health`
+probe, and an explicit `backend_alive: false` overrides a probe that still
+answers.
 
 ### Model management endpoints
 

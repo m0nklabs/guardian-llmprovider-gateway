@@ -258,6 +258,60 @@ for the Anthropic↔OpenAI translation layer.
   `llama-server` build without changing model profiles or tensor splits.
 - Guardian starts and stops the backend with `sudo systemctl start llama-server`
   and `sudo systemctl stop llama-server`.
+- Under F5 ([GATEWAY_MANAGER_SPLIT.md](GATEWAY_MANAGER_SPLIT.md)) the caretaker
+  daemon owns lifecycle execution on the happy path; Guardian keeps the
+  decisions and talks to it over the control API. The backend-death signal
+  below is part of that split, not a second controller.
+
+### Caretaker death signal (compatibility contract)
+
+Guardian used to learn that the backend died through exactly one channel: the
+**next** `POST /ensure` failing with `503 model_load_failed` and
+`crash_details`. A crash or an OOM kill during a live-but-idle session was
+therefore invisible until a request forced a reload — `/api/crashes` stayed
+empty and nothing in `/api/status` said the backend had died
+([#34](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/34)).
+
+The two repositories now share an **optional** status contract:
+
+- `GET {management_url}/status` MAY carry `last_death` — an object with at
+  least `cause` (`oom` / `signal` / `exit_code`), `model` and an ISO-8601
+  `timestamp`, plus optional `exit_code`, `signal`, `detail` and `event_id` —
+  and MAY carry `backend_alive` (`true` / `false`) as the daemon's own current
+  view of the process.
+- Guardian consumes it where `/api/status` already reads backend state (never
+  per inference request), records a reported death as a `CrashRecord` with
+  `origin: "reported_death"` and the daemon's `cause`, and exposes
+  `backend_state`, `backend_death` and `caretaker` on `GET /api/status`. The
+  wire shape, every error case and the `backend_state` derivation order are in
+  [API_REFERENCE.md](API_REFERENCE.md#caretaker-death-signal-the-contract-guardian-consumes).
+
+The compatibility rules are the point of the contract, so they are stated here
+as well:
+
+1. **Nothing is required.** A caretaker that predates the field (or omits it
+   for a given response) behaves exactly as before: no record, no extra
+   requirement, no behaviour change. There is no new required field and no hard
+   dependency on the daemon for `/api/status` to answer.
+2. **Unknown is not alive.** A status read that fails, times out, returns a
+   non-200 or a malformed record is reported as `unavailable`/`malformed` and
+   yields `backend_state: "unknown"`. The daemon's silence never counts as
+   health, and `backend_state: "alive"` requires the direct `/health` probe.
+3. **A death is history, not a liveness claim.** `backend_death` keeps the last
+   observed death across a later successful reload (so `/api/status` can show
+   *why* the backend died earlier), while `backend_state` returns to `alive`
+   once the probe answers again. A daemon asserting `backend_alive: false`
+   overrides a probe that still answers, and a daemon claiming `alive` that the
+   probe contradicts fails closed to `unknown`.
+4. **Provenance is explicit.** `CrashRecord.origin` separates a load failure
+   from a reported death and `CrashRecord.cause` is set only by a reporter that
+   knows why. Guardian never invents a cause for a load failure.
+
+Producing the signal is the caretaker's half of the split and lives in
+`m0nklabs/caretaker-llamacpp` (watchdog start-up and OOM/crash reporting are
+open handoff items in [HANDOFF.md](HANDOFF.md)). Guardian ships the seam, the
+recording and the fail-open consumption; it does not fake a signal the daemon
+does not send.
 
 ### Switch/load flow
 
