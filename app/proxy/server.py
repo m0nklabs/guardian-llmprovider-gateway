@@ -44,6 +44,9 @@ from app.gateway import capture_dispatch as _capture_dispatch
 # ── F5 remote lifecycle execution (caretaker /ensure hotpath) ────────
 from app.gateway import caretaker_runtime as _caretaker_runtime
 
+# ── Issue #34: caretaker-reported backend deaths (the /status death signal) ─
+from app.gateway import backend_death as _backend_death
+
 # ── Gateway helpers (Phase 5 extraction) ─────────────────────────────
 from app.gateway import context_metadata as _ctx_meta
 
@@ -1099,6 +1102,15 @@ _caretaker_runtime.init(
     caretaker_client=caretaker_client,
 )
 
+# Issue #34: the out-of-band backend-death signal.  The observer reads the
+# caretaker's optional `last_death`/`backend_alive` fields where /api/status
+# already reads backend state, and turns a reported death into a CrashRecord.
+# Built even with `caretaker_client is None`: it then reports `not_configured`
+# and the status body keeps its pre-#34 meaning.
+backend_death_observer = _backend_death.BackendDeathObserver(
+    caretaker_client, model_manager
+)
+
 _lifespan.init(
     proxy_port=PROXY_PORT,
     pid_file=PID_FILE,
@@ -1848,6 +1860,7 @@ _admin_api.init(
     _failover_registry=failover_registry,
     _failover_health=failover_health,
     _reference_catalog=reference_catalog,
+    _caretaker_death_observer=backend_death_observer,
 )
 
 async def start_proxy():

@@ -38,6 +38,20 @@ logger = logging.getLogger("model-manager")
 
 MAX_CRASH_HISTORY = 50  # Keep last N crash records
 
+# Crash provenance vocabulary.  A crash record answers two separate questions:
+# WHERE Guardian learned about the death (``origin``) and WHY the process
+# stopped when the reporter knows it (``cause``, absent otherwise).
+#
+# - ``load_failure``: Guardian's own load/switch health-wait detected the
+#   death, or the caretaker answered ``/ensure`` with ``503 model_load_failed``
+#   and its ``crash_details``.  No cause is known; the launch snapshot and the
+#   journal lines are the evidence.
+# - ``reported_death``: the caretaker reported a death that did NOT happen
+#   during an ``/ensure`` (its ``GET /status`` death signal, issue #34).  The
+#   daemon's vocabulary supplies ``cause`` (``oom`` / ``signal`` / ``exit_code``).
+CRASH_ORIGIN_LOAD_FAILURE = "load_failure"
+CRASH_ORIGIN_REPORTED_DEATH = "reported_death"
+
 
 @dataclass
 class CrashRecord:
@@ -47,6 +61,13 @@ class CrashRecord:
     error_message: str
     exit_code: int | None = None
     config_snapshot: dict | None = None
+    # Provenance of the record: load_failure | reported_death (see the
+    # CRASH_ORIGIN_* constants).  The default keeps every pre-existing record
+    # (Guardian's own crash detection) stable.
+    origin: str = CRASH_ORIGIN_LOAD_FAILURE
+    # Daemon-reported death cause (oom | signal | exit_code); None for a load
+    # failure, which is never given a cause Guardian did not observe.
+    cause: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -55,6 +76,8 @@ class CrashRecord:
             "error_message": self.error_message,
             "exit_code": self.exit_code,
             "config_snapshot": self.config_snapshot,
+            "origin": self.origin,
+            "cause": self.cause,
         }
 
 
@@ -1496,10 +1519,7 @@ class ModelManager:
             config_snapshot=config_snap,
         )
 
-        self.last_crash = crash
-        self.crash_history.append(crash)
-        if len(self.crash_history) > MAX_CRASH_HISTORY:
-            self.crash_history = self.crash_history[-MAX_CRASH_HISTORY:]
+        self.record_crash(crash)
 
         runtime_mode = config_snap.get("runtime_mode") if isinstance(config_snap, dict) else None
         effective = config_snap.get("effective_runtime_config") if isinstance(config_snap, dict) else None
@@ -1580,6 +1600,33 @@ class ModelManager:
             return int(val)
         except Exception:
             return None
+
+    def record_crash(self, crash: CrashRecord) -> CrashRecord:
+        """Append ``crash`` to the bounded history and make it the last crash.
+
+        The single choke point for crash records: Guardian's own load/switch
+        detection (``_detect_crash``) and a caretaker-reported backend death
+        (``app/gateway/backend_death.py``, issue #34) share one history, one
+        ``MAX_CRASH_HISTORY`` bound and one ``last_crash`` pointer, so
+        ``/api/crashes`` stays complete without a second store.
+        """
+        self.last_crash = crash
+        self.crash_history.append(crash)
+        if len(self.crash_history) > MAX_CRASH_HISTORY:
+            self.crash_history = self.crash_history[-MAX_CRASH_HISTORY:]
+        return crash
+
+    @property
+    def last_reported_death(self) -> CrashRecord | None:
+        """Newest crash whose origin is a caretaker-reported backend death.
+
+        ``None`` when every record came from a load failure — the pre-#34
+        behaviour, and the reason an absent death signal changes nothing.
+        """
+        for crash in reversed(self.crash_history):
+            if crash.origin == CRASH_ORIGIN_REPORTED_DEATH:
+                return crash
+        return None
 
     def get_crash_history(self) -> list[dict]:
         """Return crash history as a list of dicts (for API responses)."""

@@ -17,6 +17,7 @@ import httpx  # noqa: F401 — kept as a monkeypatch target (tests patch <module
 from fastapi import HTTPException, Request
 
 from app.destination_policy import guarded_async_client
+from app.gateway import backend_death as _backend_death
 from app.gateway.context_metadata import enrich_model_context_metadata
 from app.gateway.metadata_enrichment import attach_parity_metadata
 from app.log_safety import clean_log_value
@@ -51,6 +52,10 @@ _token_fingerprint = None
 _model_switch_lock = None
 _reset_startup_check_status = None
 _run_guardian_operation = None
+# Caretaker backend-death observer (issue #34).  Optional by design: no
+# caretaker configured — or an older wiring that predates the observer — keeps
+# `/api/status` byte-identical to the pre-#34 body.
+_caretaker_death_observer = None
 
 # Config-reload plumbing (injected at startup; see reload_runtime_config)
 _reload_settings_config = None  # callable() -> reloaded settings dict
@@ -91,6 +96,7 @@ def init(
     _failover_registry=None,
     _failover_health=None,
     _reference_catalog=None,
+    _caretaker_death_observer=None,
 ) -> None:
     """Inject all dependencies. Called once at startup."""
     globals().update({k: v for k, v in locals().items() if k != "_init"})
@@ -376,9 +382,52 @@ async def get_crash_history(client_id: str) -> Any:
     return {
         "total_crashes": len(_model_manager.crash_history),
         "last_crash": _model_manager.last_crash.to_dict() if _model_manager.last_crash else None,
+        # Issue #34: the newest death the caretaker reported outside /ensure.
+        # Null when every record came from a load failure, so the field is
+        # additive for clients that only ever saw load-failure crashes.
+        "last_reported_death": (
+            _model_manager.last_reported_death.to_dict()
+            if _model_manager.last_reported_death
+            else None
+        ),
         "history": _model_manager.get_crash_history(),
     }
 
+
+async def _probe_backend_health() -> bool:
+    """Direct ``/health`` probe of the managed backend (pre-#34 behaviour)."""
+    try:
+        async with guarded_async_client(timeout=5.0, purpose="backend-health") as client:
+            resp = await client.get(f"{_llama_server_url}/health")
+            return resp.status_code == 200
+    except Exception:
+        return False
+
+
+async def _observe_caretaker_death() -> _backend_death.CaretakerObservation:
+    """Read the caretaker's backend-death signal (issue #34).
+
+    Fail-open by construction: no observer (no caretaker configured, or older
+    wiring) yields the ``not_configured`` observation and the observer itself
+    turns every read failure into ``unavailable`` — neither can claim the
+    backend is alive.
+    """
+    observer = _caretaker_death_observer
+    if observer is None:
+        return _backend_death.CaretakerObservation()
+    try:
+        return await observer.observe()
+    except Exception as exc:  # noqa: BLE001 — /api/status must always answer
+        logger.error(
+            "Caretaker death observation failed (%s); reporting the backend "
+            "state as unknown rather than alive",
+            exc,
+        )
+        return _backend_death.CaretakerObservation(
+            configured=True,
+            reachable=False,
+            death_signal=_backend_death.DEATH_SIGNAL_UNAVAILABLE,
+        )
 
 
 async def get_server_status(client_id: str) -> Any:
@@ -388,13 +437,19 @@ async def get_server_status(client_id: str) -> Any:
     switch_in_progress = _startup_state_is_in_progress(startup_status.get("_state")) and startup_status.get("phase") != "idle"
     current_requested_target = startup_status.get("target_model") if switch_in_progress else None
     active_switch_owner = startup_status.get("owner") if switch_in_progress else None
-    healthy = False
-    try:
-        async with guarded_async_client(timeout=5.0, purpose="backend-health") as client:
-            resp = await client.get(f"{_llama_server_url}/health")
-            healthy = resp.status_code == 200
-    except Exception:
-        pass
+    # The probe and the death-signal read are independent, so run them
+    # together: the observation's own short timeout must not add to the probe's.
+    healthy, observation = await asyncio.gather(
+        _probe_backend_health(),
+        _observe_caretaker_death(),
+    )
+    observer = _caretaker_death_observer
+    death_fields = _backend_death.status_fields(
+        observation,
+        probe_healthy=healthy,
+        gateway_unloaded=_model_manager.is_unloaded,
+        last_report=observer.last_report if observer is not None else None,
+    )
 
     preferred_tool_model = _model_manager.get_preferred_tool_model(current_model)
     preferred_reasoning_model = _model_manager.get_preferred_reasoning_model(current_model)
@@ -409,6 +464,14 @@ async def get_server_status(client_id: str) -> Any:
     return {
         "current_model": current_model,
         "backend_healthy": healthy,
+        # Issue #34 (additive): the combined backend judgement, the last
+        # backend death Guardian has observed (null when none) and how the
+        # caretaker answered this read.  `backend_healthy` keeps its pre-#34
+        # meaning (the direct probe); `backend_state` never reports "alive"
+        # from an unreachable daemon's silence.
+        "backend_state": death_fields["backend_state"],
+        "backend_death": death_fields["backend_death"],
+        "caretaker": death_fields["caretaker"],
         "is_unloaded": _model_manager.is_unloaded,
         "idle_seconds": round(idle_secs),
         "idle_unload_minutes": idle_minutes,

@@ -299,13 +299,22 @@ class CaretakerClient:
         logger.error("Caretaker /unload failed (status %s): %s", resp.status_code, _safe_body_text(resp))
         raise CaretakerUnloadFailed()
 
-    async def status(self) -> dict:
-        """GET /status — return the caretaker runtime status dict."""
+    async def status(self, *, timeout: float | None = None) -> dict:
+        """GET /status — return the caretaker runtime status dict.
+
+        ``timeout`` overrides the configured control-API timeout for this one
+        read.  The backend-death observation (issue #34) uses a shorter window
+        so a hung daemon cannot stall the dashboard's status poll; every other
+        caller keeps the live ``caretaker.client_timeout_seconds`` budget.
+        """
+        request_timeout = (
+            httpx.Timeout(timeout) if timeout is not None else self._request_timeout()
+        )
         try:
             resp = await self._client.get(
                 f"{self._management_url}/status",
                 headers=self._headers(),
-                timeout=self._request_timeout(),
+                timeout=request_timeout,
             )
         except httpx.HTTPError as exc:
             logger.error("Caretaker /status transport error: %s", exc)
