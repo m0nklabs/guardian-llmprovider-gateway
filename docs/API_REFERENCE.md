@@ -1056,8 +1056,9 @@ Backend-death fields ([#34](https://github.com/m0nklabs/guardian-llmprovider-gat
   *successful* read; `null` if the daemon has never answered).
 
 `/api/status` is the **only** place Guardian reads the caretaker death signal.
-The read is coalesced for 5 s and uses `min(2 s, caretaker.client_timeout_seconds)`,
-so a hung daemon cannot stall the endpoint. Inference requests never read it.
+The read is coalesced (5 s TTL, single-flight: concurrent polls share one daemon
+read) and uses `min(2 s, caretaker.client_timeout_seconds)`, so a hung daemon
+cannot stall the endpoint. Inference requests never read it.
 
 <a id="backendstate-derivation"></a>
 ##### `backend_state` derivation
@@ -1076,7 +1077,18 @@ Consequences that matter for monitoring:
 
 - An **unreachable** caretaker never produces `alive` on its own: with a
   failing probe the state is `unknown`, not healthy. The daemon's silence is
-  not evidence of health.
+  not evidence of health. A status read that fails, times out or carries an
+  unusable record is reported as such in `caretaker.death_signal`
+  (`unavailable` / `malformed`) and `caretaker.reachable: false` — it is never
+  reported as if the daemon had answered.
+- That failed read does **not** erase independent positive evidence: when the
+  direct `/health` probe answers `200` the backend really is serving, so
+  `backend_state` stays `alive` (the documented "the daemon died but
+  llama-server survived" case) while `caretaker.death_signal` still says
+  `unavailable`. `alive` here is the probe's verdict, not the daemon's silence;
+  in the same payload `backend_healthy` says the same thing. Drop to
+  `backend_healthy`/`backend_state` only after the probe fails, which is when
+  the death signal becomes decisive (`dead`) or the answer becomes `unknown`.
 - A **death record is not a liveness claim**: `backend_death` keeps the last
   death even after a successful reload (the record is history), while
   `backend_state` returns to `alive` as soon as the probe answers again.
@@ -1144,8 +1156,10 @@ Provenance fields (added for [#34](https://github.com/m0nklabs/guardian-llmprovi
 - `cause`: the reported cause (`oom` | `signal` | `exit_code`, or any newer
   value the daemon sends, lower-cased) for a `reported_death`; always `null`
   for a `load_failure`, which Guardian never gives a cause it did not observe.
-- `last_reported_death`: the newest `reported_death` entry, or `null` when the
-  history holds only load failures.
+- `last_reported_death`: the newest `reported_death` entry still in the
+  bounded crash history (50 records), or `null` when the history holds only
+  load failures. `backend_death` in `/api/status` is the same event with the
+  daemon-side detail (`signal`, `detail`, `event_id`, `observed_at`) attached.
 
 So a crash record answers two different questions: `origin` says *where
 Guardian learned about the death*, `cause` says *why the process stopped* when
@@ -1181,8 +1195,8 @@ Guardian's handling of every case:
 | `last_death` omitted (daemon predates #34) | `unsupported` | none | no contribution — exactly today's behaviour |
 | `last_death: null` | `empty` | none | no death |
 | valid `last_death` object | `reported` | one record per death (deduped) | `dead` while the probe fails |
-| `last_death` present but unusable (not an object; missing `cause`/`model`/`timestamp`; unparsable timestamp) | `malformed` | none (logged, never a bogus record) | none — cannot claim alive |
-| timeout, connection error, non-200, non-JSON/non-object body | `unavailable` | none | `unknown`, never `alive` |
+| `last_death` present but unusable (not an object; missing `cause`/`model`/`timestamp`; unparsable timestamp) | `malformed` | none (logged, never a bogus record) | probe verdict; cannot create an `alive` |
+| timeout, connection error, non-200, non-JSON/non-object body | `unavailable` | none | probe verdict; `unknown` when the probe also fails — never `alive` from the daemon's silence |
 | no caretaker configured | `not_configured` | none | probe only |
 
 The reported death becomes a `CrashRecord` with `origin: "reported_death"`,

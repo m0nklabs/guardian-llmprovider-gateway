@@ -34,6 +34,7 @@ into a caretaker load generator.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -125,13 +126,17 @@ def _coerce_exit_code(value: Any) -> int | None:
     return None
 
 
+def _parsed_timestamp(value: str) -> datetime | None:
+    """Parse an ISO-8601 timestamp (``Z`` suffix accepted); None when invalid."""
+    try:
+        return datetime.fromisoformat(_ISO_WITH_Z.sub("+00:00", value))
+    except ValueError:
+        return None
+
+
 def _valid_timestamp(value: str) -> bool:
     """True when ``value`` parses as ISO-8601 (``Z`` suffix accepted)."""
-    try:
-        datetime.fromisoformat(_ISO_WITH_Z.sub("+00:00", value))
-    except ValueError:
-        return False
-    return True
+    return _parsed_timestamp(value) is not None
 
 
 def _optional_bool(status: dict, field_name: str) -> bool | None:
@@ -363,21 +368,36 @@ class BackendDeathObserver:
         self._last_at: float | None = None
         self._last_success_read_at: str | None = None
         self._seen: list[tuple[str, ...]] = []
+        # Single-flight for the cache refresh: concurrent /api/status calls
+        # must not each start a daemon read, and their results must not race
+        # into last_report / the crash history out of order.
+        self._refresh_lock = asyncio.Lock()
         #: Newest death record the daemon has reported in this process
         #: lifetime (also the source for ``/api/status.backend_death``).
         self.last_report: BackendDeathReport | None = None
 
     async def observe(self) -> CaretakerObservation:
-        """Return the (cached) caretaker observation; never raises."""
+        """Return the (cached) caretaker observation; never raises.
+
+        Single-flight: the fast path answers from the cache, and a refresh is
+        serialized behind ``_refresh_lock`` with a cache re-check, so N
+        concurrent ``/api/status`` polls produce at most one daemon read and
+        cannot interleave their results.
+        """
         if self._client is None:
             return CaretakerObservation(configured=False)
         cached = self._cached()
         if cached is not None:
             return cached
-        observation = await self._read()
-        self._last = observation
-        self._last_at = self._monotonic()
-        return observation
+        async with self._refresh_lock:
+            # A concurrent caller may have refreshed while we waited.
+            cached = self._cached()
+            if cached is not None:
+                return cached
+            observation = await self._read()
+            self._last = observation
+            self._last_at = self._monotonic()
+            return observation
 
     # ── internals ───────────────────────────────────────────────────────
 
@@ -443,10 +463,30 @@ class BackendDeathObserver:
             death=report,
         )
 
+    @staticmethod
+    def _newest_report(
+        current: BackendDeathReport | None, incoming: BackendDeathReport
+    ) -> BackendDeathReport:
+        """Keep the newest death as ``last_report``.
+
+        A slow read (or a daemon that restarted and re-reports an older death)
+        must not replace a newer one: ``/api/status.backend_death`` is the LAST
+        death, not the last response that happened to arrive.
+        """
+        if current is None:
+            return incoming
+        incoming_at = _parsed_timestamp(incoming.timestamp)
+        if incoming_at is None:
+            return current
+        current_at = _parsed_timestamp(current.timestamp)
+        if current_at is None or incoming_at >= current_at:
+            return incoming
+        return current
+
     def _record_death(self, report: BackendDeathReport) -> None:
         """Record ``report`` once, as a crash history entry."""
         fingerprint = report.fingerprint()
-        self.last_report = report
+        self.last_report = self._newest_report(self.last_report, report)
         if report.cause not in KNOWN_DEATH_CAUSES:
             # A newer daemon may add causes; record them verbatim instead of
             # losing a death Guardian can see.  The documented vocabulary

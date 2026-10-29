@@ -13,6 +13,7 @@ death stay distinguishable in ``/api/crashes``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -66,15 +67,23 @@ def _isolate_runtime_state_files(tmp_path, monkeypatch):
 class _StubCaretaker:
     """Minimal caretaker client: returns a status body or raises."""
 
-    def __init__(self, status: dict | None = None, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        status: dict | None = None,
+        error: Exception | None = None,
+        gate: asyncio.Event | None = None,
+    ) -> None:
         self._status = status
         self._error = error
+        self._gate = gate
         self.calls = 0
         self.timeouts: list[float | None] = []
 
     async def status(self, *, timeout: float | None = None) -> dict:
         self.calls += 1
         self.timeouts.append(timeout)
+        if self._gate is not None:
+            await self._gate.wait()
         if self._error is not None:
             raise self._error
         return self._status or {}
@@ -429,6 +438,33 @@ def test_gateway_unloaded_flag_is_unloaded_not_dead():
     ) == BACKEND_STATE_UNLOADED
 
 
+@pytest.mark.parametrize(
+    "death_signal",
+    [DEATH_SIGNAL_UNAVAILABLE, DEATH_SIGNAL_MALFORMED, DEATH_SIGNAL_UNSUPPORTED],
+)
+def test_healthy_probe_still_reads_alive_when_the_read_is_unusable(death_signal):
+    """The alive verdict comes from the probe, never from the daemon's silence.
+
+    A failed or unusable status read is reported as such in
+    ``caretaker.death_signal``/``reachable``; it does not erase the independent
+    positive evidence of a backend that answers ``/health`` (the documented
+    "daemon gone, llama-server survived" case).  What it must never do is
+    *create* an alive verdict — see the failing-probe tests above.
+    """
+    fields = status_fields(
+        CaretakerObservation(
+            configured=True,
+            reachable=death_signal not in {DEATH_SIGNAL_UNAVAILABLE, DEATH_SIGNAL_MALFORMED},
+            death_signal=death_signal,
+        ),
+        probe_healthy=True,
+        gateway_unloaded=False,
+        last_report=None,
+    )
+    assert fields["backend_state"] == BACKEND_STATE_ALIVE
+    assert fields["caretaker"]["death_signal"] == death_signal
+
+
 def test_reported_death_with_dead_probe_is_dead():
     """The reported death supplies the cause for a backend that is down."""
     fields = status_fields(
@@ -609,6 +645,45 @@ async def test_observation_is_coalesced_for_the_cache_window(tmp_path):
     clock[0] += 6.0
     await observer.observe()
     assert client.calls == 2
+
+
+async def test_concurrent_observations_share_one_daemon_read(tmp_path):
+    """Single-flight: parallel /api/status polls cannot stampede the daemon."""
+    mgr = _make_manager(tmp_path)
+    gate = asyncio.Event()
+    client = _StubCaretaker({"is_unloaded": False}, gate=gate)
+    observer = BackendDeathObserver(client, mgr, cache_seconds=5.0)
+
+    first = asyncio.create_task(observer.observe())
+    second = asyncio.create_task(observer.observe())
+    await asyncio.sleep(0)  # let both tasks reach the refresh path
+    gate.set()
+    observations = await asyncio.gather(first, second)
+
+    assert client.calls == 1
+    assert observations[0] == observations[1]
+
+
+async def test_out_of_order_older_report_keeps_the_newest_death(tmp_path):
+    """A daemon that re-reports an older death must not rewind backend_death."""
+    mgr = _make_manager(tmp_path)
+    client = _StubCaretaker(
+        {"last_death": _death_payload(timestamp="2026-10-28T22:00:00+00:00")}
+    )
+    observer = BackendDeathObserver(client, mgr, cache_seconds=0)
+    await observer.observe()
+    assert observer.last_report.timestamp == "2026-10-28T22:00:00+00:00"
+
+    # Second read returns an OLDER death (daemon restart lost/replayed state).
+    client._status = {
+        "last_death": _death_payload(timestamp="2026-10-28T20:00:00+00:00")
+    }
+    await observer.observe()
+
+    assert observer.last_report.timestamp == "2026-10-28T22:00:00+00:00"
+    # Both deaths stay in the crash history: they are distinct events.
+    assert len(mgr.crash_history) == 2
+    assert mgr.crash_history[-1].timestamp == "2026-10-28T20:00:00+00:00"
 
 
 async def test_observation_uses_a_short_bounded_timeout(tmp_path):

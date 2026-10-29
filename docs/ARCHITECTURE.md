@@ -294,9 +294,13 @@ as well:
    requirement, no behaviour change. There is no new required field and no hard
    dependency on the daemon for `/api/status` to answer.
 2. **Unknown is not alive.** A status read that fails, times out, returns a
-   non-200 or a malformed record is reported as `unavailable`/`malformed` and
-   yields `backend_state: "unknown"`. The daemon's silence never counts as
-   health, and `backend_state: "alive"` requires the direct `/health` probe.
+   non-200 or a malformed record is reported as `unavailable`/`malformed`
+   (`caretaker.death_signal`/`reachable`) and never counts as an alive claim:
+   with a failing probe the state is `"unknown"`. The alive verdict requires
+   the direct `/health` probe, so it can never be *created* by a failed read —
+   and a backend that still answers `/health` keeps reading `"alive"` even when
+   the daemon is gone, which is the documented "daemon died, llama-server
+   survived" case rather than a health claim by proxy.
 3. **A death is history, not a liveness claim.** `backend_death` keeps the last
    observed death across a later successful reload (so `/api/status` can show
    *why* the backend died earlier), while `backend_state` returns to `alive`
