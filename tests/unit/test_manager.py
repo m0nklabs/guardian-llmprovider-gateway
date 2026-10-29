@@ -1005,6 +1005,81 @@ class TestCrashRecord:
         assert d["exit_code"] == 137
         assert d["config_snapshot"]["ngl"] == 99
 
+    def test_to_dict_carries_provenance(self):
+        """#34: every record says where it came from, and only a reported
+        death carries a cause."""
+        from app.engine.manager import (
+            CRASH_ORIGIN_LOAD_FAILURE,
+            CRASH_ORIGIN_REPORTED_DEATH,
+            CrashRecord,
+        )
+
+        load = CrashRecord(timestamp="t", model="m", error_message="boom")
+        assert load.to_dict()["origin"] == CRASH_ORIGIN_LOAD_FAILURE
+        assert load.to_dict()["cause"] is None
+
+        death = CrashRecord(
+            timestamp="t",
+            model="m",
+            error_message="caretaker reported oom",
+            cause="oom",
+            origin=CRASH_ORIGIN_REPORTED_DEATH,
+        )
+        assert death.to_dict()["origin"] == CRASH_ORIGIN_REPORTED_DEATH
+        assert death.to_dict()["cause"] == "oom"
+
+    def test_record_crash_bounds_history_and_tracks_last(self, tmp_path: Path):
+        from app.engine.manager import MAX_CRASH_HISTORY, CrashRecord
+
+        mgr = _make_manager(tmp_path)
+        for index in range(MAX_CRASH_HISTORY + 3):
+            mgr.record_crash(
+                CrashRecord(timestamp=f"t{index}", model="m", error_message="boom")
+            )
+        assert len(mgr.crash_history) == MAX_CRASH_HISTORY
+        # Oldest records fall off the front; the newest stays last.
+        assert mgr.crash_history[0].timestamp == "t3"
+        assert mgr.last_crash.timestamp == f"t{MAX_CRASH_HISTORY + 2}"
+        assert mgr.get_crash_history()[-1]["timestamp"] == mgr.last_crash.timestamp
+
+    def test_last_reported_death_ignores_load_failures(self, tmp_path: Path):
+        from app.engine.manager import CrashRecord
+
+        mgr = _make_manager(tmp_path)
+        mgr.record_crash(
+            CrashRecord(timestamp="t1", model="m", error_message="load failed")
+        )
+        assert mgr.last_reported_death is None
+
+    def test_last_reported_death_returns_the_newest_reported(self, tmp_path: Path):
+        from app.engine.manager import CRASH_ORIGIN_REPORTED_DEATH, CrashRecord
+
+        mgr = _make_manager(tmp_path)
+        mgr.record_crash(
+            CrashRecord(timestamp="t1", model="m", error_message="load failed")
+        )
+        first = mgr.record_crash(
+            CrashRecord(
+                timestamp="t2",
+                model="m",
+                error_message="caretaker reported death",
+                cause="oom",
+                origin=CRASH_ORIGIN_REPORTED_DEATH,
+            )
+        )
+        second = mgr.record_crash(
+            CrashRecord(
+                timestamp="t3",
+                model="m",
+                error_message="caretaker reported death",
+                cause="signal",
+                origin=CRASH_ORIGIN_REPORTED_DEATH,
+            )
+        )
+        assert mgr.last_reported_death is second
+        assert mgr.last_reported_death is not first
+        assert mgr.last_crash is second
+
 
 class TestCrashLogParsing:
     def test_extracts_fit_failure_messages(self, tmp_path: Path):

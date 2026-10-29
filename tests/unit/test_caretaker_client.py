@@ -264,6 +264,33 @@ async def test_status_success() -> None:
     assert status["is_unloaded"] is False
 
 
+async def test_status_accepts_an_explicit_observation_timeout(monkeypatch) -> None:
+    """#34: the death observation reads /status with a shorter, bounded window.
+
+    Everything else keeps the live ``caretaker.client_timeout_seconds`` budget,
+    so the override must be per-call, not per-client.
+    """
+    client = _make_client(
+        lambda req: _ok({"loaded_model": "minimal", "is_unloaded": False})
+    )
+    captured: dict = {}
+    real_get = client._client.get
+
+    async def _spy(url, **kwargs):
+        captured.update(kwargs)
+        return await real_get(url, **kwargs)
+
+    monkeypatch.setattr(client._client, "get", _spy)
+    await client.status(timeout=1.5)
+    assert captured["timeout"].connect == 1.5
+    assert captured["timeout"].read == 1.5
+
+    captured.clear()
+    await client.status()
+    assert captured["timeout"].connect > 0  # configured budget, not the override
+    await client.close()
+
+
 async def test_status_non_200_unavailable() -> None:
     client = _make_client(lambda req: httpx.Response(503, json={}))
     with pytest.raises(CaretakerUnavailable):
