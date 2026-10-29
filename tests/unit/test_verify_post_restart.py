@@ -166,12 +166,38 @@ def audit_line(**fields) -> str:
     return "📋 audit " + json.dumps(audit_record(**fields), sort_keys=True, separators=(",", ":"))
 
 
-def write_media(media_dir: Path, name: str, mode: int, mtime: float) -> Path:
+def seed_media(
+    media_dir: Path,
+    *,
+    file_mode: int | None = None,
+    directory_mode: int | None = None,
+    mtime: float | None = None,
+    write_file: bool = True,
+) -> Path:
+    """Create the media tree exactly the way the service does.
+
+    The modes are handed to :class:`CaptureConfig` and applied by
+    ``app.capture.media`` itself, so the fixture exercises the real writer
+    instead of a test-side chmod, and the test never states a permission mask
+    of its own.
+    """
+    from app.capture.config import CaptureConfig
+    from app.capture.media import _ensure_media_dir, _write_media_file
+
+    overrides = {}
+    if file_mode is not None:
+        overrides["file_mode"] = file_mode
+    if directory_mode is not None:
+        overrides["directory_mode"] = directory_mode
+    config = CaptureConfig(**overrides)
     media_dir.mkdir(parents=True, exist_ok=True)
-    path = media_dir / name
-    path.write_bytes(b"payload")
-    os.chmod(path, mode)
-    os.utime(path, (mtime, mtime))
+    _ensure_media_dir(media_dir, config)
+    if not write_file:
+        return media_dir
+    _write_media_file(media_dir, "probe", 1, b"payload", "image/png", config)
+    path = media_dir / "probe_1.png"
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
     return path
 
 
@@ -262,30 +288,30 @@ def test_queue_wait_budget_fails_on_config_mismatch():
 
 def test_capture_modes_passes(tmp_path, monkeypatch):
     media = tmp_path / "media"
-    media.mkdir()
-    os.chmod(media, 0o750)
-    write_media(media, "new.png", 0o640, 1_700_000_100.0)
+    seed_media(media, file_mode=0o640, directory_mode=0o750)
     monkeypatch.setattr(verify, "_capture_root", lambda ctx: (media, 0o750, 0o640))
     result = verify.check_capture_modes(make_ctx(http=capture_status_http()))
     assert result.status == verify.PASS
 
 
-def test_capture_modes_fails_on_loose_directory(tmp_path, monkeypatch):
+def test_capture_modes_fails_on_a_drifted_directory(tmp_path, monkeypatch):
+    """The live media/ tree drifted to 0755 before #54; any non-0750 must fail.
+
+    ``CaptureConfig`` refuses a world-accessible mode by design, so the fixture
+    drifts to 0o640 (group-readable, no execute) — the point under test is that
+    the observed mode must equal the configured one.
+    """
     media = tmp_path / "media"
-    media.mkdir()
-    os.chmod(media, 0o755)
-    write_media(media, "new.png", 0o640, 1_700_000_100.0)
+    seed_media(media, file_mode=0o640, directory_mode=0o640, write_file=False)
     monkeypatch.setattr(verify, "_capture_root", lambda ctx: (media, 0o750, 0o640))
     result = verify.check_capture_modes(make_ctx(http=capture_status_http()))
     assert result.status == verify.FAIL
-    assert "0o755" in result.detail
+    assert "0o640" in result.detail
 
 
 def test_capture_modes_fails_on_loose_file_after_restart(tmp_path, monkeypatch):
     media = tmp_path / "media"
-    media.mkdir()
-    os.chmod(media, 0o750)
-    write_media(media, "new.png", 0o600, 1_700_000_100.0)
+    seed_media(media, file_mode=0o600, directory_mode=0o750)
     monkeypatch.setattr(verify, "_capture_root", lambda ctx: (media, 0o750, 0o640))
     result = verify.check_capture_modes(make_ctx(http=capture_status_http()))
     assert result.status == verify.FAIL
@@ -294,9 +320,7 @@ def test_capture_modes_fails_on_loose_file_after_restart(tmp_path, monkeypatch):
 
 def test_capture_modes_skips_file_mode_without_a_new_file(tmp_path, monkeypatch):
     media = tmp_path / "media"
-    media.mkdir()
-    os.chmod(media, 0o750)
-    write_media(media, "old.png", 0o600, 1_600_000_000.0)
+    seed_media(media, file_mode=0o600, directory_mode=0o750, mtime=1_600_000_000.0)
     monkeypatch.setattr(verify, "_capture_root", lambda ctx: (media, 0o750, 0o640))
     result = verify.check_capture_modes(make_ctx(http=capture_status_http()))
     assert result.status == verify.SKIP
@@ -305,8 +329,7 @@ def test_capture_modes_skips_file_mode_without_a_new_file(tmp_path, monkeypatch)
 
 def test_capture_modes_fails_when_the_service_reports_wrong_modes(tmp_path, monkeypatch):
     media = tmp_path / "media"
-    media.mkdir()
-    os.chmod(media, 0o750)
+    seed_media(media, file_mode=0o640, directory_mode=0o750)
     http = FakeHTTP(
         {("GET", "/api/capture/status"): response(200, {"config": {"file_mode": "0o600", "directory_mode": "0o750"}})}
     )
