@@ -48,6 +48,7 @@ from app.engine.manager import (
     CrashRecord,
 )
 from app.gateway.caretaker_client import CaretakerError
+from app.log_safety import clean_log_value
 
 logger = logging.getLogger("Guardian")
 
@@ -100,12 +101,14 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _clean_str(value: Any) -> str | None:
+def _clean_str(value: Any, limit: int | None = None) -> str | None:
     """Return a stripped non-empty string, or None for anything else."""
     if not isinstance(value, str):
         return None
     text = value.strip()
-    return text or None
+    if not text:
+        return None
+    return text[:limit] if limit is not None else text
 
 
 def _coerce_exit_code(value: Any) -> int | None:
@@ -224,9 +227,9 @@ def parse_death_signal(status: Any) -> tuple[str, BackendDeathReport | None]:
         return DEATH_SIGNAL_EMPTY, None
     if not isinstance(payload, dict):
         return DEATH_SIGNAL_MALFORMED, None
-    cause = _clean_str(payload.get("cause"))
-    model = _clean_str(payload.get("model"))
-    timestamp = _clean_str(payload.get("timestamp"))
+    cause = _clean_str(payload.get("cause"), 64)
+    model = _clean_str(payload.get("model"), 200)
+    timestamp = _clean_str(payload.get("timestamp"), 64)
     if cause is None or model is None or timestamp is None or not _valid_timestamp(timestamp):
         return DEATH_SIGNAL_MALFORMED, None
     return DEATH_SIGNAL_REPORTED, BackendDeathReport(
@@ -234,9 +237,11 @@ def parse_death_signal(status: Any) -> tuple[str, BackendDeathReport | None]:
         model=model,
         timestamp=timestamp,
         exit_code=_coerce_exit_code(payload.get("exit_code")),
-        signal=_clean_str(payload.get("signal")),
-        detail=_clean_str(payload.get("detail")),
-        event_id=_clean_str(payload.get("event_id")),
+        signal=_clean_str(payload.get("signal"), 64),
+        # The detail is free text from the daemon: bounded so one record cannot
+        # bloat the crash history or the API response.
+        detail=_clean_str(payload.get("detail"), 500),
+        event_id=_clean_str(payload.get("event_id"), 128),
         observed_at=_now_iso(),
     )
 
@@ -400,14 +405,14 @@ class BackendDeathObserver:
             self._log.warning(
                 "Caretaker /status unreadable for the death signal (%s); "
                 "backend state is unknown, not alive",
-                exc,
+                clean_log_value(exc),
             )
             return self._unavailable(DEATH_SIGNAL_UNAVAILABLE)
         except Exception as exc:  # noqa: BLE001 — /api/status must keep answering
             self._log.error(
                 "Caretaker /status observation failed unexpectedly (%s); "
                 "backend state is unknown, not alive",
-                exc,
+                clean_log_value(exc),
             )
             return self._unavailable(DEATH_SIGNAL_UNAVAILABLE)
 
@@ -447,8 +452,8 @@ class BackendDeathObserver:
             # losing a death Guardian can see.  The documented vocabulary
             # (oom | signal | exit_code) is what clients can rely on.
             self._log.info(
-                "Caretaker reported an undocumented death cause %r; recording it verbatim",
-                report.cause,
+                "Caretaker reported an undocumented death cause %s; recording it verbatim",
+                clean_log_value(report.cause),
             )
         if fingerprint in self._seen:
             # The daemon keeps reporting its last death until it observes a new
@@ -460,7 +465,7 @@ class BackendDeathObserver:
         if self._model_manager is None:
             self._log.error(
                 "Cannot record the reported backend death (%s): no model manager",
-                report.summary(),
+                clean_log_value(report.summary()),
             )
             return
         crash = CrashRecord(
@@ -473,4 +478,7 @@ class BackendDeathObserver:
             cause=report.cause,
         )
         self._model_manager.record_crash(crash)
-        self._log.error("💥 Backend death reported by the caretaker: %s", report.summary())
+        self._log.error(
+            "💥 Backend death reported by the caretaker: %s",
+            clean_log_value(report.summary()),
+        )

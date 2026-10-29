@@ -13,6 +13,7 @@ death stay distinguishable in ``/api/crashes``.
 
 from __future__ import annotations
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -192,6 +193,33 @@ async def test_reported_death_is_recorded_once_per_death(tmp_path):
     await observer.observe()
     assert len(mgr.crash_history) == 3
     assert mgr.last_reported_death.cause == "oom"
+
+
+async def test_reported_detail_cannot_inject_a_log_line(tmp_path, caplog):
+    """G1-04: daemon free text reaches the log one line, never as a new one."""
+    mgr = _make_manager(tmp_path)
+    client = _StubCaretaker(
+        {
+            "last_death": _death_payload(
+                detail="first line\nCRITICAL forged-second-line"
+            )
+        }
+    )
+    observer = BackendDeathObserver(client, mgr, cache_seconds=0)
+
+    with caplog.at_level(logging.ERROR, logger="Guardian.BackendDeathObserver"):
+        observation = await observer.observe()
+
+    lines = [
+        record.getMessage()
+        for record in caplog.records
+        if "Backend death reported" in record.getMessage()
+    ]
+    assert len(lines) == 1
+    assert "\n" not in lines[0]
+    assert "first line" in lines[0]
+    # The API payload keeps the daemon's text; only the log line is sanitized.
+    assert observation.death.detail.startswith("first line")
 
 
 def test_unknown_cause_is_recorded_verbatim():

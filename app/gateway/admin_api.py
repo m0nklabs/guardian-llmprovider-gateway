@@ -421,7 +421,7 @@ async def _observe_caretaker_death() -> _backend_death.CaretakerObservation:
         logger.error(
             "Caretaker death observation failed (%s); reporting the backend "
             "state as unknown rather than alive",
-            exc,
+            clean_log_value(exc),
         )
         return _backend_death.CaretakerObservation(
             configured=True,
