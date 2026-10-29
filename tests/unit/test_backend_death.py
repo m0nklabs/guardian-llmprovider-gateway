@@ -686,6 +686,41 @@ async def test_out_of_order_older_report_keeps_the_newest_death(tmp_path):
     assert mgr.crash_history[-1].timestamp == "2026-10-28T20:00:00+00:00"
 
 
+@pytest.mark.parametrize(
+    ("first", "second", "expected"),
+    [
+        # aware then naive, and naive then aware: the deadliest combination for
+        # a direct datetime comparison (TypeError: naive vs aware).
+        ("2026-10-28T22:00:00+00:00", "2026-10-28T20:00:00", "2026-10-28T22:00:00+00:00"),
+        ("2026-10-28T22:00:00+00:00", "2026-10-28T23:00:00", "2026-10-28T23:00:00"),
+        ("2026-10-28T22:00:00", "2026-10-28T20:00:00+00:00", "2026-10-28T22:00:00"),
+        ("2026-10-28T22:00:00", "2026-10-28T23:00:00+00:00", "2026-10-28T23:00:00+00:00"),
+        # explicit non-UTC offsets compare as instants, not as wall clocks.
+        ("2026-10-28T22:00:00+00:00", "2026-10-28T23:30:00+02:00", "2026-10-28T22:00:00+00:00"),
+    ],
+)
+async def test_newest_death_comparison_handles_mixed_timestamp_forms(
+    tmp_path, first, second, expected
+):
+    """Review #81: naive and offset-aware timestamps must not raise.
+
+    ``backend_death`` stays the newest death by instant, and a comparison that
+    used to raise ``TypeError`` must never lose the later record.
+    """
+    mgr = _make_manager(tmp_path)
+    client = _StubCaretaker({"last_death": _death_payload(timestamp=first)})
+    observer = BackendDeathObserver(client, mgr, cache_seconds=0)
+    await observer.observe()
+
+    client._status = {"last_death": _death_payload(timestamp=second)}
+    observation = await observer.observe()
+
+    assert observation.death is not None
+    assert observer.last_report.timestamp == expected
+    # Both reported deaths are distinct events in the history.
+    assert len(mgr.crash_history) == 2
+
+
 async def test_observation_uses_a_short_bounded_timeout(tmp_path):
     mgr = _make_manager(tmp_path)
     client = _StubCaretaker({"is_unloaded": False})

@@ -127,11 +127,21 @@ def _coerce_exit_code(value: Any) -> int | None:
 
 
 def _parsed_timestamp(value: str) -> datetime | None:
-    """Parse an ISO-8601 timestamp (``Z`` suffix accepted); None when invalid."""
+    """Parse an ISO-8601 timestamp as timezone-aware UTC; None when invalid.
+
+    The contract accepts both an explicit offset and a naive local timestamp,
+    and mixing the two in a comparison raises ``TypeError``.  Normalise here so
+    every comparison site sees aware datetimes: naive values are read as UTC
+    (the daemon is the same host, and the value is only used for ordering, not
+    for display).
+    """
     try:
-        return datetime.fromisoformat(_ISO_WITH_Z.sub("+00:00", value))
+        parsed = datetime.fromisoformat(_ISO_WITH_Z.sub("+00:00", value))
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _valid_timestamp(value: str) -> bool:
