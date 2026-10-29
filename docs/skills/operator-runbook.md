@@ -150,5 +150,40 @@ grep -E 'OPENROUTER_API_KEY|NVIDIA_API_KEY|POOLSIDE_API_KEY' .env
    not self-healable because the agent's own model traffic routes through
    Guardian (see AGENTS.md Critical rules).
 3. `sudo systemctl restart guardian-llmprovider-gateway` — deploy
-4. `curl -s http://127.0.0.1:11434/healthz` — verify it's back up
-5. Watch logs: `journalctl -u guardian-llmprovider-gateway.service -f | grep -v healthz`
+4. **Run the post-restart verifier** — this is the step that proves the restart
+   actually deployed what was merged (`active` alone does not):
+   ```bash
+   ./venv/bin/python scripts/verify_post_restart.py
+   ./venv/bin/python scripts/verify_post_restart.py --json   # machine use
+   ```
+   Exit `0` = every check passed; `1` = at least one check failed (the running
+   deployment is NOT the merged contract); `2` = no failures but something
+   could not be verified — read the `SKIP` reasons. The script is read-only: it
+   probes the `MainPID` listener on `https://127.0.0.1:11435`, reads the journald
+   log and the capture tree, and never uploads a large body (the body-bound
+   check declares an oversized `Content-Length` and sends zero bytes).
+5. `curl -s http://127.0.0.1:11434/healthz` — verify it's back up
+6. Watch logs: `journalctl -u guardian-llmprovider-gateway.service -f | grep -v healthz`
+
+### What the post-restart verifier checks
+
+One line per item, each reading a fact only the merged code produces: service
+identity (`MainPID` owns `127.0.0.1:11435`, not just `active`), the queue wait
+budget, capture media modes (`0750` directory / `0640` files), the removed
+`get_version` (import check, not a grep), privilege-scope grace (a `scope-grace`
+line in the journal), the `/metrics` gate (`401` anonymous), the destination
+allowlist source and the flagging of the `192.168.1.245` cleartext hops,
+admission bounds (queue depth, resolved body bound,
+`guardian_admission_rejections_total`), the metadata-only audit record, the
+`Bearer`-free log invariant, `/v1` endpoint confinement, the backend-death seam
+on `/api/status`, plus the retained key-store, config-merge and
+cloud-catalog-credential checks.
+
+A `FAIL` on a config-derived item (destination allowlist source, admission
+bound) means the *live* `config/global.settings.yaml` has no such block and the
+service is running on the shipped default: merge the block from the repository
+copy (both are hot-reloadable) and re-run the verifier.
+
+A `SKIP` means the verifier could not verify that item and says why — a missing
+scoped key (`admin`, `capture-export`), no media file written since the restart,
+or a grace window that already closed. It is never a quiet PASS.
