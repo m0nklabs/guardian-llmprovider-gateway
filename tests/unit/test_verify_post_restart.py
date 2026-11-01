@@ -137,7 +137,7 @@ def make_ctx(**overrides) -> "verify.Context":
         http=FakeHTTP(),
         systemctl=lambda unit, props, unix: {},
         journal=lambda since, lines: [],
-        module_has_attr=lambda module, attr: False,
+        read_proc_cwd=lambda pid: None,
         config=json.loads(json.dumps(BASE_CONFIG)),
         admin_key=key_choice("admin"),
         client_key=key_choice("client"),
@@ -352,18 +352,93 @@ def test_capture_modes_fails_when_the_service_reports_wrong_modes(tmp_path, monk
     assert "0o600" in result.detail
 
 
-# ── dead code ──────────────────────────────────────────────────────────
+# ── dead code (issue #84: judged against the deployed code only) ───────
+
+#: A `server.py` shaped like the post-#47 module: auth-shaped handler, no
+#: `get_version`.
+CLEAN_SERVER = '''
+async def proxy_tags_ollama(client_id: str = Depends(verify_api_key)):
+    return {}
+'''
+
+#: A `server.py` shaped like the pre-#47 module the live process still loaded.
+STALE_SERVER = (
+    CLEAN_SERVER
+    + '''
+async def get_version(client_id: str = Depends(verify_api_key)):
+    """Mimic Ollama version endpoint"""
+    return {"version": "0.1.27"}
+'''
+)
 
 
-def test_dead_code_removed_passes():
-    result = verify.check_dead_code_removed(make_ctx(module_has_attr=lambda module, attr: False))
+def deployed_tree(tmp_path: Path, source: str, *, mtime: float = 1_600_000_000.0) -> Path:
+    """Write a deployed `app/proxy/server.py` whose mtime predates the process."""
+    root = tmp_path / "deployed"
+    module = root / "app" / "proxy" / "server.py"
+    module.parent.mkdir(parents=True, exist_ok=True)
+    module.write_text(source)
+    os.utime(module, (mtime, mtime))
+    return root
+
+
+def dead_code_ctx(root: Path | None, *, status: int = 404, **overrides):
+    http = FakeHTTP({("GET", "/api/version"): response(status, {"detail": "not found"})})
+    data = dict(
+        http=http,
+        deployment=verify.Deployment(root=root, main_pid=4242, proc_cwd=str(root or ""),
+                                      origin="/proc/4242/cwd"),
+    )
+    data.update(overrides)
+    return make_ctx(**data)
+
+
+def test_dead_code_removed_passes_on_the_deployed_module(tmp_path):
+    root = deployed_tree(tmp_path, CLEAN_SERVER)
+    result = verify.check_dead_code_removed(dead_code_ctx(root))
     assert result.status == verify.PASS
+    assert str(root / "app" / "proxy" / "server.py") in result.detail
+    assert verify.DEAD_CODE_ROUTE in result.detail
 
 
-def test_dead_code_removed_fails_when_get_version_survives():
-    result = verify.check_dead_code_removed(make_ctx(module_has_attr=lambda module, attr: True))
+def test_dead_code_removed_fails_when_the_process_still_serves_the_route(tmp_path):
+    """A served `/api/version` is the old code, whatever the script's tree says."""
+    root = deployed_tree(tmp_path, CLEAN_SERVER)
+    result = verify.check_dead_code_removed(dead_code_ctx(root, status=200))
+    assert result.status == verify.FAIL
+    assert "/api/version" in result.detail
+    assert "200" in result.detail
+
+
+def test_dead_code_removed_fails_on_the_running_old_code_not_the_script_tree(tmp_path):
+    """The regression that motivated issue #84.
+
+    The deployed module still defines ``get_version`` while this checkout (the
+    script's own tree) does not.  The old import-based check imported the
+    *script's* module and reported PASS for code that was not running.
+    """
+    own_module = REPO / "app" / "proxy" / "server.py"
+    assert "def get_version" not in own_module.read_text()  # the script's tree is clean
+    root = deployed_tree(tmp_path, STALE_SERVER)
+    result = verify.check_dead_code_removed(dead_code_ctx(root))
     assert result.status == verify.FAIL
     assert "get_version" in result.detail
+    assert str(root) in result.detail
+
+
+def test_dead_code_removed_fails_when_the_file_is_newer_than_the_process(tmp_path):
+    """A file edited after the start is not the code the process loaded."""
+    root = deployed_tree(tmp_path, CLEAN_SERVER, mtime=1_800_000_000.0)
+    result = verify.check_dead_code_removed(dead_code_ctx(root))
+    assert result.status == verify.FAIL
+    assert "modified after the process started" in result.detail
+
+
+def test_dead_code_removed_skips_when_the_deployed_root_is_unknown():
+    ctx = dead_code_ctx(None, deployment=verify.Deployment(reason="no MainPID"))
+    result = verify.check_dead_code_removed(ctx)
+    assert result.status == verify.SKIP
+    assert "unknown" in result.detail
 
 
 # ── privilege scopes ───────────────────────────────────────────────────
@@ -459,37 +534,80 @@ def test_metrics_gate_fails_when_anonymous_access_is_allowed():
     assert "401" in result.detail
 
 
-# ── destination allowlist ──────────────────────────────────────────────
+# ── destination allowlist (issue #84: the live policy, not a YAML file) ─
 
 
-def test_destination_allowlist_passes():
-    result = verify.check_destination_allowlist(make_ctx())
+def live_policy(**overrides) -> dict:
+    """The `/api/status` → `policy` report a deployed process sends."""
+    policy = {
+        "source": "config",
+        "schemes": ["http", "https"],
+        "entries": [
+            {"host": "127.0.0.1", "ports": [11440], "cleartext_credentials": False},
+            {"host": "192.168.1.245", "ports": [11440, 11441, 11450, 11451],
+             "cleartext_credentials": True},
+            {"host": "openrouter.ai", "ports": [443], "cleartext_credentials": False},
+        ],
+        "cleartext_hops": ["http://192.168.1.245:11440", "http://192.168.1.245:11441",
+                           "http://192.168.1.245:11450", "http://192.168.1.245:11451"],
+    }
+    policy.update(overrides)
+    return policy
+
+
+def policy_http(policy: dict | None = None, status: int = 200) -> FakeHTTP:
+    body = {"policy": live_policy() if policy is None else policy}
+    return FakeHTTP({("GET", "/api/status"): response(status, body)})
+
+
+def test_destination_allowlist_passes_on_the_live_policy():
+    result = verify.check_destination_allowlist(make_ctx(http=policy_http()))
     assert result.status == verify.PASS
     assert "cleartext" in result.detail
 
 
-def test_destination_allowlist_fails_on_shipped_default():
-    config = dict(BASE_CONFIG)
-    config.pop("destination_policy")
-    result = verify.check_destination_allowlist(make_ctx(config=config))
+def test_destination_allowlist_fails_on_shipped_default_even_with_a_local_yaml():
+    """The exact false PASS of issue #84: a local `destination_policy` block.
+
+    ``BASE_CONFIG`` declares the allowlist, so the old YAML-based check passed —
+    while the running process reports ``source=shipped-default``.
+    """
+    assert "destination_policy" in BASE_CONFIG
+    result = verify.check_destination_allowlist(
+        make_ctx(http=policy_http(live_policy(source="shipped-default")))
+    )
     assert result.status == verify.FAIL
     assert "shipped-default" in result.detail
 
 
 def test_destination_allowlist_fails_when_the_hop_is_not_flagged():
-    config = json.loads(json.dumps(BASE_CONFIG))
-    config["destination_policy"]["allow"][1].pop("cleartext_credentials")
-    result = verify.check_destination_allowlist(make_ctx(config=config))
+    policy = live_policy()
+    policy["entries"][1]["cleartext_credentials"] = False
+    result = verify.check_destination_allowlist(make_ctx(http=policy_http(policy)))
     assert result.status == verify.FAIL
     assert "not flagged" in result.detail
 
 
 def test_destination_allowlist_fails_when_a_port_is_missing():
-    config = json.loads(json.dumps(BASE_CONFIG))
-    config["destination_policy"]["allow"][1]["ports"] = [11440, 11441]
-    result = verify.check_destination_allowlist(make_ctx(config=config))
+    policy = live_policy()
+    policy["entries"][1]["ports"] = [11440, 11441]
+    result = verify.check_destination_allowlist(make_ctx(http=policy_http(policy)))
     assert result.status == verify.FAIL
     assert "ports" in result.detail
+
+
+def test_destination_allowlist_fails_when_the_process_reports_no_policy():
+    """An older process has no `policy` block: no verdict, and never a PASS."""
+    http = FakeHTTP({("GET", "/api/status"): response(200, {"backend_state": "alive"})})
+    result = verify.check_destination_allowlist(make_ctx(http=http))
+    assert result.status == verify.FAIL
+    assert "no 'policy' block" in result.detail
+
+
+def test_destination_allowlist_skips_without_a_usable_key():
+    result = verify.check_destination_allowlist(make_ctx(admin_key=None, client_key=None))
+    assert result.status == verify.SKIP
+    assert "/api/status" in result.detail
 
 
 # ── admission bounds ───────────────────────────────────────────────────
@@ -843,7 +961,9 @@ def test_an_unreachable_service_fails_every_service_check(monkeypatch, tmp_path)
         "queue_wait_budget",
         "privilege_scope_grace",
         "metrics_gate",
+        "destination_allowlist",
         "admission_bounds",
+        "dead_code_removed",
         "metadata_audit",
         "log_sanitizer",
         "endpoint_confinement",
@@ -859,8 +979,37 @@ def test_an_unreachable_service_fails_every_service_check(monkeypatch, tmp_path)
 def test_run_checks_reports_every_check_once():
     results = verify.run_checks(make_ctx())
     ids = [result.check_id for result in results]
-    assert ids == [check_id for check_id, _ in verify.CHECKS]
+    assert ids == [spec.check_id for spec in verify.CHECKS]
     assert len(ids) == len(set(ids))
+
+
+def test_every_check_declares_and_prints_its_source():
+    """A reader must see a process fact from a file fact without reading code."""
+    results = verify.run_checks(make_ctx())
+    known = {
+        verify.SOURCE_PROCESS,
+        verify.SOURCE_LIVE_API,
+        verify.SOURCE_DEPLOYED_CODE,
+        verify.SOURCE_DEPLOYED_CONFIG,
+        verify.SOURCE_DEPLOYED_FILE,
+        verify.SOURCE_JOURNAL,
+    }
+    for result in results:
+        assert result.source in known, result.check_id
+        assert result.source_evidence, result.check_id
+        rendered = result.to_json()
+        assert rendered["source"] == result.source
+        assert rendered["source_evidence"] == result.source_evidence
+
+
+def test_check_titles_in_the_table_match_the_check_results():
+    """The spec table is what a foreign-tree SKIP prints: keep the titles equal."""
+    titles = {spec.check_id: spec.title for spec in verify.CHECKS}
+    http = policy_http()
+    results = verify.run_checks(make_ctx(http=http))
+    for result in results:
+        if result.status != verify.SKIP:
+            assert result.title == titles[result.check_id], result.check_id
 
 
 def test_exit_code_maps_pass_fail_skip():
@@ -1009,21 +1158,210 @@ def test_json_document_carries_every_check(monkeypatch, capsys):
     fake = make_ctx()
     monkeypatch.setattr(verify, "build_context", lambda args: fake)
     monkeypatch.setattr(verify, "prepare", lambda ctx: None)
+    monkeypatch.setattr(verify, "resolve_deployment", lambda ctx: deployed_deployment(REPO))
     code = verify.main(["--json"])
     document = json.loads(capsys.readouterr().out)
     assert [entry["check"] for entry in document["checks"]] == [
-        check_id for check_id, _ in verify.CHECKS
+        spec.check_id for spec in verify.CHECKS
     ]
     assert document["exit_code"] == code
     assert document["ok"] is (code == verify.EXIT_PASS)
+    assert document["proves_the_deployment"] is True
+    assert document["deployed_root"] == str(REPO)
+    assert all(entry["source"] for entry in document["checks"])
 
 
 def test_human_output_prints_one_line_per_check(monkeypatch, capsys):
     fake = make_ctx()
     monkeypatch.setattr(verify, "build_context", lambda args: fake)
     monkeypatch.setattr(verify, "prepare", lambda ctx: None)
+    monkeypatch.setattr(verify, "resolve_deployment", lambda ctx: deployed_deployment(REPO))
     verify.main([])
     out = capsys.readouterr().out
     for tag in ("[PASS]", "[FAIL]", "[SKIP]"):
         assert tag in out  # the fake mix exercises all three
+    assert "passed" in out and "skipped" in out
+    assert "source=" in out  # every line names where its evidence came from
+
+
+# ── issue #84: the tree guard ──────────────────────────────────────────
+
+
+def deployed_deployment(root: Path) -> "verify.Deployment":
+    """A Deployment that resolves to *root* (the tree the script lives in)."""
+    return verify.Deployment(
+        root=Path(root),
+        main_pid=4242,
+        proc_cwd=str(root),
+        working_directory=str(root),
+        origin="/proc/4242/cwd",
+    )
+
+
+def foreign_deployment(tmp_path: Path) -> "verify.Deployment":
+    """A Deployment whose tree is some other checkout."""
+    other = tmp_path / "some-other-worktree"
+    other.mkdir(parents=True, exist_ok=True)
+    return deployed_deployment(other)
+
+
+def test_resolve_deployment_takes_the_process_cwd_and_cross_checks_the_unit():
+    ctx = make_ctx(
+        systemctl=lambda unit, props, unix: {
+            "ActiveState": "active",
+            "MainPID": "4242",
+            "WorkingDirectory": "/srv/guardian/",
+        },
+        read_proc_cwd=lambda pid: "/srv/guardian",
+    )
+    deployment = verify.resolve_deployment(ctx)
+    assert deployment.root == Path("/srv/guardian")
+    assert deployment.origin == "/proc/4242/cwd"
+    assert deployment.known is True
+
+
+def test_resolve_deployment_refuses_when_proc_and_the_unit_disagree():
+    ctx = make_ctx(
+        systemctl=lambda unit, props, unix: {
+            "ActiveState": "active",
+            "MainPID": "4242",
+            "WorkingDirectory": "/srv/one",
+        },
+        read_proc_cwd=lambda pid: "/srv/two",
+    )
+    deployment = verify.resolve_deployment(ctx)
+    assert deployment.root is None
+    assert "/srv/one" in deployment.reason and "/srv/two" in deployment.reason
+    assert "refusing to guess" in deployment.reason
+
+
+def test_resolve_deployment_never_guesses_when_the_service_is_down():
+    ctx = make_ctx(
+        systemctl=lambda unit, props, unix: {"ActiveState": "inactive", "MainPID": "0"},
+        read_proc_cwd=lambda pid: None,
+    )
+    deployment = verify.resolve_deployment(ctx)
+    assert deployment.root is None
+    assert "not running" in deployment.reason
+
+
+def test_resolve_deployment_never_guesses_without_proc_or_workdir():
+    ctx = make_ctx(
+        systemctl=lambda unit, props, unix: {"ActiveState": "active", "MainPID": "4242"},
+        read_proc_cwd=lambda pid: None,
+    )
+    deployment = verify.resolve_deployment(ctx)
+    assert deployment.root is None
+    assert "unreadable" in deployment.reason
+
+
+def test_foreign_tree_without_the_flag_is_refused_with_no_verdict(monkeypatch, capsys, tmp_path):
+    fake = make_ctx()
+    monkeypatch.setattr(verify, "build_context", lambda args: fake)
+    monkeypatch.setattr(verify, "prepare", lambda ctx: None)
+    monkeypatch.setattr(verify, "resolve_deployment", lambda ctx: foreign_deployment(tmp_path))
+
+    code = verify.main([])
+    captured = capsys.readouterr()
+
+    assert code == verify.EXIT_REFUSED
+    assert captured.out == ""  # no check output at all
+    foreign_root = os.path.realpath(tmp_path / "some-other-worktree")
+    assert foreign_root in captured.err
+    assert os.path.realpath(REPO) in captured.err
+    for tag in ("[PASS]", "[FAIL]", "[SKIP]"):
+        assert tag not in captured.err
+
+
+def test_foreign_tree_without_the_flag_refuses_in_json_mode(monkeypatch, capsys, tmp_path):
+    fake = make_ctx()
+    monkeypatch.setattr(verify, "build_context", lambda args: fake)
+    monkeypatch.setattr(verify, "prepare", lambda ctx: None)
+    monkeypatch.setattr(verify, "resolve_deployment", lambda ctx: foreign_deployment(tmp_path))
+
+    code = verify.main(["--json"])
+    document = json.loads(capsys.readouterr().out)
+
+    assert code == verify.EXIT_REFUSED
+    assert document["refused"] is True
+    assert document["checks"] == []  # a refusal produces no verdict
+    assert document["deployed_root"] == os.path.realpath(tmp_path / "some-other-worktree")
+    assert document["script_root"] == os.path.realpath(REPO)
+
+
+def test_unknown_deployed_root_is_refused_not_guessed(monkeypatch, capsys):
+    fake = make_ctx()
+    monkeypatch.setattr(verify, "build_context", lambda args: fake)
+    monkeypatch.setattr(verify, "prepare", lambda ctx: None)
+    monkeypatch.setattr(
+        verify,
+        "resolve_deployment",
+        lambda ctx: verify.Deployment(reason="the unit has no MainPID (ActiveState=inactive)"),
+    )
+
+    code = verify.main([])
+    err = capsys.readouterr().err
+
+    assert code == verify.EXIT_REFUSED
+    assert "UNKNOWN" in err
+    assert "no MainPID" in err
+
+
+def test_foreign_tree_with_the_flag_skips_process_checks_but_answers_live_api(tmp_path):
+    ctx = make_ctx(
+        http=policy_http(),
+        foreign_tree=True,
+        deployment=foreign_deployment(tmp_path),
+    )
+    results = {result.check_id: result for result in verify.run_checks(ctx)}
+
+    for spec in verify.CHECKS:
+        result = results[spec.check_id]
+        assert result.source == spec.source, spec.check_id
+        if spec.source == verify.SOURCE_LIVE_API:
+            # Answered from the live service: never gated to a SKIP by the tree.
+            assert "does not prove the deployment" not in result.detail, spec.check_id
+        else:
+            assert result.status == verify.SKIP, spec.check_id
+            assert "does not prove the deployment" in result.detail, spec.check_id
+
+    # The code-level check of the issue is a deployment claim: SKIP, never PASS.
+    assert results["dead_code_removed"].status == verify.SKIP
+    # The live-policy check reads the running process's own policy report, so it
+    # answers — and it is the live verdict, not this tree's.
+    assert results["destination_allowlist"].status == verify.PASS
+    # A second live-HTTP check answers from the same run (it FAILs only because
+    # the fake has no /metrics route; the point is that it was not gated).
+    assert results["metrics_gate"].status in {verify.PASS, verify.FAIL}
+
+
+def test_foreign_tree_never_reports_a_pass_for_a_tree_dependent_check(tmp_path, capsys, monkeypatch):
+    fake = make_ctx(http=policy_http())
+    monkeypatch.setattr(verify, "build_context", lambda args: fake)
+    monkeypatch.setattr(verify, "prepare", lambda ctx: None)
+    monkeypatch.setattr(verify, "resolve_deployment", lambda ctx: foreign_deployment(tmp_path))
+
+    code = verify.main(["--allow-foreign-tree"])
+    out = capsys.readouterr().out
+
+    assert code != verify.EXIT_REFUSED
+    assert "does not prove the deployment" in out
+    assert "--allow-foreign-tree" in out
+    for spec in verify.CHECKS:
+        if spec.source != verify.SOURCE_LIVE_API:
+            assert f"[PASS] {spec.title}" not in out, spec.check_id
+
+
+def test_deployed_tree_produces_a_normal_verdict(monkeypatch, capsys):
+    fake = make_ctx()
+    monkeypatch.setattr(verify, "build_context", lambda args: fake)
+    monkeypatch.setattr(verify, "prepare", lambda ctx: None)
+    monkeypatch.setattr(verify, "resolve_deployment", lambda ctx: deployed_deployment(REPO))
+
+    code = verify.main([])
+    out = capsys.readouterr().out
+
+    assert code in {verify.EXIT_PASS, verify.EXIT_FAIL, verify.EXIT_SKIP}
+    assert f"deployed root {REPO}" in out
+    assert "does not prove the deployment" not in out
     assert "passed" in out and "skipped" in out

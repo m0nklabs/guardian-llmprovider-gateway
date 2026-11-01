@@ -150,34 +150,55 @@ grep -E 'OPENROUTER_API_KEY|NVIDIA_API_KEY|POOLSIDE_API_KEY' .env
    not self-healable because the agent's own model traffic routes through
    Guardian (see AGENTS.md Critical rules).
 3. `sudo systemctl restart guardian-llmprovider-gateway` — deploy
-4. **Run the post-restart verifier** — this is the step that proves the restart
-   actually deployed what was merged (`active` alone does not):
+4. **Run the post-restart verifier from the deployed checkout, as the service
+   user** — this is the step that proves the restart actually deployed what was
+   merged (`active` alone does not):
    ```bash
+   cd /home/flip/guardian-llmprovider-gateway
    ./venv/bin/python scripts/verify_post_restart.py
    ./venv/bin/python scripts/verify_post_restart.py --json   # machine use
    ```
    Exit `0` = every check passed; `1` = at least one check failed (the running
    deployment is NOT the merged contract); `2` = no failures but something
-   could not be verified — read the `SKIP` reasons. The script is read-only: it
-   probes the `MainPID` listener on `https://127.0.0.1:11435`, reads the journald
-   log and the capture tree, and never uploads a large body (the body-bound
-   check declares an oversized `Content-Length` and sends zero bytes).
+   could not be verified — read the `SKIP` reasons; `3` = **refused**: this
+   checkout is not the tree the service runs in, so nothing was graded. The
+   script is read-only: it probes the `MainPID` listener on
+   `https://127.0.0.1:11435`, reads the journald log and the capture tree, and
+   never uploads a large body (the body-bound check declares an oversized
+   `Content-Length` and sends zero bytes).
 5. `curl -s http://127.0.0.1:11434/healthz` — verify it's back up
 6. Watch logs: `journalctl -u guardian-llmprovider-gateway.service -f | grep -v healthz`
 
 ### What the post-restart verifier checks
 
-One line per item, each reading a fact only the merged code produces: service
-identity (`MainPID` owns `127.0.0.1:11435`, not just `active`), the queue wait
-budget, capture media modes (`0750` directory / `0640` files), the removed
-`get_version` (import check, not a grep), privilege-scope grace (a `scope-grace`
-line in the journal), the `/metrics` gate (`401` anonymous), the destination
-allowlist source and the flagging of the `192.168.1.245` cleartext hops,
-admission bounds (queue depth, resolved body bound,
-`guardian_admission_rejections_total`), the metadata-only audit record, the
-`Bearer`-free log invariant, `/v1` endpoint confinement, the backend-death seam
-on `/api/status`, plus the retained key-store, config-merge and
-cloud-catalog-credential checks.
+One line per item, and **every line names its source** (`source=process`,
+`live-api`, `deployed-code`, `deployed-config`, `deployed-file`, `journal`), so
+a reader can tell a process fact from a file fact: service identity (`MainPID`
+owns `127.0.0.1:11435`, not just `active`), the queue wait budget, capture media
+modes (`0750` directory / `0640` files), the removed `get_version` (the module
+the process *loaded*, parsed from `/proc/<MainPID>/cwd`, plus a `404` on
+`/api/version`), privilege-scope grace (a `scope-grace` line in the journal), the
+`/metrics` gate (`401` anonymous), the **live** destination-policy source and the
+flagging of the `192.168.1.245` cleartext hops (read from `/api/status` →
+`policy`, never from a YAML file next to the script), admission bounds (queue
+depth, resolved body bound, `guardian_admission_rejections_total`), the
+metadata-only audit record, the `Bearer`-free log invariant, `/v1` endpoint
+confinement, the backend-death seam on `/api/status`, plus the retained
+key-store, config-merge and cloud-catalog-credential checks.
+
+**The tree guard.** Before any check runs, the script asks the service where it
+lives (`/proc/<MainPID>/cwd`, cross-checked with `systemctl show -p
+WorkingDirectory`) and compares that with its own checkout. A different tree — or
+a service that is down, so the tree cannot be determined — is **refused**
+(exit `3`, both paths named, no verdict printed). This is the whole point: a
+verifier that grades another checkout must not print `PASS` for code that is not
+running ([#84](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/84)).
+
+`--allow-foreign-tree` is for **review and CI only**: it lets the run proceed
+from any checkout, but every check whose source is not the live HTTP API reports
+`SKIP` with *"does not prove the deployment"* instead of a verdict, and the run
+ends with an explicit "this run graded <script tree>, not the deployment". It
+never turns a process-level check into a PASS.
 
 A `FAIL` on a config-derived item (destination allowlist source, admission
 bound) means the *live* `config/global.settings.yaml` has no such block and the
@@ -186,4 +207,5 @@ copy (both are hot-reloadable) and re-run the verifier.
 
 A `SKIP` means the verifier could not verify that item and says why — a missing
 scoped key (`admin`, `capture-export`), no media file written since the restart,
-or a grace window that already closed. It is never a quiet PASS.
+a grace window that already closed, or a foreign-tree run. It is never a quiet
+PASS.
