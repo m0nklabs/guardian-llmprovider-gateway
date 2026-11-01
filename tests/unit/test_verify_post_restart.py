@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -383,11 +384,19 @@ def deployed_tree(tmp_path: Path, source: str, *, mtime: float = 1_600_000_000.0
 
 
 def dead_code_ctx(root: Path | None, *, status: int = 404, **overrides):
+    """A context whose "process" started *after* the fixture file was written.
+
+    Production order is checkout → restart, so the loaded module's mtime and
+    ctime are both older than the process start.  A fixture file necessarily has
+    ``ctime = now``, hence the fake start a minute in the future; the failure
+    cases pass their own ``service_start``.
+    """
     http = FakeHTTP({("GET", "/api/version"): response(status, {"detail": "not found"})})
     data = dict(
         http=http,
         deployment=verify.Deployment(root=root, main_pid=4242, proc_cwd=str(root or ""),
                                       origin="/proc/4242/cwd"),
+        service_start=time.time() + 60.0,
     )
     data.update(overrides)
     return make_ctx(**data)
@@ -428,10 +437,28 @@ def test_dead_code_removed_fails_on_the_running_old_code_not_the_script_tree(tmp
 
 def test_dead_code_removed_fails_when_the_file_is_newer_than_the_process(tmp_path):
     """A file edited after the start is not the code the process loaded."""
-    root = deployed_tree(tmp_path, CLEAN_SERVER, mtime=1_800_000_000.0)
-    result = verify.check_dead_code_removed(dead_code_ctx(root))
+    root = deployed_tree(tmp_path, CLEAN_SERVER, mtime=time.time())
+    ctx = dead_code_ctx(root, service_start=time.time() - 3600.0)
+    result = verify.check_dead_code_removed(ctx)
     assert result.status == verify.FAIL
     assert "modified after the process started" in result.detail
+    assert "mtime" in result.detail
+
+
+def test_dead_code_removed_fails_on_a_timestamp_preserving_replacement(tmp_path):
+    """`rsync -a` keeps mtime; ctime still proves the file was placed after start.
+
+    PR-Piet on #84: only-mtime freshness would let a timestamp-preserving deploy
+    slip a module with ``get_version`` past the check, because the old unrouted
+    handler also answers 404 — the route prong alone cannot tell them apart.
+    """
+    root = deployed_tree(tmp_path, STALE_SERVER, mtime=1_600_000_000.0)  # mtime "old"
+    assert (root / "app" / "proxy" / "server.py").stat().st_mtime == 1_600_000_000.0
+    ctx = dead_code_ctx(root, service_start=time.time() - 3600.0)
+    result = verify.check_dead_code_removed(ctx)
+    assert result.status == verify.FAIL
+    assert "ctime" in result.detail
+    assert "get_version" not in result.detail  # failed on freshness, not on the symbol
 
 
 def test_dead_code_removed_skips_when_the_deployed_root_is_unknown():
@@ -1252,7 +1279,28 @@ def test_resolve_deployment_never_guesses_without_proc_or_workdir():
     )
     deployment = verify.resolve_deployment(ctx)
     assert deployment.root is None
-    assert "unreadable" in deployment.reason
+    assert "cannot be read" in deployment.reason
+
+
+def test_resolve_deployment_ignores_a_declared_workdir_when_proc_is_unreadable():
+    """`WorkingDirectory` is declaration, not evidence (PR-Piet on #84).
+
+    Changing it + `daemon-reload` without a restart leaves the old process in its
+    old checkout, so a verifier started from the *newly configured* checkout would
+    grade the wrong files.  Only the process's own cwd may anchor a verdict.
+    """
+    ctx = make_ctx(
+        systemctl=lambda unit, props, unix: {
+            "ActiveState": "active",
+            "MainPID": "4242",
+            "WorkingDirectory": "/srv/newly-configured",
+        },
+        read_proc_cwd=lambda pid: None,
+    )
+    deployment = verify.resolve_deployment(ctx)
+    assert deployment.root is None
+    assert "/proc/4242/cwd cannot be read" in deployment.reason
+    assert "/srv/newly-configured" in deployment.reason  # named, never trusted
 
 
 def test_foreign_tree_without_the_flag_is_refused_with_no_verdict(monkeypatch, capsys, tmp_path):

@@ -194,6 +194,11 @@ a service that is down, so the tree cannot be determined — is **refused**
 verifier that grades another checkout must not print `PASS` for code that is not
 running ([#84](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/84)).
 
+Run it **as the service user** (or root) for that reason: `/proc/<MainPID>/cwd`
+must be readable. The unit's `WorkingDirectory` is only a cross-check, never
+evidence — a `daemon-reload` can change it without restarting the process, so an
+unreadable cwd makes the tree unknown and the run refuses instead of guessing.
+
 `--allow-foreign-tree` is for **review and CI only**: it lets the run proceed
 from any checkout, but every check whose source is not the live HTTP API reports
 `SKIP` with *"does not prove the deployment"* instead of a verdict, and the run

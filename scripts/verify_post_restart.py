@@ -40,10 +40,10 @@ check                              source          what it reads
                                                    (``0640``).  Read-only: nothing is chmod-ed.
 4  ``dead_code_removed``           deployed-code   The module the process loaded
                                                    (``/proc/<MainPID>/cwd/app/proxy/server.py``,
-                                                   accepted only when its mtime is not newer than
-                                                   the process start) must not define
-                                                   ``get_version``, and the process must not serve
-                                                   a ``/api/version`` route (404).
+                                                   accepted only when neither its mtime nor its
+                                                   ctime is newer than the process start) must not
+                                                   define ``get_version``, and the process must not
+                                                   serve a ``/api/version`` route (404).
 5  ``privilege_scope_grace``       journal         An unscoped *legacy* key calls a privileged route
                                                    (``/api/status``); the journal must carry a
                                                    ``scope-grace`` line for that route, and the key
@@ -359,14 +359,15 @@ class Deployment:
     """Where the running service's tree is, and how that was established.
 
     ``root`` is ``None`` — never a guess — whenever the service cannot say where
-    it runs (no MainPID, unreadable ``/proc``, or two contradicting answers).
+    it runs: no MainPID, no readable ``/proc`` entry *and* no declared
+    ``WorkingDirectory``, or two contradicting answers.
     """
 
     root: Path | None = None
     main_pid: int | None = None
     proc_cwd: str | None = None
     working_directory: str | None = None
-    #: How ``root`` was resolved: ``/proc/<pid>/cwd`` or the systemd property.
+    #: How ``root`` was resolved: ``/proc/<pid>/cwd`` (the only accepted origin).
     origin: str = ""
     #: Why ``root`` is unknown; empty when it was resolved.
     reason: str = ""
@@ -392,11 +393,12 @@ def _realpath(value: str | Path) -> Path:
 def resolve_deployment(ctx: Context) -> Deployment:
     """Resolve the deployed root from the service itself.  Never guesses.
 
-    ``/proc/<MainPID>/cwd`` is the process's own answer and is preferred;
-    ``systemctl show -p WorkingDirectory`` is the unit's declaration and is used
-    as the cross-check.  Equal answers (after resolving symlinks) are the root.
-    Any other combination is reported as *unknown* with the reason, so the
-    caller can refuse instead of grading an arbitrary tree.
+    ``/proc/<MainPID>/cwd`` is the process's own answer and the **only** accepted
+    origin: ``WorkingDirectory`` is the unit's *declaration*, and a
+    ``daemon-reload`` can change it without restarting the process.  It is used
+    only as a cross-check; when the two disagree, or the cwd cannot be read, or
+    there is no MainPID at all, the root is *unknown* with the reason, so the
+    caller refuses instead of grading an arbitrary tree.
     """
     try:
         facts = ctx.systemctl(ctx.unit, ("ActiveState", "MainPID", "WorkingDirectory"), False)
@@ -421,19 +423,17 @@ def resolve_deployment(ctx: Context) -> Deployment:
         )
     proc_cwd = ctx.read_proc_cwd(main_pid)
     if not proc_cwd:
-        if not working_directory:
-            return Deployment(
-                main_pid=main_pid,
-                working_directory=None,
-                reason=f"/proc/{main_pid}/cwd is unreadable and {ctx.unit} declares no "
-                "WorkingDirectory (run as the service user, or as root)",
-            )
+        # WorkingDirectory is *declaration*, not evidence: changing it and
+        # running `daemon-reload` without a restart leaves the old process in its
+        # old checkout, and a verifier started from the newly configured one
+        # would grade the wrong files (PR-Piet, #84).  Only the process's own cwd
+        # may anchor a verdict.
+        declared = f"; the unit merely declares WorkingDirectory={working_directory}" if working_directory else ""
         return Deployment(
             main_pid=main_pid,
             working_directory=working_directory,
-            origin="systemd WorkingDirectory",
-            root=_realpath(working_directory),
-            reason=f"/proc/{main_pid}/cwd is unreadable; used WorkingDirectory only",
+            reason=f"/proc/{main_pid}/cwd cannot be read{declared} — run the verifier as the "
+            "service user (or as root) so the process's own cwd is available",
         )
     if working_directory and _realpath(working_directory) != _realpath(proc_cwd):
         return Deployment(
@@ -1224,9 +1224,12 @@ def check_dead_code_removed(ctx: Context) -> Result:
 
     * the module file *the process loaded* — ``<deployed root>/app/proxy/server.py``
       where the deployed root comes from ``/proc/<MainPID>/cwd``, accepted only
-      when its mtime is not newer than the process start (a file edited after the
-      process started is not the code that is running).  It is parsed with
-      :mod:`ast`; nothing is imported, so the script's own sys.path is irrelevant.
+      when **neither** its mtime **nor** its ctime is newer than the process
+      start: a file replaced after the process started is not the code that is
+      running, and mtime alone is preserved by ``rsync -a``/``install -p``
+      (ctime cannot be preserved by any userspace tool, so it catches a
+      timestamp-preserving replacement).  It is parsed with :mod:`ast`; nothing
+      is imported, so the script's own sys.path is irrelevant.
     * the running process must not serve ``/api/version`` (the Ollama-shaped route
       the contract says is gone): a 404 from the probed listener.
 
@@ -1277,6 +1280,7 @@ def check_dead_code_removed(ctx: Context) -> Result:
             observed,
         )
     observed["module_mtime"] = info.st_mtime
+    observed["module_ctime"] = info.st_ctime
     if ctx.service_start is None:
         return Result(
             "dead_code_removed",
@@ -1286,16 +1290,24 @@ def check_dead_code_removed(ctx: Context) -> Result:
             "the code the process loaded",
             observed,
         )
-    if info.st_mtime > float(ctx.service_start):
-        return Result(
-            "dead_code_removed",
-            title,
-            FAIL,
-            f"{module_path} was modified after the process started "
-            f"(mtime {datetime.fromtimestamp(info.st_mtime, timezone.utc).isoformat()}), "
-            "so the running process is not that code",
-            observed,
-        )
+    # Both stamps, because either alone is forgeable: `rsync -a`/`install -p`
+    # preserve mtime but always bump ctime, and a plain `touch -d` sets mtime but
+    # also bumps ctime.  A file whose ctime is newer than the process start was
+    # (re)placed after the process read it, whatever its mtime claims
+    # (PR-Piet, #84).
+    for label, stamp in (("mtime", info.st_mtime), ("ctime", info.st_ctime)):
+        if stamp > float(ctx.service_start):
+            return Result(
+                "dead_code_removed",
+                title,
+                FAIL,
+                f"{module_path} was modified after the process started "
+                f"({label} {datetime.fromtimestamp(stamp, timezone.utc).isoformat()} > "
+                f"process start "
+                f"{datetime.fromtimestamp(float(ctx.service_start), timezone.utc).isoformat()}), "
+                "so the running process is not that code",
+                observed,
+            )
     try:
         names = _module_function_names(module_path)
     except (OSError, SyntaxError) as exc:
@@ -1320,8 +1332,8 @@ def check_dead_code_removed(ctx: Context) -> Result:
         "dead_code_removed",
         title,
         PASS,
-        f"the loaded module {module_path} (older than the process start) does not define "
-        f"{DEAD_CODE_SYMBOL}, and the process returns 404 for GET {DEAD_CODE_ROUTE}",
+        f"the loaded module {module_path} (mtime and ctime older than the process start) does "
+        f"not define {DEAD_CODE_SYMBOL}, and the process returns 404 for GET {DEAD_CODE_ROUTE}",
         observed,
     )
 
