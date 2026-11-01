@@ -787,3 +787,44 @@ def test_observe_timeout_falls_back_when_config_is_broken(monkeypatch):
         backend_death._observe_timeout()
         == backend_death.DEFAULT_OBSERVE_TIMEOUT_SECONDS
     )
+
+
+# ── Issue #84: /api/status reports the LIVE destination policy ─────────
+
+
+async def test_api_status_carries_the_live_destination_policy(tmp_path, monkeypatch):
+    """The verifier reads the policy's provenance from the running process.
+
+    ``POST /api/config/reload`` can change the live policy without touching a
+    file, so the process's own report is the only source that proves what it
+    enforces.  ``scripts/verify_post_restart.py`` reads exactly this block.
+    """
+    mgr = _make_manager(tmp_path)
+    client = _StubCaretaker({"is_unloaded": False})
+    observer = BackendDeathObserver(client, mgr, cache_seconds=0)
+    _install_admin_runtime(monkeypatch, mgr, observer, probe_healthy=True)
+    report = {"source": "config", "entries": [{"host": "192.168.1.245", "ports": [11440]}]}
+    monkeypatch.setattr(
+        admin_api, "current_policy", lambda: SimpleNamespace(report=lambda: dict(report))
+    )
+
+    payload = await admin_api.get_server_status("test")
+
+    assert payload["policy"] == report
+
+
+async def test_api_status_survives_a_broken_policy_report(tmp_path, monkeypatch):
+    """A policy that cannot be reported is labelled, never silently dropped."""
+    mgr = _make_manager(tmp_path)
+    client = _StubCaretaker({"is_unloaded": False})
+    observer = BackendDeathObserver(client, mgr, cache_seconds=0)
+    _install_admin_runtime(monkeypatch, mgr, observer, probe_healthy=True)
+
+    def _boom():
+        raise RuntimeError("config exploded")
+
+    monkeypatch.setattr(admin_api, "current_policy", _boom)
+
+    payload = await admin_api.get_server_status("test")
+
+    assert payload["policy"]["source"] == "unavailable"

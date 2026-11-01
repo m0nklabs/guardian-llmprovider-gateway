@@ -1036,6 +1036,17 @@ Important subtrees:
 - `security`: pinned model, allowlist, backend verification timestamps
 - `proxy`: PID, listener ownership, PID file state
 - `routing`: preferred tool model and reasoning model
+- `policy`: the **live** outbound destination policy
+  ([#84](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/84),
+  additive). `source` is its provenance — `config` when the
+  `destination_policy` section of the loaded document supplied it,
+  `shipped-default` when the section was absent and the shipped allowlist was
+  substituted — plus `entries` (`{host, ports, cleartext_credentials}`),
+  `schemes`, `cleartext_hops`, `failure` and `invalid_entries`. This is the
+  source of record for "which policy is the process actually enforcing":
+  `POST /api/config/reload` can change it without touching a file, so a config
+  file is not evidence. `scripts/verify_post_restart.py` reads it; a policy that
+  cannot be reported is labelled `source: "unavailable"` rather than omitted.
 
 Backend-death fields ([#34](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/34), additive):
 
