@@ -809,11 +809,12 @@ def test_apply_aborts_before_any_write_when_the_backup_fails(tmp_path):
     work, _origin, _base = make_repo(tmp_path)
     config_dir = work / "config"
     before = snapshot(work)
-    os.chmod(config_dir, 0o555)
+    original_mode = stat.S_IMODE(config_dir.stat().st_mode)
+    os.chmod(config_dir, stat.S_IRUSR | stat.S_IXUSR)  # owner-only, no write
     try:
         proc = run_tool(work, "--apply")
     finally:
-        os.chmod(config_dir, 0o755)
+        os.chmod(config_dir, original_mode)
 
     assert proc.returncode == 2
     assert "could not back up" in proc.stdout

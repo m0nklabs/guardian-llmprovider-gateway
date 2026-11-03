@@ -963,11 +963,14 @@ def install_config(repo: pathlib.Path, text: str, mode: int | None = None) -> pa
     git's 0644, so reading the mode here would silently widen a 0600 config.
     """
     target = repo / CONFIG_REL
-    if mode is None:
-        mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else 0o644
+    if mode is None and target.exists():
+        mode = stat.S_IMODE(target.stat().st_mode)
     temporary = target.with_name(target.name + ".tmp")
     temporary.write_text(text)
-    os.chmod(temporary, mode)
+    if mode is not None:
+        # Only ever the mode the live file already had; a new file keeps the
+        # process umask rather than a permissive literal (CodeQL py/overly-permissive-file).
+        os.chmod(temporary, mode)
     os.replace(temporary, target)
     return target
 
