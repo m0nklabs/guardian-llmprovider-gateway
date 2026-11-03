@@ -87,6 +87,14 @@ RECONCILED_REL = CONFIG_REL + ".reconciled"
 #: ``config/global.settings.yaml.<UTC timestamp>.bak``, next to the file.
 BACKUP_SUFFIX = ".bak"
 
+#: This tool's own untracked artifacts: the timestamped backup and the proposal.
+#: Matched exactly, so a *tracked* file that happens to share the prefix (say a
+#: committed ``config/global.settings.yaml.example``) is still stashed like any
+#: other local edit.
+_ARTIFACT_RE = re.compile(
+    rf"^{re.escape(CONFIG_REL)}\.(?:\d{{8}}T\d{{6}}Z{re.escape(BACKUP_SUFFIX)}|reconciled)$"
+)
+
 #: The stash message names the tool and the moment, so `git stash list` is readable.
 STASH_PREFIX = "prepare_deployment: local state before main switch"
 
@@ -579,6 +587,11 @@ class WorktreeEntry:
         return self.code == "??"
 
 
+def is_own_artifact(entry: WorktreeEntry) -> bool:
+    """True for the untracked backup/proposal this tool writes next to the config."""
+    return entry.untracked and _ARTIFACT_RE.match(entry.path) is not None
+
+
 def read_worktree(repo: pathlib.Path) -> tuple[tuple[WorktreeEntry, ...], str]:
     """List every dirty and untracked path (``-uall``: no collapsed directories).
 
@@ -1029,9 +1042,7 @@ def apply_plan(plan: Plan, *, out=print) -> int:
     # This tool's own artifacts (the backup and the proposal) are never stashed:
     # a bare `git stash push -u` would take the one file the operator needs for
     # recovery out of the working tree.
-    stashable = [
-        entry for entry in plan.entries if not entry.path.startswith(f"{CONFIG_REL}.")
-    ]
+    stashable = [entry for entry in plan.entries if not is_own_artifact(entry)]
     needs_stash = bool(stashable) and (not plan.on_main or not plan.at_origin_main)
     if needs_stash:
         # Explicit pathspecs, not a bare `-u`, so exactly the listed files move.

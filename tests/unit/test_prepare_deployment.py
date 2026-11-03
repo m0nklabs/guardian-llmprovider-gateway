@@ -173,6 +173,9 @@ def make_repo(
     (seed / "app" / "main.py").write_text("VALUE = 1\n")
     (seed / "config").mkdir()
     (seed / "config" / "global.settings.yaml").write_text(main_text)
+    # A tracked file that shares the config's prefix: the stash filter must not
+    # treat it as one of this tool's own artifacts.
+    (seed / "config" / "global.settings.yaml.example").write_text("an example\n")
     (seed / "AGENTS.md").write_text("# charter\n")
     commit(seed, "initial")
     git(seed, "remote", "add", "origin", str(origin))
@@ -887,10 +890,25 @@ def test_apply_never_stashes_its_own_backup_or_proposal(tmp_path):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert earlier.exists() and earlier.read_text() == "an earlier backup\n"
     assert (work / tool.RECONCILED_REL).exists()
-    stashed = git(work, "stash", "show", "--name-only", "stash@{0}").splitlines()
+    # `-u` matters: untracked files live in the stash's third parent, so a plain
+    # `stash show` would not list them and the assertion would be vacuous.
+    stashed = git(work, "stash", "show", "-u", "--name-only", "stash@{0}").splitlines()
     assert "config/global.settings.yaml.20260101T000000Z.bak" not in stashed
     assert tool.RECONCILED_REL not in stashed
     assert "config/global.settings.yaml" in stashed
+
+
+def test_apply_stashes_a_tracked_file_that_shares_the_config_prefix(tmp_path):
+    """Only this tool's own untracked artifacts are excluded, not the prefix."""
+    work, _origin, _base = make_repo(tmp_path)
+    example = work / "config" / "global.settings.yaml.example"
+    example.write_text("an example, locally edited\n")
+
+    proc = run_tool(work, "--apply")
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    stashed = git(work, "stash", "show", "-u", "--name-only", "stash@{0}").splitlines()
+    assert "config/global.settings.yaml.example" in stashed
 
 
 def test_apply_restores_the_config_mode_when_no_install_is_needed(tmp_path):
