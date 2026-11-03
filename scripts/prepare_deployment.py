@@ -35,7 +35,7 @@ correct — it is simply not needed.
 
 Exit codes: ``0`` = plan produced / apply succeeded, ``1`` = preflight refused
 (a human decision is needed), ``2`` = reconciliation, verification or apply
-failed.
+failed, or the tool cannot run (no PyYAML).
 
 Usage:
     ./venv/bin/python scripts/prepare_deployment.py
@@ -859,8 +859,9 @@ def render_plan(plan: Plan, *, apply: bool) -> str:
         add("  (the tree is clean — nothing to stash)")
     add(f"  backup:          {plan.backup_path.relative_to(plan.repo)} "
         f"(mode preserved from {CONFIG_REL})")
-    add(f"  stash:           git stash push -u -m \"{plan.stash_message}\"")
-    add("                   (the stash ref is printed after the push; recover with `git stash pop`)")
+    add(f"  stash:           git stash push -u -m \"{plan.stash_message}\" -- <the files above>")
+    add("                   (explicit pathspecs, so this tool's own backup and proposal are")
+    add("                   never stashed; the stash ref is printed after the push)")
     add("")
 
     # 3. reconciliation
@@ -1088,7 +1089,15 @@ def apply_plan(plan: Plan, *, out=print) -> int:
     out(f"  pulled:   fast-forward to {_short(head)}")
 
     # (d) Install the reconciled config.
-    reconciled = write_reconciled(repo, rec.merged_text)
+    try:
+        reconciled = write_reconciled(repo, rec.merged_text)
+    except OSError as exc:
+        out(f"  ABORT — could not write the proposal: {exc}")
+        out("  the config was NOT installed")
+        if stash_sha:
+            out(f"  your local state is in stash@{{0}} ({_short(stash_sha)}) — `git stash pop`")
+        out(f"  the config backup is {backup.relative_to(repo)}")
+        return EXIT_ERROR
     out(f"  proposal: {reconciled.relative_to(repo)}")
     live = repo / CONFIG_REL
     if live.exists() and live.read_text() == rec.merged_text:
