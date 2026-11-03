@@ -142,7 +142,22 @@ grep -E 'OPENROUTER_API_KEY|NVIDIA_API_KEY|POOLSIDE_API_KEY' .env
 ## When making code changes
 
 1. Edit `app/*.py`
-2. Run the full pre-restart gate (deployment head + py_compile + pyflakes +
+2. **Put the checkout on the merge target** — the unit runs this checkout, so a
+   restart deploys whatever `HEAD` it is on. One reviewable command does the
+   whole step (dry run by default; it prints the plan and a diff and writes
+   nothing):
+   ```bash
+   ./venv/bin/python scripts/prepare_deployment.py            # plan + diff, no writes
+   ./venv/bin/python scripts/prepare_deployment.py --apply    # backup, stash, switch, install
+   ```
+   It proves the switch is a fast-forward, refuses when the tree carries commits
+   `main` lacks or when `app/`/`scripts/` is dirty, backs up
+   `config/global.settings.yaml` before any write, and reconciles that file as
+   `main`'s version plus the operator's local delta (the 420 s remote-ensure
+   window, the queue-timeout choice, the `cloud_retry` decision comment). It
+   never restarts, pushes or merges — it prints the next three commands and
+   stops.
+3. Run the full pre-restart gate (deployment head + py_compile + pyflakes +
    signature check + pytest):
    ```bash
    ./venv/bin/python scripts/pre_restart_check.py
@@ -150,8 +165,8 @@ grep -E 'OPENROUTER_API_KEY|NVIDIA_API_KEY|POOLSIDE_API_KEY' .env
    Every blocking gate must PASS before restarting — a startup-breaking error is
    not self-healable because the agent's own model traffic routes through
    Guardian (see AGENTS.md Critical rules).
-3. `sudo systemctl restart guardian-llmprovider-gateway` — deploy
-4. **Run the post-restart verifier from the deployed checkout, as the service
+4. `sudo systemctl restart guardian-llmprovider-gateway` — deploy
+5. **Run the post-restart verifier from the deployed checkout, as the service
    user** — this is the step that proves the restart actually deployed what was
    merged (`active` alone does not):
    ```bash
@@ -167,8 +182,8 @@ grep -E 'OPENROUTER_API_KEY|NVIDIA_API_KEY|POOLSIDE_API_KEY' .env
    `https://127.0.0.1:11435`, reads the journald log and the capture tree, and
    never uploads a large body (the body-bound check declares an oversized
    `Content-Length` and sends zero bytes).
-5. `curl -s http://127.0.0.1:11434/healthz` — verify it's back up
-6. Watch logs: `journalctl -u guardian-llmprovider-gateway.service -f | grep -v healthz`
+6. `curl -s http://127.0.0.1:11434/healthz` — verify it's back up
+7. Watch logs: `journalctl -u guardian-llmprovider-gateway.service -f | grep -v healthz`
 
 ### The restart sequence proves the tree, not just the code
 
@@ -176,7 +191,8 @@ The unit runs this checkout, so `systemctl restart` deploys whatever `HEAD` the
 checkout is on — which is how a restart on 2026-10-29 would have deployed
 `b30e027` (a feature branch 29 commits *behind* `main`) while every gate passed
 ([#85](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/85)).
-The sequence is therefore **`git checkout main && git pull` →
+The sequence is therefore **`scripts/prepare_deployment.py --apply` (which does
+the `git checkout main && git pull --ff-only` and the config reconciliation) →
 `scripts/pre_restart_check.py` → `sudo systemctl restart
 guardian-llmprovider-gateway` → `scripts/verify_post_restart.py`**, and each
 step now names the commit it is talking about: the gate's first step prints
