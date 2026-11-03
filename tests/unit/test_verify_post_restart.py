@@ -1413,3 +1413,132 @@ def test_deployed_tree_produces_a_normal_verdict(monkeypatch, capsys):
     assert f"deployed root {REPO}" in out
     assert "does not prove the deployment" not in out
     assert "passed" in out and "skipped" in out
+
+
+# ── issue #85: the deployed commit ─────────────────────────────────────
+
+
+def git_checkout(tmp_path: Path) -> tuple[Path, str]:
+    """A throwaway git checkout; returns ``(root, HEAD sha)``.
+
+    A real repository, not a mock: the point of the check is that the commit is
+    read from the *process's* root with ``git -C <root> rev-parse HEAD``.
+    """
+    import subprocess
+
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "Verify Test",
+        "GIT_AUTHOR_EMAIL": "verify@example.invalid",
+        "GIT_COMMITTER_NAME": "Verify Test",
+        "GIT_COMMITTER_EMAIL": "verify@example.invalid",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+    }
+
+    def run(*args: str) -> str:
+        proc = subprocess.run(
+            ["git", *args], cwd=str(root), capture_output=True, text=True, env=env, check=False
+        )
+        assert proc.returncode == 0, f"git {' '.join(args)} failed: {proc.stderr}"
+        return proc.stdout.strip()
+
+    root = tmp_path / "deployed"
+    root.mkdir()
+    run("init", "-b", "main")
+    (root / "app").mkdir()
+    (root / "app" / "main.py").write_text("VALUE = 1\n")
+    run("add", "-A")
+    run("commit", "-m", "deployed")
+    return root, run("rev-parse", "HEAD")
+
+
+def test_deployed_commit_is_read_from_the_process_root(tmp_path):
+    """The commit comes from ``/proc/<MainPID>/cwd``, not from the script's tree."""
+    root, head = git_checkout(tmp_path)
+    ctx = make_ctx(deployment=deployed_deployment(root))
+
+    deployed = verify.resolve_deployed_commit(ctx)
+
+    assert deployed.status == verify.INFO
+    assert deployed.commit == head
+    assert deployed.branch == "main"
+    assert deployed.root == root
+    assert "/proc/4242/cwd" in deployed.origin
+
+
+def test_deployed_commit_appears_in_the_output_and_in_json(tmp_path, monkeypatch, capsys):
+    root, head = git_checkout(tmp_path)
+    fake = make_ctx(repo_root=root, deployment=deployed_deployment(root))
+    monkeypatch.setattr(verify, "build_context", lambda args: fake)
+    monkeypatch.setattr(verify, "prepare", lambda ctx: None)
+    monkeypatch.setattr(verify, "resolve_deployment", lambda ctx: deployed_deployment(root))
+
+    verify.main([])
+    out = capsys.readouterr().out
+
+    assert "[INFO] deployed commit" in out
+    assert "source=deployed-tree" in out
+    assert head[:12] in out
+    assert "on main" in out
+
+    verify.main(["--json"])
+    document = json.loads(capsys.readouterr().out)
+
+    assert document["deployed_commit"]["commit"] == head
+    assert document["deployed_commit"]["branch"] == "main"
+    assert document["deployed_commit"]["source"] == verify.SOURCE_DEPLOYED_TREE
+    assert document["deployed_commit"]["status"] == verify.INFO
+    # It is a report, not a check: the check list is unchanged.
+    assert [entry["check"] for entry in document["checks"]] == [
+        spec.check_id for spec in verify.CHECKS
+    ]
+
+
+def test_deployed_commit_never_changes_the_exit_code(tmp_path):
+    """An old commit deployed on purpose is legitimate: INFO is not a verdict."""
+    root, _head = git_checkout(tmp_path)
+    result = verify.deployed_commit_result(make_ctx(deployment=deployed_deployment(root)))
+
+    assert result.status == verify.INFO
+    assert verify.exit_code_for([result]) == verify.EXIT_PASS
+
+
+def test_foreign_tree_reports_the_deployed_commit_as_a_skip(tmp_path):
+    """A foreign-tree run must not invent a commit for the deployment."""
+    root, _head = git_checkout(tmp_path)
+    ctx = make_ctx(
+        foreign_tree=True,
+        deployment=deployed_deployment(root),
+    )
+
+    deployed = verify.resolve_deployed_commit(ctx)
+    result = verify.deployed_commit_result(ctx)
+
+    assert deployed.status == verify.SKIP
+    assert deployed.commit == ""  # nothing invented
+    assert result.status == verify.SKIP
+    assert "does not prove the deployment" in result.detail
+    assert result.observed["commit"] is None
+
+
+def test_unknown_deployed_root_reports_a_skip_with_the_reason():
+    ctx = make_ctx(deployment=verify.Deployment(reason="the unit has no MainPID"))
+
+    deployed = verify.resolve_deployed_commit(ctx)
+
+    assert deployed.status == verify.SKIP
+    assert deployed.commit == ""
+    assert "no MainPID" in deployed.reason
+
+
+def test_a_deployed_root_without_git_reports_a_skip_not_a_commit(tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    ctx = make_ctx(deployment=deployed_deployment(plain))
+
+    deployed = verify.resolve_deployed_commit(ctx)
+
+    assert deployed.status == verify.SKIP
+    assert deployed.commit == ""
+    assert "no readable git HEAD" in deployed.reason

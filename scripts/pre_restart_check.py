@@ -1,41 +1,388 @@
 #!/usr/bin/env python3
 """Pre-restart gate for guardian-llmprovider-gateway.
 
-Runs every cheap static check that has caught real bugs before:
-  1. py_compile on all app/**/*.py
-  2. pyflakes over app/ (undefined names — caught the _-prefix injection
+Runs every cheap check that has caught real bugs before:
+  1. The deployment head: the tree this gate runs from must be the commit the
+     operator intends to deploy (issue #85)
+  2. py_compile on all app/**/*.py
+  3. pyflakes over app/ (undefined names — caught the _-prefix injection
      bugs after the 2026-08-12 restart)
-  3. The wrapper-vs-module signature regression test
-  4. Full pytest suite
+  4. The wrapper-vs-module signature regression test
+  5. Full pytest suite
 
 Exit code 0 = safe to `sudo systemctl restart guardian-llmprovider-gateway`.
 Any failure = fix first; a startup-breaking error is NOT self-healable
 because the agent's own model traffic routes through Guardian.
 
+**Why the deployment head is checked first (issue #85).**  The unit runs the
+operator's checkout, so `systemctl restart` deploys whatever `HEAD` that
+checkout happens to be on.  On 2026-10-29 the checkout sat on
+`feat/unified-provider-model-phase-a` at `b30e027` while `main` was at
+`6a71cee`: every gate below passed, the restart succeeded, and the service came
+back running code that predated the whole batch.  A green gate that does not
+name the commit it graded is a false green light, so this gate now proves the
+tree before it proves the code:
+
+* **FAIL** when `HEAD` is not `origin/main`, in either direction.  A tree that
+  carries commits `main` does not have deploys unreviewed work; a tree that is
+  *behind* `main` deploys old code.  The second direction is the live case:
+  `b30e027` **is** an ancestor of `bded1c8` (0 commits ahead, 29 behind), so an
+  ancestor-only rule would have called the production checkout a PASS.  The
+  line names the branch, `HEAD`, `origin/main` and how many commits would be
+  deployed while absent from `main`.
+* **FAIL** when `app/` or `scripts/` carries uncommitted changes: those files
+  are the deployment, so a dirty tree deploys something no commit describes.
+* **WARN** when `config/global.settings.yaml` is modified.  That file is
+  *runtime input* read from the working directory, and on this host the live
+  copy is deliberately the operator's local delta (it carries settings `main`
+  does not), so a dirty copy is expected and must not block a restart.
+* **SKIP** — never PASS — when the head cannot be proven: no git checkout, a
+  detached `HEAD` (a CI checkout is not a deployment tree), or `origin/main`
+  unreachable.  The fetch is best-effort with a short timeout so the gate can
+  never hang on the network.
+* ``--expect-head <sha>`` pins the intended commit (prefix match allowed) and
+  FAILs on any other `HEAD`.  This is how an operator says "I intend to deploy
+  exactly this", and it is the only form that works offline and from a
+  detached checkout.
+
 Usage:
     ./venv/bin/python scripts/pre_restart_check.py
+    ./venv/bin/python scripts/pre_restart_check.py --expect-head bded1c8
 """
 
 from __future__ import annotations
 
+import argparse
 import ast
+import dataclasses
 import importlib
 import inspect
 import pathlib
 import py_compile
 import subprocess
 import sys
+from typing import Sequence
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 APP = REPO / "app"
+
+#: Gate verdicts.  Only :data:`FAIL` blocks a restart; ``WARN`` and ``SKIP`` are
+#: printed loudly and never turn into a silent pass.
+PASS = "PASS"
+FAIL = "FAIL"
+WARN = "WARN"
+SKIP = "SKIP"
+
+#: Worst-first, so a gate step that reports several lines can summarise itself.
+_SEVERITY = {PASS: 0, WARN: 1, SKIP: 2, FAIL: 3}
+
+#: Paths whose uncommitted changes *are* the deployment (issue #85).
+DEPLOYMENT_CODE_PATHS = ("app/", "scripts/")
+
+#: Runtime input that is expected to differ on this host: the live copy is the
+#: operator's local delta, so a dirty copy is a WARN and never a FAIL.
+DEPLOYMENT_CONFIG_PATHS = ("config/global.settings.yaml",)
+
+#: Seconds allowed for the best-effort `git fetch`; the gate must never hang.
+FETCH_TIMEOUT_S = 5.0
+
+#: Seconds allowed for a local git query (no network involved).
+GIT_TIMEOUT_S = 10.0
 
 
 def step(name: str) -> None:
     print(f"── {name}")
 
 
+def worst(*statuses: str) -> str:
+    """Return the most severe of *statuses* (``FAIL`` beats ``SKIP`` beats ``WARN``)."""
+    return max(statuses, key=lambda status: _SEVERITY.get(status, 0), default=PASS)
+
+
+# ── The deployment head (issue #85) ────────────────────────────────────
+
+
+@dataclasses.dataclass(frozen=True)
+class HeadState:
+    """The git state of the tree this gate runs from.
+
+    Every field is a fact read from git; nothing here is inferred.  ``head`` is
+    empty when the tree is not a checkout or ``HEAD`` cannot be resolved, and
+    ``origin_main`` is empty when the remote-tracking ref is unknown — the
+    judge turns both into ``SKIP`` rather than a guess.
+    """
+
+    is_repo: bool = False
+    head: str = ""
+    branch: str = ""
+    detached: bool = False
+    origin_main: str = ""
+    #: ``True``/``False`` when ``origin/main`` is known, ``None`` when it is not.
+    ancestor_of_main: bool | None = None
+    #: Commits in ``HEAD`` that ``origin/main`` does not have.
+    ahead_of_main: int = 0
+    #: Commits in ``origin/main`` that ``HEAD`` does not have.
+    behind_main: int = 0
+    #: Why the fetch failed; empty when it succeeded or was not attempted.
+    fetch_error: str = ""
+    #: Uncommitted paths under :data:`DEPLOYMENT_CODE_PATHS`.
+    dirty_code: tuple[str, ...] = ()
+    #: Uncommitted paths under :data:`DEPLOYMENT_CONFIG_PATHS`.
+    dirty_config: tuple[str, ...] = ()
+
+    @property
+    def origin_main_known(self) -> bool:
+        return bool(self.origin_main)
+
+
+def _git(
+    args: Sequence[str],
+    *,
+    repo: pathlib.Path = REPO,
+    timeout: float = GIT_TIMEOUT_S,
+) -> tuple[int, str, str]:
+    """Run a read-only git command in *repo*; return ``(rc, stdout, stderr)``.
+
+    Never raises: a missing ``git`` binary, a timeout or a non-zero exit all
+    come back as a return code, so the gate reports a SKIP instead of a
+    traceback.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True, text=True, timeout=timeout, check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 127, "", str(exc)
+    # `rstrip`, not `strip`: `git status --porcelain` lines are "XY path", and
+    # stripping the leading space of the first line would shift every path by one
+    # character (" M app/x.py" -> "M app/x.py" -> "pp/x.py").
+    return proc.returncode, proc.stdout.rstrip(), proc.stderr.strip()
+
+
+def _dirty_paths(status_output: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Split ``git status --porcelain`` output into (code, config) dirty paths."""
+    code: list[str] = []
+    config: list[str] = []
+    for line in status_output.splitlines():
+        if len(line) < 4:
+            continue
+        path = line[3:]
+        if " -> " in path:  # a rename reports "old -> new"
+            path = path.split(" -> ", 1)[1]
+        path = path.strip().strip('"')
+        if path.startswith(DEPLOYMENT_CODE_PATHS):
+            code.append(path)
+        elif path in DEPLOYMENT_CONFIG_PATHS:
+            config.append(path)
+    return tuple(code), tuple(config)
+
+
+def read_head_state(
+    *,
+    repo: pathlib.Path = REPO,
+    fetch: bool = True,
+    timeout: float = FETCH_TIMEOUT_S,
+) -> HeadState:
+    """Read the git state of *repo*.  Never raises, never guesses.
+
+    The fetch is the only network call and it is best-effort: it is bounded by
+    *timeout* and its failure is recorded in ``fetch_error`` so the judge can
+    report a SKIP instead of a false pass.
+    """
+    rc, _out, _err = _git(("rev-parse", "--git-dir"), repo=repo)
+    if rc != 0:
+        return HeadState(is_repo=False)
+
+    rc, head, _err = _git(("rev-parse", "HEAD"), repo=repo)
+    if rc != 0 or not head:
+        return HeadState(is_repo=True)
+
+    rc, branch, _err = _git(("rev-parse", "--abbrev-ref", "HEAD"), repo=repo)
+    detached = rc != 0 or branch == "HEAD"
+
+    fetch_error = ""
+    if fetch:
+        # Explicit refspec: the remote-tracking ref is updated deterministically
+        # even when the local clone has no default refspec for `main`.
+        rc, _out, err = _git(
+            ("fetch", "--quiet", "--no-tags", "origin", "+refs/heads/main:refs/remotes/origin/main"),
+            repo=repo,
+            timeout=timeout,
+        )
+        if rc != 0:
+            fetch_error = err or f"git fetch exited {rc}"
+
+    rc, origin_main, _err = _git(("rev-parse", "--verify", "origin/main"), repo=repo)
+    if rc != 0:
+        origin_main = ""
+
+    ancestor: bool | None = None
+    ahead = 0
+    behind = 0
+    if origin_main:
+        rc, _out, _err = _git(("merge-base", "--is-ancestor", "HEAD", "origin/main"), repo=repo)
+        if rc == 0:
+            ancestor = True
+        elif rc == 1:
+            ancestor = False
+        rc, count, _err = _git(("rev-list", "--count", "origin/main..HEAD"), repo=repo)
+        if rc == 0 and count.isdigit():
+            ahead = int(count)
+        rc, count, _err = _git(("rev-list", "--count", "HEAD..origin/main"), repo=repo)
+        if rc == 0 and count.isdigit():
+            behind = int(count)
+
+    rc, status_output, _err = _git(("status", "--porcelain"), repo=repo)
+    dirty_code, dirty_config = _dirty_paths(status_output if rc == 0 else "")
+
+    return HeadState(
+        is_repo=True,
+        head=head,
+        branch="" if detached else branch,
+        detached=detached,
+        origin_main=origin_main,
+        ancestor_of_main=ancestor,
+        ahead_of_main=ahead,
+        behind_main=behind,
+        fetch_error=fetch_error,
+        dirty_code=dirty_code,
+        dirty_config=dirty_config,
+    )
+
+
+def _head_facts(state: HeadState) -> str:
+    """The one-line fact block every deployment-head verdict carries."""
+    branch = state.branch or "detached HEAD"
+    main = state.origin_main[:12] if state.origin_main_known else "unknown"
+    if state.fetch_error or not state.origin_main_known:
+        # A stale remote-tracking ref is not evidence: say so instead of printing
+        # a sha and a count that may describe a main nobody can see.
+        return f"on {branch} @ {state.head[:12]}, origin/main unknown, commits not in main unknown"
+    return (
+        f"on {branch} @ {state.head[:12]}, origin/main {main}, "
+        f"{state.ahead_of_main} commits not in main"
+    )
+
+
+def judge_deployment_head(
+    state: HeadState, expect_head: str | None = None
+) -> tuple[str, str]:
+    """Decide whether *state* is the commit the operator intends to deploy.
+
+    Returns ``(status, line)``; the line is the single verdict the operator
+    reads, and it always names the branch, ``HEAD``, ``origin/main`` and the
+    number of commits that would be deployed while absent from ``main``.
+    """
+    facts = _head_facts(state)
+    if not state.is_repo:
+        return SKIP, (
+            f"deployment head — {REPO} is not a git checkout, so the deployment head "
+            "was not proven (pass --expect-head <sha> to pin the intended commit)"
+        )
+    if not state.head:
+        return SKIP, (
+            "deployment head — HEAD cannot be resolved (unborn branch?), so the "
+            "deployment head was not proven"
+        )
+    if expect_head:
+        wanted = expect_head.strip().lower()
+        if not state.head.lower().startswith(wanted):
+            return FAIL, (
+                f"deployment head — {facts}; --expect-head {expect_head} does not match "
+                f"HEAD {state.head}"
+            )
+        return PASS, f"deployment head — {facts}; --expect-head {expect_head} matches HEAD"
+    if state.detached:
+        # A CI checkout is detached and is not a deployment tree: the unit runs a
+        # branch checkout.  Never a PASS, never a FAIL that would break CI.
+        return SKIP, (
+            f"deployment head — {facts}; detached HEAD is not a deployment checkout "
+            "(the unit runs a branch checkout) — pass --expect-head <sha> to pin the "
+            "intended commit"
+        )
+    if state.fetch_error:
+        # A failed fetch leaves a stale `origin/main` ref behind, and comparing
+        # against it would be a false pass: the gate cannot see the main it is
+        # supposed to prove, so it says so.
+        return SKIP, (
+            f"deployment head — {facts}; origin/main could not be fetched "
+            f"({state.fetch_error}), so the deployment head was not proven"
+        )
+    if not state.origin_main_known:
+        return SKIP, (
+            f"deployment head — {facts}; there is no origin/main ref, so the deployment "
+            "head was not proven"
+        )
+    if state.ancestor_of_main:
+        if state.head == state.origin_main:
+            return PASS, f"deployment head — {facts}"
+        # An ancestor that is not equal is *behind* main, and that is the live
+        # #85 case: the production checkout sat on `b30e027` while main was at
+        # `bded1c8`, and `git merge-base --is-ancestor b30e027 bded1c8` is true
+        # (0 commits ahead, 29 behind).  An ancestor-only rule would call that a
+        # PASS and the restart would deploy old code while the gate looked
+        # green — the exact false green light the issue is about.
+        return FAIL, (
+            f"deployment head — {facts}; HEAD is {state.behind_main} commit(s) behind "
+            "origin/main, so a restart would deploy old code — check out main and pull, "
+            "or pin the intent with --expect-head <sha>"
+        )
+    if state.branch == "main":
+        # On main but ahead of origin/main: the commits are in main locally, so
+        # this is not the #85 case, but they are not pushed either.
+        return WARN, (
+            f"deployment head — {facts}; local main is ahead of origin/main, so these "
+            "commits are not pushed"
+        )
+    return FAIL, (
+        f"deployment head — {facts}; HEAD carries {state.ahead_of_main} commit(s) that "
+        f"main does not have — a restart would deploy {state.branch or 'this commit'} "
+        "instead of main"
+    )
+
+
+def judge_deployment_tree(state: HeadState) -> tuple[str, str]:
+    """Decide whether the working tree is clean enough to deploy."""
+    if not state.is_repo:
+        return SKIP, "deployment tree — not a git checkout, so the working tree was not proven"
+    if state.dirty_code:
+        shown = ", ".join(state.dirty_code[:5])
+        more = f" (+{len(state.dirty_code) - 5} more)" if len(state.dirty_code) > 5 else ""
+        return FAIL, (
+            f"deployment tree — {len(state.dirty_code)} uncommitted change(s) under "
+            f"app/ or scripts/ would be deployed: {shown}{more}"
+        )
+    if state.dirty_config:
+        return WARN, (
+            "deployment tree — config/global.settings.yaml is modified; that is expected "
+            "on this host (the live file is the operator's local delta and is runtime "
+            "input, not code), so it does not block the restart"
+        )
+    return PASS, (
+        "deployment tree — no uncommitted changes under app/, scripts/ or "
+        "config/global.settings.yaml"
+    )
+
+
+def check_deployment_head(
+    expect_head: str | None = None,
+    *,
+    repo: pathlib.Path = REPO,
+    state: HeadState | None = None,
+) -> str:
+    """Print the deployment-head verdicts and return the gate status."""
+    step("1/5 deployment head (issue #85)")
+    state = state if state is not None else read_head_state(repo=repo)
+    head_status, head_line = judge_deployment_head(state, expect_head)
+    print(f"  [{head_status}] {head_line}")
+    tree_status, tree_line = judge_deployment_tree(state)
+    print(f"  [{tree_status}] {tree_line}")
+    return worst(head_status, tree_status)
+
+
 def check_compile() -> bool:
-    step("1/4 py_compile app/**/*.py")
+    step("2/5 py_compile app/**/*.py")
     files = sorted(APP.rglob("*.py"))
     ok = True
     for f in files:
@@ -49,7 +396,7 @@ def check_compile() -> bool:
 
 
 def check_pyflakes() -> bool:
-    step("2/4 pyflakes app/ (undefined names)")
+    step("3/5 pyflakes app/ (undefined names)")
     try:
         import pyflakes.api  # noqa: F401
     except ImportError:
@@ -72,7 +419,7 @@ def check_pyflakes() -> bool:
 
 
 def check_wrapper_signatures() -> bool:
-    step("3/4 wrapper-vs-module signature check")
+    step("4/5 wrapper-vs-module signature check")
     sys.path.insert(0, str(REPO))
     src = (APP / "proxy" / "server.py").read_text()
     tree = ast.parse(src)
@@ -155,7 +502,7 @@ def check_call_site_signatures() -> bool:
     - Skip ``init`` (DI convention), ``**kwargs``/``*args`` callees, and
       calls that resolve to nothing importable.
     """
-    step("3b/4 cross-module call-site signature check")
+    step("4b/5 cross-module call-site signature check")
     sys.path.insert(0, str(REPO))
 
     import ast
@@ -316,7 +663,7 @@ def check_call_site_signatures() -> bool:
 
 
 def check_pytest() -> bool:
-    step("4/4 pytest tests/")
+    step("5/5 pytest tests/")
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", str(REPO / "tests"), "-q"],
         capture_output=True, text=True,
@@ -327,24 +674,58 @@ def check_pytest() -> bool:
     return proc.returncode == 0
 
 
-def main() -> int:
+def _status(ok: bool) -> str:
+    """Map a boolean check to a gate verdict."""
+    return PASS if ok else FAIL
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Pre-restart gate: prove the tree, then prove the code.",
+    )
+    parser.add_argument(
+        "--expect-head",
+        default=None,
+        metavar="SHA",
+        help=(
+            "the commit this restart intends to deploy; HEAD must equal it (prefix "
+            "match allowed) or the gate FAILs. Works offline and from a detached "
+            "checkout, which is the only way to pin a tree git cannot compare to main"
+        ),
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     print(f"Pre-restart gate for guardian-llmprovider-gateway ({REPO})")
-    results = [
-        ("py_compile", check_compile()),
-        ("pyflakes", check_pyflakes()),
-        ("signatures", check_wrapper_signatures()),
-        ("call-sites", check_call_site_signatures()),
-        ("pytest", check_pytest()),
+    results: list[tuple[str, str]] = [
+        ("deployment-head", check_deployment_head(args.expect_head)),
+        ("py_compile", _status(check_compile())),
+        ("pyflakes", _status(check_pyflakes())),
+        ("signatures", _status(check_wrapper_signatures())),
+        ("call-sites", _status(check_call_site_signatures())),
+        ("pytest", _status(check_pytest())),
     ]
     print("──")
-    ok = all(r for _, r in results)
-    for name, r in results:
-        print(f"  {name}: {'PASS' if r else 'FAIL'}")
-    if ok:
-        print("✅ ALL GATES PASSED — safe to restart guardian-llmprovider-gateway")
-    else:
-        print("❌ GATE FAILURES — fix before restarting (session drops on restart)")
-    return 0 if ok else 1
+    for name, status in results:
+        print(f"  {name}: {status}")
+    blocking = [name for name, status in results if status == FAIL]
+    if blocking:
+        print(
+            "❌ GATE FAILURES — fix before restarting (session drops on restart): "
+            + ", ".join(blocking)
+        )
+        return 1
+    unproven = [name for name, status in results if status in (WARN, SKIP)]
+    if unproven:
+        print(
+            "⚠️  ALL BLOCKING GATES PASSED — read the WARN/SKIP lines above: "
+            + ", ".join(unproven)
+        )
+        return 0
+    print("✅ ALL GATES PASSED — safe to restart guardian-llmprovider-gateway")
+    return 0
 
 
 if __name__ == "__main__":

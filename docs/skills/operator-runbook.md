@@ -142,11 +142,12 @@ grep -E 'OPENROUTER_API_KEY|NVIDIA_API_KEY|POOLSIDE_API_KEY' .env
 ## When making code changes
 
 1. Edit `app/*.py`
-2. Run the full pre-restart gate (py_compile + pyflakes + signature check + pytest):
+2. Run the full pre-restart gate (deployment head + py_compile + pyflakes +
+   signature check + pytest):
    ```bash
    ./venv/bin/python scripts/pre_restart_check.py
    ```
-   All four gates must PASS before restarting — a startup-breaking error is
+   Every blocking gate must PASS before restarting — a startup-breaking error is
    not self-healable because the agent's own model traffic routes through
    Guardian (see AGENTS.md Critical rules).
 3. `sudo systemctl restart guardian-llmprovider-gateway` — deploy
@@ -168,6 +169,28 @@ grep -E 'OPENROUTER_API_KEY|NVIDIA_API_KEY|POOLSIDE_API_KEY' .env
    `Content-Length` and sends zero bytes).
 5. `curl -s http://127.0.0.1:11434/healthz` — verify it's back up
 6. Watch logs: `journalctl -u guardian-llmprovider-gateway.service -f | grep -v healthz`
+
+### The restart sequence proves the tree, not just the code
+
+The unit runs this checkout, so `systemctl restart` deploys whatever `HEAD` the
+checkout is on — which is how a restart on 2026-10-29 would have deployed
+`b30e027` (a feature branch 29 commits *behind* `main`) while every gate passed
+([#85](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/85)).
+The sequence is therefore **`git checkout main && git pull` →
+`scripts/pre_restart_check.py` → `sudo systemctl restart
+guardian-llmprovider-gateway` → `scripts/verify_post_restart.py`**, and each
+step now names the commit it is talking about: the gate's first step prints
+`[PASS]/[FAIL]/[WARN] deployment head — on <branch> @ <sha>, origin/main <sha>,
+N commits not in main` and FAILs when `HEAD` is not `origin/main` in either
+direction (ahead: unreviewed work; behind: old code), when `app/` or `scripts/`
+is dirty, and — with `--expect-head <sha>` — when `HEAD` is not the commit the
+operator pinned; a dirty `config/global.settings.yaml` is only a WARN because
+that file is runtime input and the live copy is the operator's local delta. The
+verifier then prints `[INFO] deployed commit — source=deployed-tree` (and
+`deployed_commit` in `--json`), read from `/proc/<MainPID>/cwd` →
+`git -C <root> rev-parse HEAD`, so a green verdict names what it graded. Neither
+line is a verdict on its own: an unprovable head is a `SKIP`, never a pass, and
+a deliberately old deployment is legitimate.
 
 ### What the post-restart verifier checks
 

@@ -87,6 +87,16 @@ check                              source          what it reads
                                                    ``credential_status`` and none is ``broken``.
 =================================  ==============  ==============================================
 
+**Which commit it graded (issue #85).**  Before the checks, the run prints one
+``[INFO] deployed commit — source=deployed-tree`` line naming the commit the
+running process executes, read from the process's own root
+(``/proc/<MainPID>/cwd`` -> ``git -C <root> rev-parse HEAD``) and carried in
+``--json`` as ``deployed_commit``.  It is **reported, never graded**: deploying
+an older commit on purpose is legitimate, so it is not a PASS/FAIL check and
+never changes the exit code.  When the commit cannot be read — unknown root, a
+foreign-tree run, or a tree without git metadata — the line is ``SKIP`` with the
+reason instead of an invented sha.
+
 **How the probe reaches the process.**  The checks talk to the ``MainPID``
 itself on ``https://127.0.0.1:11435`` (the TLS listener the unit binds), not to
 nginx on ``:11434``: a proxy hop would let a dead Guardian look healthy.  The
@@ -177,10 +187,16 @@ DEFAULT_CA_GLOB = "/usr/local/share/ca-certificates/*guardian*.crt"
 DEFAULT_TIMEOUT_S = 20.0
 DEFAULT_JOURNAL_LINES = 20000
 JOURNAL_SETTLE_TIMEOUT_S = 4.0
+#: Seconds allowed for the local ``git`` query that names the deployed commit.
+GIT_TIMEOUT_S = 10.0
 
 PASS = "PASS"
 FAIL = "FAIL"
 SKIP = "SKIP"
+#: A reported fact, not a verdict: it never changes the exit code.  Used for the
+#: deployed commit, because deploying an older commit on purpose is legitimate
+#: (issue #85) — the point is that the verdict *names* what it graded.
+INFO = "INFO"
 
 EXIT_PASS = 0
 EXIT_FAIL = 1
@@ -204,6 +220,10 @@ SOURCE_DEPLOYED_CONFIG = "deployed-config"
 SOURCE_DEPLOYED_FILE = "deployed-file"
 #: journald lines the running unit wrote.
 SOURCE_JOURNAL = "journal"
+#: The git commit the deployed tree is on, read from the process's own root
+#: (``/proc/<MainPID>/cwd`` -> ``git -C <root> rev-parse HEAD``).  Reported, never
+#: graded: it exists so a verdict names what it graded (issue #85).
+SOURCE_DEPLOYED_TREE = "deployed-tree"
 
 #: The only source that stands on its own in a foreign tree: it reads the live
 #: service and nothing about the script's checkout.
@@ -485,6 +505,123 @@ def refusal_message(deployment: Deployment, script_root: Path) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+# ── The deployed commit (issue #85) ────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class DeployedCommit:
+    """The commit the running process executes, and how that was established.
+
+    Reported, never graded.  Deploying an older commit on purpose is legitimate,
+    so this is not a PASS/FAIL check; it exists so that a green verdict *names*
+    what it graded instead of leaving the reader to guess which commit is live.
+    ``commit`` is empty — never a guess — whenever the root is unknown, the run
+    is a foreign-tree run, or the tree carries no git metadata.
+    """
+
+    root: Path | None = None
+    commit: str = ""
+    branch: str = ""
+    status: str = SKIP
+    reason: str = ""
+    #: How the commit was read, e.g. ``/proc/4242/cwd -> git -C <root> rev-parse HEAD``.
+    origin: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "source": SOURCE_DEPLOYED_TREE,
+            "root": str(self.root) if self.root is not None else None,
+            "commit": self.commit or None,
+            "branch": self.branch or None,
+            "origin": self.origin,
+            "reason": self.reason,
+        }
+
+
+def _git_in(root: Path, *args: str) -> str:
+    """Run a read-only git command in *root*; return stdout, or ``""`` on failure."""
+    try:
+        proc = subprocess.run(  # noqa: S603 - fixed argv, never a shell
+            ["git", "-C", str(root), *args],
+            capture_output=True,
+            text=True,
+            timeout=GIT_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if proc.returncode != 0:
+        return ""
+    return proc.stdout.strip()
+
+
+def resolve_deployed_commit(ctx: Context) -> DeployedCommit:
+    """Read the commit the running process executes, from its own tree.
+
+    The chain is ``/proc/<MainPID>/cwd`` -> ``git -C <root> rev-parse HEAD``: the
+    process's own root, never the script's checkout.  Never a guess — an unknown
+    root, a foreign-tree run, or a tree without git metadata reports ``SKIP``
+    with the reason instead of inventing a commit.
+    """
+    deployment = ctx.deployment
+    if deployment is None or not deployment.known:
+        why = deployment.reason if deployment is not None else "no deployment facts"
+        return DeployedCommit(
+            reason=f"the deployed root could not be determined ({why})",
+        )
+    root = deployment.root
+    origin = f"{deployment.origin} -> git -C {root} rev-parse HEAD"
+    if ctx.foreign_tree:
+        return DeployedCommit(
+            root=root,
+            status=SKIP,
+            origin=origin,
+            reason=(
+                "does not prove the deployment: --allow-foreign-tree was given and this "
+                f"run graded {_realpath(ctx.repo_root)}, not the deployed tree {root}"
+            ),
+        )
+    commit = _git_in(root, "rev-parse", "HEAD")
+    if not commit:
+        return DeployedCommit(
+            root=root,
+            status=SKIP,
+            origin=origin,
+            reason=(
+                f"{root} carries no readable git HEAD (not a git checkout, or git is "
+                "unavailable), so the deployed commit was not reported"
+            ),
+        )
+    branch = _git_in(root, "rev-parse", "--abbrev-ref", "HEAD")
+    return DeployedCommit(
+        root=root,
+        commit=commit,
+        branch="" if branch == "HEAD" else branch,
+        status=INFO,
+        origin=origin,
+    )
+
+
+def deployed_commit_result(ctx: Context, deployed: DeployedCommit | None = None) -> Result:
+    """The deployed-commit report line: same shape as a check, never a verdict."""
+    deployed = deployed if deployed is not None else resolve_deployed_commit(ctx)
+    if deployed.status == INFO:
+        detail = deployed.commit[:12]
+        detail += f" on {deployed.branch}" if deployed.branch else " (detached HEAD)"
+    else:
+        detail = deployed.reason
+    return Result(
+        "deployed_commit",
+        "deployed commit",
+        deployed.status,
+        detail,
+        deployed.to_json(),
+        source=SOURCE_DEPLOYED_TREE,
+        source_evidence=deployed.origin or "/proc/<MainPID>/cwd -> git -C <root> rev-parse HEAD",
+    )
 
 
 # ── Host surfaces (all read-only) ──────────────────────────────────────
@@ -2429,7 +2566,11 @@ def run_checks(ctx: Context) -> list[Result]:
 
 
 def exit_code_for(results: Sequence[Result]) -> int:
-    """``0`` all passed, ``1`` any failure, ``2`` skips without a failure."""
+    """``0`` all passed, ``1`` any failure, ``2`` skips without a failure.
+
+    ``INFO`` results (the deployed-commit report) are deliberately ignored: they
+    are facts, not verdicts, so they can never change the exit code.
+    """
     if any(result.status == FAIL for result in results):
         return EXIT_FAIL
     if any(result.status == SKIP for result in results):
@@ -2567,6 +2708,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"({deployment.reason}); no check can prove the deployment"
             )
     prepare(ctx)
+    # Issue #85: the verdict must name the commit it graded.  Reported, never
+    # graded — an old commit deployed on purpose is legitimate.
+    deployed = resolve_deployed_commit(ctx)
+    deployed_line = deployed_commit_result(ctx, deployed)
     results = run_checks(ctx)
     code = exit_code_for(results)
     if args.json:
@@ -2578,6 +2723,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "service_reachable": ctx.service_reachable,
             "deployed_root": str(ctx.deployed_root) if ctx.deployed_root is not None else None,
             "deployment_origin": ctx.deployment.origin if ctx.deployment is not None else "",
+            "deployed_commit": deployed.to_json(),
             "script_root": str(_realpath(ctx.repo_root)),
             "allow_foreign_tree": ctx.allow_foreign_tree,
             "proves_the_deployment": not ctx.foreign_tree,
@@ -2605,6 +2751,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             else ""
         )
     )
+    _print_result(deployed_line)
     for result in results:
         _print_result(result)
     passed = sum(1 for result in results if result.status == PASS)
