@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare the production checkout for a deployment: switch to ``main``, reconcile config.
+r"""Prepare the production checkout for a deployment: switch to ``main``, reconcile config.
 
 Issue #85: the systemd unit runs the operator's checkout, so ``systemctl
 restart`` deploys whatever ``HEAD`` that checkout is on.  On 2026-10-29 that was
@@ -7,6 +7,22 @@ restart`` deploys whatever ``HEAD`` that checkout is on.  On 2026-10-29 that was
 have deployed old code while every gate passed.  The operator's decision is that
 the checkout tracks ``main``, with the live ``config/global.settings.yaml``
 reconciled once and kept as the local delta.
+
+**First run — the checkout is behind ``main``.**  Then this file does not exist in
+that tree yet, and a copy of it cannot start: the tool imports its sibling
+``scripts/pre_restart_check.py``, which such a tree does not have either.  Run it
+from a ``main`` worktree and point ``--repo`` at the live checkout (verified
+2026-11-03, read-only, exit 0 — see issue #89):
+
+    cd /home/flip/guardian-llmprovider-gateway
+    git fetch origin
+    git worktree add --detach /tmp/main-tool origin/main
+    /home/flip/guardian-llmprovider-gateway/venv/bin/python /tmp/main-tool/scripts/prepare_deployment.py \
+        --repo /home/flip/guardian-llmprovider-gateway
+
+``--repo`` is what makes it work across trees: the code runs from the ``main``
+worktree, the plan and the writes target the live checkout.  After the first
+successful switch the tool runs normally from its own tree.
 
 This script turns that manual step into one reviewable command:
 
@@ -35,7 +51,8 @@ correct — it is simply not needed.
 
 Exit codes: ``0`` = plan produced / apply succeeded, ``1`` = preflight refused
 (a human decision is needed), ``2`` = reconciliation, verification or apply
-failed, or the tool cannot run (no PyYAML).
+failed, or the tool cannot run (no PyYAML, or ``pre_restart_check`` is not
+importable because this script was copied out of its tree).
 
 Usage:
     ./venv/bin/python scripts/prepare_deployment.py
@@ -74,9 +91,92 @@ _SCRIPTS_DIR = pathlib.Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
+#: Exit codes, declared before the import guard below because that guard exits.
+EXIT_OK = 0
+EXIT_REFUSED = 1
+EXIT_ERROR = 2
+
+#: The documented production checkout (``AGENTS.md``): the tree the systemd unit
+#: runs, and therefore the ``--repo`` target on a first deployment.
+LIVE_CHECKOUT = "/home/flip/guardian-llmprovider-gateway"
+
+#: The verified bootstrap worktree (issue #89) — a detached ``main`` tree whose
+#: own ``scripts/`` carries this file *and* the sibling module it imports.
+BOOTSTRAP_WORKTREE = "/tmp/main-tool"
+
+
+def _bootstrap_repo() -> str:
+    """The checkout the bootstrap command should target.
+
+    ``--repo`` is this tool's own flag, so a reader who already passed it gets a
+    command matching their intent; otherwise the documented live checkout.  Read
+    from ``sys.argv`` because this runs at import time, before the parser exists.
+    """
+    argv = sys.argv[1:]
+    for index, arg in enumerate(argv):
+        if arg == "--repo" and index + 1 < len(argv):
+            return argv[index + 1]
+        if arg.startswith("--repo="):
+            return arg.split("=", 1)[1]
+    return LIVE_CHECKOUT
+
+
+def bootstrap_command(repo: str | None = None) -> str:
+    """The verified first-run bootstrap from issue #89, ready to paste."""
+    target = repo or _bootstrap_repo()
+    return "\n".join(
+        (
+            f"cd {target}",
+            "git fetch origin",
+            f"git worktree add --detach {BOOTSTRAP_WORKTREE} origin/main",
+            f"{target}/venv/bin/python {BOOTSTRAP_WORKTREE}/scripts/prepare_deployment.py \\",
+            f"    --repo {target}",
+        )
+    )
+
+
+def missing_gate_message(exc: ImportError) -> str:
+    """Explain a failed ``import pre_restart_check`` and print the way out.
+
+    A copied script used to die with ``ModuleNotFoundError: No module named
+    'pre_restart_check'``, which names neither the cause (the file was taken out
+    of its tree) nor the fix (run it from a ``main`` worktree).  Issue #89.
+    """
+    expected = _SCRIPTS_DIR / "pre_restart_check.py"
+    lines = [
+        "prepare_deployment.py cannot import its sibling module 'pre_restart_check'.",
+        "",
+        "  missing module:  pre_restart_check",
+        f"  expected at:     {expected}",
+        f"  import path:     {_SCRIPTS_DIR}",
+        "",
+        "This tool reuses the deployment-head guard from scripts/pre_restart_check.py, so",
+        "it must run from a tree that contains both files — a worktree of main, not a copy",
+        "of this file.  A checkout that is behind main has neither yet: bootstrap from a",
+        "main worktree and point --repo at the live checkout:",
+        "",
+        *(f"  {line}" for line in bootstrap_command().splitlines()),
+        "",
+        "After the first successful switch the tool runs normally from its own tree.",
+        "",
+        f"(the raw error was: {exc})",
+    ]
+    return "\n".join(lines)
+
+
 # The deployment-head guard from #87 lives in the restart gate; this tool reuses
 # it instead of re-deriving ancestry, ahead/behind counts and porcelain status.
-import pre_restart_check as gate  # noqa: E402
+# The import is guarded but the failure stays hard: a plan produced without the
+# guard would be exactly the blind restart #85 exists to prevent.
+try:
+    import pre_restart_check as gate  # noqa: E402
+except ImportError as exc:  # pragma: no cover - pinned by a subprocess test
+    if getattr(exc, "name", None) not in (None, "pre_restart_check"):
+        # A different missing dependency is a different problem; its own
+        # traceback is the honest report for that one.
+        raise
+    print(missing_gate_message(exc), file=sys.stderr)
+    raise SystemExit(EXIT_ERROR) from None
 
 #: The runtime input this tool reconciles, relative to the repository root.
 CONFIG_REL = "config/global.settings.yaml"
@@ -97,10 +197,6 @@ _ARTIFACT_RE = re.compile(
 
 #: The stash message names the tool and the moment, so `git stash list` is readable.
 STASH_PREFIX = "prepare_deployment: local state before main switch"
-
-EXIT_OK = 0
-EXIT_REFUSED = 1
-EXIT_ERROR = 2
 
 #: ``keep-local`` keeps the live value; ``operator-choice`` keeps it by default
 #: and lets ``--queue-timeout`` override it.
@@ -1144,8 +1240,17 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Prepare the production checkout for a deployment: prove the switch to main is a "
             "fast-forward, reconcile config/global.settings.yaml, and (with --apply) execute it. "
-            "The default is a dry run that writes nothing."
+            "The default is a dry run that writes nothing.\n\n"
+            "On a checkout that is behind main this file does not exist in that tree yet: run "
+            "it from a main worktree with --repo <live checkout> (bootstrap below)."
         ),
+        epilog=(
+            "First run — the checkout is behind main:\n\n"
+            f"{bootstrap_command(LIVE_CHECKOUT)}\n\n"
+            "The code runs from the main worktree; the plan and the writes target --repo. "
+            "After the first successful switch the tool runs normally from its own tree."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--repo",
