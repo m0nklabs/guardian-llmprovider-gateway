@@ -565,21 +565,23 @@ def _checkout_moved_after(root: Path, since: float | None) -> tuple[bool | None,
     "what did the process load".  After the documented ``checkout main && pull``
     step an unrestarted process still runs its old code while its cwd holds the
     new ``HEAD``, so the raw sha would name a deployment that never happened
-    (PR-Piet on #85).  The reflog records when ``HEAD`` last moved in *this*
-    checkout, which is the fact that binds the sha to the process start; the
-    commit date is the fallback when the reflog is unavailable.
+    (PR-Piet on #85).
+
+    The reflog is the only accepted evidence: it records when ``HEAD`` last moved
+    in *this* checkout, which is the fact that binds the sha to the process
+    start.  A commit date is deliberately **not** used as a fallback — it says
+    when the commit was written, not when it was checked out, so it would turn
+    "cannot tell" into a false "verified".  No reflog, no process start, or an
+    unparseable timestamp all return ``None``, and the caller reports the
+    checkout ``HEAD`` as unverified.
     """
     if since is None:
         return None, ""
     raw = _git_in(root, "reflog", "show", "-1", "--format=%ct", "HEAD")
-    source = "reflog"
-    if not raw:
-        raw = _git_in(root, "log", "-1", "--format=%ct", "HEAD")
-        source = "commit date"
     if not raw.isdigit():
         return None, ""
     moved_at = float(raw)
-    evidence = f"{source} {moved_at:.0f} vs process start {since:.0f}"
+    evidence = f"reflog {moved_at:.0f} vs process start {since:.0f}"
     return moved_at > since, evidence
 
 
@@ -638,18 +640,27 @@ def resolve_deployed_commit(ctx: Context) -> DeployedCommit:
                 "re-run this verifier"
             ),
         )
+    if moved is None:
+        # The sha is what is on disk; nothing binds it to the process, so it is
+        # reported as unverified rather than as the deployment.
+        return DeployedCommit(
+            root=root,
+            commit=commit,
+            branch=branch,
+            status=SKIP,
+            origin=origin,
+            reason=(
+                "the checkout HEAD could not be bound to the process start (no reflog, or "
+                "the service start time is unknown), so this is the checkout's HEAD and not "
+                "proof of the running code"
+            ),
+        )
     return DeployedCommit(
         root=root,
         commit=commit,
         branch=branch,
         status=INFO,
         origin=origin,
-        reason=(
-            ""
-            if moved is False
-            else "the checkout HEAD could not be compared with the process start, so this "
-            "is the checkout's HEAD and not proof of the running code"
-        ),
     )
 
 

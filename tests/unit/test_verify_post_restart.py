@@ -1530,6 +1530,27 @@ def test_a_checkout_that_moved_after_the_process_start_is_not_the_deployment(tmp
     assert "restart, then re-run" in deployed.reason
 
 
+def test_a_checkout_without_a_reflog_is_reported_as_unverified(tmp_path):
+    """No startup-bound evidence ⇒ the sha is named but never claimed as running.
+
+    A commit date is not a substitute: it says when the commit was written, not
+    when it was checked out, so using it would turn "cannot tell" into a false
+    "verified" (PR-Piet on #85).
+    """
+    root, head = git_checkout(tmp_path)
+    import shutil
+
+    shutil.rmtree(root / ".git" / "logs")  # no reflog to bind the sha to the process
+    ctx = make_ctx(deployment=deployed_deployment(root), service_start=time.time() + 3600)
+
+    deployed = verify.resolve_deployed_commit(ctx)
+
+    assert deployed.status == verify.SKIP
+    assert deployed.commit == head  # named, explicitly unverified
+    assert "could not be bound to the process start" in deployed.reason
+    assert "not proof of the running code" in deployed.reason
+
+
 def test_foreign_tree_reports_the_deployed_commit_as_a_skip(tmp_path):
     """A foreign-tree run must not invent a commit for the deployment."""
     root, _head = git_checkout(tmp_path)
