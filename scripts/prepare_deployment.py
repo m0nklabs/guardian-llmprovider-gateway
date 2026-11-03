@@ -58,7 +58,17 @@ import stat
 import sys
 from typing import Any, Sequence
 
-import yaml
+try:
+    import yaml
+except ModuleNotFoundError:  # pragma: no cover - the venv always has it
+    # A deployment tool must not greet the operator with a traceback.  PyYAML is
+    # in requirements.txt, so this only fires when the wrong interpreter is used.
+    print(
+        "prepare_deployment.py needs PyYAML (it is in requirements.txt): run it with "
+        "./venv/bin/python, not a bare python",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
 
 _SCRIPTS_DIR = pathlib.Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
@@ -773,7 +783,10 @@ def render_plan(plan: Plan, *, apply: bool) -> str:
 
     # 1. preflight
     add("── 1/5 preflight")
-    add(f"  branch:        {state.branch or 'detached HEAD'}")
+    if not state.is_repo:
+        add("  branch:        n/a (not a git checkout)")
+    else:
+        add(f"  branch:        {state.branch or 'detached HEAD'}")
     add(f"  HEAD:          {_short(state.head)}")
     origin_note = "remote-tracking ref as last fetched" if not plan.fetched else "fetched just now"
     add(f"  origin/main:   {_short(state.origin_main)}  ({origin_note})")
@@ -796,6 +809,8 @@ def render_plan(plan: Plan, *, apply: bool) -> str:
         add("  verdict: REFUSED — a human decision is needed:")
         for refusal in plan.refusals:
             add(f"    ✗ {refusal}")
+    elif not rec.ok:
+        add("  verdict: REFUSED — the config reconciliation failed (see 3/5)")
     else:
         add("  verdict: READY — the switch is a fast-forward and app/ + scripts/ are clean")
     add("")
@@ -1078,7 +1093,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return EXIT_REFUSED
 
     if args.write_reconciled and not args.apply:
-        target = write_reconciled(plan.repo, plan.reconciliation.merged_text)
+        try:
+            target = write_reconciled(plan.repo, plan.reconciliation.merged_text)
+        except OSError as exc:
+            print("")
+            print(f"❌ could not write the proposal: {exc}")
+            return EXIT_ERROR
         print("")
         print(f"✅ proposal written to {target} — review it, then re-run with --apply")
 

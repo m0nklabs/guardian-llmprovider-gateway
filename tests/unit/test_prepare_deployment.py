@@ -215,8 +215,10 @@ def run_tool(
     path_prefix: pathlib.Path | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the tool against *repo* as a subprocess, with a hermetic environment."""
+    # HOME is inherited on purpose: on the CI runner PyYAML lives in the *user*
+    # site-packages, so overriding HOME would hide it from the subprocess.  Git
+    # hermeticity comes from GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM, not from HOME.
     env = dict(_GIT_ENV)
-    env["HOME"] = str(repo.parent)
     if path_prefix is not None:
         env["PATH"] = f"{path_prefix}{os.pathsep}{env.get('PATH', '')}"
     return subprocess.run(
@@ -828,6 +830,24 @@ def test_run_git_refuses_push_merge_and_friends(tmp_path):
     for subcommand in ("push", "merge", "rebase", "reset", "clean"):
         with pytest.raises(RuntimeError, match="never runs"):
             tool.run_git(tmp_path, subcommand)
+
+
+def test_a_missing_pyyaml_is_a_clear_message_not_a_traceback(tmp_path):
+    """`python -S` hides site-packages, which is what a bare python looks like."""
+    work, _origin, _base = make_repo(tmp_path)
+
+    proc = subprocess.run(
+        [sys.executable, "-S", str(SCRIPT), "--repo", str(work)],
+        capture_output=True,
+        text=True,
+        env=dict(_GIT_ENV),
+        cwd=str(work.parent),
+        check=False,
+    )
+
+    assert proc.returncode == 2
+    assert "needs PyYAML" in proc.stderr
+    assert "Traceback" not in proc.stderr
 
 
 def test_every_git_call_goes_through_the_guard():
