@@ -59,6 +59,7 @@ import importlib
 import inspect
 import pathlib
 import py_compile
+import re
 import subprocess
 import sys
 from typing import Sequence
@@ -88,6 +89,11 @@ FETCH_TIMEOUT_S = 5.0
 
 #: Seconds allowed for a local git query (no network involved).
 GIT_TIMEOUT_S = 10.0
+
+#: A commit sha as ``--expect-head`` accepts it: 4-64 hex characters.  Anything
+#: else is rejected, because ``"".startswith("")`` is true and an empty pin would
+#: pass every tree (PR-Piet on #85).
+_PIN_RE = re.compile(r"^[0-9a-f]{4,64}$")
 
 
 def step(name: str) -> None:
@@ -131,6 +137,9 @@ class HeadState:
     dirty_code: tuple[str, ...] = ()
     #: Uncommitted paths under :data:`DEPLOYMENT_CONFIG_PATHS`.
     dirty_config: tuple[str, ...] = ()
+    #: Why ``git status`` failed; empty when it succeeded.  An unreadable status
+    #: is *not* a clean tree, so the judge reports a SKIP instead of a PASS.
+    status_error: str = ""
 
     @property
     def origin_main_known(self) -> bool:
@@ -169,14 +178,16 @@ def _dirty_paths(status_output: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
     for line in status_output.splitlines():
         if len(line) < 4:
             continue
-        path = line[3:]
-        if " -> " in path:  # a rename reports "old -> new"
-            path = path.split(" -> ", 1)[1]
-        path = path.strip().strip('"')
-        if path.startswith(DEPLOYMENT_CODE_PATHS):
-            code.append(path)
-        elif path in DEPLOYMENT_CONFIG_PATHS:
-            config.append(path)
+        # A rename/copy reports "old -> new" and *both* sides matter:
+        # `git mv app/main.py docs/main.py` removes a deployed file while its
+        # destination is outside the deployment paths, so classifying only the
+        # destination would report the tree clean (PR-Piet on #85).
+        for path in line[3:].split(" -> "):
+            path = path.strip().strip('"')
+            if path.startswith(DEPLOYMENT_CODE_PATHS):
+                code.append(path)
+            elif path in DEPLOYMENT_CONFIG_PATHS:
+                config.append(path)
     return tuple(code), tuple(config)
 
 
@@ -235,7 +246,8 @@ def read_head_state(
         if rc == 0 and count.isdigit():
             behind = int(count)
 
-    rc, status_output, _err = _git(("status", "--porcelain"), repo=repo)
+    rc, status_output, status_err = _git(("status", "--porcelain"), repo=repo)
+    status_error = "" if rc == 0 else (status_err or f"git status exited {rc}")
     dirty_code, dirty_config = _dirty_paths(status_output if rc == 0 else "")
 
     return HeadState(
@@ -251,6 +263,7 @@ def read_head_state(
         fetch_error=fetch_error,
         dirty_code=dirty_code,
         dirty_config=dirty_config,
+        status_error=status_error,
     )
 
 
@@ -288,8 +301,13 @@ def judge_deployment_head(
             "deployment head — HEAD cannot be resolved (unborn branch?), so the "
             "deployment head was not proven"
         )
-    if expect_head:
+    if expect_head is not None:
         wanted = expect_head.strip().lower()
+        if not _PIN_RE.match(wanted):
+            return FAIL, (
+                f"deployment head — {facts}; --expect-head {expect_head!r} is not a commit "
+                "sha (4-64 hex characters), so the intended commit was not pinned"
+            )
         if not state.head.lower().startswith(wanted):
             return FAIL, (
                 f"deployment head — {facts}; --expect-head {expect_head} does not match "
@@ -332,8 +350,17 @@ def judge_deployment_head(
             "or pin the intent with --expect-head <sha>"
         )
     if state.branch == "main":
-        # On main but ahead of origin/main: the commits are in main locally, so
-        # this is not the #85 case, but they are not pushed either.
+        if state.behind_main > 0:
+            # Diverged: local main has unpushed commits *and* is missing merged
+            # ones, so a restart would deploy a main nobody else has while
+            # silently dropping the merged changes (PR-Piet on #85).
+            return FAIL, (
+                f"deployment head — {facts}; local main has diverged from origin/main "
+                f"({state.ahead_of_main} unpushed, {state.behind_main} missing), so a "
+                "restart would deploy a main nobody else has"
+            )
+        # Purely ahead: the commits are in main locally, so this is not the #85
+        # case, but they are not pushed either.
         return WARN, (
             f"deployment head — {facts}; local main is ahead of origin/main, so these "
             "commits are not pushed"
@@ -349,6 +376,11 @@ def judge_deployment_tree(state: HeadState) -> tuple[str, str]:
     """Decide whether the working tree is clean enough to deploy."""
     if not state.is_repo:
         return SKIP, "deployment tree — not a git checkout, so the working tree was not proven"
+    if state.status_error:
+        return SKIP, (
+            f"deployment tree — git status failed ({state.status_error}), so the working "
+            "tree was not proven clean"
+        )
     if state.dirty_code:
         shown = ", ".join(state.dirty_code[:5])
         more = f" (+{len(state.dirty_code) - 5} more)" if len(state.dirty_code) > 5 else ""

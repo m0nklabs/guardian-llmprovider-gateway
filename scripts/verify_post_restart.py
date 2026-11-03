@@ -558,6 +558,31 @@ def _git_in(root: Path, *args: str) -> str:
     return proc.stdout.strip()
 
 
+def _checkout_moved_after(root: Path, since: float | None) -> tuple[bool | None, str]:
+    """Did the checkout's ``HEAD`` move after *since*?  ``None`` when unknowable.
+
+    ``git -C <root> rev-parse HEAD`` answers "what is checked out *now*", not
+    "what did the process load".  After the documented ``checkout main && pull``
+    step an unrestarted process still runs its old code while its cwd holds the
+    new ``HEAD``, so the raw sha would name a deployment that never happened
+    (PR-Piet on #85).  The reflog records when ``HEAD`` last moved in *this*
+    checkout, which is the fact that binds the sha to the process start; the
+    commit date is the fallback when the reflog is unavailable.
+    """
+    if since is None:
+        return None, ""
+    raw = _git_in(root, "reflog", "show", "-1", "--format=%ct", "HEAD")
+    source = "reflog"
+    if not raw:
+        raw = _git_in(root, "log", "-1", "--format=%ct", "HEAD")
+        source = "commit date"
+    if not raw.isdigit():
+        return None, ""
+    moved_at = float(raw)
+    evidence = f"{source} {moved_at:.0f} vs process start {since:.0f}"
+    return moved_at > since, evidence
+
+
 def resolve_deployed_commit(ctx: Context) -> DeployedCommit:
     """Read the commit the running process executes, from its own tree.
 
@@ -596,12 +621,35 @@ def resolve_deployed_commit(ctx: Context) -> DeployedCommit:
             ),
         )
     branch = _git_in(root, "rev-parse", "--abbrev-ref", "HEAD")
+    branch = "" if branch == "HEAD" else branch
+    moved, evidence = _checkout_moved_after(root, ctx.service_start)
+    if moved is True:
+        # The checkout moved after the process started: the sha is what is on
+        # disk, not what is running.  Report it, but never as the deployment.
+        return DeployedCommit(
+            root=root,
+            commit=commit,
+            branch=branch,
+            status=SKIP,
+            origin=origin,
+            reason=(
+                f"the checkout moved to {commit[:12]} after the process started "
+                f"({evidence}), so the running code is not this commit — restart, then "
+                "re-run this verifier"
+            ),
+        )
     return DeployedCommit(
         root=root,
         commit=commit,
-        branch="" if branch == "HEAD" else branch,
+        branch=branch,
         status=INFO,
         origin=origin,
+        reason=(
+            ""
+            if moved is False
+            else "the checkout HEAD could not be compared with the process start, so this "
+            "is the checkout's HEAD and not proof of the running code"
+        ),
     )
 
 
@@ -611,6 +659,8 @@ def deployed_commit_result(ctx: Context, deployed: DeployedCommit | None = None)
     if deployed.status == INFO:
         detail = deployed.commit[:12]
         detail += f" on {deployed.branch}" if deployed.branch else " (detached HEAD)"
+        if deployed.reason:
+            detail += f"; {deployed.reason}"
     else:
         detail = deployed.reason
     return Result(

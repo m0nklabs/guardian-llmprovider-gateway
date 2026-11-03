@@ -145,6 +145,29 @@ def test_tree_behind_main_fails_even_though_it_is_an_ancestor(tmp_path):
     assert "would deploy old code" in line
 
 
+def test_diverged_local_main_fails(tmp_path):
+    """Local main with unpushed commits *and* missing merged ones is a FAIL.
+
+    A WARN here would let a restart deploy a main nobody else has while silently
+    dropping the merged changes (PR-Piet on #85).
+    """
+    work, origin = make_repo(tmp_path)
+    (work / "app" / "unpushed.py").write_text("UNPUSHED = 1\n")
+    commit(work, "unpushed local work")
+    advance_origin(tmp_path, origin, count=2)
+
+    state = gate.read_head_state(repo=work)
+    status, line = gate.judge_deployment_head(state)
+
+    assert state.branch == "main"
+    assert state.ahead_of_main == 1
+    assert state.behind_main == 2
+    assert state.ancestor_of_main is False
+    assert status == gate.FAIL
+    assert "diverged from origin/main" in line
+    assert "1 unpushed, 2 missing" in line
+
+
 def test_tree_on_main_at_origin_main_passes(tmp_path):
     work, _origin = make_repo(tmp_path)
 
@@ -177,6 +200,17 @@ def test_expect_head_mismatching_fails(tmp_path):
     assert status == gate.FAIL
     assert "--expect-head deadbeef does not match HEAD" in line
     assert state.head in line
+
+
+def test_expect_head_rejects_an_empty_or_non_hex_pin(tmp_path):
+    """``"".startswith("")`` is true, so an empty pin would pass every tree."""
+    work, _origin = make_repo(tmp_path)
+    state = gate.read_head_state(repo=work)
+
+    for pin in ("", "   ", "zzzz", "abc"):
+        status, line = gate.judge_deployment_head(state, pin)
+        assert status == gate.FAIL, pin
+        assert "is not a commit sha" in line, pin
 
 
 def test_expect_head_pins_a_detached_checkout(tmp_path):
@@ -267,6 +301,38 @@ def test_dirty_config_is_a_warn_with_the_reason(tmp_path):
     assert status == gate.WARN
     assert "expected on this host" in line
     assert "does not block the restart" in line
+
+
+def test_a_rename_out_of_app_fails(tmp_path):
+    """``git mv app/x.py docs/x.py`` removes a deployed file.
+
+    Classifying only the destination would report the tree clean (PR-Piet on #85).
+    """
+    work, _origin = make_repo(tmp_path)
+    (work / "docs").mkdir()
+    git(work, "mv", "app/main.py", "docs/main.py")
+
+    state = gate.read_head_state(repo=work)
+    status, line = gate.judge_deployment_tree(state)
+
+    assert "app/main.py" in state.dirty_code
+    assert status == gate.FAIL
+    assert "app/main.py" in line
+
+
+def test_an_unreadable_status_is_a_skip_never_a_pass(tmp_path):
+    """A corrupt index must not be read as a clean tree (PR-Piet on #85)."""
+    work, _origin = make_repo(tmp_path)
+    (work / ".git" / "index").write_bytes(b"garbage-not-an-index")
+
+    state = gate.read_head_state(repo=work)
+    status, line = gate.judge_deployment_tree(state)
+
+    assert state.status_error
+    assert status == gate.SKIP
+    assert status != gate.PASS
+    assert "git status failed" in line
+    assert "not proven clean" in line
 
 
 def test_clean_tree_passes(tmp_path):

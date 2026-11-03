@@ -1456,7 +1456,7 @@ def git_checkout(tmp_path: Path) -> tuple[Path, str]:
 def test_deployed_commit_is_read_from_the_process_root(tmp_path):
     """The commit comes from ``/proc/<MainPID>/cwd``, not from the script's tree."""
     root, head = git_checkout(tmp_path)
-    ctx = make_ctx(deployment=deployed_deployment(root))
+    ctx = make_ctx(deployment=deployed_deployment(root), service_start=time.time() + 3600)
 
     deployed = verify.resolve_deployed_commit(ctx)
 
@@ -1469,7 +1469,11 @@ def test_deployed_commit_is_read_from_the_process_root(tmp_path):
 
 def test_deployed_commit_appears_in_the_output_and_in_json(tmp_path, monkeypatch, capsys):
     root, head = git_checkout(tmp_path)
-    fake = make_ctx(repo_root=root, deployment=deployed_deployment(root))
+    fake = make_ctx(
+        repo_root=root,
+        deployment=deployed_deployment(root),
+        service_start=time.time() + 3600,
+    )
     monkeypatch.setattr(verify, "build_context", lambda args: fake)
     monkeypatch.setattr(verify, "prepare", lambda ctx: None)
     monkeypatch.setattr(verify, "resolve_deployment", lambda ctx: deployed_deployment(root))
@@ -1498,10 +1502,32 @@ def test_deployed_commit_appears_in_the_output_and_in_json(tmp_path, monkeypatch
 def test_deployed_commit_never_changes_the_exit_code(tmp_path):
     """An old commit deployed on purpose is legitimate: INFO is not a verdict."""
     root, _head = git_checkout(tmp_path)
-    result = verify.deployed_commit_result(make_ctx(deployment=deployed_deployment(root)))
+    result = verify.deployed_commit_result(
+        make_ctx(deployment=deployed_deployment(root), service_start=time.time() + 3600)
+    )
 
     assert result.status == verify.INFO
     assert verify.exit_code_for([result]) == verify.EXIT_PASS
+
+
+def test_a_checkout_that_moved_after_the_process_start_is_not_the_deployment(tmp_path):
+    """``checkout main && pull`` without a restart must not name the new sha.
+
+    The process keeps the code it loaded; its cwd now holds a newer ``HEAD``.  The
+    reflog timestamp is what binds the sha to the process start, so a checkout
+    that moved after the start is reported as unverified, never as the deployment
+    (PR-Piet on #85).
+    """
+    root, head = git_checkout(tmp_path)
+    # The process started *before* the checkout was made.
+    ctx = make_ctx(deployment=deployed_deployment(root), service_start=time.time() - 3600)
+
+    deployed = verify.resolve_deployed_commit(ctx)
+
+    assert deployed.status == verify.SKIP
+    assert deployed.commit == head  # named, but explicitly not the running code
+    assert "moved to" in deployed.reason
+    assert "restart, then re-run" in deployed.reason
 
 
 def test_foreign_tree_reports_the_deployed_commit_as_a_skip(tmp_path):
