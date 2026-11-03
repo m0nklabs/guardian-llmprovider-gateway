@@ -475,6 +475,32 @@ class DestinationPolicy:
     def owner_destinations(self, owner: str) -> frozenset[tuple[str, int]]:
         return self._owners.get(owner.lower(), frozenset())
 
+    def report(self) -> dict[str, Any]:
+        """Provenance and allowlist as the running process holds them.
+
+        Read-only status data for the operator surfaces (``/api/status``) and for
+        ``scripts/verify_post_restart.py``, which must judge the *live* policy and
+        not a YAML file next to itself (issue #84).  ``source`` is the provenance
+        the policy was built with: ``config`` when ``destination_policy`` came
+        from the loaded document, ``shipped-default`` when the section was absent
+        and the shipped allowlist was substituted.
+        """
+        return {
+            "source": self.source,
+            "schemes": list(self._schemes),
+            "entries": [
+                {
+                    "host": entry.host,
+                    "ports": list(entry.ports),
+                    "cleartext_credentials": bool(entry.cleartext_credentials),
+                }
+                for entry in self._entries
+            ],
+            "cleartext_hops": self.cleartext_credential_hops(),
+            "failure": self._failure,
+            "invalid_entries": list(self._invalid_entries),
+        }
+
     @property
     def owner_count(self) -> int:
         return len(self._owners)

@@ -16,7 +16,7 @@ from typing import Any
 import httpx  # noqa: F401 — kept as a monkeypatch target (tests patch <module>.httpx.AsyncClient)
 from fastapi import HTTPException, Request
 
-from app.destination_policy import guarded_async_client
+from app.destination_policy import current_policy, guarded_async_client
 from app.gateway import backend_death as _backend_death
 from app.gateway.context_metadata import enrich_model_context_metadata
 from app.gateway.metadata_enrichment import attach_parity_metadata
@@ -430,6 +430,25 @@ async def _observe_caretaker_death() -> _backend_death.CaretakerObservation:
         )
 
 
+def _destination_policy_report() -> dict[str, Any]:
+    """Provenance of the **live** destination policy (issue #84).
+
+    ``/api/status`` is where the post-restart verifier reads it: the check must
+    judge the policy the running process holds — ``config`` versus the shipped
+    fallback — instead of re-parsing a YAML file next to the script.  A broken
+    policy document must never break the endpoint, so failures are reported as
+    ``source: "unavailable"`` and never as a pass.
+    """
+    try:
+        return current_policy().report()
+    except Exception as exc:  # noqa: BLE001 — /api/status must always answer
+        logger.error(
+            "Destination policy report failed (%s); reporting it as unavailable",
+            clean_log_value(exc),
+        )
+        return {"source": "unavailable", "detail": clean_log_value(exc)}
+
+
 async def get_server_status(client_id: str) -> Any:
     current_model = await _model_manager.get_current_model()
     startup_status = _get_startup_check_status()
@@ -480,6 +499,11 @@ async def get_server_status(client_id: str) -> Any:
         "last_crash": _model_manager.last_crash.to_dict() if _model_manager.last_crash else None,
         "vram": vram,
         "vram_model_mb": _get_model_size(current_model),
+        # Issue #84: the provenance of the LIVE outbound policy.  The
+        # post-restart verifier must read this instead of a YAML file next to
+        # itself; `source == "shipped-default"` is the condition it exists to
+        # catch.  Additive: older readers ignore the key.
+        "policy": _destination_policy_report(),
         "security": {
             "pinned_model": _model_manager.pinned_model,
             "switch_allowlist": list(_model_manager._switch_allowlist) if _model_manager._switch_allowlist else None,

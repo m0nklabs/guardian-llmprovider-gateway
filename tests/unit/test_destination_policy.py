@@ -479,6 +479,36 @@ def test_shipped_policy_covers_the_known_lan_and_loopback_hops():
         policy.check_structure(url, purpose="inventory")
 
 
+def test_report_carries_the_provenance_and_the_entries(policy):
+    """``report()`` is what ``/api/status`` publishes (issue #84).
+
+    The post-restart verifier judges the live policy from this report, so it must
+    name the provenance and every entry the process enforces — the cleartext flag
+    included.
+    """
+    report = policy.report()
+
+    assert report["source"] == "config"
+    assert report["schemes"] == ["http", "https"]
+    assert report["failure"] is None
+    entries = {entry["host"]: entry for entry in report["entries"]}
+    assert entries["192.168.1.245"]["ports"] == [11440, 11441, 11450, 11451]
+    assert entries["192.168.1.245"]["cleartext_credentials"] is True
+    assert entries["openrouter.ai"]["cleartext_credentials"] is False
+    assert "http://192.168.1.245:11441" in report["cleartext_hops"]
+
+
+def test_report_names_the_shipped_default_when_the_section_is_absent(caplog):
+    """The false PASS of issue #84: the process runs the shipped allowlist."""
+    with caplog.at_level(logging.WARNING):
+        shipped = dp.DestinationPolicy.from_config({})
+
+    report = shipped.report()
+
+    assert report["source"] == "shipped-default"
+    assert report["entries"], "the shipped allowlist is reported, not hidden"
+
+
 def test_shipped_policy_flags_the_unmigrated_cleartext_hops():
     """B-03/B-04 must stay visible, not buried in prose."""
     policy = dp.DestinationPolicy.from_config(_live_config())

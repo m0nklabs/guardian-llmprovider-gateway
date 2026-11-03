@@ -8,65 +8,84 @@ is *safe to deploy*; this script proves the running process *is* that code.  A
 service that is merely ``active`` can still be an old process, so every check
 below reads a fact that only the merged code produces.
 
-**What it verifies** (one ``[PASS]``/``[FAIL]``/``[SKIP]`` line per item):
+**Which tree it grades (issue #84).**  A verifier that grades a checkout other
+than the running deployment is worse than none: run from a detached worktree it
+once reported ``PASS`` for code that was not running.  So the script resolves the
+deployed root *from the service itself* — ``/proc/<MainPID>/cwd`` of the unit,
+cross-checked with ``systemctl show -p WorkingDirectory`` (no MainPID, no
+readable ``/proc`` entry, or two disagreeing answers ⇒ the root is **unknown**,
+never guessed) — and compares it with its own root.  A different tree is refused
+with exit ``3``, a message naming both paths, and **no check output at all**;
+``--allow-foreign-tree`` proceeds for review/CI but every check whose source is
+not the live API reports ``SKIP`` ("does not prove the deployment") instead of a
+verdict.  When the service is down the tree is unknown, so the run refuses too.
 
-=================================  ==============================================
-check                              what it reads
-=================================  ==============================================
-1  ``service_identity``            ``systemctl show``: active + ``MainPID``, and the
-                                   process that owns the listener on the probe
-                                   address (``/proc``/``ss``), so a *stale*
-                                   process behind a healthy unit still fails.
-2  ``queue_wait_budget``           ``GET /v1/queue/status``:
-                                   ``queue_timeout_enforced: true`` and the
-                                   configured ``queue_timeout_s``.
-3  ``capture_modes``               Live ``GET /api/capture/status`` modes plus the
-                                   real modes of ``<capture_root>/media`` (``0750``)
-                                   and of the media files written since the restart
-                                   (``0640``).  Read-only: nothing is chmod-ed.
-4  ``dead_code_removed``           Imports ``app.proxy.server`` in a subprocess and
-                                   asserts ``get_version`` is gone (import, not grep).
-5  ``privilege_scope_grace``       An unscoped *legacy* key calls a privileged route
-                                   (``/api/status``); the journal must carry a
-                                   ``scope-grace`` line for that route, and the key
-                                   entry must still declare no extra scope.  See
-                                   "How the log is found" below.
-6  ``metrics_gate``                ``GET /metrics``: ``401`` without a key, ``200``
-                                   with a ``client`` key.
-7  ``destination_allowlist``       In-process policy resolved from the live config:
-                                   ``source == "config"`` (not ``shipped-default``)
-                                   and the four ``192.168.1.245`` cleartext hops are
-                                   present *and* flagged.
-8  ``admission_bounds``            ``/v1/queue/status`` carries ``max_queue_depth``;
-                                   the resolved body bound matches
-                                   ``config/global.settings.yaml``; a **header-only**
-                                   probe (declared ``Content-Length`` over the
-                                   bound, zero body bytes uploaded) gets the typed
-                                   ``413`` and makes
-                                   ``guardian_admission_rejections_total`` appear.
-9  ``metadata_audit``              One allowed request produces exactly one audit
-                                   record, and the record contains no payload,
-                                   header, query or credential (G1-03 §11 schema).
-10 ``log_sanitizer``               No ``Bearer <value>`` shape in the log lines
-                                   written since the restart (G1-04 invariant).
-11 ``endpoint_confinement``        ``GET /v1/../slots`` and a percent-encoded
-                                   variant return ``400 path_not_allowed``; a
-                                   legitimate ``GET /v1/models`` still works.
-12 ``backend_death_seam``          ``/api/status`` exposes ``backend_state`` in
-                                   ``{alive, dead, unloaded, unknown}``,
-                                   ``backend_death`` and ``caretaker.reachable``.
-                                   Fail-open: a daemon without ``last_death`` is
-                                   still a PASS, and the line says so.
-13 ``capture_pipeline``            Retained from the previous verifier: capture
-                                   enabled for all clients, infinite retention,
-                                   writer running.
-14 ``key_store``                   The auth store loads ``guardian.keys.yaml`` and
-                                   sees every key in the file.
-15 ``config_deep_merge``           The merged config carries the full global
-                                   document (``queue.max_concurrent`` …).
-16 ``cloud_catalog_credentials``   Every configured cloud provider reports a
-                                   ``credential_status`` and none is ``broken``.
-=================================  ==============================================
+**What it verifies** (one ``[PASS]``/``[FAIL]``/``[SKIP]`` line per item, each
+naming its source: the running process, the live HTTP API, the deployed
+code/config file, or journald):
+
+=================================  ==============  ==============================================
+check                              source          what it reads
+=================================  ==============  ==============================================
+1  ``service_identity``            process         ``systemctl show``: active + ``MainPID``, and the
+                                                   process that owns the listener on the probe
+                                                   address (``/proc``/``ss``), so a *stale*
+                                                   process behind a healthy unit still fails.
+2  ``queue_wait_budget``           deployed-config ``GET /v1/queue/status``:
+                                                   ``queue_timeout_enforced: true`` and the
+                                                   configured ``queue_timeout_s``.
+3  ``capture_modes``               deployed-file   Live ``GET /api/capture/status`` modes plus the
+                                                   real modes of ``<capture_root>/media`` (``0750``)
+                                                   and of the media files written since the restart
+                                                   (``0640``).  Read-only: nothing is chmod-ed.
+4  ``dead_code_removed``           deployed-code   The module the process loaded
+                                                   (``/proc/<MainPID>/cwd/app/proxy/server.py``,
+                                                   accepted only when neither its mtime nor its
+                                                   ctime is newer than the process start) must not
+                                                   define ``get_version``, and the process must not
+                                                   serve a ``/api/version`` route (404).
+5  ``privilege_scope_grace``       journal         An unscoped *legacy* key calls a privileged route
+                                                   (``/api/status``); the journal must carry a
+                                                   ``scope-grace`` line for that route, and the key
+                                                   entry must still declare no extra scope.  See
+                                                   "How the log is found" below.
+6  ``metrics_gate``                live-api        ``GET /metrics``: ``401`` without a key, ``200``
+                                                   with a ``client`` key.
+7  ``destination_allowlist``       live-api        ``GET /api/status`` → ``policy``: the policy the
+                                                   running process holds — ``source == "config"``
+                                                   (not ``shipped-default``) — and the four
+                                                   ``192.168.1.245`` cleartext hops present *and*
+                                                   flagged.  No YAML is re-parsed.
+8  ``admission_bounds``            deployed-config ``/v1/queue/status`` carries ``max_queue_depth``;
+                                                   the resolved body bound matches
+                                                   ``config/global.settings.yaml``; a **header-only**
+                                                   probe (declared ``Content-Length`` over the
+                                                   bound, zero body bytes uploaded) gets the typed
+                                                   ``413`` and makes
+                                                   ``guardian_admission_rejections_total`` appear.
+9  ``metadata_audit``              journal         One allowed request produces exactly one audit
+                                                   record, and the record contains no payload,
+                                                   header, query or credential (G1-03 §11 schema).
+10 ``log_sanitizer``               journal         No ``Bearer <value>`` shape in the log lines
+                                                   written since the restart (G1-04 invariant).
+11 ``endpoint_confinement``        live-api        ``GET /v1/../slots`` and a percent-encoded
+                                                   variant return ``400 path_not_allowed``; a
+                                                   legitimate ``GET /v1/models`` still works.
+12 ``backend_death_seam``          live-api        ``/api/status`` exposes ``backend_state`` in
+                                                   ``{alive, dead, unloaded, unknown}``,
+                                                   ``backend_death`` and ``caretaker.reachable``.
+                                                   Fail-open: a daemon without ``last_death`` is
+                                                   still a PASS, and the line says so.
+13 ``capture_pipeline``            live-api        Retained from the previous verifier: capture
+                                                   enabled for all clients, infinite retention,
+                                                   writer running.
+14 ``key_store``                   deployed-file   The auth store loads ``guardian.keys.yaml`` and
+                                                   sees every key in the file.
+15 ``config_deep_merge``           deployed-config The merged config carries the full global
+                                                   document (``queue.max_concurrent`` …).
+16 ``cloud_catalog_credentials``   live-api        Every configured cloud provider reports a
+                                                   ``credential_status`` and none is ``broken``.
+=================================  ==============  ==============================================
 
 **How the probe reaches the process.**  The checks talk to the ``MainPID``
 itself on ``https://127.0.0.1:11435`` (the TLS listener the unit binds), not to
@@ -85,8 +104,11 @@ request, so lines from a previous run can neither satisfy nor fail a check.
 Checks that need a written line poll the journal for a few seconds, because
 journald is asynchronous.
 
-**How keys are found.**  ``app.proxy.auth.load_api_keys()`` reads the same
-``config/guardian.keys.yaml`` the service uses; the script picks one key that
+**How keys are found.**  ``app.proxy.auth.load_api_keys()`` reads
+``config/guardian.keys.yaml`` *of the script's tree* — which the tree guard has
+already proven to be the deployed tree, or the run is refused; under
+``--allow-foreign-tree`` a worktree without that untracked file simply yields no
+key and the checks that need one report ``SKIP``.  The script picks one key that
 grants ``admin``, one that grants ``client``, one that grants
 ``capture-export``, and one *unscoped legacy* key (no ``metadata.scopes``) for
 the grace check.  Tokens are never printed: they are registered with
@@ -108,21 +130,26 @@ refuses a declared oversized body without reading it), so the "must not upload
 
 **Exit codes.**  ``0`` every check passed · ``1`` at least one check failed ·
 ``2`` no failures but at least one ``SKIP`` (something could not be verified —
-read the reason).  ``--json`` prints one machine-readable document on stdout.
+read the reason) · ``3`` refused: the script's tree is not the deployed tree (or
+the deployed root could not be determined), so no verdict was produced.
+``--json`` prints one machine-readable document on stdout.
 
 Usage::
 
-    ./venv/bin/python scripts/verify_post_restart.py
+    ./venv/bin/python scripts/verify_post_restart.py          # from the deployment
     ./venv/bin/python scripts/verify_post_restart.py --json | jq -r '.checks[] | ...'
     ./venv/bin/python scripts/verify_post_restart.py --url http://127.0.0.1:11436
+    ./venv/bin/python scripts/verify_post_restart.py --allow-foreign-tree   # review only
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
 import glob
 import json
 import logging
+import os
 import re
 import socket
 import ssl
@@ -158,6 +185,38 @@ SKIP = "SKIP"
 EXIT_PASS = 0
 EXIT_FAIL = 1
 EXIT_SKIP = 2
+EXIT_REFUSED = 3
+
+# ── Sources (issue #84) ────────────────────────────────────────────────
+# Every check declares where its evidence comes from, and every line prints it:
+# a reader must be able to tell a process fact from a file fact without reading
+# the code.
+#: The running service as systemd and ``/proc`` describe it (unit state, MainPID,
+#: listener ownership).
+SOURCE_PROCESS = "process"
+#: Answers of the running process on its own listener — nothing else.
+SOURCE_LIVE_API = "live-api"
+#: The code file the process loaded, located through ``/proc/<MainPID>/cwd``.
+SOURCE_DEPLOYED_CODE = "deployed-code"
+#: A config file that is genuinely the deployed one (the tree guard proves it).
+SOURCE_DEPLOYED_CONFIG = "deployed-config"
+#: A data/key file that is genuinely the deployed one.
+SOURCE_DEPLOYED_FILE = "deployed-file"
+#: journald lines the running unit wrote.
+SOURCE_JOURNAL = "journal"
+
+#: The only source that stands on its own in a foreign tree: it reads the live
+#: service and nothing about the script's checkout.
+SOURCES_TREE_INDEPENDENT = frozenset({SOURCE_LIVE_API})
+
+#: Procfs mount point (injected through ``Context.read_proc_cwd`` in tests).
+PROC_ROOT = Path("/proc")
+
+#: The dead code the deploy batch removed (#47): an unscoped handler that was
+#: never routed, plus the Ollama-shaped route the contract says is not served.
+DEAD_CODE_MODULE = Path("app") / "proxy" / "server.py"
+DEAD_CODE_SYMBOL = "get_version"
+DEAD_CODE_ROUTE = "/api/version"
 
 #: ``Bearer <value>`` — the shape the G1-04 invariant forbids in a log line.
 _BEARER_SHAPE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=\-]{6,}")
@@ -173,19 +232,25 @@ _CLEARTEXT_PORTS = (11440, 11441, 11450, 11451)
 
 @dataclass
 class Result:
-    """One check's outcome."""
+    """One check's outcome, including where its evidence came from."""
 
     check_id: str
     title: str
     status: str
     detail: str = ""
     observed: dict[str, Any] = field(default_factory=dict)
+    #: One of the ``SOURCE_*`` kinds; stamped by the runner from ``CHECKS``.
+    source: str = ""
+    #: What that source concretely is (e.g. the path or the endpoint read).
+    source_evidence: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return {
             "check": self.check_id,
             "title": self.title,
             "status": self.status,
+            "source": self.source,
+            "source_evidence": self.source_evidence,
             "detail": self.detail,
             "observed": self.observed,
         }
@@ -252,7 +317,7 @@ class Context:
     http: Callable[..., Response]
     systemctl: Callable[[str, Sequence[str], bool], dict[str, str]]
     journal: Callable[[float, int], list[str]]
-    module_has_attr: Callable[[str, str], bool]
+    read_proc_cwd: Callable[[int], str | None]
     # filled by `prepare`
     service: dict[str, Any] = field(default_factory=dict)
     config: dict[str, Any] = field(default_factory=dict)
@@ -265,6 +330,12 @@ class Context:
     service_reachable: bool = False
     unreachable_reason: str = ""
     warnings: list[str] = field(default_factory=list)
+    #: Where the running deployment lives, as the service reported it (issue #84).
+    deployment: "Deployment | None" = None
+    #: True when this run grades a tree that is not the deployment (flag given).
+    foreign_tree: bool = False
+    #: True when the flag was given at all (printed as a banner).
+    allow_foreign_tree: bool = False
 
     def require_service(self) -> None:
         """Fail the calling check unless the probe listener answered."""
@@ -273,6 +344,147 @@ class Context:
                 f"service unreachable on {self.scheme}://{self.host}:{self.port}"
                 + (f" ({self.unreachable_reason})" if self.unreachable_reason else "")
             )
+
+    @property
+    def deployed_root(self) -> Path | None:
+        """The root the service runs in, or ``None`` when it is unknown."""
+        return self.deployment.root if self.deployment is not None else None
+
+
+# ── The deployed tree (issue #84) ──────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class Deployment:
+    """Where the running service's tree is, and how that was established.
+
+    ``root`` is ``None`` — never a guess — whenever the service cannot say where
+    it runs: no MainPID, no readable ``/proc`` entry *and* no declared
+    ``WorkingDirectory``, or two contradicting answers.
+    """
+
+    root: Path | None = None
+    main_pid: int | None = None
+    proc_cwd: str | None = None
+    working_directory: str | None = None
+    #: How ``root`` was resolved: ``/proc/<pid>/cwd`` (the only accepted origin).
+    origin: str = ""
+    #: Why ``root`` is unknown; empty when it was resolved.
+    reason: str = ""
+
+    @property
+    def known(self) -> bool:
+        return self.root is not None
+
+
+def read_proc_cwd(pid: int) -> str | None:
+    """Return ``readlink /proc/<pid>/cwd``, or ``None`` when it cannot be read."""
+    try:
+        return os.readlink(PROC_ROOT / str(pid) / "cwd")
+    except OSError:
+        return None
+
+
+def _realpath(value: str | Path) -> Path:
+    """Resolve *value* to a canonical absolute path (it need not exist)."""
+    return Path(os.path.realpath(os.path.expanduser(str(value))))
+
+
+def resolve_deployment(ctx: Context) -> Deployment:
+    """Resolve the deployed root from the service itself.  Never guesses.
+
+    ``/proc/<MainPID>/cwd`` is the process's own answer and the **only** accepted
+    origin: ``WorkingDirectory`` is the unit's *declaration*, and a
+    ``daemon-reload`` can change it without restarting the process.  It is used
+    only as a cross-check; when the two disagree, or the cwd cannot be read, or
+    there is no MainPID at all, the root is *unknown* with the reason, so the
+    caller refuses instead of grading an arbitrary tree.
+    """
+    try:
+        facts = ctx.systemctl(ctx.unit, ("ActiveState", "MainPID", "WorkingDirectory"), False)
+    except ProbeError as exc:
+        return Deployment(reason=f"systemd could not report the unit: {_clean(exc)}")
+    active = str(facts.get("ActiveState") or "").strip()
+    working_directory = str(facts.get("WorkingDirectory") or "").strip() or None
+    try:
+        main_pid = int(str(facts.get("MainPID") or "0").strip())
+    except ValueError:
+        return Deployment(
+            main_pid=None,
+            working_directory=working_directory,
+            reason=f"systemd reports a non-numeric MainPID {facts.get('MainPID')!r}",
+        )
+    if main_pid <= 0:
+        return Deployment(
+            main_pid=None,
+            working_directory=working_directory,
+            reason=f"{ctx.unit} has no MainPID (ActiveState={active or 'unknown'}): "
+            "the service is not running, so its tree cannot be determined",
+        )
+    proc_cwd = ctx.read_proc_cwd(main_pid)
+    if not proc_cwd:
+        # WorkingDirectory is *declaration*, not evidence: changing it and
+        # running `daemon-reload` without a restart leaves the old process in its
+        # old checkout, and a verifier started from the newly configured one
+        # would grade the wrong files (PR-Piet, #84).  Only the process's own cwd
+        # may anchor a verdict.
+        declared = f"; the unit merely declares WorkingDirectory={working_directory}" if working_directory else ""
+        return Deployment(
+            main_pid=main_pid,
+            working_directory=working_directory,
+            reason=f"/proc/{main_pid}/cwd cannot be read{declared} — run the verifier as the "
+            "service user (or as root) so the process's own cwd is available",
+        )
+    if working_directory and _realpath(working_directory) != _realpath(proc_cwd):
+        return Deployment(
+            main_pid=main_pid,
+            proc_cwd=proc_cwd,
+            working_directory=working_directory,
+            reason=f"/proc/{main_pid}/cwd is {proc_cwd} but the unit declares "
+            f"WorkingDirectory={working_directory} — refusing to guess which is deployed",
+        )
+    return Deployment(
+        main_pid=main_pid,
+        proc_cwd=proc_cwd,
+        working_directory=working_directory,
+        origin=f"/proc/{main_pid}/cwd",
+        root=_realpath(proc_cwd),
+    )
+
+
+def tree_matches(deployment: Deployment, script_root: Path) -> bool | None:
+    """``True``/``False`` when the deployed root is known, ``None`` when it is not."""
+    if deployment.root is None:
+        return None
+    return _realpath(deployment.root) == _realpath(script_root)
+
+
+def refusal_message(deployment: Deployment, script_root: Path) -> str:
+    """The text printed when this checkout is not the deployed tree."""
+    lines = [
+        f"REFUSED: {os.path.basename(__file__)} would grade the wrong tree",
+        f"  deployed root : {deployment.root if deployment.known else 'UNKNOWN'}"
+        + (f"   ({deployment.origin})" if deployment.origin else ""),
+        f"  script root   : {_realpath(script_root)}",
+    ]
+    if not deployment.known:
+        lines.append(f"  why unknown   : {deployment.reason}")
+    else:
+        lines.append(
+            "  The running service does not run the checkout this script lives in, so no "
+            "check was run and no verdict was printed."
+        )
+    lines.extend(
+        [
+            "",
+            "Run it from the deployed checkout, as the service user:",
+            f"  cd {deployment.root if deployment.known else '<deployed checkout>'} "
+            "&& ./venv/bin/python scripts/verify_post_restart.py",
+            "For a review run that never proves the deployment, pass --allow-foreign-tree "
+            "(process-level checks then SKIP).",
+        ]
+    )
+    return "\n".join(lines)
 
 
 # ── Host surfaces (all read-only) ──────────────────────────────────────
@@ -453,31 +665,6 @@ def read_journal(unit: str, since: float, lines: int = DEFAULT_JOURNAL_LINES) ->
             f"{proc.stderr.strip() or 'no output'} (is the unit name right?)"
         )
     return proc.stdout.splitlines()
-
-
-def module_has_attr(module: str, attribute: str, repo_root: Path | None = None) -> bool:
-    """Import *module* in a subprocess and report whether it defines *attribute*.
-
-    A subprocess keeps the verifier free of the heavy import side effects (the
-    server module builds the app, the queue and the caretaker client at import
-    time).  An import failure is a :class:`ProbeError`: "cannot import" is not
-    "the name is gone".
-    """
-    code = (
-        "import importlib, json, logging\n"
-        "logging.disable(logging.CRITICAL)\n"
-        f"module = importlib.import_module({module!r})\n"
-        f"print(json.dumps({{'has': hasattr(module, {attribute!r})}}))\n"
-    )
-    try:
-        proc = _run([sys.executable, "-c", code], timeout=120.0)
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise ProbeError(f"import probe failed: {exc}") from exc
-    if proc.returncode != 0:
-        lines = proc.stderr.strip().splitlines() or ["no output"]
-        raise ProbeError(f"cannot import {module}: {lines[-1]}")
-    payload = json.loads(proc.stdout.strip().splitlines()[-1])
-    return bool(payload["has"])
 
 
 # ── TLS + HTTP probe ───────────────────────────────────────────────────
@@ -1020,25 +1207,133 @@ def check_capture_modes(ctx: Context) -> Result:
     )
 
 
+def _module_function_names(path: Path) -> set[str]:
+    """Top-level function names defined in *path* (parsed, never imported)."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return {
+        node.name
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+
 def check_dead_code_removed(ctx: Context) -> Result:
-    """``app.proxy.server.get_version`` is gone (import check, not a grep)."""
-    title = "dead get_version removed"
-    observed = {"module": "app.proxy.server", "attribute": "get_version"}
-    if ctx.module_has_attr("app.proxy.server", "get_version"):
-        observed["present"] = True
+    """The code the process loaded carries no dead handler and no dead route.
+
+    Two prongs, both anchored on the running deployment:
+
+    * the module file *the process loaded* — ``<deployed root>/app/proxy/server.py``
+      where the deployed root comes from ``/proc/<MainPID>/cwd``, accepted only
+      when **neither** its mtime **nor** its ctime is newer than the process
+      start: a file replaced after the process started is not the code that is
+      running, and mtime alone is preserved by ``rsync -a``/``install -p``
+      (ctime cannot be preserved by any userspace tool, so it catches a
+      timestamp-preserving replacement).  It is parsed with :mod:`ast`; nothing
+      is imported, so the script's own sys.path is irrelevant.
+    * the running process must not serve ``/api/version`` (the Ollama-shaped route
+      the contract says is gone): a 404 from the probed listener.
+
+    The script's own tree is never read, so a checkout that already dropped the
+    dead symbol cannot make a stale process pass.
+    """
+    title = "dead get_version removed from the running code"
+    ctx.require_service()
+    observed: dict[str, Any] = {
+        "attribute": DEAD_CODE_SYMBOL,
+        "route": DEAD_CODE_ROUTE,
+        "process_start": ctx.service_start,
+    }
+    key = ctx.client_key
+    route = ctx.http("GET", DEAD_CODE_ROUTE, key=key.token if key else None)
+    observed["route_status"] = route.status
+    if route.status != 404:
         return Result(
             "dead_code_removed",
             title,
             FAIL,
-            "app.proxy.server still defines get_version — the deployed code predates the removal",
+            f"the running process answers GET {DEAD_CODE_ROUTE} with {route.status}; "
+            "the contract removed that route (#47)",
             observed,
         )
-    observed["present"] = False
+
+    deployed = ctx.deployed_root
+    if deployed is None:
+        reason = ctx.deployment.reason if ctx.deployment is not None else "no deployment facts"
+        return Result(
+            "dead_code_removed",
+            title,
+            SKIP,
+            f"the deployed root is unknown ({reason}), so the loaded module cannot be read",
+            observed,
+        )
+    module_path = Path(deployed) / DEAD_CODE_MODULE
+    observed["module_path"] = str(module_path)
+    try:
+        info = module_path.stat()
+    except OSError as exc:
+        return Result(
+            "dead_code_removed",
+            title,
+            SKIP,
+            f"{module_path} is unreadable ({_clean(exc)}): this root is not where the "
+            "process loads its code",
+            observed,
+        )
+    observed["module_mtime"] = info.st_mtime
+    observed["module_ctime"] = info.st_ctime
+    if ctx.service_start is None:
+        return Result(
+            "dead_code_removed",
+            title,
+            SKIP,
+            f"the process start time is unknown, so {module_path} cannot be proven to be "
+            "the code the process loaded",
+            observed,
+        )
+    # Both stamps, because either alone is forgeable: `rsync -a`/`install -p`
+    # preserve mtime but always bump ctime, and a plain `touch -d` sets mtime but
+    # also bumps ctime.  A file whose ctime is newer than the process start was
+    # (re)placed after the process read it, whatever its mtime claims
+    # (PR-Piet, #84).
+    for label, stamp in (("mtime", info.st_mtime), ("ctime", info.st_ctime)):
+        if stamp > float(ctx.service_start):
+            return Result(
+                "dead_code_removed",
+                title,
+                FAIL,
+                f"{module_path} was modified after the process started "
+                f"({label} {datetime.fromtimestamp(stamp, timezone.utc).isoformat()} > "
+                f"process start "
+                f"{datetime.fromtimestamp(float(ctx.service_start), timezone.utc).isoformat()}), "
+                "so the running process is not that code",
+                observed,
+            )
+    try:
+        names = _module_function_names(module_path)
+    except (OSError, SyntaxError) as exc:
+        return Result(
+            "dead_code_removed",
+            title,
+            FAIL,
+            f"cannot read {module_path} ({_clean(exc)}); the loaded code cannot be judged",
+            observed,
+        )
+    observed["symbol_present"] = DEAD_CODE_SYMBOL in names
+    if DEAD_CODE_SYMBOL in names:
+        return Result(
+            "dead_code_removed",
+            title,
+            FAIL,
+            f"the code the process loaded ({module_path}) still defines {DEAD_CODE_SYMBOL} — "
+            "the running deployment predates the removal",
+            observed,
+        )
     return Result(
         "dead_code_removed",
         title,
         PASS,
-        "imported app.proxy.server in a subprocess: get_version is absent",
+        f"the loaded module {module_path} (mtime and ctime older than the process start) does "
+        f"not define {DEAD_CODE_SYMBOL}, and the process returns 404 for GET {DEAD_CODE_ROUTE}",
         observed,
     )
 
@@ -1195,43 +1490,69 @@ def check_metrics_gate(ctx: Context) -> Result:
     )
 
 
-def _policy_entries(policy: Any) -> list[dict[str, Any]]:
-    """Read ``AllowEntry`` objects without depending on a private attribute name."""
-    raw = getattr(policy, "_entries", None)
-    if raw is None:
-        raw = getattr(policy, "entries", None)
-    entries: list[dict[str, Any]] = []
-    for entry in raw or ():
-        host = getattr(entry, "host", None)
-        ports = getattr(entry, "ports", None)
-        flagged = getattr(entry, "cleartext_credentials", None)
-        if isinstance(entry, Mapping):
-            host = host if host is not None else entry.get("host")
-            ports = ports if ports is not None else entry.get("ports")
-            flagged = flagged if flagged is not None else entry.get("cleartext_credentials")
-        if host is None:
-            continue
-        entries.append(
-            {
-                "host": str(host),
-                "ports": list(ports or ()),
-                "cleartext_credentials": bool(flagged),
-            }
-        )
-    return entries
-
-
 def check_destination_allowlist(ctx: Context) -> Result:
-    """The loaded policy comes from config and still flags the cleartext hops."""
-    title = "destination allowlist from config, cleartext hops flagged"
-    from app.destination_policy import DestinationPolicy
+    """The policy the running process holds comes from config, hops flagged.
 
-    policy = DestinationPolicy.from_config(ctx.config)
-    source = getattr(policy, "source", "unknown")
-    entries = _policy_entries(policy)
+    Read from ``GET /api/status`` → ``policy``, i.e. the live policy object's own
+    report.  The old implementation rebuilt the policy from a YAML file next to
+    the script, which reported ``PASS`` while the process ran the shipped
+    default — the false green light of issue #84.
+    """
+    title = "destination allowlist from the live policy, cleartext hops flagged"
+    ctx.require_service()
+    key = ctx.admin_key or ctx.client_key
+    if key is None:
+        return Result(
+            "destination_allowlist",
+            title,
+            SKIP,
+            "no key usable for /api/status (the admin or client scope is required)",
+        )
+    response = ctx.http("GET", "/api/status", key=key.token)
+    if response.status == 403:
+        return Result(
+            "destination_allowlist",
+            title,
+            SKIP,
+            f"GET /api/status requires the admin scope: {_clean(response.text(), 120)}",
+            {"status": 403},
+        )
+    if response.status != 200:
+        return Result(
+            "destination_allowlist",
+            title,
+            FAIL,
+            f"GET /api/status returned {response.status}",
+            {"status": response.status},
+        )
+    body = response.json()
+    policy = body.get("policy") if isinstance(body, Mapping) else None
+    if not isinstance(policy, Mapping):
+        return Result(
+            "destination_allowlist",
+            title,
+            FAIL,
+            "the running process reports no 'policy' block on /api/status, so the live "
+            "policy cannot be judged (the deployed code predates this verifier; a YAML "
+            "file next to the script is deliberately not used instead)",
+            {"status": 200, "policy": None},
+        )
+    source = str(policy.get("source") or "unknown")
+    entries = [
+        {
+            "host": str(entry.get("host")),
+            "ports": [
+                port for port in entry.get("ports") or () if isinstance(port, int) and not isinstance(port, bool)
+            ],
+            "cleartext_credentials": bool(entry.get("cleartext_credentials")),
+        }
+        for entry in policy.get("entries") or ()
+        if isinstance(entry, Mapping) and entry.get("host") is not None
+    ]
     observed: dict[str, Any] = {
         "source": source,
         "entries": len(entries),
+        "cleartext_hops": policy.get("cleartext_hops"),
         "cleartext_hosts": sorted(
             entry["host"] for entry in entries if entry["cleartext_credentials"]
         ),
@@ -1241,8 +1562,8 @@ def check_destination_allowlist(ctx: Context) -> Result:
             "destination_allowlist",
             title,
             FAIL,
-            f"the loaded policy source is {source!r} (expected 'config'): "
-            "config/global.settings.yaml has no destination_policy block",
+            f"the live policy source is {source!r} (expected 'config'): "
+            "the running process has no destination_policy block in its config",
             observed,
         )
     if not entries:
@@ -1928,39 +2249,182 @@ def check_cloud_catalog_credentials(ctx: Context) -> Result:
     )
 
 
-CHECKS: tuple[tuple[str, Callable[[Context], Result]], ...] = (
-    ("service_identity", check_service_identity),
-    ("queue_wait_budget", check_queue_wait_budget),
-    ("capture_modes", check_capture_modes),
-    ("dead_code_removed", check_dead_code_removed),
-    ("privilege_scope_grace", check_privilege_scope_grace),
-    ("metrics_gate", check_metrics_gate),
-    ("destination_allowlist", check_destination_allowlist),
-    ("admission_bounds", check_admission_bounds),
-    ("metadata_audit", check_metadata_audit),
-    ("log_sanitizer", check_log_sanitizer),
-    ("endpoint_confinement", check_endpoint_confinement),
-    ("backend_death_seam", check_backend_death_seam),
-    ("capture_pipeline", check_capture_pipeline),
-    ("key_store", check_key_store),
-    ("config_deep_merge", check_config_deep_merge),
-    ("cloud_catalog_credentials", check_cloud_catalog_credentials),
+@dataclass(frozen=True)
+class CheckSpec:
+    """One check, its title, and where its evidence comes from (issue #84).
+
+    The source is the single place that decides what a check is allowed to claim
+    in a foreign tree: only :data:`SOURCE_LIVE_API` checks stand on their own
+    there, because they read the live service and nothing about the checkout this
+    script lives in.
+    """
+
+    check_id: str
+    title: str
+    source: str
+    evidence: str
+    run: Callable[[Context], Result]
+
+
+CHECKS: tuple[CheckSpec, ...] = (
+    CheckSpec(
+        "service_identity",
+        "service active and MainPID owns the listener",
+        SOURCE_PROCESS,
+        f"systemctl show {DEFAULT_UNIT} (ActiveState, MainPID) + ss//proc listener owners",
+        check_service_identity,
+    ),
+    CheckSpec(
+        "queue_wait_budget",
+        "queue wait budget enforced",
+        SOURCE_DEPLOYED_CONFIG,
+        "GET /v1/queue/status vs the deployed config/global.settings.yaml",
+        check_queue_wait_budget,
+    ),
+    CheckSpec(
+        "capture_modes",
+        "capture media modes",
+        SOURCE_DEPLOYED_FILE,
+        "GET /api/capture/status + <capture_root>/media modes under the deployed root",
+        check_capture_modes,
+    ),
+    CheckSpec(
+        "dead_code_removed",
+        "dead get_version removed from the running code",
+        SOURCE_DEPLOYED_CODE,
+        "/proc/<MainPID>/cwd/app/proxy/server.py (AST) + GET /api/version on the process",
+        check_dead_code_removed,
+    ),
+    CheckSpec(
+        "privilege_scope_grace",
+        "privilege scopes: legacy grace, key stays client-only",
+        SOURCE_JOURNAL,
+        "journalctl -u <unit> scope-grace lines + the deployed key store declaration",
+        check_privilege_scope_grace,
+    ),
+    CheckSpec(
+        "metrics_gate",
+        "metrics gate: 401 without a key, 200 with a client key",
+        SOURCE_LIVE_API,
+        "GET /metrics (anonymous and with a client key)",
+        check_metrics_gate,
+    ),
+    CheckSpec(
+        "destination_allowlist",
+        "destination allowlist from the live policy, cleartext hops flagged",
+        SOURCE_LIVE_API,
+        "GET /api/status -> policy (the running process's own policy report)",
+        check_destination_allowlist,
+    ),
+    CheckSpec(
+        "admission_bounds",
+        "admission bounds resolved and counted",
+        SOURCE_DEPLOYED_CONFIG,
+        "GET /v1/queue/status, POST /v1/chat/completions, GET /metrics vs the deployed config",
+        check_admission_bounds,
+    ),
+    CheckSpec(
+        "metadata_audit",
+        "metadata audit: one record, no payload",
+        SOURCE_JOURNAL,
+        "one allowed GET /api/tags + its audit record in journald",
+        check_metadata_audit,
+    ),
+    CheckSpec(
+        "log_sanitizer",
+        "log sanitizer: no Bearer value in the log",
+        SOURCE_JOURNAL,
+        "journalctl -u <unit> since the restart",
+        check_log_sanitizer,
+    ),
+    CheckSpec(
+        "endpoint_confinement",
+        "endpoint confinement",
+        SOURCE_LIVE_API,
+        "GET /v1/../slots, GET /v1/%252e%252e/slots, GET /v1/models",
+        check_endpoint_confinement,
+    ),
+    CheckSpec(
+        "backend_death_seam",
+        "backend-death seam on /api/status",
+        SOURCE_LIVE_API,
+        "GET /api/status (backend_state, backend_death, caretaker)",
+        check_backend_death_seam,
+    ),
+    CheckSpec(
+        "capture_pipeline",
+        "capture pipeline enabled and writing",
+        SOURCE_LIVE_API,
+        "GET /api/capture/status",
+        check_capture_pipeline,
+    ),
+    CheckSpec(
+        "key_store",
+        "key store loads guardian.keys.yaml",
+        SOURCE_DEPLOYED_FILE,
+        "the deployed config/guardian.keys.yaml as the auth store loads it",
+        check_key_store,
+    ),
+    CheckSpec(
+        "config_deep_merge",
+        "config deep-merges global.settings.yaml",
+        SOURCE_DEPLOYED_CONFIG,
+        "the deployed config/global.settings.yaml as the loader merges it",
+        check_config_deep_merge,
+    ),
+    CheckSpec(
+        "cloud_catalog_credentials",
+        "cloud catalog: no broken credentials",
+        SOURCE_LIVE_API,
+        "GET /api/cloud/catalog",
+        check_cloud_catalog_credentials,
+    ),
 )
 
 
 # ── Runner ─────────────────────────────────────────────────────────────
 
 
+def foreign_tree_skip(ctx: Context, spec: CheckSpec) -> Result:
+    """The SKIP a tree-dependent check reports when the tree is foreign.
+
+    Never a verdict: in a foreign tree the evidence this check grades is not the
+    deployment's, so "does not prove the deployment" is the only honest answer.
+    """
+    deployment = ctx.deployment
+    if deployment is None or not deployment.known:
+        why = deployment.reason if deployment is not None else "no deployment facts"
+        where = f"the deployed root could not be determined ({why})"
+    else:
+        where = (
+            f"the script's tree {_realpath(ctx.repo_root)} is not the deployed tree "
+            f"{deployment.root}"
+        )
+    return Result(
+        spec.check_id,
+        spec.title,
+        SKIP,
+        f"does not prove the deployment: --allow-foreign-tree was given and {where}",
+        {"source": spec.source, "foreign_tree": True},
+    )
+
+
 def run_checks(ctx: Context) -> list[Result]:
     """Run every check; an unexpected exception is a loud FAIL, never a skip."""
     results: list[Result] = []
-    for check_id, check in CHECKS:
-        try:
-            results.append(check(ctx))
-        except ProbeError as exc:
-            results.append(Result(check_id, check_id, FAIL, _clean(exc)))
-        except Exception as exc:  # noqa: BLE001 - one broken check must not stop the run
-            results.append(Result(check_id, check_id, FAIL, f"{type(exc).__name__}: {_clean(exc)}"))
+    for spec in CHECKS:
+        if ctx.foreign_tree and spec.source not in SOURCES_TREE_INDEPENDENT:
+            result = foreign_tree_skip(ctx, spec)
+        else:
+            try:
+                result = spec.run(ctx)
+            except ProbeError as exc:
+                result = Result(spec.check_id, spec.title, FAIL, _clean(exc))
+            except Exception as exc:  # noqa: BLE001 - one broken check must not stop the run
+                result = Result(spec.check_id, spec.title, FAIL, f"{type(exc).__name__}: {_clean(exc)}")
+        result.source = spec.source
+        result.source_evidence = spec.evidence
+        results.append(result)
     return results
 
 
@@ -1974,9 +2438,14 @@ def exit_code_for(results: Sequence[Result]) -> int:
 
 
 def _print_result(result: Result) -> None:
+    """One line per check, naming the source before the verdict's detail."""
     line = f"[{result.status}] {result.title}"
+    if result.source:
+        line += f" — source={result.source}"
+        if result.source_evidence:
+            line += f" ({result.source_evidence})"
     if result.detail:
-        line += f" — {result.detail}"
+        line += f"; {result.detail}"
     print(line)
 
 
@@ -2005,6 +2474,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_JOURNAL_LINES,
         help="maximum journal lines to read per check",
     )
+    parser.add_argument(
+        "--allow-foreign-tree",
+        action="store_true",
+        help=(
+            "run even when this checkout is not the deployed tree (review/CI). The run "
+            "then does NOT prove the deployment: every check whose source is not the live "
+            "API reports SKIP instead of a verdict"
+        ),
+    )
     return parser
 
 
@@ -2028,10 +2506,34 @@ def build_context(args: argparse.Namespace) -> Context:
         http=lambda *a, **kw: (_ for _ in ()).throw(ProbeError("http surface not built")),
         systemctl=systemctl_show,
         journal=lambda since, lines: read_journal(args.unit, since, lines),
-        module_has_attr=lambda module, attribute: module_has_attr(module, attribute, REPO_ROOT),
+        read_proc_cwd=read_proc_cwd,
     )
     ctx.http = make_http(ctx)
     return ctx
+
+
+def _refuse(ctx: Context, args: argparse.Namespace, text: str) -> int:
+    """Print the refusal (no verdict) and return the refused exit code."""
+    print(text, file=sys.stderr)
+    deployment = ctx.deployment
+    if args.json:
+        document = {
+            "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "unit": ctx.unit,
+            "base_url": f"{ctx.scheme}://{ctx.host}:{ctx.port}",
+            "refused": True,
+            "reason": (deployment.reason if deployment is not None else ""),
+            "deployed_root": str(deployment.root) if deployment is not None and deployment.known else None,
+            "deployment_origin": deployment.origin if deployment is not None else "",
+            "script_root": str(_realpath(ctx.repo_root)),
+            "allow_foreign_tree": False,
+            "exit_code": EXIT_REFUSED,
+            "ok": False,
+            "warnings": [],
+            "checks": [],
+        }
+        print(json.dumps(document, indent=2, sort_keys=True))
+    return EXIT_REFUSED
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -2045,6 +2547,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception as exc:  # noqa: BLE001 - a broken invocation must not traceback
         print(f"[{FAIL}] could not start: {_clean(exc)}")
         return EXIT_FAIL
+    # Issue #84: never grade a tree that is not the running deployment.
+    deployment = resolve_deployment(ctx)
+    ctx.deployment = deployment
+    ctx.allow_foreign_tree = bool(args.allow_foreign_tree)
+    if tree_matches(deployment, ctx.repo_root) is not True:
+        if not ctx.allow_foreign_tree:
+            return _refuse(ctx, args, refusal_message(deployment, ctx.repo_root))
+        ctx.foreign_tree = True
+        if deployment.known:
+            ctx.warnings.append(
+                "--allow-foreign-tree: this checkout "
+                f"({_realpath(ctx.repo_root)}) is not the deployed tree ({deployment.root}); "
+                "the run does NOT prove the deployment"
+            )
+        else:
+            ctx.warnings.append(
+                "--allow-foreign-tree: the deployed root could not be determined "
+                f"({deployment.reason}); no check can prove the deployment"
+            )
     prepare(ctx)
     results = run_checks(ctx)
     code = exit_code_for(results)
@@ -2055,6 +2576,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             "base_url": f"{ctx.scheme}://{ctx.host}:{ctx.port}",
             "tls_verified": not ctx.insecure and ctx.scheme == "https",
             "service_reachable": ctx.service_reachable,
+            "deployed_root": str(ctx.deployed_root) if ctx.deployed_root is not None else None,
+            "deployment_origin": ctx.deployment.origin if ctx.deployment is not None else "",
+            "script_root": str(_realpath(ctx.repo_root)),
+            "allow_foreign_tree": ctx.allow_foreign_tree,
+            "proves_the_deployment": not ctx.foreign_tree,
             "exit_code": code,
             "ok": code == EXIT_PASS,
             "warnings": [_clean(warning) for warning in ctx.warnings],
@@ -2069,6 +2595,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(
         f"Verifying {ctx.unit} on {ctx.scheme}://{ctx.host}:{ctx.port}"
         + (
+            f" (deployed root {ctx.deployed_root}, from {ctx.deployment.origin})"
+            if ctx.deployed_root is not None and not ctx.foreign_tree
+            else ""
+        )
+        + (
             " (service unreachable — service checks will fail)"
             if not ctx.service_reachable
             else ""
@@ -2080,7 +2611,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     failed = sum(1 for result in results if result.status == FAIL)
     skipped = sum(1 for result in results if result.status == SKIP)
     print(f"\n{passed} passed, {failed} failed, {skipped} skipped")
-    if code == EXIT_PASS:
+    if ctx.foreign_tree:
+        print(
+            "⚠️  --allow-foreign-tree: this run graded "
+            f"{_realpath(ctx.repo_root)}, not the deployment"
+            + (f" ({ctx.deployed_root})" if ctx.deployed_root is not None else "")
+            + " — it proves nothing about what is running"
+        )
+    elif code == EXIT_PASS:
         print("✅ the running deployment matches the contract")
     elif code == EXIT_SKIP:
         print("⚠️  no failures, but something could not be verified — read the SKIP reasons")
