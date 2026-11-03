@@ -216,17 +216,19 @@ def leading_comments(lines: Sequence[str], index: int) -> list[str]:
     return list(reversed(out))
 
 
-def block_comments(lines: Sequence[str], index: int) -> list[str]:
-    """The comment lines inside the mapping that starts at ``lines[index]``."""
-    header_indent = len(lines[index]) - len(lines[index].lstrip())
+def leading_block_comments(lines: Sequence[str], index: int) -> list[str]:
+    """The comment lines at the *top* of the mapping that starts at ``lines[index]``.
+
+    Only the contiguous run directly after the header counts.  A comment that sits
+    further down, between mapping entries, is part of that entry's documentation
+    and must never be moved or replaced — treating the whole block as one comment
+    region would delete the entry it follows.
+    """
     out: list[str] = []
     for line in lines[index + 1:]:
-        if not line.strip():
-            continue
-        if len(line) - len(line.lstrip()) <= header_indent:
+        if not line.strip() or not line.lstrip().startswith("#"):
             break
-        if line.lstrip().startswith("#"):
-            out.append(line)
+        out.append(line)
     return out
 
 
@@ -405,6 +407,24 @@ def reconcile(
                 f"{rule.key}: origin/main's config has no such key — refusing to invent it"
             )
             continue
+        # An explicit operator choice is applied before the "nothing to do" cases:
+        # `--queue-timeout 600` must win even when both files already say 1800, and
+        # even when the live file has no such key at all.
+        if rule.policy == OPERATOR_CHOICE and queue_timeout is not None:
+            deltas.append(Delta(
+                rule.key,
+                local_value if local_found else None,
+                main_value,
+                queue_timeout,
+                OPERATOR_CHOICE,
+                rule.reason + f"; --queue-timeout {queue_timeout} overrides the live value",
+            ))
+            index = find_key(main_paths, path)
+            if index is None:
+                problems.append(f"{rule.key}: could not locate the key line in origin/main's config")
+            elif queue_timeout != main_value:
+                merged[index] = replace_value_line(merged[index], queue_timeout)
+            continue
         if not local_found:
             deltas.append(Delta(rule.key, None, main_value, main_value, "take-main",
                                 "the live file has no value for this key; main's value is used"))
@@ -418,11 +438,7 @@ def reconcile(
             reason = rule.reason
         else:
             chosen, action = local_value, OPERATOR_CHOICE
-            if queue_timeout is None:
-                reason = rule.reason + "; keeping the live value (--queue-timeout overrides it)"
-            else:
-                reason = rule.reason + f"; --queue-timeout {queue_timeout} overrides the live value"
-                chosen = queue_timeout
+            reason = rule.reason + "; keeping the live value (--queue-timeout overrides it)"
         deltas.append(Delta(rule.key, local_value, main_value, chosen, action, reason))
         if chosen == main_value:
             continue
@@ -451,8 +467,8 @@ def reconcile(
             start = merged_index - len(main_comments)
             end = merged_index
         else:
-            local_comments = block_comments(local_lines, local_index)
-            main_comments = block_comments(merged, merged_index)
+            local_comments = leading_block_comments(local_lines, local_index)
+            main_comments = leading_block_comments(merged, merged_index)
             start = merged_index + 1
             end = start + len(main_comments)
         known = {line.strip() for line in main_comments}
@@ -564,17 +580,31 @@ class WorktreeEntry:
 
 
 def read_worktree(repo: pathlib.Path) -> tuple[tuple[WorktreeEntry, ...], str]:
-    """List every dirty and untracked path (``-uall``: no collapsed directories)."""
-    rc, out, err = gate._git(("status", "--porcelain", "-uall"), repo=repo)
+    """List every dirty and untracked path (``-uall``: no collapsed directories).
+
+    ``-z`` is not cosmetic: the display form quotes a path with non-ASCII bytes or
+    a space (``"docs/caf\303\251.md"``) and separates a rename with `` -> ``,
+    which a filename may itself contain.  NUL-delimited records are the raw paths,
+    so the pathspecs handed to ``git stash`` are the ones git reported.
+    """
+    rc, out, err = gate._git(("status", "--porcelain", "-z", "-uall"), repo=repo)
     if rc != 0:
         return (), err or f"git status exited {rc}"
     entries: list[WorktreeEntry] = []
-    for line in out.splitlines():
-        if len(line) < 4:
+    tokens = out.split("\0")
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
+        if len(token) < 4:
             continue
-        code = line[:2]
-        for path in line[3:].split(" -> "):
-            entries.append(WorktreeEntry(code, path.strip().strip('"')))
+        code = token[:2]
+        entries.append(WorktreeEntry(code, token[3:]))
+        # With -z a rename/copy reports the destination first and the original
+        # second; both sides matter, because the original is what disappears.
+        if (code[0] in "RC" or code[1] in "RC") and index < len(tokens) and tokens[index]:
+            entries.append(WorktreeEntry(code, tokens[index]))
+            index += 1
     return tuple(entries), ""
 
 
@@ -953,6 +983,32 @@ def apply_plan(plan: Plan, *, out=print) -> int:
     repo = plan.repo
     rec = plan.reconciliation
 
+    # (0) Prove the target before anything is written.  The plan was built from
+    # the remote-tracking ref, which may be stale: `git pull` talks to the remote
+    # and can land on a commit the reconciled config was never built against,
+    # silently dropping settings merged in the meantime.  Refresh the ref and
+    # refuse when it moved — nothing has been written at this point.
+    rc, _stdout, err = run_git(
+        repo, "fetch", "--quiet", "--no-tags", "origin",
+        "+refs/heads/main:refs/remotes/origin/main", timeout=120.0,
+    )
+    if rc != 0:
+        out(f"  ABORT — cannot refresh origin/main: {err}")
+        out("  the target cannot be proven, so nothing was written")
+        return EXIT_ERROR
+    rc, target, _err = run_git(repo, "rev-parse", "origin/main")
+    if rc != 0 or not target:
+        out("  ABORT — origin/main cannot be resolved after the fetch; nothing was written")
+        return EXIT_ERROR
+    if target != plan.state.origin_main:
+        out(f"  ABORT — origin/main moved from {_short(plan.state.origin_main)} to "
+            f"{_short(target)} since the plan was built")
+        out("  the reconciled config describes the older commit; re-run the tool to plan "
+            "against the new one")
+        out("  nothing was written")
+        return EXIT_ERROR
+    out(f"  target:  origin/main {_short(target)} (refreshed, unchanged since the plan)")
+
     # (a) The backup comes first: it must exist before anything writes.
     try:
         backup = backup_config(repo, plan.stamp)
@@ -966,12 +1022,16 @@ def apply_plan(plan: Plan, *, out=print) -> int:
     # pull can overwrite a dirty file; when neither happens there is nothing to
     # protect, so the stash is skipped and the tree stays as the operator had it.
     stash_sha = ""
-    needs_stash = bool(plan.entries) and (not plan.on_main or not plan.at_origin_main)
+    # This tool's own artifacts (the backup and the proposal) are never stashed:
+    # a bare `git stash push -u` would take the one file the operator needs for
+    # recovery out of the working tree.
+    stashable = [
+        entry for entry in plan.entries if not entry.path.startswith(f"{CONFIG_REL}.")
+    ]
+    needs_stash = bool(stashable) and (not plan.on_main or not plan.at_origin_main)
     if needs_stash:
-        # Explicit pathspecs, not a bare `-u`: the backup was just written next to
-        # the live config, and a bare `git stash push -u` would stash it too —
-        # taking the one artifact the operator needs out of the working tree.
-        pathspecs = [f":(literal){entry.path}" for entry in plan.entries]
+        # Explicit pathspecs, not a bare `-u`, so exactly the listed files move.
+        pathspecs = [f":(literal){entry.path}" for entry in stashable]
         rc, _stdout, err = run_git(
             repo, "stash", "push", "-u", "-m", plan.stash_message, "--", *pathspecs
         )
@@ -982,6 +1042,9 @@ def apply_plan(plan: Plan, *, out=print) -> int:
         rc, sha, _err = run_git(repo, "rev-parse", "stash@{0}")
         stash_sha = sha if rc == 0 else ""
         out(f"  stashed: {_short(stash_sha)} — recover with `git stash pop`")
+    elif plan.entries and not stashable:
+        out("  stash: nothing to stash (only this tool's own backup/proposal files are "
+            "untracked)")
     elif plan.entries:
         out("  stash: not needed — already on main at origin/main, so no checkout or pull "
             "can overwrite the local files")
@@ -1004,24 +1067,39 @@ def apply_plan(plan: Plan, *, out=print) -> int:
         if rc != 0:
             return abort("git checkout main", err)
         out("  switched: checkout main")
+    # Always pull: skipping it when the *tracking ref* already matches would miss
+    # a remote that moved on, and the reconciled config would then describe a
+    # commit that is no longer the target.
+    rc, _stdout, err = run_git(repo, "pull", "--ff-only", "origin", "main", timeout=120.0)
+    if rc != 0:
+        return abort("git pull --ff-only origin main", err)
     rc, head, _err = run_git(repo, "rev-parse", "HEAD")
     if rc != 0:
         return abort("git rev-parse HEAD", "HEAD cannot be resolved")
-    if head != plan.state.origin_main:
-        rc, _stdout, err = run_git(repo, "pull", "--ff-only", "origin", "main", timeout=120.0)
-        if rc != 0:
-            return abort("git pull --ff-only origin main", err)
-        rc, head, _err = run_git(repo, "rev-parse", "HEAD")
-        out(f"  pulled:   fast-forward to {_short(head)}")
-    else:
-        out(f"  pull:     already at origin/main ({_short(head)}) — skipped")
+    if head != target:
+        out(f"  ABORT — the target moved again during the apply: HEAD is {_short(head)}, "
+            f"the plan was built against {_short(target)}")
+        out("  the reconciled config was NOT installed; re-run the tool to plan against the "
+            "new commit")
+        if stash_sha:
+            out(f"  your local state is in stash@{{0}} ({_short(stash_sha)}) — `git stash pop`")
+        out(f"  the config backup is {backup.relative_to(repo)}")
+        return EXIT_ERROR
+    out(f"  pulled:   fast-forward to {_short(head)}")
 
     # (d) Install the reconciled config.
     reconciled = write_reconciled(repo, rec.merged_text)
     out(f"  proposal: {reconciled.relative_to(repo)}")
     live = repo / CONFIG_REL
     if live.exists() and live.read_text() == rec.merged_text:
-        out(f"  config:   {CONFIG_REL} already matches the reconciled file — nothing to install")
+        # The content is already right, but a checkout restores git's 0644: put the
+        # operator's mode back rather than silently widening a 0600 config.
+        if plan.config_mode is not None and stat.S_IMODE(live.stat().st_mode) != plan.config_mode:
+            os.chmod(live, plan.config_mode)
+            out(f"  config:   {CONFIG_REL} already matches the reconciled file — mode restored "
+                f"to {oct(plan.config_mode)}")
+        else:
+            out(f"  config:   {CONFIG_REL} already matches the reconciled file — nothing to install")
     else:
         install_config(repo, rec.merged_text, plan.config_mode)
         out(f"  config:   {CONFIG_REL} installed from the reconciled file")

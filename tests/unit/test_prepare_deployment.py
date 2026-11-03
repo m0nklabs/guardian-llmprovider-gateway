@@ -327,6 +327,27 @@ def test_queue_timeout_flag_takes_mains_shipped_default():
     assert "  queue_timeout_seconds: 300" not in rec.merged_text
 
 
+def test_queue_timeout_flag_wins_when_both_files_agree():
+    """`--queue-timeout 600` must not be swallowed by the "identical" branch."""
+    local = LOCAL_TEXT.replace("queue_timeout_seconds: 300", "queue_timeout_seconds: 1800")
+    rec = tool.reconcile(MAIN_TEXT, local, queue_timeout=600)
+
+    delta = next(d for d in rec.deltas if d.key == "queue.queue_timeout_seconds")
+    assert delta.chosen == 600
+    assert "  queue_timeout_seconds: 600" in rec.merged_text
+    assert rec.ok, rec.problems
+
+
+def test_queue_timeout_flag_wins_when_the_live_key_is_missing():
+    local = LOCAL_TEXT.replace("  queue_timeout_seconds: 300\n", "")
+    rec = tool.reconcile(MAIN_TEXT, local, queue_timeout=600)
+
+    delta = next(d for d in rec.deltas if d.key == "queue.queue_timeout_seconds")
+    assert delta.chosen == 600
+    assert "  queue_timeout_seconds: 600" in rec.merged_text
+    assert rec.ok, rec.problems
+
+
 def test_queue_timeout_flag_accepts_any_operator_value():
     rec = tool.reconcile(MAIN_TEXT, LOCAL_TEXT, queue_timeout=600)
 
@@ -366,6 +387,28 @@ def test_preserved_leading_comment_keeps_the_operators_order():
     preserved = next(item for item in rec.preserved if item.key == "failover")
     assert preserved.where == "leading"
     assert preserved.lines == FAILOVER_COMMENT
+
+
+def test_a_comment_below_a_mapping_entry_is_left_alone():
+    """Only the contiguous leading comment region may be replaced.
+
+    Treating the whole block as one comment region would delete the entry the
+    comment follows (here `enabled: false`).
+    """
+    main = MAIN_TEXT.replace(
+        "  enabled: false\n  max_retries: 10\n",
+        "  enabled: false\n  # trailing note in main, documenting max_retries\n"
+        "  max_retries: 10\n",
+    )
+    rec = tool.reconcile(main, LOCAL_TEXT)
+
+    assert rec.ok, rec.problems
+    merged = rec.merged_text.splitlines()
+    header = merged.index("cloud_retry:")
+    assert merged[header + 1:header + 5] == list(CLOUD_RETRY_COMMENT)
+    assert merged[header + 5] == "  enabled: false"
+    assert merged[header + 6] == "  # trailing note in main, documenting max_retries"
+    assert merged[header + 7] == "  max_retries: 10"
 
 
 def test_a_comment_main_already_has_is_not_duplicated():
@@ -779,23 +822,110 @@ def test_apply_aborts_before_any_write_when_the_backup_fails(tmp_path):
     assert snapshot(work) == before
 
 
-def test_apply_leaves_the_backup_and_the_stash_when_the_pull_fails(tmp_path):
-    """A failure after the stash must still leave both recovery paths intact."""
+def test_apply_aborts_before_any_write_when_the_remote_is_gone(tmp_path):
+    """The target is proven first: an unreachable remote writes nothing."""
     work, origin, _base = make_repo(tmp_path)
-    original = (work / "config" / "global.settings.yaml").read_text()
+    before = snapshot(work)
     shutil.rmtree(origin)  # the remote-tracking ref survives; the remote does not
 
     proc = run_tool(work, "--apply")
 
     assert proc.returncode == 2
-    assert "git pull --ff-only origin main failed" in proc.stdout
+    assert "cannot refresh origin/main" in proc.stdout
+    assert "nothing was written" in proc.stdout
+    assert backups(work) == []
+    assert git(work, "stash", "list") == ""
+    assert snapshot(work) == before
+
+
+def test_apply_refuses_when_origin_main_moved_since_the_plan(tmp_path):
+    """A stale tracking ref must not let the pull land on an unplanned commit."""
+    work, origin, _base = make_repo(tmp_path)
+    push_to_origin(tmp_path, origin, count=1)  # the remote moves; work does not fetch
+    before = snapshot(work)
+
+    proc = run_tool(work, "--apply")
+
+    assert proc.returncode == 2
+    assert "origin/main moved from" in proc.stdout
+    assert "re-run the tool" in proc.stdout
+    assert backups(work) == []
+    assert git(work, "stash", "list") == ""
+    assert snapshot(work) == before
+
+
+def test_apply_leaves_the_backup_and_the_stash_when_the_checkout_fails(tmp_path):
+    """A failure after the stash must still leave both recovery paths intact."""
+    work, _origin, _base = make_repo(tmp_path)
+    original = (work / "config" / "global.settings.yaml").read_text()
+    # `main` is checked out in a second worktree, so `git checkout main` refuses.
+    git(work, "worktree", "add", str(tmp_path / "other"), "main")
+
+    proc = run_tool(work, "--apply")
+
+    assert proc.returncode == 2
+    assert "git checkout main failed" in proc.stdout
     assert "git stash pop" in proc.stdout
     found = backups(work)
     assert len(found) == 1
     assert found[0].read_text() == original
     assert "prepare_deployment: local state before main switch" in git(work, "stash", "list")
-    # the checkout happened, so the live file is main's; the delta is in the stash
+    # the checkout did not happen, so the live file is main's; the delta is stashed
     assert (work / "config" / "global.settings.yaml").read_text() == MAIN_TEXT
+
+
+def test_apply_never_stashes_its_own_backup_or_proposal(tmp_path):
+    """A second run must not stash the artifacts the first run left behind."""
+    work, _origin, _base = make_repo(tmp_path)
+    earlier = work / "config" / "global.settings.yaml.20260101T000000Z.bak"
+    earlier.write_text("an earlier backup\n")
+    (work / tool.RECONCILED_REL).write_text("an earlier proposal\n")
+
+    proc = run_tool(work, "--apply")
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert earlier.exists() and earlier.read_text() == "an earlier backup\n"
+    assert (work / tool.RECONCILED_REL).exists()
+    stashed = git(work, "stash", "show", "--name-only", "stash@{0}").splitlines()
+    assert "config/global.settings.yaml.20260101T000000Z.bak" not in stashed
+    assert tool.RECONCILED_REL not in stashed
+    assert "config/global.settings.yaml" in stashed
+
+
+def test_apply_restores_the_config_mode_when_no_install_is_needed(tmp_path):
+    """A checkout restores git's 0644; a 0600 config must not be widened."""
+    # The live file differs from main's only by a trailing blank line, so the
+    # reconciled text equals main's: the install is skipped, but the checkout has
+    # already reset the mode to git's 0644.
+    work, _origin, _base = make_repo(tmp_path, local_text=MAIN_TEXT + "\n")
+    live = work / "config" / "global.settings.yaml"
+    os.chmod(live, 0o600)
+    assert " M config/global.settings.yaml" in git(work, "status", "--porcelain")
+
+    proc = run_tool(work, "--apply")
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "mode restored to 0o600" in proc.stdout
+    assert stat.S_IMODE(live.stat().st_mode) == 0o600
+
+
+def test_apply_handles_non_ascii_and_arrow_paths(tmp_path):
+    """`git status` quotes such paths; the stash pathspec must be the raw path."""
+    work, _origin, _base = make_repo(tmp_path)
+    (work / "docs" / "café.md").write_text("accented\n")
+    (work / "docs" / "a -> b.md").write_text("arrow\n")
+
+    proc = run_tool(work, "--apply")
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert not (work / "docs" / "café.md").exists()  # stashed, not left behind
+    assert not (work / "docs" / "a -> b.md").exists()
+    # `-u` is required: untracked files live in the stash's third parent and a
+    # plain `stash show` does not list them.
+    stashed = git(work, "-c", "core.quotepath=false", "stash", "show", "-u", "--name-only",
+                  "stash@{0}").splitlines()
+    assert "docs/café.md" in stashed
+    assert "docs/a -> b.md" in stashed
 
 
 def test_apply_skips_the_install_when_the_config_already_matches(tmp_path):
