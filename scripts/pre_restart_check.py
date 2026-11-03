@@ -112,6 +112,8 @@ class HeadState:
     judge turns both into ``SKIP`` rather than a guess.
     """
 
+    #: The tree these facts describe, so a verdict names the tree it judged.
+    repo: pathlib.Path | None = None
     is_repo: bool = False
     head: str = ""
     branch: str = ""
@@ -192,11 +194,11 @@ def read_head_state(
     """
     rc, _out, _err = _git(("rev-parse", "--git-dir"), repo=repo)
     if rc != 0:
-        return HeadState(is_repo=False)
+        return HeadState(repo=repo, is_repo=False)
 
     rc, head, _err = _git(("rev-parse", "HEAD"), repo=repo)
     if rc != 0 or not head:
-        return HeadState(is_repo=True)
+        return HeadState(repo=repo, is_repo=True)
 
     rc, branch, _err = _git(("rev-parse", "--abbrev-ref", "HEAD"), repo=repo)
     detached = rc != 0 or branch == "HEAD"
@@ -237,6 +239,7 @@ def read_head_state(
     dirty_code, dirty_config = _dirty_paths(status_output if rc == 0 else "")
 
     return HeadState(
+        repo=repo,
         is_repo=True,
         head=head,
         branch="" if detached else branch,
@@ -277,7 +280,7 @@ def judge_deployment_head(
     facts = _head_facts(state)
     if not state.is_repo:
         return SKIP, (
-            f"deployment head — {REPO} is not a git checkout, so the deployment head "
+            f"deployment head — {state.repo or REPO} is not a git checkout, so the deployment head "
             "was not proven (pass --expect-head <sha> to pin the intended commit)"
         )
     if not state.head:

@@ -216,6 +216,7 @@ def test_a_non_git_tree_is_a_skip_never_a_pass(tmp_path):
     assert state.is_repo is False
     assert status == gate.SKIP
     assert "not a git checkout" in line
+    assert str(plain) in line  # names the tree it judged, not the module default
 
 
 # ── The working-tree verdict ───────────────────────────────────────────
