@@ -24,6 +24,7 @@ import importlib.util
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -1100,3 +1101,35 @@ def test_the_bootstrap_is_where_a_reader_meets_it():
         assert "git fetch origin" in text
         assert "git worktree add --detach /tmp/main-tool origin/main" in text
         assert f"--repo {tool.LIVE_CHECKOUT}" in text
+
+
+def test_the_bootstrap_quotes_its_paths_and_stops_on_a_failed_step(tmp_path):
+    """Review round 1, finding 1 + 3: a pasted block must stop and must not re-parse paths."""
+    hostile = tmp_path / "live checkout; touch pwned"
+
+    command = tool.bootstrap_command(str(hostile))
+
+    # `&&` between the steps: when /tmp/main-tool already exists the worktree add
+    # fails and nothing stale (or planted) may run after it.
+    assert "&& \\\n" in command
+    # Every path is shell-quoted, so a space or a metacharacter stays inert.
+    assert f"cd {shlex.quote(str(hostile))}" in command
+    assert f"--repo {shlex.quote(str(hostile))}" in command
+    # ... and never in its raw form, where the `;` would start a new command.
+    assert f"cd {hostile}" not in command
+    assert f"--repo {hostile}" not in command
+    # ... and the block is still valid shell after all that quoting.
+    assert subprocess.run(["bash", "-n", "-c", command], check=False).returncode == 0
+
+
+def test_a_relative_repo_renders_absolute_paths(tmp_path, monkeypatch):
+    """Review round 1, finding 3: ``cd <relative>`` must not make the interpreter relative."""
+    monkeypatch.chdir(tmp_path)
+
+    command = tool.bootstrap_command("relative-live")
+
+    resolved = str((tmp_path / "relative-live").resolve())
+    assert "cd relative-live" not in command
+    assert f"cd {resolved}" in command
+    assert f"{resolved}/venv/bin/python" in command
+    assert f"--repo {resolved}" in command

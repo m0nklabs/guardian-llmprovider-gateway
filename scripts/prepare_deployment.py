@@ -14,15 +14,21 @@ that tree yet, and a copy of it cannot start: the tool imports its sibling
 from a ``main`` worktree and point ``--repo`` at the live checkout (verified
 2026-11-03, read-only, exit 0 — see issue #89):
 
-    cd /home/flip/guardian-llmprovider-gateway
-    git fetch origin
-    git worktree add --detach /tmp/main-tool origin/main
-    /home/flip/guardian-llmprovider-gateway/venv/bin/python /tmp/main-tool/scripts/prepare_deployment.py \
-        --repo /home/flip/guardian-llmprovider-gateway
+    cd /home/flip/guardian-llmprovider-gateway && \
+      git fetch origin && \
+      git worktree add --detach /tmp/main-tool origin/main && \
+      /home/flip/guardian-llmprovider-gateway/venv/bin/python \
+          /tmp/main-tool/scripts/prepare_deployment.py \
+          --repo /home/flip/guardian-llmprovider-gateway
 
-``--repo`` is what makes it work across trees: the code runs from the ``main``
-worktree, the plan and the writes target the live checkout.  After the first
-successful switch the tool runs normally from its own tree.
+That is the plan (a dry run: it writes nothing).  Review it, then re-run the last
+command with ``--apply`` appended — still from the worktree, because the live tree
+carries neither script until that switch lands, so ``--apply`` cannot be run from
+there first.  The ``&&`` chain stops on a failed step instead of running a stale
+``/tmp/main-tool``, and ``--repo`` is what makes it work across trees: the code
+runs from the ``main`` worktree, the plan and the writes target the live checkout.
+After that switch the live tree carries both scripts and the tool runs normally
+from its own tree.
 
 This script turns that manual step into one reviewable command:
 
@@ -70,6 +76,7 @@ import difflib
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import stat
 import sys
@@ -122,17 +129,31 @@ def _bootstrap_repo() -> str:
 
 
 def bootstrap_command(repo: str | None = None) -> str:
-    """The verified first-run bootstrap from issue #89, ready to paste."""
-    target = repo or _bootstrap_repo()
-    return "\n".join(
-        (
-            f"cd {target}",
-            "git fetch origin",
-            f"git worktree add --detach {BOOTSTRAP_WORKTREE} origin/main",
-            f"{target}/venv/bin/python {BOOTSTRAP_WORKTREE}/scripts/prepare_deployment.py \\",
-            f"    --repo {target}",
-        )
+    """The verified first-run bootstrap from issue #89, ready to paste.
+
+    Three properties make it safe to paste:
+
+    * **``&&`` between the steps** — when ``/tmp/main-tool`` already exists,
+      ``git worktree add`` fails; without the chain the next command would run
+      whatever stale (or planted) ``prepare_deployment.py`` sits in that path.
+    * **the target is resolved first** — a relative ``--repo`` would otherwise
+      produce ``cd relative-live`` followed by ``relative-live/venv/bin/python``,
+      which the ``cd`` has already invalidated.
+    * **every path is shell-quoted** — a checkout path with a space or a
+      metacharacter must not be re-interpreted when the block is pasted.
+    """
+    target = pathlib.Path(repo or _bootstrap_repo()).expanduser().resolve()
+    worktree = pathlib.Path(BOOTSTRAP_WORKTREE)
+    quoted = shlex.quote
+    steps = (
+        f"cd {quoted(str(target))}",
+        "git fetch origin",
+        f"git worktree add --detach {quoted(str(worktree))} origin/main",
+        f"{quoted(str(target / 'venv' / 'bin' / 'python'))} "
+        f"{quoted(str(worktree / 'scripts' / 'prepare_deployment.py'))} \\\n"
+        f"    --repo {quoted(str(target))}",
     )
+    return " && \\\n  ".join(steps)
 
 
 def missing_gate_message(exc: ImportError) -> str:
@@ -1247,8 +1268,11 @@ def build_parser() -> argparse.ArgumentParser:
         epilog=(
             "First run — the checkout is behind main:\n\n"
             f"{bootstrap_command(LIVE_CHECKOUT)}\n\n"
-            "The code runs from the main worktree; the plan and the writes target --repo. "
-            "After the first successful switch the tool runs normally from its own tree."
+            "That is the plan. Run it twice: append --apply to the last command to switch the "
+            "live checkout, still from the worktree — the live tree has neither this file nor "
+            "scripts/pre_restart_check.py until that switch lands. The code runs from the main "
+            "worktree; the plan and the writes target --repo. After that switch the tool runs "
+            "normally from its own tree."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )

@@ -150,18 +150,28 @@ grep -E 'OPENROUTER_API_KEY|NVIDIA_API_KEY|POOLSIDE_API_KEY' .env
    imports its sibling `scripts/pre_restart_check.py`, which that tree lacks too.
    Run it from a `main` worktree and point `--repo` at the live checkout:
    ```bash
-   cd /home/flip/guardian-llmprovider-gateway
-   git fetch origin
-   git worktree add --detach /tmp/main-tool origin/main
-   /home/flip/guardian-llmprovider-gateway/venv/bin/python /tmp/main-tool/scripts/prepare_deployment.py \
-       --repo /home/flip/guardian-llmprovider-gateway
+   cd /home/flip/guardian-llmprovider-gateway && \
+     git fetch origin && \
+     git worktree add --detach /tmp/main-tool origin/main && \
+     /home/flip/guardian-llmprovider-gateway/venv/bin/python \
+         /tmp/main-tool/scripts/prepare_deployment.py \
+         --repo /home/flip/guardian-llmprovider-gateway
    ```
+   That is the **plan** — a dry run that writes nothing. Review it, then re-run
+   the last command **with `--apply` appended, still from the worktree**:
+   ```bash
+   /home/flip/guardian-llmprovider-gateway/venv/bin/python \
+       /tmp/main-tool/scripts/prepare_deployment.py \
+       --repo /home/flip/guardian-llmprovider-gateway --apply
+   ```
+   `--apply` cannot be run from the live tree first: until that switch lands the
+   live tree carries neither script, so the worktree tool is the only one that
+   exists. The `&&` chain stops on a failed step, so a pre-existing
+   `/tmp/main-tool` makes the block fail instead of running stale code, and
    `--repo` is what makes it work across trees: the code runs from the `main`
    worktree, the plan and the writes target the live checkout.
 
-   After the first successful switch the tool runs normally from its own tree.
-   One reviewable command does the whole step (dry run by default; it prints the
-   plan and a diff and writes nothing):
+   After that switch the tool runs normally from its own tree:
    ```bash
    ./venv/bin/python scripts/prepare_deployment.py            # plan + diff, no writes
    ./venv/bin/python scripts/prepare_deployment.py --apply    # backup, stash, switch, install
@@ -232,16 +242,19 @@ dies on the import. Bootstrap from a `main` worktree and point `--repo` at the
 live checkout:
 
 ```bash
-cd /home/flip/guardian-llmprovider-gateway
-git fetch origin
-git worktree add --detach /tmp/main-tool origin/main
-/home/flip/guardian-llmprovider-gateway/venv/bin/python /tmp/main-tool/scripts/prepare_deployment.py \
-    --repo /home/flip/guardian-llmprovider-gateway
+cd /home/flip/guardian-llmprovider-gateway && \
+  git fetch origin && \
+  git worktree add --detach /tmp/main-tool origin/main && \
+  /home/flip/guardian-llmprovider-gateway/venv/bin/python \
+      /tmp/main-tool/scripts/prepare_deployment.py \
+      --repo /home/flip/guardian-llmprovider-gateway
 ```
 
+That is the plan; re-run the last command with `--apply` appended — still from
+the worktree, because the live tree has neither script until that switch lands.
 The code runs from the `main` worktree; the plan and the writes target the live
-checkout. After the first successful switch the tool runs normally from its own
-tree and the sequence above applies unchanged.
+checkout. After that switch the tool runs normally from its own tree and the
+sequence above applies unchanged.
 
 ### What the post-restart verifier checks
 
