@@ -528,6 +528,10 @@ class DeployedCommit:
     reason: str = ""
     #: How the commit was read, e.g. ``/proc/4242/cwd -> git -C <root> rev-parse HEAD``.
     origin: str = ""
+    #: True only when the checkout is proven not to have moved since the process
+    #: started, i.e. when the sha is startup-bound evidence and not merely "what
+    #: is on disk now".  Always False for a SKIP.
+    bound_to_process: bool = False
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -538,6 +542,7 @@ class DeployedCommit:
             "branch": self.branch or None,
             "origin": self.origin,
             "reason": self.reason,
+            "bound_to_process": self.bound_to_process,
         }
 
 
@@ -661,6 +666,8 @@ def resolve_deployed_commit(ctx: Context) -> DeployedCommit:
         branch=branch,
         status=INFO,
         origin=origin,
+        bound_to_process=True,
+        reason=f"checkout unchanged since the process started ({evidence})",
     )
 
 
@@ -674,6 +681,8 @@ def deployed_commit_result(ctx: Context, deployed: DeployedCommit | None = None)
             detail += f"; {deployed.reason}"
     else:
         detail = deployed.reason
+        if deployed.commit:
+            detail = f"checkout HEAD {deployed.commit[:12]} is NOT the running code — {detail}"
     return Result(
         "deployed_commit",
         "deployed commit",

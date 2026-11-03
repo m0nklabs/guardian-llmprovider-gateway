@@ -1465,6 +1465,9 @@ def test_deployed_commit_is_read_from_the_process_root(tmp_path):
     assert deployed.branch == "main"
     assert deployed.root == root
     assert "/proc/4242/cwd" in deployed.origin
+    # The sha is startup-bound evidence, not merely "what is on disk now".
+    assert deployed.bound_to_process is True
+    assert "checkout unchanged since the process started" in deployed.reason
 
 
 def test_deployed_commit_appears_in_the_output_and_in_json(tmp_path, monkeypatch, capsys):
@@ -1493,6 +1496,7 @@ def test_deployed_commit_appears_in_the_output_and_in_json(tmp_path, monkeypatch
     assert document["deployed_commit"]["branch"] == "main"
     assert document["deployed_commit"]["source"] == verify.SOURCE_DEPLOYED_TREE
     assert document["deployed_commit"]["status"] == verify.INFO
+    assert document["deployed_commit"]["bound_to_process"] is True
     # It is a report, not a check: the check list is unchanged.
     assert [entry["check"] for entry in document["checks"]] == [
         spec.check_id for spec in verify.CHECKS
@@ -1526,6 +1530,7 @@ def test_a_checkout_that_moved_after_the_process_start_is_not_the_deployment(tmp
 
     assert deployed.status == verify.SKIP
     assert deployed.commit == head  # named, but explicitly not the running code
+    assert deployed.bound_to_process is False
     assert "moved to" in deployed.reason
     assert "restart, then re-run" in deployed.reason
 
@@ -1547,8 +1552,21 @@ def test_a_checkout_without_a_reflog_is_reported_as_unverified(tmp_path):
 
     assert deployed.status == verify.SKIP
     assert deployed.commit == head  # named, explicitly unverified
+    assert deployed.bound_to_process is False
     assert "could not be bound to the process start" in deployed.reason
     assert "not proof of the running code" in deployed.reason
+
+
+def test_an_unbound_sha_is_printed_as_not_the_running_code(tmp_path):
+    """The line itself must say the sha is not the running code, not just the code."""
+    root, head = git_checkout(tmp_path)
+    ctx = make_ctx(deployment=deployed_deployment(root), service_start=time.time() - 3600)
+
+    result = verify.deployed_commit_result(ctx)
+
+    assert result.status == verify.SKIP
+    assert f"checkout HEAD {head[:12]} is NOT the running code" in result.detail
+    assert result.observed["bound_to_process"] is False
 
 
 def test_foreign_tree_reports_the_deployed_commit_as_a_skip(tmp_path):
