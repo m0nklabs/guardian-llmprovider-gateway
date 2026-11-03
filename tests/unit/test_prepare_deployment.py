@@ -24,6 +24,7 @@ import importlib.util
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -1031,3 +1032,104 @@ def test_fetch_refreshes_origin_main_before_planning(tmp_path):
     assert "behind main:   1 commit(s)" in proc.stdout
     assert "fetched just now" in proc.stdout
     assert git(work, "rev-parse", "origin/main") == git(origin, "rev-parse", "refs/heads/main")
+
+
+# ── The first run (issue #89) ──────────────────────────────────────────
+
+
+def _run_copied_script(tmp_path: pathlib.Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run a copy of the tool that has no sibling ``pre_restart_check.py``.
+
+    The defect only exists at import time, so no in-process import and no mock can
+    reproduce it: the copy has to meet a real interpreter.  ``PYTHONPATH`` is
+    dropped so the repository's ``scripts/`` cannot rescue the import.
+    """
+    copied = tmp_path / "pd.py"
+    copied.write_text(SCRIPT.read_text())
+    env = dict(_GIT_ENV)
+    env.pop("PYTHONPATH", None)
+    return subprocess.run(
+        [sys.executable, str(copied), *args],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(tmp_path),
+        check=False,
+    )
+
+
+def test_a_copied_script_gives_the_bootstrap_not_a_bare_traceback(tmp_path):
+    """Issue #89: a copy loses its sibling module; the message must show the way out."""
+    live = tmp_path / "live-checkout"
+
+    proc = _run_copied_script(tmp_path, "--repo", str(live))
+
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert "Traceback" not in proc.stderr
+    # (a) the missing module and the directory it was expected in
+    assert "pre_restart_check" in proc.stderr
+    assert str(tmp_path / "pre_restart_check.py") in proc.stderr
+    # (b) the real cause: it must run from a tree that carries the sibling module
+    assert "scripts/pre_restart_check.py" in proc.stderr
+    assert "worktree of main, not a copy" in proc.stderr
+    # (c) the verified bootstrap, ready to paste, aimed at the checkout the reader named
+    assert "git fetch origin" in proc.stderr
+    assert "git worktree add --detach /tmp/main-tool origin/main" in proc.stderr
+    assert f"{live}/venv/bin/python /tmp/main-tool/scripts/prepare_deployment.py" in proc.stderr
+    assert f"--repo {live}" in proc.stderr
+
+
+def test_the_bootstrap_defaults_to_the_documented_live_checkout(tmp_path):
+    """Without ``--repo`` the message still prints the command from issue #89 verbatim."""
+    proc = _run_copied_script(tmp_path)
+
+    assert proc.returncode == 2, proc.stdout + proc.stderr
+    assert f"cd {tool.LIVE_CHECKOUT}" in proc.stderr
+    assert f"--repo {tool.LIVE_CHECKOUT}" in proc.stderr
+
+
+def test_the_bootstrap_is_where_a_reader_meets_it():
+    """Docstring and ``--help`` must lead with the first-run bootstrap (issue #89)."""
+    help_text = tool.build_parser().format_help()
+    docstring = tool.__doc__ or ""
+
+    for text in (docstring, help_text):
+        # The section is labelled and carries the whole paste-ready command: the
+        # docstring writes main in RST backticks and the help does not, so the
+        # label plus the commands are the shared pins.
+        assert "First run" in text
+        assert "git fetch origin" in text
+        assert "git worktree add --detach /tmp/main-tool origin/main" in text
+        assert f"--repo {tool.LIVE_CHECKOUT}" in text
+
+
+def test_the_bootstrap_quotes_its_paths_and_stops_on_a_failed_step(tmp_path):
+    """Review round 1, finding 1 + 3: a pasted block must stop and must not re-parse paths."""
+    hostile = tmp_path / "live checkout; touch pwned"
+
+    command = tool.bootstrap_command(str(hostile))
+
+    # `&&` between the steps: when /tmp/main-tool already exists the worktree add
+    # fails and nothing stale (or planted) may run after it.
+    assert "&& \\\n" in command
+    # Every path is shell-quoted, so a space or a metacharacter stays inert.
+    assert f"cd {shlex.quote(str(hostile))}" in command
+    assert f"--repo {shlex.quote(str(hostile))}" in command
+    # ... and never in its raw form, where the `;` would start a new command.
+    assert f"cd {hostile}" not in command
+    assert f"--repo {hostile}" not in command
+    # ... and the block is still valid shell after all that quoting.
+    assert subprocess.run(["bash", "-n", "-c", command], check=False).returncode == 0
+
+
+def test_a_relative_repo_renders_absolute_paths(tmp_path, monkeypatch):
+    """Review round 1, finding 3: ``cd <relative>`` must not make the interpreter relative."""
+    monkeypatch.chdir(tmp_path)
+
+    command = tool.bootstrap_command("relative-live")
+
+    resolved = str((tmp_path / "relative-live").resolve())
+    assert "cd relative-live" not in command
+    assert f"cd {resolved}" in command
+    assert f"{resolved}/venv/bin/python" in command
+    assert f"--repo {resolved}" in command

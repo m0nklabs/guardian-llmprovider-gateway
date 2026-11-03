@@ -143,9 +143,35 @@ grep -E 'OPENROUTER_API_KEY|NVIDIA_API_KEY|POOLSIDE_API_KEY' .env
 
 1. Edit `app/*.py`
 2. **Put the checkout on the merge target** — the unit runs this checkout, so a
-   restart deploys whatever `HEAD` it is on. One reviewable command does the
-   whole step (dry run by default; it prints the plan and a diff and writes
-   nothing):
+   restart deploys whatever `HEAD` it is on.
+
+   **If the checkout is behind `main`, bootstrap first**: the tool does not exist
+   in that tree yet, and a copy of `prepare_deployment.py` cannot start because it
+   imports its sibling `scripts/pre_restart_check.py`, which that tree lacks too.
+   Run it from a `main` worktree and point `--repo` at the live checkout:
+   ```bash
+   cd /home/flip/guardian-llmprovider-gateway && \
+     git fetch origin && \
+     git worktree add --detach /tmp/main-tool origin/main && \
+     /home/flip/guardian-llmprovider-gateway/venv/bin/python \
+         /tmp/main-tool/scripts/prepare_deployment.py \
+         --repo /home/flip/guardian-llmprovider-gateway
+   ```
+   That is the **plan** — a dry run that writes nothing. Review it, then re-run
+   the last command **with `--apply` appended, still from the worktree**:
+   ```bash
+   /home/flip/guardian-llmprovider-gateway/venv/bin/python \
+       /tmp/main-tool/scripts/prepare_deployment.py \
+       --repo /home/flip/guardian-llmprovider-gateway --apply
+   ```
+   `--apply` cannot be run from the live tree first: until that switch lands the
+   live tree carries neither script, so the worktree tool is the only one that
+   exists. The `&&` chain stops on a failed step, so a pre-existing
+   `/tmp/main-tool` makes the block fail instead of running stale code, and
+   `--repo` is what makes it work across trees: the code runs from the `main`
+   worktree, the plan and the writes target the live checkout.
+
+   After that switch the tool runs normally from its own tree:
    ```bash
    ./venv/bin/python scripts/prepare_deployment.py            # plan + diff, no writes
    ./venv/bin/python scripts/prepare_deployment.py --apply    # backup, stash, switch, install
@@ -191,8 +217,9 @@ The unit runs this checkout, so `systemctl restart` deploys whatever `HEAD` the
 checkout is on — which is how a restart on 2026-10-29 would have deployed
 `b30e027` (a feature branch 29 commits *behind* `main`) while every gate passed
 ([#85](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/85)).
-The sequence is therefore **`scripts/prepare_deployment.py --apply` (which does
-the `git checkout main && git pull --ff-only` and the config reconciliation) →
+The sequence is therefore **bootstrap from a `main` worktree when the checkout is
+behind (below) → `scripts/prepare_deployment.py --apply` (which does the `git
+checkout main && git pull --ff-only` and the config reconciliation) →
 `scripts/pre_restart_check.py` → `sudo systemctl restart
 guardian-llmprovider-gateway` → `scripts/verify_post_restart.py`**, and each
 step now names the commit it is talking about: the gate's first step prints
@@ -207,6 +234,27 @@ verifier then prints `[INFO] deployed commit — source=deployed-tree` (and
 `git -C <root> rev-parse HEAD`, so a green verdict names what it graded. Neither
 line is a verdict on its own: an unprovable head is a `SKIP`, never a pass, and
 a deliberately old deployment is legitimate.
+
+**The first run on a checkout behind `main`** is the one case where the tool
+cannot start from its own tree: neither `scripts/prepare_deployment.py` nor its
+sibling `scripts/pre_restart_check.py` exists there yet, and a copy of the file
+dies on the import. Bootstrap from a `main` worktree and point `--repo` at the
+live checkout:
+
+```bash
+cd /home/flip/guardian-llmprovider-gateway && \
+  git fetch origin && \
+  git worktree add --detach /tmp/main-tool origin/main && \
+  /home/flip/guardian-llmprovider-gateway/venv/bin/python \
+      /tmp/main-tool/scripts/prepare_deployment.py \
+      --repo /home/flip/guardian-llmprovider-gateway
+```
+
+That is the plan; re-run the last command with `--apply` appended — still from
+the worktree, because the live tree has neither script until that switch lands.
+The code runs from the `main` worktree; the plan and the writes target the live
+checkout. After that switch the tool runs normally from its own tree and the
+sequence above applies unchanged.
 
 ### What the post-restart verifier checks
 
