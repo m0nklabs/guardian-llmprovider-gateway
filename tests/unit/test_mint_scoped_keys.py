@@ -194,20 +194,35 @@ def test_a_mismatched_key_is_reported_not_called_ready(tmp_path: Path, capsys) -
     assert "every planned key already exists with the right scopes" not in out
 
 
-def test_concurrent_applies_do_not_drop_each_others_keys(tmp_path: Path) -> None:
-    """The lock serializes read-modify-write, so no minted key is lost."""
+def test_the_store_lock_serializes_read_modify_write(tmp_path: Path) -> None:
+    """Every concurrent writer's key must survive, not just the last one's.
+
+    Asserting "four correctly named keys at the end" would accept the very
+    failure this guards against: each writer could read the empty store, mint
+    its own tokens, and the last save would win while the others' printed
+    tokens no longer exist. So each writer adds a **distinct** key and every
+    one of them must be present afterwards.
+    """
     import threading
+    import time as _time
 
     path = _store(tmp_path)
     errors: list[BaseException] = []
 
-    def _run() -> None:
+    def _writer(index: int) -> None:
         try:
-            mint.main(["--store", str(path), "--apply"])
+            with mint.store_lock(path):
+                store = mint.load_store(path)
+                _time.sleep(0.05)  # widen the window the lock must cover
+                store[f"flip_writer{index}"] = {
+                    "name": f"writer{index}", "created_at": 1.0,
+                    "metadata": {"scopes": ["client"]}, "cloud_gateway_access": True,
+                }
+                mint.save_store(path, store)
         except BaseException as exc:  # noqa: BLE001 - surfaced below
             errors.append(exc)
 
-    threads = [threading.Thread(target=_run) for _ in range(4)]
+    threads = [threading.Thread(target=_writer, args=(i,)) for i in range(4)]
     for thread in threads:
         thread.start()
     for thread in threads:
@@ -215,6 +230,31 @@ def test_concurrent_applies_do_not_drop_each_others_keys(tmp_path: Path) -> None
 
     assert not errors, errors
     store = _read(path)
-    names = sorted(entry["name"] for entry in store.values())
-    assert names == ["capture-export", "dashboard", "lifecycle", "operator-tools"]
-    assert len(store) == 4, "a concurrent run must not leave duplicate keys"
+    assert sorted(store) == [f"flip_writer{i}" for i in range(4)], (
+        "a lost update: some writer's key was overwritten"
+    )
+
+
+def test_apply_saves_while_holding_the_lock(tmp_path: Path, monkeypatch) -> None:
+    """The real path must hold the lock across the save, not just the test helper."""
+    import fcntl
+
+    path = _store(tmp_path)
+    held: list[bool] = []
+    real_save = mint.save_store
+
+    def _spy(store_path, store):
+        # A second, non-blocking lock attempt must fail while the save runs.
+        with open(store_path.with_name(store_path.name + ".lock"), "a+") as handle:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                held.append(True)
+            else:
+                held.append(False)
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return real_save(store_path, store)
+
+    monkeypatch.setattr(mint, "save_store", _spy)
+    mint.main(["--store", str(path), "--apply"])
+    assert held == [True], "the store was saved without holding the lock"

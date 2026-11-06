@@ -90,11 +90,13 @@ def load_store(path: Path) -> dict:
     except yaml.YAMLError as exc:
         # A YAML error message quotes the offending source line, and that line
         # can be a token. Report the position and the problem class only.
+        # Report the position and the exception class only. ``str(exc)``,
+        # ``exc.problem`` and ``exc.context`` can all quote the offending source
+        # line, and that line can be a token.
         mark = getattr(exc, "problem_mark", None)
         where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark is not None else ""
-        problem = getattr(exc, "problem", None) or type(exc).__name__
         raise SystemExit(
-            f"refusing to touch {path}: unparsable YAML{where} ({problem}); "
+            f"refusing to touch {path}: unparsable YAML{where} ({type(exc).__name__}); "
             "the file was not modified and its contents are not reproduced here"
         ) from None
     if raw is None:
