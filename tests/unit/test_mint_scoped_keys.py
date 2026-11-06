@@ -93,7 +93,8 @@ def test_an_existing_key_with_other_scopes_is_left_alone(tmp_path: Path, capsys)
     mint.main(["--store", str(path), "--apply"])
     store = _read(path)
     assert store["flip_existing"]["metadata"]["scopes"] == ["client"]
-    assert "skip" in capsys.readouterr().out
+    # Reported as a mismatch, not as "ready": the migration is incomplete.
+    assert "mismatch" in capsys.readouterr().out
 
 
 def test_a_malformed_store_is_refused_and_left_untouched(tmp_path: Path) -> None:
@@ -136,3 +137,84 @@ def test_minted_tokens_are_unique(tmp_path: Path) -> None:
     mint.main(["--store", str(path), "--apply"])
     tokens = list(_read(path))
     assert len(tokens) == len(set(tokens)) == 4
+
+
+# ── the five review findings ────────────────────────────────────────────
+
+
+def test_json_and_apply_are_rejected_together(tmp_path: Path) -> None:
+    """The JSON document is token-free; --apply prints tokens. Never both."""
+    path = _store(tmp_path)
+    with pytest.raises(SystemExit):
+        mint.main(["--store", str(path), "--json", "--apply"])
+    assert not path.exists(), "the combination must be rejected before any write"
+
+
+def test_a_yaml_error_does_not_reproduce_the_store_contents(tmp_path: Path) -> None:
+    """A parser message quotes the offending line — which can be a token."""
+    path = tmp_path / "guardian.keys.yaml"
+    secret = "flip_deadbeefdeadbeefdeadbeefdeadbeef"
+    path.write_text(f"{secret}: [unclosed\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc:
+        mint.main(["--store", str(path), "--apply"])
+    message = str(exc.value)
+    assert secret not in message, "the token must not appear in the error"
+    assert "unparsable YAML" in message
+    assert path.read_text(encoding="utf-8").startswith(secret), "the file is untouched"
+
+
+def test_the_temporary_file_is_never_world_readable(tmp_path: Path, monkeypatch) -> None:
+    """Tokens must not be readable by other local users, even mid-write."""
+    path = _store(tmp_path)
+    seen: list[int] = []
+    real_mkstemp = mint.tempfile.mkstemp
+
+    def _spy(*args, **kwargs):
+        fd, name = real_mkstemp(*args, **kwargs)
+        seen.append(stat.S_IMODE(Path(name).stat().st_mode))
+        return fd, name
+
+    monkeypatch.setattr(mint.tempfile, "mkstemp", _spy)
+    mint.main(["--store", str(path), "--apply"])
+    assert seen, "the store must be written through a temporary file"
+    assert all(mode == 0o600 for mode in seen), f"temporary modes were {seen}"
+
+
+def test_a_mismatched_key_is_reported_not_called_ready(tmp_path: Path, capsys) -> None:
+    """An existing legacy key must not be presented as a completed migration."""
+    path = _store(tmp_path, {"flip_legacy": {
+        "name": "dashboard", "created_at": 1.0,
+        "metadata": {}, "cloud_gateway_access": True,
+    }})
+    mint.main(["--store", str(path)])
+    out = capsys.readouterr().out
+    assert "mismatch" in out
+    assert "--force" in out
+    assert "every planned key already exists with the right scopes" not in out
+
+
+def test_concurrent_applies_do_not_drop_each_others_keys(tmp_path: Path) -> None:
+    """The lock serializes read-modify-write, so no minted key is lost."""
+    import threading
+
+    path = _store(tmp_path)
+    errors: list[BaseException] = []
+
+    def _run() -> None:
+        try:
+            mint.main(["--store", str(path), "--apply"])
+        except BaseException as exc:  # noqa: BLE001 - surfaced below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_run) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert not errors, errors
+    store = _read(path)
+    names = sorted(entry["name"] for entry in store.values())
+    assert names == ["capture-export", "dashboard", "lifecycle", "operator-tools"]
+    assert len(store) == 4, "a concurrent run must not leave duplicate keys"
