@@ -1316,6 +1316,12 @@ async def model_endpoints(model_id: str, request: Request, client_id: str) -> di
             status_code=404, detail="Model '' not found in configuration (no alias match)"
         )
 
+    # Per-key model allowlist: a restricted key must not learn about endpoints of
+    # models it was not granted (404, matching the neighbouring model routes).
+    _allowed_models = (_auth_context(request) or {}).get("allowed_models")
+    if _allowed_models and raw_id not in _allowed_models:
+        raise HTTPException(status_code=404, detail=f"Model '{raw_id}' not found")
+
     if _is_failover_address(raw_id):
         group_name = raw_id.partition("/")[2]
         group = _safe_call(
