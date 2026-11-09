@@ -1094,6 +1094,10 @@ def _pick_keys(keys: Mapping[str, Any], warnings: list[str]) -> dict[str, KeyCho
     return picked
 
 
+class KeysFileError(Exception):
+    """A key store that exists but could not be used, with no token in the text."""
+
+
 def load_keys_file(path: Path) -> dict[str, Any]:
     """Load a Guardian key store from an explicit path.
 
@@ -1107,10 +1111,19 @@ def load_keys_file(path: Path) -> dict[str, Any]:
     """
     import yaml
 
-    with Path(path).open("r", encoding="utf-8") as handle:
-        loaded = yaml.safe_load(handle)
+    try:
+        with Path(path).open("r", encoding="utf-8") as handle:
+            loaded = yaml.safe_load(handle)
+    except yaml.YAMLError as exc:
+        # A YAML error can quote the offending source line, and a key store's
+        # source lines *are* tokens. The tokens are not registered as secrets
+        # yet (that happens after a successful load), so the text must not
+        # carry any of the document: class and position only.
+        mark = getattr(exc, "problem_mark", None)
+        where = f" at line {mark.line + 1}, column {mark.column + 1}" if mark is not None else ""
+        raise KeysFileError(f"{path} is not valid YAML{where} " f"({type(exc).__name__})") from None
     if not isinstance(loaded, Mapping):
-        raise TypeError(f"{path} is not a token -> entry mapping")
+        raise KeysFileError(f"{path} is not a token -> entry mapping")
     return {str(token): entry for token, entry in loaded.items()}
 
 
@@ -1199,7 +1212,13 @@ def prepare(ctx: Context) -> None:
     try:
         from app.proxy import auth as _auth
 
-        if ctx.keys_file:
+        if ctx.keys_file and not Path(ctx.keys_file).exists():
+            # A store that is not there is a different fact from one that is
+            # broken, and the operator's next action differs: point at the
+            # deployment's store vs repair this one. Do not load it.
+            ctx.keys = {}
+            ctx.keys_file_missing = True
+        elif ctx.keys_file:
             ctx.keys = load_keys_file(Path(ctx.keys_file))
         else:
             ctx.keys = _auth.load_api_keys()
@@ -1220,6 +1239,9 @@ def prepare(ctx: Context) -> None:
     except Exception as exc:  # noqa: BLE001 - reported by the key_store check
         ctx.keys = {}
         ctx.keys_load_error = _clean(exc)
+        # A store that failed to load grants nothing: leaving earlier choices in
+        # place would let a check answer with a key the run never resolved.
+        ctx.admin_key = ctx.client_key = ctx.capture_key = ctx.legacy_key = None
         ctx.warnings.append(f"key store could not be loaded: {_clean(exc)}")
 
 

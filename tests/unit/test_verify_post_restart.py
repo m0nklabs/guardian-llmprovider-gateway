@@ -1710,5 +1710,60 @@ def test_keys_file_loader_reads_a_store_the_checkout_does_not_have(tmp_path):
 def test_keys_file_loader_refuses_a_document_that_is_not_a_mapping(tmp_path):
     store = tmp_path / "guardian.keys.yaml"
     store.write_text("- just\n- a list\n", encoding="utf-8")
-    with pytest.raises(TypeError):
+    with pytest.raises(verify.KeysFileError):
         verify.load_keys_file(store)
+
+
+# -- Through prepare(), not by hand (review finding 1) ------------------
+
+
+def _prepare_ctx(**overrides):
+    """A Context whose prepare() can run without touching systemd or the network."""
+
+    def http(method, path, **kwargs):
+        if path == "/healthz":
+            return response(200, {})
+        if path == "/metrics":
+            return response(401 if not kwargs.get("key") else 200, {})
+        raise AssertionError(f"unexpected probe {method} {path}")
+
+    return make_ctx(http=http, **overrides)
+
+
+def test_prepare_classifies_a_nonexistent_keys_file_as_missing(tmp_path):
+    store = tmp_path / "nowhere" / "guardian.keys.yaml"
+    ctx = _prepare_ctx(keys_file=str(store))
+    verify.prepare(ctx)
+    assert ctx.keys_file_missing is True
+    assert ctx.keys_load_error == ""
+    result = verify.check_metrics_gate(ctx)
+    assert result.status == verify.SKIP
+    assert str(store) in result.detail
+    assert "gitignored" in result.detail
+    assert "could not be loaded" not in result.detail
+
+
+def test_prepare_reports_an_empty_existing_store_as_empty_not_missing(tmp_path):
+    store = tmp_path / "guardian.keys.yaml"
+    store.write_text("{}\n", encoding="utf-8")
+    ctx = _prepare_ctx(keys_file=str(store))
+    verify.prepare(ctx)
+    assert ctx.keys_file_missing is False
+    assert ctx.keys_file_empty is True
+    assert "holds no keys" in verify.check_metrics_gate(ctx).detail
+
+
+def test_a_malformed_keys_file_never_puts_a_token_in_the_output(tmp_path):
+    """PyYAML quotes the offending source line, and those lines are tokens."""
+    token = "oelala_deadbeefdeadbeefdeadbeefdeadbeef"
+    store = tmp_path / "guardian.keys.yaml"
+    store.write_text(f"name: {token}\nmetadata: [unclosed\n", encoding="utf-8")
+    ctx = _prepare_ctx(keys_file=str(store))
+    verify.prepare(ctx)
+    detail = verify.check_metrics_gate(ctx).detail
+    warnings = " ".join(ctx.warnings)
+    for text in (detail, warnings, ctx.keys_load_error or ""):
+        assert token not in text
+        assert "deadbeef" not in text
+    assert "could not be loaded" in detail
+    assert ctx.keys_file_missing is False
