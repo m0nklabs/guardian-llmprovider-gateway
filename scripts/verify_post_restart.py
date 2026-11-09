@@ -356,6 +356,14 @@ class Context:
     foreign_tree: bool = False
     #: True when the flag was given at all (printed as a banner).
     allow_foreign_tree: bool = False
+    #: Where the API keys came from (``auth`` or ``--keys-file``), for SKIP text.
+    keys_file: str | None = None
+    #: True when the key store this run read does not exist at all.
+    keys_file_missing: bool = False
+    #: True when the store exists but holds no entries.
+    keys_file_empty: bool = False
+    #: Why the store could not be loaded, when it could not (never a token).
+    keys_load_error: str = ""
 
     def require_service(self) -> None:
         """Fail the calling check unless the probe listener answered."""
@@ -1086,6 +1094,47 @@ def _pick_keys(keys: Mapping[str, Any], warnings: list[str]) -> dict[str, KeyCho
     return picked
 
 
+def load_keys_file(path: Path) -> dict[str, Any]:
+    """Load a Guardian key store from an explicit path.
+
+    A fresh worktree has no key store: ``config/guardian.keys.yaml`` is a
+    gitignored secret (``.gitignore:68``), so a run that grades the *live* API
+    from a review worktree sees an empty mapping and cannot observe anything
+    (#92).  ``--keys-file`` points at the deployment's store instead.
+
+    Returns the same token -> entry mapping ``auth.load_api_keys()`` returns; an
+    unreadable or non-mapping document raises so ``prepare`` can report it.
+    """
+    import yaml
+
+    with Path(path).open("r", encoding="utf-8") as handle:
+        loaded = yaml.safe_load(handle)
+    if not isinstance(loaded, Mapping):
+        raise TypeError(f"{path} is not a token -> entry mapping")
+    return {str(token): entry for token, entry in loaded.items()}
+
+
+def _no_key_reason(ctx: "Context", needed: str) -> str:
+    """Explain *why* a check has no usable key, without guessing at scopes.
+
+    "no key grants the client scope" was true in wording and wrong in meaning:
+    on a foreign tree the store is a gitignored secret that simply is not there,
+    so the reader went looking for a scope problem that did not exist (#92).
+    The three states need three different operator actions.
+    """
+    if ctx.keys_load_error:
+        return f"the key store could not be loaded: {ctx.keys_load_error}"
+    where = ctx.keys_file or "the key store"
+    if ctx.keys_file_missing:
+        return (
+            f"no key store at {where} (it is a gitignored secret, so a fresh worktree has none; "
+            "pass --keys-file with the deployment's config/guardian.keys.yaml to observe the live API)"
+        )
+    if ctx.keys_file_empty:
+        return f"the key store at {where} holds no keys"
+    return f"no key grants the {needed} scope ({len(ctx.keys)} key(s) in the store, none usable for it)"
+
+
 def _parse_unix_timestamp(raw: Any) -> float | None:
     """Parse a ``systemctl show --timestamp=unix`` value.
 
@@ -1150,7 +1199,14 @@ def prepare(ctx: Context) -> None:
     try:
         from app.proxy import auth as _auth
 
-        ctx.keys = _auth.load_api_keys()
+        if ctx.keys_file:
+            ctx.keys = load_keys_file(Path(ctx.keys_file))
+        else:
+            ctx.keys = _auth.load_api_keys()
+            ctx.keys_file = str(getattr(_auth, "API_KEYS_FILE", "")) or None
+        if ctx.keys_file:
+            ctx.keys_file_missing = not Path(ctx.keys_file).exists()
+        ctx.keys_file_empty = not ctx.keys and not ctx.keys_file_missing
         picked = _pick_keys(ctx.keys, ctx.warnings)
         ctx.admin_key = picked["admin"]
         ctx.client_key = picked["client"]
@@ -1163,6 +1219,7 @@ def prepare(ctx: Context) -> None:
             register_secrets(tokens)
     except Exception as exc:  # noqa: BLE001 - reported by the key_store check
         ctx.keys = {}
+        ctx.keys_load_error = _clean(exc)
         ctx.warnings.append(f"key store could not be loaded: {_clean(exc)}")
 
 
@@ -1242,7 +1299,7 @@ def check_queue_wait_budget(ctx: Context) -> Result:
     ctx.require_service()
     key = ctx.client_key
     if key is None:
-        return Result("queue_wait_budget", title, SKIP, "no key grants the client scope")
+        return Result("queue_wait_budget", title, SKIP, _no_key_reason(ctx, "client"))
     response = ctx.http("GET", "/v1/queue/status", key=key.token)
     body = response.json() if response.status == 200 else {}
     body = body if isinstance(body, Mapping) else {}
@@ -1668,7 +1725,7 @@ def check_metrics_gate(ctx: Context) -> Result:
         )
     key = ctx.client_key
     if key is None:
-        return Result("metrics_gate", title, SKIP, "no key grants the client scope", observed)
+        return Result("metrics_gate", title, SKIP, _no_key_reason(ctx, "client"), observed)
     authorized = ctx.http("GET", "/metrics", key=key.token)
     observed["client_status"] = authorized.status
     observed["content_type"] = authorized.headers.get("content-type", "")
@@ -1713,7 +1770,7 @@ def check_destination_allowlist(ctx: Context) -> Result:
             "destination_allowlist",
             title,
             SKIP,
-            "no key usable for /api/status (the admin or client scope is required)",
+            _no_key_reason(ctx, "admin or client (for /api/status)"),
         )
     response = ctx.http("GET", "/api/status", key=key.token)
     if response.status == 403:
@@ -1888,7 +1945,7 @@ def check_admission_bounds(ctx: Context) -> Result:
 
     key = ctx.client_key
     if key is None:
-        return Result("admission_bounds", title, SKIP, "no key grants the client scope", observed)
+        return Result("admission_bounds", title, SKIP, _no_key_reason(ctx, "client"), observed)
     queue = ctx.http("GET", "/v1/queue/status", key=key.token)
     queue_body = queue.json() if queue.status == 200 else {}
     queue_body = queue_body if isinstance(queue_body, Mapping) else {}
@@ -2033,7 +2090,7 @@ def check_metadata_audit(ctx: Context) -> Result:
     ctx.require_service()
     key = ctx.client_key
     if key is None:
-        return Result("metadata_audit", title, SKIP, "no key grants the client scope")
+        return Result("metadata_audit", title, SKIP, _no_key_reason(ctx, "client"))
     from app.proxy.audit import RECORD_FIELDS
 
     nonce = uuid.uuid4().hex
@@ -2165,7 +2222,7 @@ def check_endpoint_confinement(ctx: Context) -> Result:
     ctx.require_service()
     key = ctx.client_key
     if key is None:
-        return Result("endpoint_confinement", title, SKIP, "no key grants the client scope")
+        return Result("endpoint_confinement", title, SKIP, _no_key_reason(ctx, "client"))
     observed: dict[str, Any] = {}
     probes = {
         "dot_segment": "/v1/../slots",
@@ -2209,7 +2266,7 @@ def check_backend_death_seam(ctx: Context) -> Result:
     ctx.require_service()
     key = ctx.admin_key or ctx.client_key
     if key is None:
-        return Result("backend_death_seam", title, SKIP, "no key usable for /api/status")
+        return Result("backend_death_seam", title, SKIP, _no_key_reason(ctx, "admin or client (for /api/status)"))
     response = ctx.http("GET", "/api/status", key=key.token)
     if response.status == 403:
         return Result(
@@ -2286,7 +2343,7 @@ def check_capture_pipeline(ctx: Context) -> Result:
             "capture_pipeline",
             title,
             SKIP,
-            "no key grants the capture-export scope required by /api/capture/status",
+            _no_key_reason(ctx, "capture-export (for /api/capture/status)"),
         )
     response = ctx.http("GET", "/api/capture/status", key=key.token)
     if response.status == 403:
@@ -2404,7 +2461,7 @@ def check_cloud_catalog_credentials(ctx: Context) -> Result:
     ctx.require_service()
     key = ctx.admin_key
     if key is None:
-        return Result("cloud_catalog_credentials", title, SKIP, "no key grants the admin scope")
+        return Result("cloud_catalog_credentials", title, SKIP, _no_key_reason(ctx, "admin"))
     response = ctx.http("GET", "/api/cloud/catalog", key=key.token)
     if response.status == 403:
         return Result(
@@ -2686,6 +2743,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="maximum journal lines to read per check",
     )
     parser.add_argument(
+        "--keys-file",
+        default=None,
+        help=(
+            "read API keys from this store instead of the checkout's (default: the "
+            "checkout's own store). Use the deployment's config/guardian.keys.yaml when "
+            "this run grades the live API from another tree; the store is a gitignored "
+            "secret, so a fresh worktree has none"
+        ),
+    )
+    parser.add_argument(
         "--allow-foreign-tree",
         action="store_true",
         help=(
@@ -2712,6 +2779,7 @@ def build_context(args: argparse.Namespace) -> Context:
         ca_file=ca_file,
         insecure=bool(args.insecure),
         tls_server_name=args.tls_server_name,
+        keys_file=args.keys_file,
         timeout=float(args.timeout),
         journal_lines=int(args.journal_lines),
         http=lambda *a, **kw: (_ for _ in ()).throw(ProbeError("http surface not built")),

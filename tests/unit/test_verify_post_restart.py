@@ -13,6 +13,8 @@ import importlib.util
 import json
 import os
 import sys
+
+import pytest
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1607,3 +1609,106 @@ def test_a_deployed_root_without_git_reports_a_skip_not_a_commit(tmp_path):
     assert deployed.status == verify.SKIP
     assert deployed.commit == ""
     assert "no readable git HEAD" in deployed.reason
+
+
+# ── Why a check has no key (#92) ───────────────────────────────────────
+#
+# "no key grants the client scope" was true in wording and wrong in meaning: on
+# a fresh worktree the store is a gitignored secret that is simply absent, so
+# the reader went hunting for a scope problem that did not exist.  The three
+# states need three different operator actions, so each gets its own text.
+
+
+def test_a_missing_key_store_names_the_store_not_a_scope(tmp_path):
+    store = tmp_path / "config" / "api_keys.json"
+    ctx = make_ctx(
+        http=SplitAuthHTTP(401, 200),
+        keys={},
+        keys_file=str(store),
+        keys_file_missing=True,
+        client_key=None,
+    )
+    result = verify.check_metrics_gate(ctx)
+    assert result.status == verify.SKIP
+    assert str(store) in result.detail
+    assert "gitignored" in result.detail
+    assert "--keys-file" in result.detail
+    assert "no key grants" not in result.detail
+
+
+def test_an_empty_key_store_says_it_holds_no_keys(tmp_path):
+    store = tmp_path / "guardian.keys.yaml"
+    store.write_text("{}\n", encoding="utf-8")
+    ctx = make_ctx(
+        http=SplitAuthHTTP(401, 200),
+        keys={},
+        keys_file=str(store),
+        keys_file_missing=False,
+        keys_file_empty=True,
+        client_key=None,
+    )
+    result = verify.check_metrics_gate(ctx)
+    assert result.status == verify.SKIP
+    assert "holds no keys" in result.detail
+    assert "no key grants" not in result.detail
+
+
+def test_a_store_that_fails_to_load_names_the_error(tmp_path):
+    ctx = make_ctx(
+        http=SplitAuthHTTP(401, 200),
+        keys={},
+        keys_file=str(tmp_path / "guardian.keys.yaml"),
+        keys_load_error="mapping values are not allowed here",
+        client_key=None,
+    )
+    result = verify.check_metrics_gate(ctx)
+    assert result.status == verify.SKIP
+    assert "could not be loaded" in result.detail
+    assert "mapping values" in result.detail
+
+
+def test_a_populated_store_without_the_scope_names_the_scope_and_the_count(tmp_path):
+    ctx = make_ctx(
+        http=SplitAuthHTTP(401, 200),
+        keys={"a": {}, "b": {}, "c": {}},
+        keys_file=str(tmp_path / "guardian.keys.yaml"),
+        client_key=None,
+    )
+    result = verify.check_metrics_gate(ctx)
+    assert result.status == verify.SKIP
+    assert "client scope" in result.detail
+    assert "3 key(s)" in result.detail
+
+
+def test_the_skip_reason_never_contains_a_token(tmp_path):
+    token = "oelala_0123456789abcdef0123456789abcdef"
+    ctx = make_ctx(
+        http=SplitAuthHTTP(401, 200),
+        keys={token: {}},
+        keys_file=str(tmp_path / "guardian.keys.yaml"),
+        client_key=None,
+    )
+    result = verify.check_metrics_gate(ctx)
+    assert token not in result.detail
+    assert "0123456789abcdef" not in result.detail
+
+
+def test_keys_file_loader_reads_a_store_the_checkout_does_not_have(tmp_path):
+    store = tmp_path / "guardian.keys.yaml"
+    store.write_text(
+        "oelala_aaa:\n  name: aaa\n  metadata:\n    scopes: [admin]\n"
+        "oelala_bbb:\n  name: bbb\n",
+        encoding="utf-8",
+    )
+    loaded = verify.load_keys_file(store)
+    assert set(loaded) == {"oelala_aaa", "oelala_bbb"}
+    picked = verify._pick_keys(loaded, [])
+    assert picked["admin"] is not None and picked["admin"].name == "aaa"
+    assert picked["client"] is not None
+
+
+def test_keys_file_loader_refuses_a_document_that_is_not_a_mapping(tmp_path):
+    store = tmp_path / "guardian.keys.yaml"
+    store.write_text("- just\n- a list\n", encoding="utf-8")
+    with pytest.raises(TypeError):
+        verify.load_keys_file(store)
