@@ -1753,17 +1753,44 @@ def test_prepare_reports_an_empty_existing_store_as_empty_not_missing(tmp_path):
     assert "holds no keys" in verify.check_metrics_gate(ctx).detail
 
 
+def test_the_loader_never_quotes_the_store_it_could_not_parse(tmp_path):
+    """PyYAML quotes the line its scanner stopped on, and that line is a token.
+
+    This asserts on the loader itself rather than on the rendered SKIP text: the
+    later ``_clean()`` pass redacts credentials too, so a test at that layer
+    would still pass with the sanitiser removed (review finding on #93). The
+    first assertion proves the fixture really would leak.
+    """
+    import yaml
+
+    token = "oelala_deadbeefdeadbeefdeadbeefdeadbeef"
+    broken = "\tname: " + token + "\n"
+    with pytest.raises(yaml.YAMLError) as raw:
+        yaml.safe_load(broken)
+    assert "oelala_" in str(raw.value), "the fixture must leak, or the test proves nothing"
+
+    store = tmp_path / "guardian.keys.yaml"
+    store.write_text(broken, encoding="utf-8")
+    with pytest.raises(verify.KeysFileError) as raised:
+        verify.load_keys_file(store)
+    message = str(raised.value)
+    assert "oelala_" not in message
+    assert "deadbeef" not in message
+    assert "ScannerError" in message
+    assert "line 1" in message
+
+
 def test_a_malformed_keys_file_never_puts_a_token_in_the_output(tmp_path):
-    """PyYAML quotes the offending source line, and those lines are tokens."""
+    """End to end: the SKIP text, the warnings and the stored error stay clean."""
     token = "oelala_deadbeefdeadbeefdeadbeefdeadbeef"
     store = tmp_path / "guardian.keys.yaml"
-    store.write_text(f"name: {token}\nmetadata: [unclosed\n", encoding="utf-8")
+    store.write_text("\tname: " + token + "\n", encoding="utf-8")
     ctx = _prepare_ctx(keys_file=str(store))
     verify.prepare(ctx)
     detail = verify.check_metrics_gate(ctx).detail
     warnings = " ".join(ctx.warnings)
     for text in (detail, warnings, ctx.keys_load_error or ""):
-        assert token not in text
+        assert "oelala_" not in text
         assert "deadbeef" not in text
     assert "could not be loaded" in detail
     assert ctx.keys_file_missing is False
