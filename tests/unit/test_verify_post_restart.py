@@ -13,6 +13,8 @@ import importlib.util
 import json
 import os
 import sys
+
+import pytest
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1607,3 +1609,188 @@ def test_a_deployed_root_without_git_reports_a_skip_not_a_commit(tmp_path):
     assert deployed.status == verify.SKIP
     assert deployed.commit == ""
     assert "no readable git HEAD" in deployed.reason
+
+
+# ── Why a check has no key (#92) ───────────────────────────────────────
+#
+# "no key grants the client scope" was true in wording and wrong in meaning: on
+# a fresh worktree the store is a gitignored secret that is simply absent, so
+# the reader went hunting for a scope problem that did not exist.  The three
+# states need three different operator actions, so each gets its own text.
+
+
+def test_a_missing_key_store_names_the_store_not_a_scope(tmp_path):
+    store = tmp_path / "config" / "api_keys.json"
+    ctx = make_ctx(
+        http=SplitAuthHTTP(401, 200),
+        keys={},
+        keys_file=str(store),
+        keys_file_missing=True,
+        client_key=None,
+    )
+    result = verify.check_metrics_gate(ctx)
+    assert result.status == verify.SKIP
+    assert str(store) in result.detail
+    assert "gitignored" in result.detail
+    assert "--keys-file" in result.detail
+    assert "no key grants" not in result.detail
+
+
+def test_an_empty_key_store_says_it_holds_no_keys(tmp_path):
+    store = tmp_path / "guardian.keys.yaml"
+    store.write_text("{}\n", encoding="utf-8")
+    ctx = make_ctx(
+        http=SplitAuthHTTP(401, 200),
+        keys={},
+        keys_file=str(store),
+        keys_file_missing=False,
+        keys_file_empty=True,
+        client_key=None,
+    )
+    result = verify.check_metrics_gate(ctx)
+    assert result.status == verify.SKIP
+    assert "holds no keys" in result.detail
+    assert "no key grants" not in result.detail
+
+
+def test_a_store_that_fails_to_load_names_the_error(tmp_path):
+    ctx = make_ctx(
+        http=SplitAuthHTTP(401, 200),
+        keys={},
+        keys_file=str(tmp_path / "guardian.keys.yaml"),
+        keys_load_error="mapping values are not allowed here",
+        client_key=None,
+    )
+    result = verify.check_metrics_gate(ctx)
+    assert result.status == verify.SKIP
+    assert "could not be loaded" in result.detail
+    assert "mapping values" in result.detail
+
+
+def test_a_populated_store_without_the_scope_names_the_scope_and_the_count(tmp_path):
+    ctx = make_ctx(
+        http=SplitAuthHTTP(401, 200),
+        keys={"a": {}, "b": {}, "c": {}},
+        keys_file=str(tmp_path / "guardian.keys.yaml"),
+        client_key=None,
+    )
+    result = verify.check_metrics_gate(ctx)
+    assert result.status == verify.SKIP
+    assert "client scope" in result.detail
+    assert "3 key(s)" in result.detail
+
+
+def test_the_skip_reason_never_contains_a_token(tmp_path):
+    token = "oelala_0123456789abcdef0123456789abcdef"
+    ctx = make_ctx(
+        http=SplitAuthHTTP(401, 200),
+        keys={token: {}},
+        keys_file=str(tmp_path / "guardian.keys.yaml"),
+        client_key=None,
+    )
+    result = verify.check_metrics_gate(ctx)
+    assert token not in result.detail
+    assert "0123456789abcdef" not in result.detail
+
+
+def test_keys_file_loader_reads_a_store_the_checkout_does_not_have(tmp_path):
+    store = tmp_path / "guardian.keys.yaml"
+    store.write_text(
+        "oelala_aaa:\n  name: aaa\n  metadata:\n    scopes: [admin]\n"
+        "oelala_bbb:\n  name: bbb\n",
+        encoding="utf-8",
+    )
+    loaded = verify.load_keys_file(store)
+    assert set(loaded) == {"oelala_aaa", "oelala_bbb"}
+    picked = verify._pick_keys(loaded, [])
+    assert picked["admin"] is not None and picked["admin"].name == "aaa"
+    assert picked["client"] is not None
+
+
+def test_keys_file_loader_refuses_a_document_that_is_not_a_mapping(tmp_path):
+    store = tmp_path / "guardian.keys.yaml"
+    store.write_text("- just\n- a list\n", encoding="utf-8")
+    with pytest.raises(verify.KeysFileError):
+        verify.load_keys_file(store)
+
+
+# -- Through prepare(), not by hand (review finding 1) ------------------
+
+
+def _prepare_ctx(**overrides):
+    """A Context whose prepare() can run without touching systemd or the network."""
+
+    def http(method, path, **kwargs):
+        if path == "/healthz":
+            return response(200, {})
+        if path == "/metrics":
+            return response(401 if not kwargs.get("key") else 200, {})
+        raise AssertionError(f"unexpected probe {method} {path}")
+
+    return make_ctx(http=http, **overrides)
+
+
+def test_prepare_classifies_a_nonexistent_keys_file_as_missing(tmp_path):
+    store = tmp_path / "nowhere" / "guardian.keys.yaml"
+    ctx = _prepare_ctx(keys_file=str(store))
+    verify.prepare(ctx)
+    assert ctx.keys_file_missing is True
+    assert ctx.keys_load_error == ""
+    result = verify.check_metrics_gate(ctx)
+    assert result.status == verify.SKIP
+    assert str(store) in result.detail
+    assert "gitignored" in result.detail
+    assert "could not be loaded" not in result.detail
+
+
+def test_prepare_reports_an_empty_existing_store_as_empty_not_missing(tmp_path):
+    store = tmp_path / "guardian.keys.yaml"
+    store.write_text("{}\n", encoding="utf-8")
+    ctx = _prepare_ctx(keys_file=str(store))
+    verify.prepare(ctx)
+    assert ctx.keys_file_missing is False
+    assert ctx.keys_file_empty is True
+    assert "holds no keys" in verify.check_metrics_gate(ctx).detail
+
+
+def test_the_loader_never_quotes_the_store_it_could_not_parse(tmp_path):
+    """PyYAML quotes the line its scanner stopped on, and that line is a token.
+
+    This asserts on the loader itself rather than on the rendered SKIP text: the
+    later ``_clean()`` pass redacts credentials too, so a test at that layer
+    would still pass with the sanitiser removed (review finding on #93). The
+    first assertion proves the fixture really would leak.
+    """
+    import yaml
+
+    token = "oelala_deadbeefdeadbeefdeadbeefdeadbeef"
+    broken = "\tname: " + token + "\n"
+    with pytest.raises(yaml.YAMLError) as raw:
+        yaml.safe_load(broken)
+    assert "oelala_" in str(raw.value), "the fixture must leak, or the test proves nothing"
+
+    store = tmp_path / "guardian.keys.yaml"
+    store.write_text(broken, encoding="utf-8")
+    with pytest.raises(verify.KeysFileError) as raised:
+        verify.load_keys_file(store)
+    message = str(raised.value)
+    assert "oelala_" not in message
+    assert "deadbeef" not in message
+    assert "ScannerError" in message
+    assert "line 1" in message
+
+
+def test_a_malformed_keys_file_never_puts_a_token_in_the_output(tmp_path):
+    """End to end: the SKIP text, the warnings and the stored error stay clean."""
+    token = "oelala_deadbeefdeadbeefdeadbeefdeadbeef"
+    store = tmp_path / "guardian.keys.yaml"
+    store.write_text("\tname: " + token + "\n", encoding="utf-8")
+    ctx = _prepare_ctx(keys_file=str(store))
+    verify.prepare(ctx)
+    detail = verify.check_metrics_gate(ctx).detail
+    warnings = " ".join(ctx.warnings)
+    for text in (detail, warnings, ctx.keys_load_error or ""):
+        assert "oelala_" not in text
+        assert "deadbeef" not in text
+    assert "could not be loaded" in detail
+    assert ctx.keys_file_missing is False
