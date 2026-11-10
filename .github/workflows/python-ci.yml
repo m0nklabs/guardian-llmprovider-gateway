@@ -44,5 +44,5 @@ jobs:
           if [ -f requirements.txt ]; then pip install --no-deps -r requirements.txt 2>/dev/null || echo "skip heavy deps"; fi
 
       - name: Run pytest with coverage
-        run: python -m pytest tests -q --tb=short --cov=app --cov-report=term-missing
+        run: python -m pytest tests -q --tb=short --cov=app --cov-report=term-missing --cov-fail-under=80
 
