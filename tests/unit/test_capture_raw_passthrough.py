@@ -50,7 +50,9 @@ def _parsable_records(text: str) -> int:
     return count
 
 
-async def _wait_for_wal(root, *, min_events: int = 1, timeout: float = 5.0) -> str:
+async def _wait_for_wal(
+    root, *, min_events: int = 1, expect: tuple[str, ...] | None = None, timeout: float = 5.0
+) -> str:
     """Return the active WAL text once it holds *min_events* complete records.
 
     The capture writer is asynchronous, so a fixed ``asyncio.sleep()`` before
@@ -66,20 +68,37 @@ async def _wait_for_wal(root, *, min_events: int = 1, timeout: float = 5.0) -> s
     while True:
         text = _read_active_wal(root)
         found = _parsable_records(text)
-        if found >= min_events:
+        seen = _event_types(text)
+        if expect:
+            if all(name in seen for name in expect):
+                return text
+        elif found >= min_events:
             return text
         if time.monotonic() >= deadline:
-            event_types = []
-            for line in text.splitlines():
-                try:
-                    event_types.append(json.loads(line).get("event_type"))
-                except json.JSONDecodeError:
-                    break
+            if expect:
+                missing = [name for name in expect if name not in seen]
+                raise AssertionError(
+                    f"capture writer did not flush {missing} within {timeout}s: "
+                    f"saw {seen} ({found} record(s)); wal_tail={text[-300:]!r}"
+                )
             raise AssertionError(
                 f"capture writer did not flush {min_events} record(s) within {timeout}s: "
-                f"saw {found} ({event_types}); wal_tail={text[-300:]!r}"
+                f"saw {found} ({seen}); wal_tail={text[-300:]!r}"
             )
         await asyncio.sleep(0.02)
+
+
+def _event_types(text: str) -> list[str]:
+    """The ``event_type`` of every complete record currently in the WAL."""
+    types = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            types.append(json.loads(line).get("event_type"))
+        except json.JSONDecodeError:
+            break
+    return types
 
 
 async def _wait_for_path(path, *, timeout: float = 5.0):
@@ -345,7 +364,7 @@ class TestCallerOriginRegistry:
         )
         assert ctx.caller_request_id is None
         ctrl.capture_request_completed(ctx, response_content="done")
-        text = await _wait_for_wal(root, min_events=2)
+        text = await _wait_for_wal(root, expect=("request_received", "request_completed"))
         events = [json.loads(line) for line in text.strip().splitlines()]
         by_type = {e["event_type"]: e for e in events}
         assert by_type["request_received"]["caller_request_id"] == "client-req-abc"
