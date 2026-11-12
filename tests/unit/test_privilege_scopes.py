@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import timedelta
 
 import pytest
 import yaml
@@ -425,12 +426,25 @@ class TestFailClosed:
         copy of it) must not turn every legacy key into a `client`-only key the
         instant the gateway restarts. A malformed value still enforces
         immediately — that case is covered separately.
+
+        The assertion is on the *resolved deadline* and on the grace window
+        evaluated at an explicit instant, never on a status code: this test used
+        to expect `200` because the shipped deadline happened to be in the
+        future, and it went red on 2026-11-11 when that stopped being true
+        (issue #97). What the fallback means must not depend on today's date.
         """
         with caplog.at_level("WARNING"):
             deadline(ABSENT)
-        response = _call(proxy_client, "get", "/api/keys", token=LEGACY_TOKEN)
-        assert response.status_code == 200, response.text
+            resolved = scopes.configured_enforced_after()
+
+        assert resolved is not None, "an absent auth section must fall back, not fail closed"
+        assert resolved == scopes.parse_enforced_after(scopes.SHIPPED_ENFORCED_AFTER)
         assert any("shipped default" in record.getMessage() for record in caplog.records)
+
+        # The window is open up to the deadline and closed from it onwards, no
+        # matter which side of it the wall clock is on today.
+        assert scopes.grace_window_open(now=resolved - timedelta(seconds=1)) is True
+        assert scopes.grace_window_open(now=resolved) is False
 
     def test_unreadable_key_store_rejects_every_request(self, tmp_path, monkeypatch, stubbed_admin):
         unreadable = tmp_path / "keys-as-directory.yaml"
