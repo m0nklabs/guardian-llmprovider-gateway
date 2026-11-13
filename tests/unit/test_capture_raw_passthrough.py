@@ -10,6 +10,7 @@ still happens.
 import asyncio
 import base64
 import json
+import time
 
 import pytest
 
@@ -31,6 +32,83 @@ ACTIVE_WAL_CANDIDATES = (
     "guardian_capture_current.jsonl",
     "guardian_capture_current.jsonl.gz",
 )
+
+
+def _parsable_records(text: str) -> int:
+    """How many complete JSON records the WAL text currently holds."""
+    count = 0
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            json.loads(line)
+        except json.JSONDecodeError:
+            # A trailing half-written line is a real state of a live WAL; it
+            # simply does not count as a record yet.
+            break
+        count += 1
+    return count
+
+
+async def _wait_for_wal(
+    root, *, min_events: int = 1, expect: tuple[str, ...] | None = None, timeout: float = 5.0
+) -> str:
+    """Return the active WAL text once it holds *min_events* complete records.
+
+    The capture writer is asynchronous, so a fixed ``asyncio.sleep()`` before
+    reading is a guess about flush latency: generous on an idle machine, too
+    short on a loaded CI runner, where the test then failed as
+    ``KeyError: 'request_completed'`` instead of saying that the writer was
+    slow (issue #99). Polling keeps the test's meaning — "the writer flushed" —
+    and turns a genuine writer failure into a failure that names the events it
+    waited for.
+    """
+    deadline = time.monotonic() + timeout
+    text = ""
+    while True:
+        text = _read_active_wal(root)
+        found = _parsable_records(text)
+        seen = _event_types(text)
+        if expect:
+            if all(name in seen for name in expect):
+                return text
+        elif found >= min_events:
+            return text
+        if time.monotonic() >= deadline:
+            if expect:
+                missing = [name for name in expect if name not in seen]
+                raise AssertionError(
+                    f"capture writer did not flush {missing} within {timeout}s: "
+                    f"saw {seen} ({found} record(s)); wal_tail={text[-300:]!r}"
+                )
+            raise AssertionError(
+                f"capture writer did not flush {min_events} record(s) within {timeout}s: "
+                f"saw {found} ({seen}); wal_tail={text[-300:]!r}"
+            )
+        await asyncio.sleep(0.02)
+
+
+def _event_types(text: str) -> list[str]:
+    """The ``event_type`` of every complete record currently in the WAL."""
+    types = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            types.append(json.loads(line).get("event_type"))
+        except json.JSONDecodeError:
+            break
+    return types
+
+
+async def _wait_for_path(path, *, timeout: float = 5.0):
+    """Wait until *path* exists — the writer decides when, not the test."""
+    deadline = time.monotonic() + timeout
+    while not path.exists():
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"{path} was not created within {timeout}s")
+        await asyncio.sleep(0.02)
+    return path
 
 
 def _read_active_wal(root) -> str:
@@ -120,8 +198,7 @@ class TestRawPassthrough:
             requested_model="llama3.2-3b",
             request_messages=messages,
         )
-        await asyncio.sleep(0.3)
-        text = _read_active_wal(root)
+        text = await _wait_for_wal(root)
         # The raw secret MUST be present — Guardian does not redact (Keanu does).
         assert fake_secret in text
         event = json.loads(text.strip().splitlines()[0])
@@ -155,8 +232,7 @@ class TestRawPassthrough:
             tool_results=[{"tool_call_id": "call_1", "content": "result: sk-something-secret-xyz"}],
             finish_reason="stop",
         )
-        await asyncio.sleep(0.3)
-        text = _read_active_wal(root)
+        text = await _wait_for_wal(root, min_events=2)
         assert "The answer is 42." in text
         assert "Wait, let me think" in text
         assert "sk-something-secret-xyz" in text  # tool results NOT redacted
@@ -181,8 +257,7 @@ class TestRawPassthrough:
             requested_model="llama3.2-3b",
             request_messages=messages,
         )
-        await asyncio.sleep(0.3)
-        text = _read_active_wal(root)
+        text = await _wait_for_wal(root)
         # Base64 payload must NOT be in the WAL; a media reference must be.
         assert PNG_1PX not in text
         event = json.loads(text.strip().splitlines()[0])
@@ -229,7 +304,7 @@ class TestRawPassthrough:
                     ],
                 }],
             )
-            await asyncio.sleep(0.3)
+            await _wait_for_path(tmp_path / "media" / "req-mode-cfg_0.png")
         finally:
             os.umask(original_umask)
             await ctrl.stop_writer()
@@ -253,6 +328,8 @@ class TestRawPassthrough:
             requested_model="llama3.2-3b",
             request_messages=[{"role": "user", "content": "hi"}],
         )
+        # A negative assertion needs elapsed time, not a poll: polling for
+        # "nothing appeared" would pass immediately and prove nothing.
         await asyncio.sleep(0.3)
         # The writer may not have created the file at all (no events to
         # write) — the helper returns "" in that case.
@@ -287,8 +364,7 @@ class TestCallerOriginRegistry:
         )
         assert ctx.caller_request_id is None
         ctrl.capture_request_completed(ctx, response_content="done")
-        await asyncio.sleep(0.3)
-        text = _read_active_wal(root)
+        text = await _wait_for_wal(root, expect=("request_received", "request_completed"))
         events = [json.loads(line) for line in text.strip().splitlines()]
         by_type = {e["event_type"]: e for e in events}
         assert by_type["request_received"]["caller_request_id"] == "client-req-abc"
