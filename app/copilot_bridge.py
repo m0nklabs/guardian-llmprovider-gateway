@@ -178,7 +178,9 @@ def create_app(settings: Settings | None = None, client: httpx.AsyncClient | Non
         protocol = model["protocol"]
         validate_chat(body, protocol)
         prefix = {"responses": "openai/responses/", "chat": "openai/", "messages": "anthropic/"}[protocol]
-        kwargs = {k: v for k, v in body.items() if k in CHAT_FIELDS}
+        # Optional nullable controls mean unspecified. Required messages were
+        # validated above; never forward explicit null into provider overrides.
+        kwargs = {k: v for k, v in body.items() if k in CHAT_FIELDS and v is not None}
         count = body.get("n")
         if count is not None and (isinstance(count, bool) or not isinstance(count, int) or count != 1):
             raise HTTPException(400, "The economical bridge supports one completion per request (n=1)")
@@ -193,8 +195,8 @@ def create_app(settings: Settings | None = None, client: httpx.AsyncClient | Non
             raise HTTPException(400, "The selected model explicitly does not support tools")
         if body.get("stream") and supports.get("streaming") is False:
             raise HTTPException(400, "The selected model explicitly does not support streaming")
-        if "reasoning_effort" in body and isinstance(supports.get("reasoning_effort"), list):
-            if body["reasoning_effort"] not in supports["reasoning_effort"]:
+        if "reasoning_effort" in kwargs and isinstance(supports.get("reasoning_effort"), list):
+            if kwargs["reasoning_effort"] not in supports["reasoning_effort"]:
                 raise HTTPException(400, "reasoning_effort is not supported by the selected model")
         if "prompt_cache_retention" in kwargs:
             retention = kwargs.pop("prompt_cache_retention")

@@ -562,3 +562,9 @@ Carry-forward per nog-OPEN item (essentie + bewijs → voltekst in `docs/AGENT_J
 
 - Review5885370991 confirms cleanup fix and identifies null n/stream flags incorrectly rejected. Nine pre-fix protocol/flag combinations return400; now null flags are omitted from inference kwargs while actual n!=1/nonboolstream remain rejected. Caller body is not mutated. Focused284 checks and actual socket-denied configured-URL/auth protocol checker pass.
 - Full suite initially stopped on unrelated asynchronous WAL request_completed timing test after363 passes; isolated retry passed. Complete rerun collected before final push. No out-of-scope capture/WAL code edits; existing issue/PR101 owns that test-race work. Final current-head review still required.
+
+### 2026-11-13T03:13Z — Transport close ownership and nullable controls
+
+- Review5885447048 confirms nullable flags and identifies the same raw-task cancellation boundary in pre-result HTTP cleanup, plus nullable cache-retention/reasoning controls. Transport now reuses independently owned `_Cleanup`/`_finish_tasks`, closes captured HTTP responses concurrently within one deadline, and observes failing/hung children without masking the upstream status. Tests use real httpx.Response/AsyncByteStream: is_closed alone was insufficient because cancellation could mark the response closed while its byte stream remained unclosed.
+- Optional chat kwargs with None are omitted before provider dispatch; capability/cache validation checks actual supplied values only. Nine additional nullable cache/key/reasoning cases and combined actual-runtime null controls preserve default behavior with oneHTTP.
+- Focused306 tests pass including13new transport cancellation tests; no public setting/API or production mutation. Full suite, final runtime checker and next exact-head review still determine completion.

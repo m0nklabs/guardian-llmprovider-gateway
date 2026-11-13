@@ -6,12 +6,14 @@ one guarded send. No prompts, credentials or raw error bodies are retained.
 """
 from __future__ import annotations
 
+import asyncio
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 import httpx
 
 from app.copilot_errors import retry_after
+from app.copilot_stream import _Cleanup, _finish_tasks
 
 
 @dataclass
@@ -130,10 +132,19 @@ class LitellmOperations:
         finally:
             self._state.reset(token)
             if not streamed:
-                import anyio
-                with anyio.move_on_after(self._cleanup_seconds, shield=True):
-                    for response in state.responses:
-                        await response.aclose()
+                # Own cleanup independently: AnyIO shields alone do not protect
+                # aclose from raw/repeated Task.cancel(), and this invocation has
+                # not handed a result to the outer inference/stream owner yet.
+                # Concurrent closes share one deadline so one stuck response
+                # cannot prevent another captured connection from being released.
+                async def close_responses(deadline):
+                    tasks = {asyncio.create_task(response.aclose(), name="copilot-stream-http-close")
+                             for response in state.responses}
+                    if tasks:
+                        await _finish_tasks(tasks, deadline)
+
+                if state.responses:
+                    await _Cleanup(close_responses, self._cleanup_seconds).wait()
 
     async def _responses_completion(self, **kwargs):
         # LiteLLM 1.103.2's async Chat→Responses bridge omits its client kwarg.
