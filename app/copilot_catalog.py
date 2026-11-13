@@ -62,6 +62,15 @@ def _mapping(parent: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     return value
 
 
+def _copy_metadata(value: Any) -> Any:
+    try:
+        return deepcopy(value)
+    except RecursionError:
+        # JSON decoding can accept deeper objects than deepcopy can traverse.
+        # This is a bad row, not a failed snapshot that should retain revocations.
+        raise _InvalidEntry("Catalog metadata exceeds projection depth") from None
+
+
 def _project(entry: Mapping[str, Any], identity: tuple[str, str, str]) -> tuple[dict[str, Any] | None, str]:
     policy = _mapping(entry, "policy")
     if policy.get("state") == "disabled":
@@ -109,20 +118,20 @@ def _project(entry: Mapping[str, Any], identity: tuple[str, str, str]) -> tuple[
         "id": f"{brand}/{raw_id}", "object": "model", "owned_by": brand,
         "name": entry.get("name", raw_id), "vendor": vendor,
         "upstream_id": raw_id, "protocol": protocol,
-        "supported_endpoints": deepcopy(endpoints),
+        "supported_endpoints": _copy_metadata(endpoints),
         # These are the adapter's protocol modalities, not invented token limits.
         "architecture": {"input_modalities": ["text"] + (["image"] if supports.get("vision") is True else []),
                          "output_modalities": ["embedding" if protocol == "embeddings" else "text"]},
     }
     if "capabilities" in entry:
-        public["capabilities"] = deepcopy(dict(capabilities))
+        public["capabilities"] = _copy_metadata(dict(capabilities))
     context = limits.get("max_context_window_tokens", limits.get("max_prompt_tokens"))
     if context is not None:
         public["context_length"] = context
     if "max_output_tokens" in limits:
         public["max_output_tokens"] = limits["max_output_tokens"]
     if efforts:
-        public["reasoning"] = {"supported": True, "supported_efforts": deepcopy(efforts)}
+        public["reasoning"] = {"supported": True, "supported_efforts": _copy_metadata(efforts)}
     return public, "accepted"
 
 
@@ -170,20 +179,26 @@ class Catalog:
 
     @property
     def is_stale(self) -> bool:
-        age = self.age_seconds
-        return age is None or age >= self.settings.catalog_max_age_seconds
+        """Discovery is degraded after failure, even during the usable grace period."""
+        return self.last_error is not None or not self.usable
 
     @property
     def usable(self) -> bool:
-        """A fresh successful snapshot is usable even when it serves no models."""
-        return not self.is_stale
+        """A successful snapshot remains usable until its maximum age expires.
+
+        Refresh failures mark discovery stale but do not cut short this grace
+        period. A successful empty snapshot is also usable.
+        """
+        age = self.age_seconds
+        return age is not None and age < self.settings.catalog_max_age_seconds
 
     @property
     def status(self) -> dict[str, Any]:
         """Safe diagnostics: no upstream rows, model names, credentials or bodies."""
         age = self.age_seconds
-        stale = age is None or age >= self.settings.catalog_max_age_seconds
-        return {"usable": not stale, "is_stale": stale, "age_seconds": age,
+        usable = age is not None and age < self.settings.catalog_max_age_seconds
+        stale = self.last_error is not None or not usable
+        return {"usable": usable, "is_stale": stale, "age_seconds": age,
                 "last_success": self.last_success, "last_error": self.last_error,
                 "model_count": len(self.models), "counts": dict(self.counts)}
 

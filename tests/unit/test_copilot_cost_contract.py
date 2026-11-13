@@ -137,6 +137,7 @@ async def test_explicit_no_tool_support_refused_before_call():
         app, name = ready_app(upstream, completion, AsyncMock())
         app.state.catalog.models[name]["capabilities"]["supports"] = {"tool_calls": False}
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://bridge") as client:
-            result = await client.post("/v1/chat/completions", json={"model": name, "messages": [{"role": "user", "content": "Hi"}], "tools": [{"type": "function"}]}, headers=HEADERS)
+            result = await client.post("/v1/chat/completions", json={"model": name, "messages": [{"role": "user", "content": "Hi"}], "tools": [{"type": "function", "function": {"name": "probe", "parameters": {"type": "object", "properties": {}}}}]}, headers=HEADERS)
     assert result.status_code == 400
+    assert "explicitly does not support tools" in result.json()["detail"]
     assert completion.await_count == 0

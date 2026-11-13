@@ -175,6 +175,82 @@ async def test_invalid_rows_do_not_discard_valid_rows_or_keep_retired_models(cap
         assert "upstream-secret" not in repr(catalog.status)
 
 
+def deeply_nested_entry():
+    raw = entry("deep")
+    nested = {"leaf": "sensitive-payload"}
+    for _ in range(600):
+        nested = {"nested": nested}
+    raw["capabilities"]["unknown_metadata"] = nested
+    return raw
+
+
+def test_deep_metadata_projection_is_invalid_instead_of_raising_recursion_error():
+    raw = json.loads(json.dumps(deeply_nested_entry()))
+    assert normalize_model(raw) is None
+
+
+@pytest.mark.asyncio
+async def test_deep_metadata_row_does_not_block_revocation_and_valid_snapshot(caplog):
+    state = {"data": [entry("revoked")]}
+    now = [100.0]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, content=json.dumps(state)))) as client:
+        catalog = Catalog(settings(), client, clock=lambda: now[0])
+        await catalog.refresh()
+        assert set(catalog.models) == {"openai/revoked"}
+        state["data"] = [entry("revoked", policy={"state": "disabled"}),
+                         deeply_nested_entry(), entry("valid")]
+        now[0] = 101
+        await catalog.refresh()
+        assert set(catalog.models) == {"openai/valid"}
+        assert catalog.last_success == 101
+        assert catalog.last_error is None
+        assert catalog.counts == {"total": 3, "accepted": 1, "invalid": 1,
+                                  "disabled": 1, "unsupported": 0, "duplicate_identities": 0}
+        assert "sensitive-payload" not in caplog.text
+
+
+@pytest.mark.parametrize("failure,error", [("http", "HTTPStatusError"), ("root", "ValueError")])
+@pytest.mark.asyncio
+async def test_failed_refresh_is_stale_but_usable_during_grace_then_success_clears_error(failure, error):
+    state = {"failure": None}
+    now = [100.0]
+    def handle(request):
+        if state["failure"] == "http":
+            return httpx.Response(503)
+        if state["failure"] == "root":
+            return httpx.Response(200, json={"data": None})
+        return httpx.Response(200, json={"data": [entry()]})
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+        catalog = Catalog(settings(max_age=37), client, clock=lambda: now[0])
+        await catalog.refresh()
+        assert not catalog.is_stale
+        previous_models = catalog.models
+        state["failure"] = failure
+        now[0] = 101
+        await catalog.refresh()
+        assert catalog.last_error == error
+        assert catalog.is_stale
+        assert catalog.usable
+        assert catalog.status["is_stale"] is True
+        assert catalog.status["usable"] is True
+        assert catalog.models is previous_models
+        assert catalog.last_success == 100
+        now[0] = 137
+        assert catalog.is_stale
+        assert not catalog.usable
+        assert catalog.status["is_stale"] is True
+        assert catalog.status["usable"] is False
+        state["failure"] = None
+        await catalog.refresh()
+        assert catalog.last_error is None
+        assert not catalog.is_stale
+        assert catalog.usable
+        assert catalog.status["is_stale"] is False
+        assert catalog.status["usable"] is True
+        assert catalog.last_success == 137
+
+
 @pytest.mark.parametrize("pair", [
     [entry(), entry()],
     [entry(), entry(vendor="Azure OpenAI")],

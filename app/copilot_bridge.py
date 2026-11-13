@@ -104,7 +104,9 @@ def create_app(settings: Settings | None = None, client: httpx.AsyncClient | Non
     operations = None
     if completion is None or embedding is None:
         from app.copilot_transport import LitellmOperations
-        operations = LitellmOperations(upstream, cleanup_seconds=settings.stream_cleanup_seconds)
+        operations = LitellmOperations(upstream, upstream_url=settings.upstream_url,
+                                        upstream_key=settings.upstream_key,
+                                        cleanup_seconds=settings.stream_cleanup_seconds)
         completion = completion or operations.completion
         embedding = embedding or operations.embedding
     catalog = Catalog(settings, upstream)

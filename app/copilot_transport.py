@@ -41,7 +41,8 @@ class _OwnedResult:
 
 class LitellmOperations:
     """Bridge-owned callables sharing one caller-owned guarded HTTP pool."""
-    def __init__(self, client: httpx.AsyncClient, *, cleanup_seconds: float = 5):
+    def __init__(self, client: httpx.AsyncClient, *, upstream_url: str, upstream_key: str,
+                 cleanup_seconds: float = 5):
         import litellm
         from openai import AsyncOpenAI
         from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
@@ -72,7 +73,10 @@ class LitellmOperations:
 
         self._handler = BorrowedHandler(client_alias="guardian-copilot")
         self._handler.client = client
-        self._openai = AsyncOpenAI(api_key="supplied-per-call", http_client=client, max_retries=0)
+        # Embeddings retain supplied SDK configuration in LiteLLM1.103.2;
+        # api_base/api_key kwargs alone do not retarget that client. Pin both.
+        self._openai = AsyncOpenAI(api_key=upstream_key, base_url=upstream_url,
+                                   http_client=client, max_retries=0)
         client.event_hooks.setdefault("response", []).append(self._capture)
 
     async def _capture(self, response: httpx.Response):
@@ -150,11 +154,19 @@ class LitellmOperations:
         operation = self._responses_completion if model.startswith("openai/responses/") else self._litellm.acompletion
         return await self._invoke(operation, kwargs)
 
+    async def _embedding(self, **kwargs):
+        # LiteLLM1.103.2 embedding uses `max_retries or DEFAULT_MAX_RETRIES`,
+        # turning0 into2 and mutating its supplied SDK client. Use the scoped
+        # SDK endpoint directly; no protocol translation is needed for embeddings.
+        request = {key: kwargs[key] for key in ("input", "dimensions", "encoding_format", "user") if key in kwargs}
+        request["model"] = kwargs["model"].removeprefix("openai/")
+        result = await self._openai.with_options(max_retries=0, timeout=kwargs.get("timeout")).embeddings.create(**request)
+        return result
+
     async def embedding(self, **kwargs):
         kwargs.pop("num_retries", None)
         kwargs.pop("max_retries", None)
-        kwargs["client"] = self._openai
-        return await self._invoke(self._litellm.aembedding, kwargs)
+        return await self._invoke(self._embedding, kwargs)
 
     def detach(self):
         """Remove this hook, without closing the borrowed pool."""

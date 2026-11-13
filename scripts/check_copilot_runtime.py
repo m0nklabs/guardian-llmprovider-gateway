@@ -97,17 +97,30 @@ def response_events():
 @contextlib.asynccontextmanager
 async def runtime(protocol, handler):
     endpoint = {"chat": "/chat/completions", "responses": "/responses",
-                "messages": "/v1/messages"}[protocol]
-    raw_id = "claude-sonnet-4-5" if protocol == "messages" else "gpt-6.1-sol"
+                "messages": "/v1/messages", "embeddings": "/embeddings"}[protocol]
+    raw_id = {"messages": "claude-sonnet-4-5", "embeddings": "text-embedding-3-small"}.get(protocol, "gpt-6.1-sol")
     vendor = "Anthropic" if protocol == "messages" else "OpenAI"
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as upstream:
+
+    def strict_handler(request):
+        # Assert destination and credentials even if production SDK silently
+        # retains its own default URL/key. Generic mocks would miss that bug.
+        expected_path = "/v1/messages" if protocol == "messages" else "/v1" + endpoint
+        assert str(request.url) == "http://synthetic.invalid" + expected_path, str(request.url)
+        credential = request.headers.get("x-api-key") if protocol == "messages" else request.headers.get("authorization")
+        expected = "synthetic-upstream-key" if protocol == "messages" else "Bearer synthetic-upstream-key"
+        assert credential == expected, credential
+        return handler(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(strict_handler)) as upstream:
         settings = Settings("http://synthetic.invalid/v1", "synthetic-upstream-key",
                             "synthetic-client-key", heartbeat_seconds=0.01,
                             stream_idle_seconds=0.05, stream_cleanup_seconds=0.1)
         # Do not inject completion/embedding mocks: exercise real operations.
         app = create_app(settings, client=upstream)
-        model = normalize_model({"id": raw_id, "vendor": vendor,
-                                 "supported_endpoints": [endpoint]})
+        entry = {"id": raw_id, "vendor": vendor, "supported_endpoints": [endpoint]}
+        if protocol == "embeddings":
+            entry["capabilities"] = {"type": "embeddings"}
+        model = normalize_model(entry)
         assert model is not None
         app.state.catalog.models = {model["id"]: model}
         app.state.catalog.last_success = time.time()
@@ -274,19 +287,149 @@ async def remote_media_check():
     return {"status": 400, "http_attempts": 0}
 
 
+async def messages_success_checks():
+    outcomes = []
+    usage = {"input_tokens": 10, "output_tokens": 4,
+             "cache_creation_input_tokens": 5, "cache_read_input_tokens": 90}
+    tool_use = {"type": "tool_use", "id": "toolu_synthetic", "name": "probe", "input": {"x": "value"}}
+    message = {"id": "msg_success", "type": "message", "role": "assistant",
+               "model": "claude-sonnet-4-5", "content": [tool_use],
+               "stop_reason": "tool_use", "stop_sequence": None, "usage": usage}
+    for streaming in (False, True):
+        calls, responses, streams = [], [], []
+
+        def handle(request):
+            body = json.loads(request.content)
+            calls.append(body)
+            if body.get("stream"):
+                stream = EventBytes([
+                    {"type": "message_start", "message": {**message, "content": [], "stop_reason": None,
+                                                          "usage": {**usage, "output_tokens": 0}}},
+                    {"type": "content_block_start", "index": 0, "content_block": {**tool_use, "input": {}}},
+                    {"type": "content_block_delta", "index": 0,
+                     "delta": {"type": "input_json_delta", "partial_json": '{"x":"'}},
+                    {"type": "content_block_delta", "index": 0,
+                     "delta": {"type": "input_json_delta", "partial_json": 'value"}'}},
+                    {"type": "content_block_stop", "index": 0},
+                    {"type": "message_delta", "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+                     "usage": {"output_tokens": 4}},
+                    {"type": "message_stop"}])
+                streams.append(stream)
+                response = httpx.Response(200, headers={"Content-Type": "text/event-stream"}, stream=stream)
+            else:
+                response = httpx.Response(200, json=message)
+            responses.append(response)
+            return response
+
+        async with runtime("messages", handle) as (client, model):
+            result = await client.post("/v1/chat/completions", headers=HEADERS,
+                json={"model": model, "messages": MESSAGES, "tools": [TOOL], "stream": streaming,
+                      "stream_options": {"include_usage": True}})
+            assert result.status_code == 200 and len(calls) == 1, result.text
+            assert calls[0]["model"] == "claude-sonnet-4-5"
+            assert calls[0]["tools"][0]["description"] == TOOL["function"]["description"]
+            assert calls[0]["tools"][0]["input_schema"] == TOOL["function"]["parameters"]
+            assert responses[0].is_closed
+            if streaming:
+                frames = [f.removeprefix("data: ") for f in result.text.split("\n\n") if f.startswith("data: ")]
+                assert frames[-1] == "[DONE]", result.text
+                chunks = [json.loads(f) for f in frames[:-1]]
+                assert not any("error" in chunk for chunk in chunks), result.text
+                usages = [chunk["usage"] for chunk in chunks if chunk.get("usage")]
+                assert len(usages) == 1, result.text
+                deltas = [tool for chunk in chunks for choice in chunk.get("choices", [])
+                          for tool in choice.get("delta", {}).get("tool_calls", [])]
+                returned_id = next(tool["id"] for tool in deltas if tool.get("id"))
+                name = next(tool["function"]["name"] for tool in deltas if tool.get("function", {}).get("name"))
+                arguments = "".join(tool.get("function", {}).get("arguments", "") for tool in deltas)
+                assert any(choice.get("finish_reason") == "tool_calls" for chunk in chunks
+                           for choice in chunk.get("choices", []))
+                assert streams[0].closed
+            else:
+                output = result.json()
+                assert output["model"] == "claude-sonnet-4-5"
+                assert output["choices"][0]["finish_reason"] == "tool_calls"
+                returned = output["choices"][0]["message"]["tool_calls"][0]
+                returned_id, name, arguments = returned["id"], returned["function"]["name"], returned["function"]["arguments"]
+                usages = [output["usage"]]
+            assert returned_id == tool_use["id"] and name == tool_use["name"]
+            assert json.loads(arguments) == tool_use["input"]  # Vendor JSON formatting is not guaranteed byte-identical.
+            counted = usages[0]
+            assert counted["prompt_tokens"] == 105 and counted["completion_tokens"] == 4 and counted["total_tokens"] == 109
+            assert counted["prompt_tokens_details"]["cached_tokens"] == 90
+            assert counted["cache_creation_input_tokens"] == 5 and counted["cache_read_input_tokens"] == 90
+        outcomes.append({"stream": streaming, "attempts": 1, "tool_semantics": True,
+                         "cached_usage": True, "cache_creation_usage": True, "http_closed": True})
+    return outcomes
+
+
+async def embeddings_checks():
+    import base64
+    import struct
+
+    outcomes = []
+    vector = [0.25, -0.5, 1.0]
+    encoded = base64.b64encode(struct.pack("<3f", *vector)).decode()
+    for mode in ("float", "base64", "default", "429", "remote_protocol", "connect"):
+        calls, responses = [], []
+
+        def handle(request):
+            body = json.loads(request.content)
+            calls.append(body)
+            if mode == "remote_protocol":
+                raise httpx.RemoteProtocolError("Synthetic embedding disconnect after send")
+            if mode == "connect":
+                raise httpx.ConnectError("Synthetic embedding connection failure")
+            if mode == "429":
+                response = httpx.Response(429, headers={"Retry-After": "17"},
+                    json={"error": {"message": "Synthetic limit", "type": "rate_limit_error"}})
+            else:
+                response = httpx.Response(200, json={"object": "list", "model": "text-embedding-3-small",
+                    "data": [{"object": "embedding", "index": 0,
+                              "embedding": encoded if body.get("encoding_format") == "base64" else vector}],
+                    "usage": {"prompt_tokens": 3, "total_tokens": 3}})
+            responses.append(response)
+            return response
+
+        async with runtime("embeddings", handle) as (client, model):
+            payload = {"model": model, "input": "Synthetic embedding", "dimensions": 3}
+            if mode != "default":
+                payload["encoding_format"] = mode if mode in ("float", "base64") else "float"
+            result = await client.post("/v1/embeddings", headers=HEADERS, json=payload)
+            assert len(calls) == 1, ("embeddings", mode, len(calls))
+            assert calls[0]["model"] == "text-embedding-3-small" and calls[0]["dimensions"] == 3
+            assert all(response.is_closed for response in responses)
+            if mode in ("float", "base64", "default"):
+                assert result.status_code == 200, result.text
+                output = result.json()
+                assert output["object"] == "list" and output["model"] == "text-embedding-3-small"
+                assert output["data"][0]["index"] == 0
+                assert output["data"][0]["embedding"] == (encoded if mode == "base64" else vector)
+                assert output["usage"]["prompt_tokens"] == output["usage"]["total_tokens"] == 3
+            elif mode == "429":
+                assert result.status_code == 429 and result.headers.get("Retry-After") == "17", result.text
+            else:
+                assert 500 <= result.status_code <= 599, result.text
+        outcomes.append({"mode": mode, "attempts": 1, "status": result.status_code, "http_closed": True})
+    return outcomes
+
+
 async def check():
     # Suppress dependency diagnostics, not errors/assertions or the final report.
     with contextlib.redirect_stdout(io.StringIO()):
         errors = await error_checks()
         responses = await successful_responses_checks()
+        messages_success = await messages_success_checks()
+        embeddings = await embeddings_checks()
         messages = await messages_idle_check()
         remote = await remote_media_check()
     return {"litellm_version": version("litellm"), "real_network_permitted": False,
-            "errors": errors, "responses": responses, "messages_idle": messages,
-            "remote_media": remote,
+            "exact_upstream_url_and_credentials": True,
+            "errors": errors, "responses": responses, "messages_success": messages_success,
+            "embeddings": embeddings, "messages_idle": messages, "remote_media": remote,
             "limits": ["Synthetic fixtures, not provider compatibility or billing evidence",
                        "No production activation, cache-hit-rate measurement or real model calls",
-                       "Messages success/tool/usage conversion and embeddings not covered",
+                       "Vendor-reported cost fields are not independently measured billing",
                        "Catalog startup/refresh and all cancellation races covered separately"]}
 
 
