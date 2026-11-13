@@ -22,7 +22,7 @@ The response wrapper owns one existing upstream stream and one pending asynchron
 
 An ASGI disconnect watcher also owns inference before headers, for streaming, nonstreaming and embeddings. It starts only after full request-body consumption, cancels one abandoned invocation, and closes a result acquired in the cancellation race. The HTTP operations retain the underlying response so messages iterators without an `aclose` cannot leak it.
 
-Cleanup is cancellation-shielded and shares one bounded deadline across the result and distinct iterator. It covers disconnect before iteration, during a read, and while ASGI sends a chunk. Python cannot forcibly stop a coroutine that suppresses cancellation or synchronous blocking provider code: cooperative cleanup is tested, and a cancellation-resistant task may outlive the response until it cooperates. No error handler retries inference.
+Cleanup is cancellation-shielded and shares one bounded deadline across the result and distinct iterator. An independently owned cleanup task handles both AnyIO-scope cancellation and direct `asyncio.Task.cancel`, including cancellation during `aclose` after EOF; duplicate callers join the same task/deadline. It covers disconnect before iteration, during a read, and while ASGI sends a chunk. Python cannot forcibly stop a coroutine that suppresses cancellation or synchronous blocking provider code: cooperative cleanup is tested, and a cancellation-resistant task may outlive the response until it cooperates. No error handler retries inference.
 
 ## Errors and request options
 

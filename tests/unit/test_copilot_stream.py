@@ -433,6 +433,251 @@ async def test_direct_iterator_and_broken_error_formatter_fallback():
     assert stream.close_calls == 1 and stream.close_completed
 
 
+@pytest.mark.asyncio
+async def test_raw_task_cancel_during_eof_close_keeps_bounded_cleanup_owned():
+    stream = Stream(hang_close=True)
+    resp = response(stream, cleanup_seconds=0.035)
+    sent = []
+
+    async def receive():
+        await asyncio.Event().wait()
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"}}
+    task = asyncio.create_task(resp(scope, receive, send))
+    try:
+        await stream.close_started.wait()
+        assert stream.reads == 1  # Cancellation happens after EOF, not during read.
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0)
+        assert stream.close_calls == 1 and stream.close_cancelled
+        assert "[DONE]" not in body(sent)
+        assert not stream_tasks()
+    finally:
+        # Reproduction must not itself leave the pre-fix leaked close behind.
+        remaining = stream_tasks()
+        for leftover in remaining:
+            leftover.cancel()
+        await asyncio.gather(*remaining, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_repeated_raw_cancel_during_eof_close_preserves_one_deadline():
+    stream = Stream(hang_close=True)
+    resp = response(stream, cleanup_seconds=0.06)
+    sent = []
+
+    async def receive():
+        await asyncio.Event().wait()
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"}}
+    task = asyncio.create_task(resp(scope, receive, send))
+    await stream.close_started.wait()
+    cleanup = resp._session.cleanup.task
+    deadline = resp._session.cleanup.deadline
+    for _ in range(3):
+        task.cancel()
+        await asyncio.sleep(0.005)
+        assert not task.done() and not cleanup.cancelled()
+        assert resp._session.cleanup.task is cleanup
+        assert resp._session.cleanup.deadline == deadline
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0)
+    assert stream.close_calls == 1 and stream.close_cancelled
+    assert "[DONE]" not in body(sent) and not stream_tasks()
+
+
+@pytest.mark.asyncio
+async def test_anyio_cancel_during_eof_result_close_never_emits_done():
+    stream = Stream(hang_close=True)
+    resp = response(stream, cleanup_seconds=0.04)
+    sent = []
+
+    async def receive():
+        await asyncio.Event().wait()
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"}}
+    async with anyio.create_task_group() as group:
+        group.start_soon(resp, scope, receive, send)
+        await stream.close_started.wait()
+        assert stream.reads == 1
+        group.cancel_scope.cancel()
+    await asyncio.sleep(0)
+    assert stream.close_calls == 1 and stream.close_cancelled
+    assert "[DONE]" not in body(sent) and not stream_tasks()
+
+
+@pytest.mark.asyncio
+async def test_duplicate_close_waiters_join_same_task_and_budget():
+    stream = Stream(hang_close=True)
+    session = response(stream, cleanup_seconds=0.05)._session
+    first = asyncio.create_task(session.close())
+    await stream.close_started.wait()
+    cleanup = session.cleanup.task
+    deadline = session.cleanup.deadline
+    second = asyncio.create_task(session.close())
+    await asyncio.sleep(0)
+    first.cancel()
+    await asyncio.sleep(0.005)
+    first.cancel()
+    await asyncio.sleep(0)
+    assert not first.done() and not second.done()
+    assert session.cleanup.task is cleanup and session.cleanup.deadline == deadline
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    await second
+    await session.close()  # A completed duplicate neither retries nor resets time.
+    await asyncio.sleep(0)
+    assert stream.close_calls == 1 and stream.close_cancelled
+    assert session.cleanup.task is cleanup and session.cleanup.deadline == deadline
+    assert not stream_tasks()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["raw", "anyio"])
+async def test_cancel_during_distinct_iterator_close_keeps_cleanup_owned(kind):
+    iterator = Stream(hang_close=True)
+
+    class Container:
+        close_calls = 0
+
+        def __aiter__(self):
+            return iterator
+
+        async def aclose(self):
+            self.close_calls += 1
+            await asyncio.sleep(0.005)
+
+    stream = Container()
+    resp = response(stream, cleanup_seconds=0.06)
+    sent = []
+
+    async def receive():
+        await asyncio.Event().wait()
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"}}
+    if kind == "raw":
+        task = asyncio.create_task(resp(scope, receive, send))
+        await iterator.close_started.wait()
+        task.cancel()
+        await asyncio.sleep(0.005)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        async with anyio.create_task_group() as group:
+            group.start_soon(resp, scope, receive, send)
+            await iterator.close_started.wait()
+            group.cancel_scope.cancel()
+    await asyncio.sleep(0)
+    assert stream.close_calls == iterator.close_calls == 1
+    assert iterator.close_cancelled and "[DONE]" not in body(sent)
+    assert not stream_tasks()
+
+
+@pytest.mark.asyncio
+async def test_raw_cancel_during_resistant_result_close_retains_deadline_management():
+    release = asyncio.Event()
+
+    class ResistantStream(Stream):
+        async def aclose(self):
+            self.close_calls += 1
+            self.close_started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                self.close_cancelled = True
+                await release.wait()
+            self.close_completed = True
+
+    stream = ResistantStream()
+    resp = response(stream, cleanup_seconds=0.04)
+
+    async def receive():
+        await asyncio.Event().wait()
+
+    async def send(message):
+        pass
+
+    scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"}}
+    task = asyncio.create_task(resp(scope, receive, send))
+    await stream.close_started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0)
+    assert resp._session.cleanup.task.done()
+    assert stream.close_calls == 1 and stream.close_cancelled
+    # Only the provider coroutine (not the deadline/cleanup owner) can outlive
+    # the bound by suppressing cancellation. Release it and observe its callback.
+    remaining = stream_tasks()
+    assert len(remaining) == 1 and remaining[0].get_name() == "copilot-stream-close"
+    release.set()
+    await asyncio.gather(*remaining)
+    assert stream.close_completed and not stream_tasks()
+
+
+@pytest.mark.asyncio
+async def test_cancel_during_delayed_result_close_completes_before_propagating():
+    stream = Stream(close_delay=0.03)
+    resp = response(stream, cleanup_seconds=0.1)
+
+    async def receive():
+        await asyncio.Event().wait()
+
+    async def send(message):
+        pass
+
+    scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.4"}}
+    task = asyncio.create_task(resp(scope, receive, send))
+    await stream.close_started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert stream.close_calls == 1 and stream.close_completed and not stream.close_cancelled
+    assert not stream_tasks()
+
+
+@pytest.mark.asyncio
+async def test_repeated_raw_cancel_during_preheader_orphan_close_stays_bounded():
+    ready = asyncio.Event()
+    stream = Stream(hang_close=True)
+
+    async def receive():
+        await ready.wait()
+        return {"type": "http.disconnect"}
+
+    async def inference():
+        ready.set()
+        return stream
+
+    task = asyncio.create_task(await_inference(
+        Request(inference_scope(), receive), inference(), cleanup_seconds=0.06))
+    await stream.close_started.wait()
+    task.cancel()
+    await asyncio.sleep(0.005)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0)
+    assert stream.close_calls == 1 and stream.close_cancelled
+    assert not stream_tasks()
+
+
 async def inference_app(scope, receive, send, completion, *, streaming=False, cleanup_seconds=0.1):
     request = Request(scope, receive)
     raw = await request.body()

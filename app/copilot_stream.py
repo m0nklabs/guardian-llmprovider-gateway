@@ -41,6 +41,67 @@ async def _close_target(target: Any) -> None:
     await target.aclose()
 
 
+async def _join_cleanup(task: asyncio.Task) -> None:
+    """Join the same cleanup even under repeated raw Task.cancel() calls.
+
+    AnyIO shields cancel scopes; asyncio.shield protects the independently owned
+    child from direct cancellation of this waiter. Remember raw cancellation and
+    propagate it only after that child finishes (within its original deadline).
+    """
+    cancellation: asyncio.CancelledError | None = None
+    with anyio.CancelScope(shield=True):
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as exc:
+                if task.cancelled():
+                    raise
+                cancellation = exc
+        try:
+            task.result()
+        finally:
+            if cancellation is not None:
+                raise cancellation
+
+
+class _Cleanup:
+    """One independently-owned operation and deadline shared by every caller."""
+
+    def __init__(self, operation: Callable[[float], Awaitable[None]], seconds: float,
+                 *, deadline: float | None = None):
+        self.operation = operation
+        self.seconds = seconds
+        self.deadline = deadline
+        self.task: asyncio.Task | None = None
+
+    def start(self) -> asyncio.Task:
+        if self.task is None:
+            if self.deadline is None:
+                self.deadline = asyncio.get_running_loop().time() + self.seconds
+            self.task = asyncio.create_task(self.run(), name="copilot-stream-cleanup")
+            self.task.add_done_callback(_consume_task)
+        return self.task
+
+    async def run(self) -> None:
+        with anyio.CancelScope(shield=True):
+            await self.operation(self.deadline)
+
+    async def wait(self) -> None:
+        await _join_cleanup(self.start())
+
+
+async def _finish_tasks(tasks: set[asyncio.Task], deadline: float) -> None:
+    """Bound child operations without waiting forever for cancellation to finish."""
+    for task in tasks:
+        task.add_done_callback(_consume_task)
+    _, pending = await asyncio.wait(
+        tasks, timeout=max(0, deadline - asyncio.get_running_loop().time()))
+    for task in pending:
+        task.cancel()
+    if pending:
+        logger.warning("Copilot cleanup exceeded cleanup budget")
+
+
 class ClientDisconnected(ClientDisconnect):
     """The client abandoned inference before a response was available."""
 
@@ -51,7 +112,8 @@ class _InferenceSession:
         self.cleanup_seconds = cleanup_seconds
         self.result: Any = None
         self.abandoned = False
-        self.result_closed = False
+        self.result_cleanup: _Cleanup | None = None
+        self.abandonment_cleanup: _Cleanup | None = None
         self.deadline: float | None = None
 
     async def run(self) -> Any:
@@ -62,26 +124,48 @@ class _InferenceSession:
             if self.abandoned:
                 await self.close_result()
 
+    def start_result_close(self) -> asyncio.Task | None:
+        if not callable(getattr(self.result, "aclose", None)):
+            return None
+        if self.result_cleanup is None:
+            # A result that first appears AFTER abandonment's deadline needs a
+            # new bounded orphan close. Duplicate calls still share that task.
+            deadline = self.deadline
+            if deadline is not None and deadline <= asyncio.get_running_loop().time():
+                deadline = None
+            self.result_cleanup = _Cleanup(
+                self._close_result, self.cleanup_seconds, deadline=deadline)
+        return self.result_cleanup.start()
+
+    async def _close_result(self, deadline: float) -> None:
+        task = asyncio.create_task(_close_target(self.result), name="copilot-stream-close")
+        await _finish_tasks({task}, deadline)
+
     async def close_result(self) -> None:
-        if self.result_closed or not callable(getattr(self.result, "aclose", None)):
-            return
-        self.result_closed = True
-        loop = asyncio.get_running_loop()
-        # A cancellation-resistant inference can produce its result after the
-        # request's cleanup budget expired. Still close that late orphan with a
-        # fresh bounded budget; the abandoned ASGI request is no longer waiting.
-        deadline = self.deadline
-        if deadline is None or deadline <= loop.time():
-            deadline = loop.time() + self.cleanup_seconds
-        with anyio.CancelScope(shield=True):
-            task = asyncio.create_task(_close_target(self.result), name="copilot-stream-close")
-            await asyncio.wait({task}, timeout=max(0, deadline - loop.time()))
-            if task.done():
-                _consume_task(task)
-            else:
-                task.cancel()
-                task.add_done_callback(_consume_task)
-                logger.warning("Copilot abandoned inference close exceeded cleanup budget")
+        task = self.start_result_close()
+        if task is not None:
+            await _join_cleanup(task)
+
+    async def abandon(self, inference: asyncio.Task, watcher: asyncio.Task) -> None:
+        self.abandoned = True
+        if self.abandonment_cleanup is None:
+            self.abandonment_cleanup = _Cleanup(
+                lambda deadline: self._abandon(inference, watcher, deadline),
+                self.cleanup_seconds, deadline=self.deadline)
+        await self.abandonment_cleanup.wait()
+
+    async def _abandon(self, inference: asyncio.Task, watcher: asyncio.Task,
+                       deadline: float) -> None:
+        self.deadline = deadline
+        if not watcher.done():
+            watcher.cancel()
+        if not inference.done():
+            inference.cancel()
+        await _finish_tasks({watcher, inference}, deadline)
+        if inference.done():
+            task = self.start_result_close()
+            if task is not None and deadline > asyncio.get_running_loop().time():
+                await _join_cleanup(task)
 
 
 async def _wait_for_disconnect(request: Request) -> None:
@@ -130,31 +214,7 @@ async def await_inference(request: Request, awaitable: Awaitable, *, cleanup_sec
         # No await after successful ownership transfer: cancellation at that
         # checkpoint would otherwise lose the result before the caller gets it.
         if not transferred:
-            session.abandoned = True
-            if session.deadline is None:
-                session.deadline = asyncio.get_running_loop().time() + cleanup_seconds
-            with anyio.CancelScope(shield=True):
-                if not watcher.done():
-                    watcher.cancel()
-                if not inference.done():
-                    inference.cancel()
-                done, pending = await asyncio.wait(
-                    {watcher, inference}, timeout=max(
-                        0, session.deadline - asyncio.get_running_loop().time()))
-                for task in done:
-                    _consume_task(task)
-                for task in pending:
-                    task.cancel()
-                    task.add_done_callback(_consume_task)
-                if pending:
-                    logger.warning("Copilot inference cancellation exceeded cleanup budget")
-                if inference.done():
-                    if session.deadline > asyncio.get_running_loop().time():
-                        await session.close_result()
-                    elif not session.result_closed:
-                        task = asyncio.create_task(
-                            session.close_result(), name="copilot-stream-orphan-close")
-                        task.add_done_callback(_consume_task)
+            await session.abandon(inference, watcher)
 
 
 class _StreamSession:
@@ -170,61 +230,40 @@ class _StreamSession:
         self.error_payload = error_payload
         self.iterator: AsyncIterator | None = None
         self.pending: asyncio.Task | None = None
-        self.closed = False
+        self.cleanup = _Cleanup(self._close, cleanup_seconds)
 
     async def close(self) -> None:
-        """Cancel reading, then close upstream within one shielded time budget.
+        """All callers join one owned cleanup task and its original deadline.
 
-        A coroutine which ignores cancellation cannot be forcibly terminated by
-        Python. Such a task is cancelled and its eventual result is observed;
-        it cannot keep the ASGI response waiting past the cleanup budget.
+        Raw/AnyIO cancellation never interrupts cleanup management. A coroutine
+        that ignores cancellation can still outlive the deadline, but its eventual
+        result is observed and it cannot keep the ASGI response waiting forever.
         """
-        if self.closed:
-            return
-        self.closed = True
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self.cleanup_seconds
-        with anyio.CancelScope(shield=True):
-            tasks: set[asyncio.Task] = set()
-            if self.pending is not None:
-                task, self.pending = self.pending, None
-                if not task.done():
-                    task.cancel()
-                    # Deliver cooperative cancellation before aclose on a
-                    # generator. Do not spend the whole budget joining a read:
-                    # result.aclose may be what releases its underlying I/O.
-                    await asyncio.wait({task}, timeout=0)
-                tasks.add(task)
-            if callable(getattr(self.result, "aclose", None)):
-                tasks.add(asyncio.create_task(
-                    _close_target(self.result), name="copilot-stream-close"))
-            if tasks:
-                done, pending = await asyncio.wait(
-                    tasks, timeout=max(0, deadline - loop.time()))
-                for task in done:
-                    _consume_task(task)
-                for task in pending:
-                    task.cancel()
-                    task.add_done_callback(_consume_task)
-                if pending:
-                    logger.warning("Copilot stream cleanup exceeded cleanup budget")
-            # __aiter__ may return a distinct generator owned by the result.
-            # Its read must have stopped before we can explicitly finalize it.
-            if (self.iterator is not None and self.iterator is not self.result
-                    and callable(getattr(self.iterator, "aclose", None))):
-                remaining = deadline - loop.time()
-                if remaining <= 0:
-                    logger.warning("Copilot stream iterator close exceeded cleanup budget")
-                    return
-                task = asyncio.create_task(
-                    _close_target(self.iterator), name="copilot-stream-close")
-                await asyncio.wait({task}, timeout=remaining)
-                if task.done():
-                    _consume_task(task)
-                else:
-                    task.cancel()
-                    task.add_done_callback(_consume_task)
-                    logger.warning("Copilot stream iterator close exceeded cleanup budget")
+        await self.cleanup.wait()
+
+    async def _close(self, deadline: float) -> None:
+        tasks: set[asyncio.Task] = set()
+        if self.pending is not None:
+            task, self.pending = self.pending, None
+            if not task.done():
+                task.cancel()
+                # Allow cooperative read cancellation before closing a generator;
+                # result.aclose may itself be what releases a stuck I/O read.
+                await asyncio.wait({task}, timeout=0)
+            tasks.add(task)
+        if callable(getattr(self.result, "aclose", None)):
+            tasks.add(asyncio.create_task(
+                _close_target(self.result), name="copilot-stream-close"))
+        if tasks:
+            await _finish_tasks(tasks, deadline)
+        if (self.iterator is not None and self.iterator is not self.result
+                and callable(getattr(self.iterator, "aclose", None))):
+            if deadline <= asyncio.get_running_loop().time():
+                logger.warning("Copilot stream iterator close exceeded cleanup budget")
+                return
+            task = asyncio.create_task(
+                _close_target(self.iterator), name="copilot-stream-close")
+            await _finish_tasks({task}, deadline)
 
     async def events(self) -> AsyncIterator[str]:
         succeeded = False
@@ -270,6 +309,9 @@ class _StreamSession:
         finally:
             await self.close()
         if succeeded:
+            # Cleanup shielding must not turn an AnyIO disconnect cancellation
+            # into success when the next send would complete synchronously.
+            await anyio.lowlevel.checkpoint_if_cancelled()
             yield "data: [DONE]\n\n"
 
 
