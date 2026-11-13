@@ -124,7 +124,7 @@ async def test_invalid_streaming_support_skips_row_and_records_safe_counter():
             entry("nonstreaming", capabilities={"supports": {"streaming": False}}), entry("valid")]
     async with httpx.AsyncClient(transport=httpx.MockTransport(
             lambda request: httpx.Response(200, json={"data": rows}))) as client:
-        catalog = Catalog(settings(), client, clock=lambda: 100)
+        catalog = Catalog(settings(), client, wall_clock=lambda: 100, monotonic_clock=lambda: 100)
         await catalog.refresh()
         assert set(catalog.models) == {"openai/nonstreaming", "openai/valid"}
         assert catalog.models["openai/nonstreaming"]["capabilities"]["supports"]["streaming"] is False
@@ -144,7 +144,7 @@ def test_disabled_and_unsupported_entries_not_served(raw):
 async def test_first_valid_snapshot_can_be_empty_or_all_disabled(entries):
     async with httpx.AsyncClient(transport=httpx.MockTransport(
             lambda request: httpx.Response(200, json={"data": entries}))) as client:
-        catalog = Catalog(settings(), client, clock=lambda: 100)
+        catalog = Catalog(settings(), client, wall_clock=lambda: 100, monotonic_clock=lambda: 100)
         assert not catalog.usable
         await catalog.refresh()
         assert catalog.models == {}
@@ -160,7 +160,7 @@ async def test_invalid_rows_do_not_discard_valid_rows_or_keep_retired_models(cap
     state = {"data": [entry("retired"), entry("retained")]}
     async with httpx.AsyncClient(transport=httpx.MockTransport(
             lambda request: httpx.Response(200, json=state))) as client:
-        catalog = Catalog(settings(), client, clock=lambda: 100)
+        catalog = Catalog(settings(), client, wall_clock=lambda: 100, monotonic_clock=lambda: 100)
         await catalog.refresh()
         state["data"] = [entry("retained"), entry("added", "Anthropic"),
                          entry("retired", policy={"state": "disabled"}, capabilities="sensitive-payload"),
@@ -195,7 +195,7 @@ async def test_deep_metadata_row_does_not_block_revocation_and_valid_snapshot(ca
     now = [100.0]
     async with httpx.AsyncClient(transport=httpx.MockTransport(
             lambda request: httpx.Response(200, content=json.dumps(state)))) as client:
-        catalog = Catalog(settings(), client, clock=lambda: now[0])
+        catalog = Catalog(settings(), client, wall_clock=lambda: now[0], monotonic_clock=lambda: now[0])
         await catalog.refresh()
         assert set(catalog.models) == {"openai/revoked"}
         state["data"] = [entry("revoked", policy={"state": "disabled"}),
@@ -222,7 +222,7 @@ async def test_failed_refresh_is_stale_but_usable_during_grace_then_success_clea
             return httpx.Response(200, json={"data": None})
         return httpx.Response(200, json={"data": [entry()]})
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-        catalog = Catalog(settings(max_age=37), client, clock=lambda: now[0])
+        catalog = Catalog(settings(max_age=37), client, wall_clock=lambda: now[0], monotonic_clock=lambda: now[0])
         await catalog.refresh()
         assert not catalog.is_stale
         previous_models = catalog.models
@@ -264,7 +264,7 @@ async def test_every_duplicate_identity_is_conservatively_excluded(pair):
     state = {"data": [entry()]}
     async with httpx.AsyncClient(transport=httpx.MockTransport(
             lambda request: httpx.Response(200, json=state))) as client:
-        catalog = Catalog(settings(), client, clock=lambda: 100)
+        catalog = Catalog(settings(), client, wall_clock=lambda: 100, monotonic_clock=lambda: 100)
         await catalog.refresh()
         state["data"] = [*pair, entry("unrelated")]
         await catalog.refresh()
@@ -282,7 +282,7 @@ async def test_malformed_root_preserves_previous_snapshot_with_value_error(root,
     now = [100.0]
     async with httpx.AsyncClient(transport=httpx.MockTransport(
             lambda request: httpx.Response(200, content=json.dumps(state["root"])))) as client:
-        catalog = Catalog(settings(), client, clock=lambda: now[0])
+        catalog = Catalog(settings(), client, wall_clock=lambda: now[0], monotonic_clock=lambda: now[0])
         await catalog.refresh()
         previous_models, previous_counts = catalog.models, deepcopy(catalog.counts)
         now[0] = 130
@@ -313,7 +313,7 @@ async def test_transport_and_json_errors_preserve_snapshot(failure, error, caplo
             return httpx.Response(200, text="sensitive-payload upstream-secret")
         return httpx.Response(200, json={"data": [entry()]})
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-        catalog = Catalog(settings(), client, clock=lambda: 100)
+        catalog = Catalog(settings(), client, wall_clock=lambda: 100, monotonic_clock=lambda: 100)
         await catalog.refresh()
         previous_models = catalog.models
         state["failure"] = failure
@@ -338,7 +338,7 @@ async def test_freshness_exact_deadline_errors_do_not_extend_age_and_reads_do_no
         calls += 1
         return httpx.Response(200, json=state)
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-        catalog = Catalog(settings(max_age=37), client, clock=lambda: now[0])
+        catalog = Catalog(settings(max_age=37), client, wall_clock=lambda: now[0], monotonic_clock=lambda: now[0])
         assert catalog.age_seconds is None
         assert catalog.is_stale
         assert catalog.status["usable"] is False
@@ -366,14 +366,73 @@ async def test_freshness_exact_deadline_errors_do_not_extend_age_and_reads_do_no
         assert catalog.models == {}
 
 
-def test_status_is_detached_from_counters_and_clock_rollback_clamps_age():
-    now = [99.0]
-    catalog = Catalog(settings(), AsyncMock(), clock=lambda: now[0])
+def test_wall_timestamp_alone_does_not_make_snapshot_usable_and_status_is_detached():
+    catalog = Catalog(settings(), AsyncMock(), wall_clock=lambda: 100, monotonic_clock=lambda: 100)
     catalog.last_success = 100
-    assert catalog.age_seconds == 0
+    assert catalog.age_seconds is None
+    assert not catalog.usable
+    assert catalog.is_stale
     status = catalog.status
+    assert status["usable"] is False
     status["counts"]["accepted"] = 900
     assert catalog.counts["accepted"] == 0
+
+
+@pytest.mark.asyncio
+async def test_wall_clock_rollback_does_not_extend_monotonic_deadline_or_failure_grace():
+    wall, elapsed = [100.0], [500.0]
+    state = {"data": [entry()]}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json=state))) as client:
+        catalog = Catalog(settings(max_age=37), client,
+                          wall_clock=lambda: wall[0], monotonic_clock=lambda: elapsed[0])
+        await catalog.refresh()
+        assert catalog.last_success == 100
+        assert catalog._last_success_monotonic == 500
+        assert catalog.age_seconds == 0
+        wall[0], elapsed[0] = 90, 536
+        assert catalog.age_seconds == 36
+        assert catalog.usable
+        state["data"] = None
+        await catalog.refresh()
+        assert catalog.last_error == "ValueError"
+        assert catalog.is_stale
+        assert catalog.usable
+        assert catalog.last_success == 100
+        assert catalog._last_success_monotonic == 500
+        elapsed[0] = 537
+        assert catalog.age_seconds == 37
+        assert not catalog.usable
+        assert catalog.status["usable"] is False
+        assert catalog.status["is_stale"] is True
+        # Success establishes a new deadline even at a lower wall timestamp.
+        state["data"] = []
+        await catalog.refresh()
+        assert catalog.last_success == 90
+        assert catalog._last_success_monotonic == 537
+        assert catalog.age_seconds == 0
+        assert catalog.usable
+        assert not catalog.is_stale
+
+
+@pytest.mark.asyncio
+async def test_forward_wall_jump_does_not_expire_snapshot_before_monotonic_deadline():
+    wall, elapsed = [100.0], [0.0]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"data": []}))) as client:
+        catalog = Catalog(settings(max_age=37), client,
+                          wall_clock=lambda: wall[0], monotonic_clock=lambda: elapsed[0])
+        await catalog.refresh()
+        wall[0], elapsed[0] = 1000000, 1
+        assert catalog.last_success == 100
+        assert catalog.age_seconds == 1
+        assert catalog.usable
+        assert not catalog.is_stale
+        assert catalog.status["usable"] is True
+        assert catalog.status["is_stale"] is False
+        elapsed[0] = 37
+        assert not catalog.usable
+        assert catalog.is_stale
 
 
 @pytest.mark.parametrize("max_age", [0, -1, True, float("inf"), float("nan")])
@@ -386,7 +445,7 @@ def test_invalid_freshness_configuration_rejected(max_age):
 async def test_failed_first_snapshot_stays_unavailable():
     async with httpx.AsyncClient(transport=httpx.MockTransport(
             lambda request: httpx.Response(200, json={"data": None}))) as client:
-        catalog = Catalog(settings(), client, clock=lambda: 100)
+        catalog = Catalog(settings(), client, wall_clock=lambda: 100, monotonic_clock=lambda: 100)
         await catalog.refresh()
         assert catalog.last_error == "ValueError"
         assert catalog.last_success is None
@@ -410,7 +469,7 @@ async def test_refreshes_serialize_and_keep_old_snapshot_until_request_finishes(
         active -= 1
         return httpx.Response(200, json={"data": [entry(str(calls))]})
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-        catalog = Catalog(settings(), client, clock=lambda: 100)
+        catalog = Catalog(settings(), client, wall_clock=lambda: 100, monotonic_clock=lambda: 100)
         catalog.models = {"old": {"id": "old"}}
         first = asyncio.create_task(catalog.refresh())
         second = asyncio.create_task(catalog.refresh())
@@ -431,7 +490,7 @@ async def test_cancelled_refresh_does_not_replace_snapshot_or_swallow_cancellati
     async def handle(request):
         raise asyncio.CancelledError
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-        catalog = Catalog(settings(), client, clock=lambda: 100)
+        catalog = Catalog(settings(), client, wall_clock=lambda: 100, monotonic_clock=lambda: 100)
         catalog.models = {"old": {"id": "old"}}
         with pytest.raises(asyncio.CancelledError):
             await catalog.refresh()

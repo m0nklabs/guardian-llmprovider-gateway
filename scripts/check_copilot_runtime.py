@@ -124,6 +124,7 @@ async def runtime(protocol, handler):
         assert model is not None
         app.state.catalog.models = {model["id"]: model}
         app.state.catalog.last_success = time.time()
+        app.state.catalog._last_success_monotonic = time.monotonic()
         try:
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app),
                                          base_url="http://synthetic-bridge") as client:
@@ -419,6 +420,46 @@ async def embeddings_checks():
     return outcomes
 
 
+async def refusal_replay_check():
+    outcomes = []
+    refusal = "Synthetic refusal café\nExact safety history"
+    history = [{"role": "user", "content": "Synthetic input"},
+               {"role": "assistant", "content": None, "refusal": refusal},
+               {"role": "user", "content": "Synthetic follow-up"}]
+    original = deepcopy(history)
+    for protocol in ("chat", "responses", "messages"):
+        calls = []
+        def handle(request):
+            calls.append(json.loads(request.content))
+            return httpx.Response(429, headers={"Retry-After": "17"},
+                json={"error": {"message": "Synthetic limit", "type": "rate_limit_error"}})
+        async with runtime(protocol, handle) as (client, model):
+            result = await client.post("/v1/chat/completions", headers=HEADERS,
+                                      json={"model": model, "messages": history})
+        assert result.status_code == 429 and len(calls) == 1, (protocol, result.text)
+        assert json.dumps(refusal, ensure_ascii=False) in json.dumps(calls[0], ensure_ascii=False), protocol
+        assert history == original
+        outcomes.append({"protocol": protocol, "refusal_preserved": True, "attempts": 1})
+    return outcomes
+
+
+async def nullable_request_check():
+    outcomes = []
+    for protocol in ("chat", "responses", "messages"):
+        calls = []
+        def handle(request):
+            calls.append(request)
+            return httpx.Response(429, headers={"Retry-After": "17"},
+                json={"error": {"message": "Synthetic limit", "type": "rate_limit_error"}})
+        async with runtime(protocol, handle) as (client, model):
+            result = await client.post("/v1/chat/completions", headers=HEADERS,
+                json={"model": model, "messages": MESSAGES, "max_tokens": None,
+                      "max_completion_tokens": None, "stream_options": None})
+        assert result.status_code == 429 and len(calls) == 1, (protocol, result.text)
+        outcomes.append({"protocol": protocol, "nullable_options_accepted": True, "attempts": 1})
+    return outcomes
+
+
 async def check():
     # Suppress dependency diagnostics, not errors/assertions or the final report.
     with contextlib.redirect_stdout(io.StringIO()):
@@ -428,10 +469,13 @@ async def check():
         embeddings = await embeddings_checks()
         messages = await messages_idle_check()
         remote = await remote_media_check()
+        nullable = await nullable_request_check()
+        refusal = await refusal_replay_check()
     return {"litellm_version": version("litellm"), "real_network_permitted": False,
             "exact_upstream_url_and_credentials": True,
             "errors": errors, "responses": responses, "messages_success": messages_success,
             "embeddings": embeddings, "messages_idle": messages, "remote_media": remote,
+            "nullable_options": nullable, "refusal_replay": refusal,
             "limits": ["Synthetic fixtures, not provider compatibility or billing evidence",
                        "No production activation, cache-hit-rate measurement or real model calls",
                        "Vendor-reported cost fields are not independently measured billing",

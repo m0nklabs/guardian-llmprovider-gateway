@@ -92,6 +92,7 @@ async def test_protocol_dispatch_and_untrusted_payload_cannot_override_transport
         model = normalize_model(entry(endpoints=endpoints))
         app.state.catalog.models = {model["id"]: model}
         app.state.catalog.last_success = time.time()
+        app.state.catalog._last_success_monotonic = time.monotonic()
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://bridge") as client:
             payload = {"model": model["id"], "messages": [{"role": "user", "content": "Hi"}],
                        "api_base": "http://attacker", "api_key": "bad", "custom_llm_provider": "evil"}
@@ -125,6 +126,7 @@ async def test_stream_tool_calls_and_close():
         model = normalize_model(entry())
         app.state.catalog.models = {model["id"]: model}
         app.state.catalog.last_success = time.time()
+        app.state.catalog._last_success_monotonic = time.monotonic()
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://bridge") as client:
             r = await client.post("/v1/chat/completions", json={"model": model["id"], "stream": True,
                     "messages": [{"role": "user", "content": "Hi"}]}, headers={"Authorization": "Bearer client-secret"})

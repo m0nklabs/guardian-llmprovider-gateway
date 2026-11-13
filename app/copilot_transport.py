@@ -39,6 +39,27 @@ class _OwnedResult:
             await close()
 
 
+def _refusal_messages(messages, protocol):
+    """Project null-content refusal turns onto the selected wire protocol.
+
+    Keep caller history immutable. Native chat already understands `refusal`;
+    Responses uses a refusal content item and messages uses assistant text.
+    """
+    if protocol not in ("responses", "messages"):
+        return messages
+    projected = []
+    for message in messages:
+        refusal = message.get("refusal")
+        if (message.get("role") == "assistant" and message.get("content") is None
+                and isinstance(refusal, str) and refusal
+                and not message.get("tool_calls") and not message.get("function_call")):
+            content = [{"type": "refusal", "refusal": refusal}] if protocol == "responses" else refusal
+            projected.append({**message, "content": content})
+        else:
+            projected.append(message)
+    return projected
+
+
 class LitellmOperations:
     """Bridge-owned callables sharing one caller-owned guarded HTTP pool."""
     def __init__(self, client: httpx.AsyncClient, *, upstream_url: str, upstream_key: str,
@@ -126,7 +147,7 @@ class LitellmOperations:
         from litellm.types.utils import ModelResponse
 
         model = kwargs["model"].removeprefix("openai/responses/")
-        messages = kwargs["messages"]
+        messages = _refusal_messages(kwargs["messages"], "responses")
         stream = kwargs.get("stream", False)
         logging = Logging(model=model, messages=messages, stream=stream, call_type="completion",
                           start_time=datetime.now(timezone.utc), litellm_call_id=str(uuid4()), function_id=str(uuid4()))
@@ -150,6 +171,8 @@ class LitellmOperations:
         kwargs.pop("num_retries", None)
         kwargs.pop("max_retries", None)
         model = kwargs.get("model", "")
+        if model.startswith("anthropic/"):
+            kwargs["messages"] = _refusal_messages(kwargs["messages"], "messages")
         kwargs["client"] = self._handler if model.startswith(("openai/responses/", "anthropic/")) else self._openai
         operation = self._responses_completion if model.startswith("openai/responses/") else self._litellm.acompletion
         return await self._invoke(operation, kwargs)

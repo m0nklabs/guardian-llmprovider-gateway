@@ -154,14 +154,17 @@ def normalize_model(entry: Any) -> dict[str, Any] | None:
 
 class Catalog:
     def __init__(self, settings: CatalogSettings, client: httpx.AsyncClient, *,
-                 clock: Callable[[], float] = time.time):
+                 wall_clock: Callable[[], float] = time.time,
+                 monotonic_clock: Callable[[], float] = time.monotonic):
         self.settings, self.client = settings, client
         self.models: dict[str, dict[str, Any]] = {}
-        self.last_success: float | None = None
+        self.last_success: float | None = None  # Wall time for diagnostics only.
+        self._last_success_monotonic: float | None = None
         self.last_error: str | None = None
         self.counts = self._empty_counts()
         self.lock = asyncio.Lock()
-        self._clock = clock
+        self._wall_clock = wall_clock
+        self._monotonic_clock = monotonic_clock
         if (isinstance(settings.catalog_max_age_seconds, bool)
                 or not math.isfinite(settings.catalog_max_age_seconds)
                 or settings.catalog_max_age_seconds <= 0):
@@ -173,9 +176,10 @@ class Catalog:
 
     @property
     def age_seconds(self) -> float | None:
-        if self.last_success is None:
+        """Elapsed age since successful discovery, unaffected by wall-clock jumps."""
+        if self._last_success_monotonic is None:
             return None
-        return max(0.0, self._clock() - self.last_success)
+        return max(0.0, self._monotonic_clock() - self._last_success_monotonic)
 
     @property
     def is_stale(self) -> bool:
@@ -242,10 +246,12 @@ class Catalog:
                         counts["duplicate_identities"] += 1
                         models.pop(public_id, None)
                 counts["accepted"] = len(models)
-                succeeded_at = self._clock()
+                succeeded_at = self._wall_clock()
+                succeeded_monotonic = self._monotonic_clock()
                 self.models = models  # Atomic replacement retires removed rows.
                 self.counts = counts
                 self.last_success, self.last_error = succeeded_at, None
+                self._last_success_monotonic = succeeded_monotonic
             except Exception as exc:
                 self.last_error = type(exc).__name__
                 logger.warning("Copilot catalog refresh failed (%s); retaining last successful snapshot", self.last_error)

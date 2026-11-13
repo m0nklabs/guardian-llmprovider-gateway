@@ -25,6 +25,7 @@ def ready_app(upstream, completion, embedding, protocol="chat"):
     row = model(protocol)
     app.state.catalog.models = {row["id"]: row}
     app.state.catalog.last_success = time.time()
+    app.state.catalog._last_success_monotonic = time.monotonic()
     return app, row["id"]
 
 
@@ -129,6 +130,7 @@ async def test_stale_catalog_refuses_without_refresh_or_inference():
     async with httpx.AsyncClient() as upstream:
         app, name = ready_app(upstream, completion, AsyncMock())
         app.state.catalog.last_success = time.time() - 4000
+        app.state.catalog._last_success_monotonic = time.monotonic() - 4000
         app.state.catalog.refresh = AsyncMock()
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://bridge") as client:
             result = await client.post("/v1/chat/completions", json={"model": name, "messages": [{"role": "user", "content": "Hi"}]}, headers=HEADERS)

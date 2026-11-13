@@ -5,6 +5,7 @@ from fastapi import HTTPException
 import pytest
 
 from app.copilot_requests import validate_chat, validate_embedding
+from app.copilot_transport import _refusal_messages
 
 
 @pytest.mark.parametrize("body", [{}, {"messages": None}, {"messages": "text"}, {"messages": []},
@@ -17,6 +18,61 @@ from app.copilot_requests import validate_chat, validate_embedding
 def test_bad_shapes_rejected(body):
     with pytest.raises(HTTPException) as error:
         validate_chat(body, "chat")
+    assert error.value.status_code == 400
+
+
+@pytest.mark.parametrize("protocol", ["chat", "responses", "messages"])
+@pytest.mark.parametrize("key", ["max_tokens", "max_completion_tokens", "stream_options"])
+def test_nullable_chat_options_are_unspecified_and_not_rewritten(protocol, key):
+    body = {"messages": [{"role": "user", "content": "hello"}], key: None}
+    original = deepcopy(body)
+    validate_chat(body, protocol)
+    assert body == original
+
+
+@pytest.mark.parametrize("key", ["max_tokens", "max_completion_tokens"])
+@pytest.mark.parametrize("value", [0, -1, True, False, 1.0, "1", [], {}])
+def test_nonnull_token_limits_still_require_positive_integers(key, value):
+    with pytest.raises(HTTPException) as error:
+        validate_chat({"messages": [{"role": "user", "content": "hello"}], key: value}, "chat")
+    assert error.value.status_code == 400
+
+
+@pytest.mark.parametrize("value", [False, 1, "include_usage", []])
+def test_nonnull_stream_options_still_require_an_object(value):
+    with pytest.raises(HTTPException) as error:
+        validate_chat({"messages": [{"role": "user", "content": "hello"}], "stream_options": value}, "chat")
+    assert error.value.status_code == 400
+
+
+@pytest.mark.parametrize("protocol", ["chat", "responses", "messages"])
+def test_assistant_refusal_full_history_is_preserved(protocol):
+    body = {"messages": [{"role": "user", "content": "First request"},
+                         {"role": "assistant", "content": None, "refusal": "Cannot comply. Café\nExact refusal."},
+                         {"role": "user", "content": "Follow-up request"}]}
+    original = deepcopy(body)
+    validate_chat(body, protocol)
+    assert body == original
+
+
+@pytest.mark.parametrize("refusal", [None, "", False, 1, [], {}])
+def test_empty_or_malformed_refusal_cannot_replace_assistant_content(refusal):
+    with pytest.raises(HTTPException) as error:
+        validate_chat({"messages": [{"role": "assistant", "content": None, "refusal": refusal}]}, "chat")
+    assert error.value.status_code == 400
+
+
+@pytest.mark.parametrize("refusal", [False, 1, [], {}])
+def test_malformed_refusal_rejected_even_with_content(refusal):
+    with pytest.raises(HTTPException) as error:
+        validate_chat({"messages": [{"role": "assistant", "content": "Answer", "refusal": refusal}]}, "chat")
+    assert error.value.status_code == 400
+
+
+@pytest.mark.parametrize("role", ["user", "system", "developer", "tool", "function"])
+def test_refusal_only_content_is_assistant_only(role):
+    with pytest.raises(HTTPException) as error:
+        validate_chat({"messages": [{"role": role, "content": None, "refusal": "Cannot comply"}]}, "chat")
     assert error.value.status_code == 400
 
 
@@ -57,3 +113,25 @@ def test_bad_embedding_shape(value):
 @pytest.mark.parametrize("value", ["text", ["a", "b"], [0, 2, 10], [[0, 10], [4, 5]]])
 def test_embedding_shapes_preserved(value):
     validate_embedding({"input": value, "dimensions": 4, "encoding_format": "float"})
+
+
+@pytest.mark.parametrize("protocol", ["chat", "responses", "messages"])
+def test_refusal_protocol_projection_preserves_original_history(protocol):
+    refusal = "Refusal café\nDo not rewrite"
+    history = [{"role": "user", "content": "before"},
+               {"role": "assistant", "content": None, "refusal": refusal},
+               {"role": "user", "content": "after"}]
+    original = deepcopy(history)
+    projected = _refusal_messages(history, protocol)
+    assert history == original
+    assert [item["role"] for item in projected] == ["user", "assistant", "user"]
+    expected = {"chat": None, "responses": [{"type": "refusal", "refusal": refusal}], "messages": refusal}
+    assert projected[1]["content"] == expected[protocol]
+    assert projected[1]["refusal"] == refusal
+
+
+@pytest.mark.parametrize("protocol", ["responses", "messages"])
+def test_refusal_projection_never_replaces_existing_content_or_tools(protocol):
+    history = [{"role": "assistant", "content": "existing", "refusal": "refusal"},
+               {"role": "assistant", "content": None, "refusal": "refusal", "tool_calls": [{"id": "call_1"}]}]
+    assert _refusal_messages(history, protocol) == history
