@@ -523,3 +523,53 @@ Carry-forward per nog-OPEN item (essentie + bewijs → voltekst in `docs/AGENT_J
   de presets `standard`, `ptc` en `cordis`; het custom preset "Context Regime"
   mount ze niet. Een reminder maken kan alleen vanuit een sessie op zo'n
   preset — de Automation-tasks-pagina heeft bewust géén aanmaakformulier.
+
+## 2026-11-13 — Economical Copilot bridge reliability (isolated implementation)
+
+- **Owner / objective:** session-290d375d, github-copilot/openai/gpt-6.1-sol; operator requested four bridge improvements with minimum request cost. Issues #103/#104/#105; isolated branch `feat/copilot-bridge-reliability`, production checkout and services untouched.
+- **Measured route:** configured Guardian Copilot inference uses LiteLLM on4000 then copilot-api on4141; dynamic adapter on4142 is separate. Discovery does not authorize onboarding every model. This implementation deliberately leaves Guardian's provider base URL and selected model allowlist unchanged.
+- **Dependency findings:** installed LiteLLM1.103.2 drops normal `prompt_cache_retention`, erases upstream rate-limit headers, replays Responses/messages connection errors inside AsyncHTTPHandler.post despite retry knobs, and omits supplied client in asynchronous Chat→Responses translation. Mock-only tests missed these. Dedicated guarded operations reuse upstream translators, fix one-send transport, carry validated request-local Retry-After, and explicitly close underlying HTTP responses where messages iterators lack close.
+- **Lifecycle / safety:** comment-only heartbeat, upstream idle deadline, failure SSE without success DONE, shielded bounded disconnect cleanup; inference itself now watches disconnect before response headers. Structural bad payloads are rejected before generation. Remote messages images cannot use LiteLLM's unrelated module-global media-fetch client; inline data images remain supported.
+- **Catalog:** per-row validation/duplicate exclusion and revocation without rollback; safe status counters, valid empty snapshot, bounded usable age. Missing capabilities are not fabricated; known boolean/effort restrictions are validated/enforced.
+- **Evidence at checkpoint:** initial full suite2686 passed20 deselected; subsequent focused suite168 passed after transport/disconnect corrections, syntax/pyflakes/whitespace clean. Final actual-runtime check and independent review still in progress; latest final counts belong in PR. No actual provider inference, dependency upgrade, route switch, secret mutation or restart. Cost savings/cache-hit rate unmeasured; only request/metadata preservation can be asserted offline.
+- **Next:** finish socket-denied actual-runtime protocol/usage checks, re-run full suite at final head, publish PR and exact `/review`; carry PR follow-up in the existing authorized Guardian loop rather than creating an unsolicited schedule. Do not mark merged, deployed or merge-ready until actual review/check gates finish.
+
+### 2026-11-13T01:56Z — PR106 review remediation
+
+- **Formal review:** head a45348a, PR-Piet review5884896586 requested two catalog fixes and suggested SDK destination/test coverage checks. Four isolated pre-fix regressions verified recursion rollback and falsely-current retained snapshot. Per-entry copy recursion now becomes invalid-row; stale diagnostics reflect failed refresh while age-based usability retains grace.
+- **SDK follow-up:** strict actual URL/header checks independently proved embeddings retained the default SDK destination and placeholder key. Explicit configured base URL/key fixes that. Testing429 then exposed LiteLLM embedding's `max_retries or DEFAULT_MAX_RETRIES` turning0 into2 and mutating shared SDK retry config. Embeddings now use the scoped zero-retry SDK endpoint directly, avoiding this falsey-default path and cross-request mutation. Runtime checks assert exact configured destination/auth, successful messages tools/cache usage, embedding float/base64 and all error single-attempt cases.
+- **Capability test:** use a valid function-tool schema and assert the capability-specific rejection; malformed input no longer gives a false positive.
+- **Verification at remediation checkpoint:**206 focused tests pass; extended actual LiteLLM1.103.2 checker passes with real sockets/DNS forbidden. Full suite running before one coherent push and new exact `/review`. No deployed changes or actual provider inference; billing/cache-hit ratio remain unmeasured.
+
+### 2026-11-13T02:07Z — Retry-After date normalization edge case
+
+- Second PR-Piet review5884987473 confirms all four prior findings resolved and reports one new date-overflow defect: parsed year9999 negative-offset HTTP date overflows during UTC normalization outside the validation try block. A pre-fix unit regression reproduced OverflowError.
+- Date parsing, timezone conversion and locale-independent HTTP formatting now share guarded validation. Invalid dates are dropped instead of crashing the mapped429/503 response. Added boundary date cases and both chat/embedding HTTP regressions;212 focused tests pass. Actual socket-denied runtime checks now assert429/503 overflow behavior across chat/Responses/messages with singleHTTP and no invalid Retry-After. Full suite and next exact-head review remain before completion.
+
+### 2026-11-13T02:27Z — Clock and history compatibility review fixes
+
+- Third formal review5885097690 confirms date fix and identifies wall-clock freshness rollback, nullable token/stream options and refusal-only assistant history rejection. Catalog now separates injected wall/monotonic clocks; only successful refresh records monotonic age anchor, with no wall fallback. Rollback/forward-jump, failure-grace and recovery regressions pass; changing diagnostic timestamp alone does not authorize an uninitialized snapshot.
+- Optional max_tokens/max_completion_tokens/stream_options null values are accepted as unspecified while actual values remain validated. Assistant refusal text with null content is accepted immutable; protocol-local copies encode it as a Responses refusal item or messages assistant text because the existing vendor translators otherwise drop the turn. Native chat remains unchanged. Exact Unicode/newline text and caller history are preserved in actual socket-denied runtime tests.
+- Focused266 tests pass; actual configured-URL/auth protocol checker includes nullable options and refusal replay for all three completion protocols, each oneHTTP. Final full suite and review of the coherent remediation head are the remaining verification gates; production state remains untouched.
+
+### 2026-11-13T02:48Z — Direct-task cancellation during stream close
+
+- PR-Piet review5885247996 confirms clock/compatibility fixes and identifies direct asyncio.Task.cancel after EOF during suspended close. AnyIO shielding alone does not protect against raw task cancellation; earlier closed flag prevented remaining cleanup management. Pre-fix ASGI2.4 regression reproduced a hung/unobserved close.
+- One independent cleanup task now owns its deadline, joins and callbacks; duplicate/repeated cancellation joins that same cleanup under asyncio+AnyIO shielding and propagates cancellation afterward. Result/iterator and preheader orphan cleanup share the mechanism. A cancellation checkpoint before DONE prevents a canceled AnyIO scope from appearing as successful EOF when send is synchronous.
+- Focused274 tests pass; no public interface change, no additional model calls or production modifications. Full suite and next exact-head independent review remain required.
+
+### 2026-11-13T03:02Z — Nullable completion flags
+
+- Review5885370991 confirms cleanup fix and identifies null n/stream flags incorrectly rejected. Nine pre-fix protocol/flag combinations return400; now null flags are omitted from inference kwargs while actual n!=1/nonboolstream remain rejected. Caller body is not mutated. Focused284 checks and actual socket-denied configured-URL/auth protocol checker pass.
+- Full suite initially stopped on unrelated asynchronous WAL request_completed timing test after363 passes; isolated retry passed. Complete rerun collected before final push. No out-of-scope capture/WAL code edits; existing issue/PR101 owns that test-race work. Final current-head review still required.
+
+### 2026-11-13T03:13Z — Transport close ownership and nullable controls
+
+- Review5885447048 confirms nullable flags and identifies the same raw-task cancellation boundary in pre-result HTTP cleanup, plus nullable cache-retention/reasoning controls. Transport now reuses independently owned `_Cleanup`/`_finish_tasks`, closes captured HTTP responses concurrently within one deadline, and observes failing/hung children without masking the upstream status. Tests use real httpx.Response/AsyncByteStream: is_closed alone was insufficient because cancellation could mark the response closed while its byte stream remained unclosed.
+- Optional chat kwargs with None are omitted before provider dispatch; capability/cache validation checks actual supplied values only. Nine additional nullable cache/key/reasoning cases and combined actual-runtime null controls preserve default behavior with oneHTTP.
+- Focused306 tests pass including13new transport cancellation tests; no public setting/API or production mutation. Full suite, final runtime checker and next exact-head review still determine completion.
+
+### 2026-11-13T03:27Z — HTTPX automatic close boundary
+
+- Review5885533567 confirms pre-result transport cleanup/null controls and identifies earlier SDK automatic nonstream close: HTTPX marks response closed before its physical byte-streamclose finishes. Later response.aclose becomes a no-op after canceled send. Response hook now wraps the owned HTTP byte stream before HTTPX reads/closes, preserves byte iteration and joins one independently owned physical close/deadline. Real MockTransport POST/nonstream and streamEOF/raw/repeated/AnyIO/disconnect tests reproduce/pin this boundary, not only direct hook invocation.
+- Nullable tools are accepted as unspecified; non-null tool schemas remain validated. Focused320 tests pass including24transport lifecycle tests and47stream tests. Full suite/runtime and review of the coherent head remain; real provider/billing/activation not exercised.

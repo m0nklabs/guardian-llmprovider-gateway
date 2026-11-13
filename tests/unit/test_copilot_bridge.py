@@ -1,6 +1,8 @@
 """Dynamic catalog discovery, protocol selection and boundary tests."""
 from unittest.mock import AsyncMock
 
+import time
+
 import httpx
 import pytest
 from pydantic import BaseModel
@@ -89,7 +91,8 @@ async def test_protocol_dispatch_and_untrusted_payload_cannot_override_transport
         app = create_app(SETTINGS, upstream, completion, AsyncMock())
         model = normalize_model(entry(endpoints=endpoints))
         app.state.catalog.models = {model["id"]: model}
-        app.state.catalog.last_success = 1
+        app.state.catalog.last_success = time.time()
+        app.state.catalog._last_success_monotonic = time.monotonic()
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://bridge") as client:
             payload = {"model": model["id"], "messages": [{"role": "user", "content": "Hi"}],
                        "api_base": "http://attacker", "api_key": "bad", "custom_llm_provider": "evil"}
@@ -122,9 +125,11 @@ async def test_stream_tool_calls_and_close():
         app = create_app(SETTINGS, upstream, AsyncMock(return_value=stream), AsyncMock())
         model = normalize_model(entry())
         app.state.catalog.models = {model["id"]: model}
+        app.state.catalog.last_success = time.time()
+        app.state.catalog._last_success_monotonic = time.monotonic()
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://bridge") as client:
             r = await client.post("/v1/chat/completions", json={"model": model["id"], "stream": True,
-                    "messages": []}, headers={"Authorization": "Bearer client-secret"})
+                    "messages": [{"role": "user", "content": "Hi"}]}, headers={"Authorization": "Bearer client-secret"})
             assert '"tool_calls"' in r.text
             assert r.text.endswith("data: [DONE]\n\n")
             assert stream.closed

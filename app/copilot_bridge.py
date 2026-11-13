@@ -7,31 +7,34 @@ from __future__ import annotations
 
 import asyncio
 import hmac
-import logging
 import os
-import re
-import time
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import httpx
 import yaml
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse
 
 from app.destination_policy import current_policy, guarded_async_client
+from app.copilot_catalog import Catalog, normalize_model as normalize_model  # Public projection helper.
+from app.copilot_errors import error_headers, error_payload, error_status
+from app.copilot_stream import CopilotStreamingResponse, await_inference, ClientDisconnected
+from app.copilot_requests import validate_chat, validate_embedding
 
-logger = logging.getLogger("guardian.copilot_bridge")
-BRANDS = {"azure openai": "openai", "xai": "x-ai", "moonshot ai": "moonshotai"}
+__all__ = ["Catalog", "Settings", "create_app", "normalize_model"]
 # Client payloads must never override LiteLLM's credentials, endpoint or provider.
 CHAT_FIELDS = frozenset({
     "messages", "stream", "stream_options", "max_tokens", "max_completion_tokens",
     "temperature", "top_p", "stop", "tools", "tool_choice", "parallel_tool_calls",
     "response_format", "reasoning_effort", "seed", "presence_penalty",
     "frequency_penalty", "logprobs", "top_logprobs", "user", "n",
+    "prompt_cache_key", "prompt_cache_retention",
 })
+# These fields must never become transport overrides, even on rejected input.
+TRANSPORT_FIELDS = frozenset({"api_base", "api_key", "custom_llm_provider", "base_url", "extra_headers", "headers", "client", "num_retries", "max_retries", "fallbacks"})
+EMBEDDING_FIELDS = frozenset({"input", "dimensions", "encoding_format", "user"})
 
 
 @dataclass(frozen=True)
@@ -43,10 +46,30 @@ class Settings:
     timeout_seconds: float = 1200
     catalog_timeout_seconds: float = 30
     max_body_bytes: int = 16 * 1024 * 1024
+    heartbeat_seconds: float = 15
+    stream_idle_seconds: float = 1200
+    stream_cleanup_seconds: float = 5
+    catalog_max_age_seconds: float = 3600
+
+    def __post_init__(self):
+        if not isinstance(self.upstream_url, str) or not self.upstream_url.startswith(("http://", "https://")):
+            raise ValueError("upstream_url must be HTTP(S)")
+        for value in (self.refresh_seconds, self.timeout_seconds, self.catalog_timeout_seconds,
+                      self.heartbeat_seconds, self.stream_idle_seconds, self.stream_cleanup_seconds,
+                      self.catalog_max_age_seconds):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < value < float("inf"):
+                raise ValueError("Bridge limits and intervals must be positive and finite")
+        if isinstance(self.max_body_bytes, bool) or not isinstance(self.max_body_bytes, int) or self.max_body_bytes <= 0:
+            raise ValueError("max_body_bytes must be a positive integer")
 
     @classmethod
     def load(cls, path: Path) -> "Settings":
-        raw = yaml.safe_load(path.read_text())
+        try:
+            raw = yaml.safe_load(path.read_text())
+        except yaml.YAMLError as exc:
+            raise ValueError(f"Bridge configuration is invalid YAML ({type(exc).__name__})") from None
+        if not isinstance(raw, dict):
+            raise ValueError("Bridge configuration must be a mapping")
         def key(name: str) -> str:
             value = os.environ.get(raw[name], "")
             if not value:
@@ -55,109 +78,16 @@ class Settings:
         result = cls(
             upstream_url=raw["upstream_url"].rstrip("/"),
             upstream_key=key("upstream_key_env"), client_key=key("client_key_env"),
-            refresh_seconds=float(raw.get("refresh_seconds", 300)),
-            timeout_seconds=float(raw.get("timeout_seconds", 1200)),
-            catalog_timeout_seconds=float(raw.get("catalog_timeout_seconds", 30)),
-            max_body_bytes=int(raw.get("max_body_bytes", 16 * 1024 * 1024)),
+            refresh_seconds=raw.get("refresh_seconds", 300),
+            timeout_seconds=raw.get("timeout_seconds", 1200),
+            catalog_timeout_seconds=raw.get("catalog_timeout_seconds", 30),
+            max_body_bytes=raw.get("max_body_bytes", 16 * 1024 * 1024),
+            heartbeat_seconds=raw.get("heartbeat_seconds", 15),
+            stream_idle_seconds=raw.get("stream_idle_seconds", raw.get("timeout_seconds", 1200)),
+            stream_cleanup_seconds=raw.get("stream_cleanup_seconds", 5),
+            catalog_max_age_seconds=raw.get("catalog_max_age_seconds", 3600),
         )
-        if not result.upstream_url.startswith(("http://", "https://")):
-            raise ValueError("upstream_url must be HTTP(S)")
-        if any(not (0 < value < float("inf")) for value in (
-            result.refresh_seconds, result.timeout_seconds,
-            result.catalog_timeout_seconds, result.max_body_bytes,
-        )):
-            raise ValueError("Bridge limits and intervals must be positive and finite")
         return result
-
-
-def normalize_model(entry: dict[str, Any]) -> dict[str, Any] | None:
-    """Project a catalog entry into a stable maker/model address and protocol."""
-    raw_id, vendor = entry.get("id"), entry.get("vendor") or entry.get("owned_by")
-    if not isinstance(raw_id, str) or not raw_id or "/" in raw_id:
-        return None
-    if not isinstance(vendor, str) or not vendor.strip():
-        return None  # Never manufacture a maker from the serving provider.
-    if (entry.get("policy") or {}).get("state") == "disabled":
-        return None
-    capabilities = entry.get("capabilities") or {}
-    endpoints = entry.get("supported_endpoints") or []
-    if capabilities.get("type") == "embeddings":
-        protocol = "embeddings"
-    elif "/responses" in endpoints:
-        protocol = "responses"
-    elif "/chat/completions" in endpoints:
-        protocol = "chat"
-    elif "/v1/messages" in endpoints:
-        protocol = "messages"
-    else:
-        return None  # Unknown or WebSocket-only protocols require an adapter.
-    if entry.get("model_picker_enabled") is False and protocol != "embeddings":
-        return None
-    vendor = vendor.strip().lower()
-    brand = BRANDS.get(vendor, re.sub(r"[^a-z0-9]+", "-", vendor).strip("-"))
-    if not brand:
-        return None
-    limits = capabilities.get("limits") or {}
-    supports = capabilities.get("supports") or {}
-    public = {
-        "id": f"{brand}/{raw_id}", "object": "model", "owned_by": brand,
-        "name": entry.get("name", raw_id), "vendor": vendor,
-        "upstream_id": raw_id, "protocol": protocol,
-        "capabilities": capabilities, "supported_endpoints": endpoints,
-        "architecture": {"input_modalities": ["text"] + (["image"] if supports.get("vision") else []),
-                         "output_modalities": ["embedding" if protocol == "embeddings" else "text"]},
-    }
-    context = limits.get("max_context_window_tokens") or limits.get("max_prompt_tokens")
-    if isinstance(context, int) and not isinstance(context, bool) and context > 0:
-        public["context_length"] = context
-    output = limits.get("max_output_tokens")
-    if isinstance(output, int) and not isinstance(output, bool) and output > 0:
-        public["max_output_tokens"] = output
-    efforts = supports.get("reasoning_effort")
-    if isinstance(efforts, list) and efforts:
-        public["reasoning"] = {"supported": True, "supported_efforts": efforts}
-    return public
-
-
-class Catalog:
-    def __init__(self, settings: Settings, client: httpx.AsyncClient):
-        self.settings, self.client = settings, client
-        self.models: dict[str, dict[str, Any]] = {}
-        self.last_success: float | None = None
-        self.last_error: str | None = None
-        self.lock = asyncio.Lock()
-
-    async def refresh(self) -> None:
-        async with self.lock:
-            try:
-                response = await self.client.get(
-                    self.settings.upstream_url + "/models",
-                    headers={"Authorization": "Bearer " + self.settings.upstream_key},
-                    timeout=self.settings.catalog_timeout_seconds,
-                )
-                response.raise_for_status()
-                entries = response.json().get("data")
-                if not isinstance(entries, list) or not entries:
-                    raise ValueError("Upstream catalog is missing or empty")
-                models = {}
-                for entry in entries:
-                    if not isinstance(entry, dict):
-                        raise ValueError("Invalid catalog entry")
-                    model = normalize_model(entry)
-                    if model:
-                        if model["id"] in models:
-                            raise ValueError("Duplicate public model identity")
-                        models[model["id"]] = model
-                self.models = models  # Atomic replace also retires removed models.
-                self.last_success, self.last_error = time.time(), None
-            except Exception as exc:
-                self.last_error = type(exc).__name__
-                logger.warning("Copilot catalog refresh failed (%s); retaining last successful snapshot", self.last_error)
-
-    async def loop(self) -> None:
-        while True:
-            await asyncio.sleep(self.settings.refresh_seconds)
-            await self.refresh()
 
 
 def create_app(settings: Settings | None = None, client: httpx.AsyncClient | None = None,
@@ -166,15 +96,19 @@ def create_app(settings: Settings | None = None, client: httpx.AsyncClient | Non
         "GUARDIAN_COPILOT_BRIDGE_CONFIG",
         str(Path(__file__).resolve().parents[1] / "config/github-copilot-bridge.settings.yaml"),
     )))
-    if completion is None or embedding is None:
-        import litellm
-        completion = completion or litellm.acompletion
-        embedding = embedding or litellm.aembedding
     upstream = client or guarded_async_client(
         purpose="copilot-upstream",
         credential_owner="copilot-bridge",
         policy=current_policy().with_owner("copilot-bridge", [settings.upstream_url]),
     )
+    operations = None
+    if completion is None or embedding is None:
+        from app.copilot_transport import LitellmOperations
+        operations = LitellmOperations(upstream, upstream_url=settings.upstream_url,
+                                        upstream_key=settings.upstream_key,
+                                        cleanup_seconds=settings.stream_cleanup_seconds)
+        completion = completion or operations.completion
+        embedding = embedding or operations.embedding
     catalog = Catalog(settings, upstream)
 
     @asynccontextmanager
@@ -187,6 +121,8 @@ def create_app(settings: Settings | None = None, client: httpx.AsyncClient | Non
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+            if operations is not None:
+                operations.detach()
             if client is None:
                 await upstream.aclose()
 
@@ -204,7 +140,10 @@ def create_app(settings: Settings | None = None, client: httpx.AsyncClient | Non
         if catalog.last_success is None:
             raise HTTPException(503, "Copilot catalog not available yet")
         return {"object": "list", "data": list(catalog.models.values()),
-                "last_success": catalog.last_success, "last_error": catalog.last_error}
+                "last_success": catalog.last_success, "last_error": catalog.last_error,
+                "catalog": catalog.status,
+                "bridge": {"chat_fields": sorted(CHAT_FIELDS), "embedding_fields": sorted(EMBEDDING_FIELDS),
+                           "automatic_retries": 0, "paid_fallback": False}}
 
     async def payload(request: Request, kind: str):
         authorize(request)
@@ -220,6 +159,12 @@ def create_app(settings: Settings | None = None, client: httpx.AsyncClient | Non
             raise HTTPException(400, "Invalid JSON") from None
         if not isinstance(body, dict) or not isinstance(body.get("model"), str):
             raise HTTPException(400, "A model ID is required")
+        allowed = CHAT_FIELDS if kind == "chat" else EMBEDDING_FIELDS
+        if set(body) - allowed - TRANSPORT_FIELDS - {"model"}:
+            raise HTTPException(400, {"error": {"type": "invalid_request_error", "code": "unsupported_parameter",
+                                                "message": "A request parameter is not supported by this bridge; inspect /v1/models bridge fields."}})
+        if not catalog.usable:
+            raise HTTPException(503, "Copilot catalog is unavailable or stale")
         model = catalog.models.get(body["model"])
         if model is None:
             raise HTTPException(404, "model_not_served")
@@ -231,43 +176,71 @@ def create_app(settings: Settings | None = None, client: httpx.AsyncClient | Non
     async def chat(request: Request):
         body, model = await payload(request, "chat")
         protocol = model["protocol"]
+        validate_chat(body, protocol)
         prefix = {"responses": "openai/responses/", "chat": "openai/", "messages": "anthropic/"}[protocol]
-        kwargs = {k: v for k, v in body.items() if k in CHAT_FIELDS}
+        # Optional nullable controls mean unspecified. Required messages were
+        # validated above; never forward explicit null into provider overrides.
+        kwargs = {k: v for k, v in body.items() if k in CHAT_FIELDS and v is not None}
+        count = body.get("n")
+        if count is not None and (isinstance(count, bool) or not isinstance(count, int) or count != 1):
+            raise HTTPException(400, "The economical bridge supports one completion per request (n=1)")
+        if body.get("stream") is not None and not isinstance(body["stream"], bool):
+            raise HTTPException(400, "stream must be a boolean")
+        # Null means not supplied, not an extra completion or a streaming mode.
+        for flag in ("n", "stream"):
+            if kwargs.get(flag) is None:
+                kwargs.pop(flag, None)
+        supports = model.get("capabilities", {}).get("supports", {})
+        if body.get("tools") and supports.get("tool_calls") is False:
+            raise HTTPException(400, "The selected model explicitly does not support tools")
+        if body.get("stream") and supports.get("streaming") is False:
+            raise HTTPException(400, "The selected model explicitly does not support streaming")
+        if "reasoning_effort" in kwargs and isinstance(supports.get("reasoning_effort"), list):
+            if kwargs["reasoning_effort"] not in supports["reasoning_effort"]:
+                raise HTTPException(400, "reasoning_effort is not supported by the selected model")
+        if "prompt_cache_retention" in kwargs:
+            retention = kwargs.pop("prompt_cache_retention")
+            if protocol == "messages" or retention not in ("in-memory", "24h"):
+                raise HTTPException(400, "prompt_cache_retention requires an OpenAI protocol and in-memory or 24h")
+            # LiteLLM 1.103.2 drops this normal kwarg. Promote only this validated
+            # provider field; callers cannot supply arbitrary extra_body values.
+            kwargs["extra_body"] = {"prompt_cache_retention": retention}
+        if "prompt_cache_key" in kwargs:
+            cache_key = kwargs["prompt_cache_key"]
+            if protocol == "messages" or not isinstance(cache_key, str) or not cache_key or len(cache_key) > 512:
+                raise HTTPException(400, "prompt_cache_key requires an OpenAI protocol and a nonempty string of at most 512 characters")
         try:
-            result = await completion(
+            result = await await_inference(request, completion(
                 model=prefix + model["upstream_id"],
                 api_base=settings.upstream_url if protocol != "messages" else settings.upstream_url.removesuffix("/v1"),
-                api_key=settings.upstream_key, timeout=settings.timeout_seconds, **kwargs,
-            )
+                api_key=settings.upstream_key, timeout=settings.timeout_seconds,
+                num_retries=0, max_retries=0, **kwargs,
+            ), cleanup_seconds=settings.stream_cleanup_seconds)
+        except ClientDisconnected:
+            return JSONResponse({"error": {"code": "client_disconnected", "message": "Client disconnected"}}, status_code=499)
         except Exception as exc:
-            code = getattr(exc, "status_code", 502)
-            raise HTTPException(code if isinstance(code, int) and 400 <= code <= 599 else 502,
-                                "Copilot upstream request failed") from None
+            return JSONResponse(error_payload(exc), status_code=error_status(exc), headers=error_headers(exc))
         if body.get("stream"):
-            async def events():
-                try:
-                    async for chunk in result:
-                        yield "data: " + chunk.model_dump_json(exclude_none=True) + "\n\n"
-                    yield "data: [DONE]\n\n"
-                finally:
-                    close = getattr(result, "aclose", None)
-                    if close:
-                        await close()
-            return StreamingResponse(events(), media_type="text/event-stream")
+            return CopilotStreamingResponse(
+                result, heartbeat_seconds=settings.heartbeat_seconds,
+                idle_seconds=settings.stream_idle_seconds,
+                cleanup_seconds=settings.stream_cleanup_seconds, error_payload=error_payload,
+            )
         return result.model_dump(exclude_none=True)
 
     @app.post("/v1/embeddings")
     async def embeddings(request: Request):
         body, model = await payload(request, "embeddings")
-        kwargs = {k: v for k, v in body.items() if k in {"input", "dimensions", "encoding_format", "user"}}
+        validate_embedding(body)
+        kwargs = {k: v for k, v in body.items() if k in EMBEDDING_FIELDS}
         try:
-            result = await embedding(model="openai/" + model["upstream_id"],
+            result = await await_inference(request, embedding(model="openai/" + model["upstream_id"],
                                      api_base=settings.upstream_url, api_key=settings.upstream_key,
-                                     timeout=settings.timeout_seconds, **kwargs)
+                                     timeout=settings.timeout_seconds, num_retries=0, max_retries=0, **kwargs), cleanup_seconds=settings.stream_cleanup_seconds)
+        except ClientDisconnected:
+            return JSONResponse({"error": {"code": "client_disconnected", "message": "Client disconnected"}}, status_code=499)
         except Exception as exc:
-            code = getattr(exc, "status_code", 502)
-            raise HTTPException(code if isinstance(code, int) and 400 <= code <= 599 else 502,
-                                "Copilot embedding request failed") from None
+            return JSONResponse(error_payload(exc), status_code=error_status(exc), headers=error_headers(exc))
         return result.model_dump(exclude_none=True)
 
     return app
