@@ -523,3 +523,11 @@ Carry-forward per nog-OPEN item (essentie + bewijs → voltekst in `docs/AGENT_J
   de presets `standard`, `ptc` en `cordis`; het custom preset "Context Regime"
   mount ze niet. Een reminder maken kan alleen vanuit een sessie op zo'n
   preset — de Automation-tasks-pagina heeft bewust géén aanmaakformulier.
+
+## 2026-11-13 — Local coverage policy confirmed and CI install errors unmasked
+
+- **Owner:** DSH loop lead, openrouter/z-ai/glm-5.3-flash. The operator explicitly chose to keep the local80% coverage gate without Codecov in GuardianPR96 and caretakerPR23. Issues/PR descriptions are aligned to that decision; earlier agent comments sent through m0nk111 and commit titles alone are not authorization evidence.
+- **Guardian change:** preserve `--cov=app --cov-report=term-missing --cov-fail-under=80`, use repository-pinned dependencies and make installation errors visible/fatal rather than `2>/dev/null || echo skip`. Two regression tests validate the local/no-upload/marker/pin contract and synthetic install exit23 propagation without installing anything.
+- **Evidence boundary:** previous head1294db2 CI measured82.08% with2553 passed20 deselected. The existing production venv lacks pytest-cov, so a direct local coverage attempt failed at option parsing; no package was installed and no new coverage percentage is claimed. Final CI must measure the new head. The pinned pre-restart gate and ordinary tests validate code separately; no restart/deployment was performed.
+- **Related corrections:** caretaker's actual `--cov=caretaker` gate measured81.57%, not the previously quoted93% from `--cov=.`. Its workflow already fails installs honestly; only its coverage documentation needed reconciliation.
+- **Loop progress:** PR101's24h window and exact-head review/check gates passed; fresh pinned gate2553 passed, then one squash merge26707cf at2026-11-13T10:27:37Z. PR106 remains inside its24h window ending no earlier than2026-11-14T03:35:53Z. G2-01 remains blocked on operator deployment/G1 exit; production dirty files preserved.
