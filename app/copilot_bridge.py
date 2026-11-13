@@ -179,11 +179,15 @@ def create_app(settings: Settings | None = None, client: httpx.AsyncClient | Non
         validate_chat(body, protocol)
         prefix = {"responses": "openai/responses/", "chat": "openai/", "messages": "anthropic/"}[protocol]
         kwargs = {k: v for k, v in body.items() if k in CHAT_FIELDS}
-        count = body.get("n", 1)
-        if isinstance(count, bool) or not isinstance(count, int) or count != 1:
+        count = body.get("n")
+        if count is not None and (isinstance(count, bool) or not isinstance(count, int) or count != 1):
             raise HTTPException(400, "The economical bridge supports one completion per request (n=1)")
-        if "stream" in body and not isinstance(body["stream"], bool):
+        if body.get("stream") is not None and not isinstance(body["stream"], bool):
             raise HTTPException(400, "stream must be a boolean")
+        # Null means not supplied, not an extra completion or a streaming mode.
+        for flag in ("n", "stream"):
+            if kwargs.get(flag) is None:
+                kwargs.pop(flag, None)
         supports = model.get("capabilities", {}).get("supports", {})
         if body.get("tools") and supports.get("tool_calls") is False:
             raise HTTPException(400, "The selected model explicitly does not support tools")

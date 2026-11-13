@@ -140,6 +140,22 @@ async def test_stale_catalog_refuses_without_refresh_or_inference():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("protocol", ["chat", "responses", "messages"])
+@pytest.mark.parametrize("option", [{"n": None}, {"stream": None}, {"n": None, "stream": None}])
+async def test_nullable_completion_flags_mean_omission(protocol, option):
+    result = SimpleNamespace(model_dump=lambda **_: {"choices": []})
+    completion = AsyncMock(return_value=result)
+    async with httpx.AsyncClient() as upstream:
+        app, name = ready_app(upstream, completion, AsyncMock(), protocol)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://bridge") as client:
+            response = await client.post("/v1/chat/completions", json={"model": name, "messages": [{"role": "user", "content": "Hi"}], **option}, headers=HEADERS)
+    assert response.status_code == 200
+    assert completion.await_count == 1
+    assert "n" not in completion.call_args.kwargs
+    assert "stream" not in completion.call_args.kwargs
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("option", [{"n": 2}, {"n": True}, {"n": 1.0}, {"stream": "true"},
                                     {"prompt_cache_key": ""}, {"prompt_cache_retention": "arbitrary"}])
 async def test_invalid_cost_or_request_options_make_zero_calls(option):

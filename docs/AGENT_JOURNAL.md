@@ -557,3 +557,8 @@ Carry-forward per nog-OPEN item (essentie + bewijs → voltekst in `docs/AGENT_J
 - PR-Piet review5885247996 confirms clock/compatibility fixes and identifies direct asyncio.Task.cancel after EOF during suspended close. AnyIO shielding alone does not protect against raw task cancellation; earlier closed flag prevented remaining cleanup management. Pre-fix ASGI2.4 regression reproduced a hung/unobserved close.
 - One independent cleanup task now owns its deadline, joins and callbacks; duplicate/repeated cancellation joins that same cleanup under asyncio+AnyIO shielding and propagates cancellation afterward. Result/iterator and preheader orphan cleanup share the mechanism. A cancellation checkpoint before DONE prevents a canceled AnyIO scope from appearing as successful EOF when send is synchronous.
 - Focused274 tests pass; no public interface change, no additional model calls or production modifications. Full suite and next exact-head independent review remain required.
+
+### 2026-11-13T03:02Z — Nullable completion flags
+
+- Review5885370991 confirms cleanup fix and identifies null n/stream flags incorrectly rejected. Nine pre-fix protocol/flag combinations return400; now null flags are omitted from inference kwargs while actual n!=1/nonboolstream remain rejected. Caller body is not mutated. Focused284 checks and actual socket-denied configured-URL/auth protocol checker pass.
+- Full suite initially stopped on unrelated asynchronous WAL request_completed timing test after363 passes; isolated retry passed. Complete rerun collected before final push. No out-of-scope capture/WAL code edits; existing issue/PR101 owns that test-race work. Final current-head review still required.

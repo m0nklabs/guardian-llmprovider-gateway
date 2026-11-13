@@ -454,7 +454,7 @@ async def nullable_request_check():
         async with runtime(protocol, handle) as (client, model):
             result = await client.post("/v1/chat/completions", headers=HEADERS,
                 json={"model": model, "messages": MESSAGES, "max_tokens": None,
-                      "max_completion_tokens": None, "stream_options": None})
+                      "max_completion_tokens": None, "stream_options": None, "n": None, "stream": None})
         assert result.status_code == 429 and len(calls) == 1, (protocol, result.text)
         outcomes.append({"protocol": protocol, "nullable_options_accepted": True, "attempts": 1})
     return outcomes
