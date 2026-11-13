@@ -81,7 +81,27 @@ async def test_rate_limit_forwarded_safely_one_attempt(endpoint, protocol):
     assert result.json()["error"]["code"] == "rate_limit_exceeded"
 
 
-@pytest.mark.parametrize("value", ["bearer secret", "17\r\nX: evil", "17\n", -1, "1.5", "9" * 129, "Wed, 01 Jan 2025 12:00:00"])
+@pytest.mark.asyncio
+@pytest.mark.parametrize("endpoint,protocol", [("/v1/chat/completions", "chat"), ("/v1/embeddings", "embeddings")])
+@pytest.mark.parametrize("status", [429, 503])
+async def test_overflow_retry_date_does_not_break_http_error(endpoint, protocol, status):
+    class UpstreamError(Exception):
+        status_code = status
+        response = SimpleNamespace(headers=httpx.Headers({"Retry-After": "Fri, 31 Dec 9999 23:59:59 -0100"}))
+    operation = AsyncMock(side_effect=UpstreamError("secret upstream detail"))
+    async with httpx.AsyncClient() as upstream:
+        app, name = ready_app(upstream, operation, operation, protocol)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://bridge") as client:
+            result = await client.post(endpoint, json={"model": name, **({"input": "hi"} if protocol == "embeddings" else {"messages": [{"role": "user", "content": "Hi"}]})}, headers=HEADERS)
+    assert operation.await_count == 1
+    assert result.status_code == status
+    assert "Retry-After" not in result.headers
+    assert "error" in result.json()
+    assert "secret" not in result.text
+
+
+@pytest.mark.parametrize("value", ["bearer secret", "17\r\nX: evil", "17\n", -1, "1.5", "9" * 129, "Wed, 01 Jan 2025 12:00:00",
+                                   "Fri, 31 Dec 9999 23:59:59 -0100", "Mon, 01 Jan 0001 00:00:00 +0100"])
 def test_invalid_retry_header_dropped(value):
     assert retry_after(value) is None
 

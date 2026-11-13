@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from datetime import timezone
-from email.utils import parsedate_to_datetime
+from email.utils import format_datetime, parsedate_to_datetime
 
 
 # Upstream exception messages and arbitrary response headers can contain tokens
@@ -20,12 +20,14 @@ def retry_after(value: object) -> str | None:
         return value
     try:
         parsed = parsedate_to_datetime(value)
+        if parsed.tzinfo is None:
+            return None
+        # Normalization can overflow even when parsing succeeds. HTTP date names
+        # are locale-independent; do not use process-locale strftime names.
+        expected = format_datetime(parsed.astimezone(timezone.utc), usegmt=True)
     except (TypeError, ValueError, OverflowError):
         return None
-    if parsed.tzinfo is None:
-        return None
     # Only IMF-fixdate is forwarded; parsing a liberal mail date is insufficient.
-    expected = parsed.astimezone(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S GMT")
     return value if value == expected else None
 
 

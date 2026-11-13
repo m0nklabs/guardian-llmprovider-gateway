@@ -140,7 +140,7 @@ async def runtime(protocol, handler):
 async def error_checks():
     outcomes = []
     for protocol in ("chat", "responses", "messages"):
-        for mode in ("429", "remote_protocol", "connect"):
+        for mode in ("429", "remote_protocol", "connect", "429_overflow", "503_overflow"):
             calls = []
 
             def handle(request):
@@ -149,7 +149,9 @@ async def error_checks():
                     raise httpx.RemoteProtocolError("Synthetic disconnect after send")
                 if mode == "connect":
                     raise httpx.ConnectError("Synthetic connection failure")
-                return httpx.Response(429, headers={"Retry-After": "17"},
+                retry = "Fri, 31 Dec 9999 23:59:59 -0100" if mode.endswith("overflow") else "17"
+                status = 503 if mode == "503_overflow" else 429
+                return httpx.Response(status, headers={"Retry-After": retry},
                     json={"error": {"message": "Synthetic limit", "type": "rate_limit_error"}})
 
             async with runtime(protocol, handle) as (client, model):
@@ -160,6 +162,9 @@ async def error_checks():
                 assert result.status_code == 429, (protocol, result.text)
                 assert result.headers.get("Retry-After") == "17", protocol
                 assert result.json()["error"]["code"] == "rate_limit_exceeded"
+            elif mode.endswith("overflow"):
+                assert result.status_code == (503 if mode == "503_overflow" else 429), (protocol, result.text)
+                assert "Retry-After" not in result.headers, protocol
             else:
                 assert 500 <= result.status_code <= 599, (protocol, result.status_code)
             assert "synthetic-upstream-key" not in result.text
