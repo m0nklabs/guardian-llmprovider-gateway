@@ -143,7 +143,7 @@ async def test_stale_catalog_refuses_without_refresh_or_inference():
 @pytest.mark.parametrize("protocol", ["chat", "responses", "messages"])
 @pytest.mark.parametrize("option", [{"n": None}, {"stream": None}, {"n": None, "stream": None},
                                      {"prompt_cache_retention": None}, {"reasoning_effort": None},
-                                     {"prompt_cache_key": None}])
+                                     {"prompt_cache_key": None}, {"tools": None}])
 async def test_nullable_completion_flags_mean_omission(protocol, option):
     result = SimpleNamespace(model_dump=lambda **_: {"choices": []})
     completion = AsyncMock(return_value=result)

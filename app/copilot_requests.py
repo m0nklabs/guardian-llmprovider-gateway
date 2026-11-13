@@ -49,7 +49,7 @@ def validate_chat(body, protocol):
         for key in ("stop", "seed", "presence_penalty", "frequency_penalty", "logprobs"):
             if key in body and body[key] is not None:
                 _invalid(f"{key} is not supported by the Responses adapter")
-    if "tools" in body:
+    if body.get("tools") is not None:
         tools = body["tools"]
         if not isinstance(tools, list):
             _invalid("tools must be a list")

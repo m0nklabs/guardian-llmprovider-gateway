@@ -9,7 +9,7 @@ import pytest
 from starlette.requests import Request
 
 from app.copilot_stream import ClientDisconnected, await_inference
-from app.copilot_transport import LitellmOperations
+from app.copilot_transport import LitellmOperations, _OwnedHTTPStream
 
 
 class ClosingBytes(httpx.AsyncByteStream):
@@ -193,7 +193,14 @@ async def test_hung_close_is_bounded_and_does_not_starve_other_responses(status)
     assert asyncio.get_running_loop().time() - started < 0.25
     await asyncio.sleep(0)  # Deliver the bounded child's issued cancellation.
     assert hung.close_calls == fast.close_calls == 1
-    assert hung.cancelled and not hung.closed and fast.closed
+    assert not hung.closed and fast.closed
+    # At the shared deadline the response-close waiter is cancelled while its
+    # independently owned physical close finishes that same deadline. Join the
+    # already-issued cooperative cancellation rather than assume one loop tick.
+    remaining = pending_cleanup()
+    if remaining:
+        await asyncio.wait_for(asyncio.gather(*remaining, return_exceptions=True), timeout=0.1)
+    assert hung.cancelled
     assert not pending_cleanup()
 
 
@@ -285,3 +292,175 @@ async def test_stream_success_transfers_http_ownership_without_premature_close()
     await result.aclose()
     assert stream.closed and response.is_closed
     assert not pending_cleanup()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [200, 429])
+@pytest.mark.parametrize("cancel_mode", ["disconnect", "raw_repeated"])
+async def test_real_nonstream_httpx_autoclose_survives_disconnect_and_raw_cancel(status, cancel_mode):
+    ops = operations()
+    stream = ClosingBytes(delay=0.035)
+    response = httpx.Response(status, stream=stream, headers={"Retry-After": "17"})
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return response
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle),
+                                 event_hooks={"response": [ops._capture]}) as client:
+        async def operation(**kwargs):
+            result = await client.post("http://synthetic.invalid/v1/messages", json={"synthetic": True})
+            result.raise_for_status()
+            return result
+
+        async def receive():
+            if cancel_mode == "disconnect":
+                await stream.started.wait()
+                return {"type": "http.disconnect"}
+            await asyncio.Event().wait()
+
+        task = asyncio.create_task(await_inference(
+            Request({"type": "http", "headers": []}, receive),
+            ops._invoke(operation, {}), cleanup_seconds=0.1))
+        await stream.started.wait()
+        assert response.is_closed  # HTTPX set this BEFORE physical close finished.
+        if cancel_mode == "raw_repeated":
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+        with pytest.raises(ClientDisconnected if cancel_mode == "disconnect" else asyncio.CancelledError):
+            await task
+        assert len(requests) == 1 and not client.is_closed
+        assert stream.closed and not stream.cancelled and stream.close_calls == 1
+        assert not pending_cleanup()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [200, 429])
+async def test_real_nonstream_httpx_autoclose_preserves_response_status_body_headers(status):
+    ops = operations()
+    stream = ClosingBytes(delay=0.005)
+    response = httpx.Response(status, stream=stream, headers={"Retry-After": "17", "X-Synthetic": "preserved"})
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return response
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle),
+                                 event_hooks={"response": [ops._capture]}) as client:
+        async def operation(**kwargs):
+            result = await client.post("http://synthetic.invalid/v1/messages", json={"synthetic": True})
+            result.raise_for_status()
+            return result
+
+        if status == 429:
+            with pytest.raises(httpx.HTTPStatusError) as caught:
+                await ops._invoke(operation, {})
+            assert caught.value.status_code == 429
+            assert caught.value.headers == {"Retry-After": "17"}
+        else:
+            result = await ops._invoke(operation, {})
+            assert result is response and result.content == b"synthetic"
+            assert result.headers["X-Synthetic"] == "preserved"
+        assert len(requests) == 1 and stream.closed and stream.close_calls == 1
+        assert not client.is_closed and not pending_cleanup()
+
+
+@pytest.mark.asyncio
+async def test_real_nonstream_httpx_autoclose_survives_anyio_disconnect_scope():
+    ops = operations()
+    stream = ClosingBytes(delay=0.035)
+    response = httpx.Response(200, stream=stream)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: response),
+                                 event_hooks={"response": [ops._capture]}) as client:
+        async def operation(**kwargs):
+            return await client.post("http://synthetic.invalid/v1/messages", json={"synthetic": True})
+
+        async def worker():
+            await ops._invoke(operation, {})
+            await anyio.lowlevel.checkpoint_if_cancelled()
+
+        async with anyio.create_task_group() as group:
+            group.start_soon(worker)
+            await stream.started.wait()
+            group.cancel_scope.cancel()
+        assert stream.closed and not stream.cancelled and stream.close_calls == 1
+        assert not client.is_closed and not pending_cleanup()
+
+
+@pytest.mark.asyncio
+async def test_real_streaming_httpx_eof_close_survives_raw_repeated_cancel():
+    ops = operations()
+    stream = ClosingBytes(delay=0.035)
+    response = httpx.Response(200, stream=stream)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: response),
+                                 event_hooks={"response": [ops._capture]}) as client:
+        async def operation(**kwargs):
+            return await client.send(client.build_request("POST", "http://synthetic.invalid/v1/messages"), stream=True)
+
+        owned = await ops._invoke(operation, {"stream": True})
+        assert not stream.started.is_set() and not response.is_closed
+        read = asyncio.create_task(owned.result.aread())
+        await stream.started.wait()
+        read.cancel()
+        await asyncio.sleep(0)
+        read.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await read
+        await owned.aclose()  # Response flag is already set; physical close was owned before it.
+        assert stream.closed and stream.close_calls == 1 and not stream.cancelled
+        assert not client.is_closed and not pending_cleanup()
+
+
+@pytest.mark.asyncio
+async def test_response_hook_does_not_wrap_unowned_discovery_streams():
+    ops = operations()
+    stream = ClosingBytes(delay=0)
+    response = httpx.Response(200, stream=stream)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: response),
+                                 event_hooks={"response": [ops._capture]}) as client:
+        result = await client.send(client.build_request("GET", "http://synthetic.invalid/v1/models"), stream=True)
+        assert not isinstance(result.stream, _OwnedHTTPStream)
+        await result.aclose()
+    assert stream.closed and not pending_cleanup()
+
+
+@pytest.mark.asyncio
+async def test_wrapped_stream_iteration_and_close_are_idempotent_with_one_deadline():
+    stream = ClosingBytes(delay=0.02)
+    wrapper = _OwnedHTTPStream(stream, 0.1)
+    assert [chunk async for chunk in wrapper] == [b"synthetic"]
+    first = asyncio.create_task(wrapper.aclose())
+    await stream.started.wait()
+    original_task, original_deadline = wrapper.cleanup.task, wrapper.cleanup.deadline
+    second = asyncio.create_task(wrapper.aclose())
+    await asyncio.gather(first, second)
+    await wrapper.aclose()
+    assert wrapper.cleanup.task is original_task and wrapper.cleanup.deadline == original_deadline
+    assert stream.close_calls == 1 and stream.closed and not pending_cleanup()
+
+
+@pytest.mark.asyncio
+async def test_real_nonstream_httpx_hung_autoclose_has_one_bounded_deadline():
+    ops = operations(cleanup_seconds=0.025)
+    stream = ClosingBytes(hang=True)
+    response = httpx.Response(200, stream=stream)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: response),
+                                 event_hooks={"response": [ops._capture]}) as client:
+        async def operation(**kwargs):
+            return await client.post("http://synthetic.invalid/v1/messages", json={"synthetic": True})
+
+        async def receive():
+            await stream.started.wait()
+            return {"type": "http.disconnect"}
+
+        start = asyncio.get_running_loop().time()
+        with pytest.raises(ClientDisconnected):
+            await await_inference(Request({"type": "http", "headers": []}, receive),
+                                  ops._invoke(operation, {}), cleanup_seconds=0.1)
+        assert asyncio.get_running_loop().time() - start < 0.25
+        await asyncio.sleep(0)
+        assert stream.cancelled and stream.close_calls == 1
+        assert not pending_cleanup()

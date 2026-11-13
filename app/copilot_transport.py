@@ -23,6 +23,30 @@ class _CallState:
     responses: list[httpx.Response] = field(default_factory=list)
 
 
+class _OwnedHTTPStream(httpx.AsyncByteStream):
+    """Own physical connection closure before HTTPX sets its closed flag.
+
+    HTTPX marks Response.is_closed before awaiting stream.aclose, then refuses
+    later response closes. Attach ownership in the response hook, before its
+    automatic read/close or SDK error handling can reach that checkpoint.
+    Every caller joins one underlying close and its original bounded deadline.
+    """
+    def __init__(self, stream: httpx.AsyncByteStream, cleanup_seconds: float):
+        self.stream = stream
+        self.cleanup = _Cleanup(self._close, cleanup_seconds)
+
+    async def __aiter__(self):
+        async for chunk in self.stream:
+            yield chunk
+
+    async def _close(self, deadline: float):
+        task = asyncio.create_task(self.stream.aclose(), name="copilot-stream-http-close")
+        await _finish_tasks({task}, deadline)
+
+    async def aclose(self):
+        await self.cleanup.wait()
+
+
 class _OwnedResult:
     """Close the original HTTP response even if a provider iterator cannot."""
     def __init__(self, result, responses):
@@ -105,6 +129,8 @@ class LitellmOperations:
     async def _capture(self, response: httpx.Response):
         state = self._state.get()
         if state is not None:
+            if not isinstance(response.stream, _OwnedHTTPStream):
+                response.stream = _OwnedHTTPStream(response.stream, self._cleanup_seconds)
             state.responses.append(response)
             if 400 <= response.status_code <= 599:
                 state.error_status = response.status_code
