@@ -8,6 +8,7 @@ is not a renamed/removed callable: issue #107.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -79,10 +80,11 @@ def _write_tree(tmp_path: Path, *sources: tuple[str, str]) -> Path:
     return tmp_path
 
 
-def _run_gate(root: Path) -> subprocess.CompletedProcess[str]:
+def _run_gate(root: Path, pythonpath: str | None = None) -> subprocess.CompletedProcess[str]:
+    env = None if pythonpath is None else {**os.environ, "PYTHONPATH": pythonpath}
     return subprocess.run(
         [sys.executable, "-c", RUNNER, str(CHECKER), str(root)],
-        cwd=root, capture_output=True, text=True, check=False, timeout=120,
+        cwd=root, env=env, capture_output=True, text=True, check=False, timeout=120,
     )
 
 
@@ -92,6 +94,32 @@ def test_uninstalled_top_level_package_is_skipped_not_failed(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     assert "openai.AsyncOpenAI does not exist" not in result.stdout
     assert "OK (all resolved call sites match callee signatures)" in result.stdout
+
+
+def test_broken_or_partial_external_package_is_skipped_not_failed(tmp_path):
+    """An external package that imports but fails (missing transitive dep,
+    raised error) is an environment fact — exactly what CI's tool-cache Python
+    exposed with a half-installed ``openai`` whose ``distro`` dependency was
+    absent. Outside the repository tree, so never a drift finding."""
+    external = tmp_path / "external-site"
+    external.mkdir()
+    (external / "broken_external").mkdir()
+    (external / "broken_external" / "__init__.py").write_text(
+        "import distro_not_installed_anywhere_xyz\n", encoding="utf-8")
+    (external / "raising_external").mkdir()
+    (external / "raising_external" / "__init__.py").write_text(
+        "raise ImportError('broken install')\n", encoding="utf-8")
+    root = _write_tree(tmp_path, ("uses_broken.py", LAZY_SDK.replace(
+        "from openai import", "from broken_external import").replace(
+        "AsyncOpenAI(", "SomeClass(").replace(
+        "AsyncOpenAI", "SomeClass")))
+    root.joinpath("app/uses_raising.py").write_text(
+        LAZY_SDK.replace("from openai import", "from raising_external import").replace(
+        "AsyncOpenAI(", "SomeClass(").replace("AsyncOpenAI", "SomeClass"),
+        encoding="utf-8")
+    result = _run_gate(root, pythonpath=str(external))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "does not exist" not in result.stdout
 
 
 def test_missing_app_module_and_wrong_attributes_still_fail(tmp_path):
