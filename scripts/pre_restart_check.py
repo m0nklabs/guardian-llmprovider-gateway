@@ -547,10 +547,28 @@ def check_call_site_signatures() -> bool:
     py_files = sorted(APP.rglob("*.py"))
     problems: list[str] = []
 
+    # Sentinel: the *top-level* package is not installed in this venv, so the
+    # call site cannot be verified here — not a drift finding. App code may
+    # import an SDK lazily inside a function (e.g. the Copilot bridge imports
+    # litellm/openai only where it talks to the external runtime), and the
+    # deployment venv deliberately does not carry that SDK.
+    _uninstalled = object()
+
     def _resolve_import(module_name: str, attr: str | None = None):
-        """Return the callee object or None."""
+        """Return the callee object, ``_uninstalled``, or None.
+
+        ``_uninstalled``: ``import_module`` failed because the top-level
+        package itself is absent, so there is nothing to resolve here.
+        ``None``: the module imports but the attribute is missing, a deeper
+        module is absent, or the import failed another way — those stay
+        drift findings.
+        """
         try:
             mod = importlib.import_module(module_name)
+        except ModuleNotFoundError as exc:
+            if exc.name is not None and exc.name == module_name.split(".", 1)[0]:
+                return _uninstalled
+            return None
         except Exception:
             return None
         if attr is None:
@@ -627,6 +645,8 @@ def check_call_site_signatures() -> bool:
                     if attr is None:
                         continue  # module alias itself, not a callable import
                     callee = _resolve_import(mod_name, attr)
+                    if callee is _uninstalled:
+                        continue
                     if callee is None:
                         problems.append(
                             f"{path.relative_to(REPO)}:{node.lineno}: {mod_name}.{attr} does not exist")
@@ -645,7 +665,7 @@ def check_call_site_signatures() -> bool:
                     continue
                 mod_name, attr = import_map[base]
                 parent = _resolve_import(mod_name, attr) if attr else _resolve_import(mod_name, None)
-                if parent is None:
+                if parent is _uninstalled or parent is None:
                     continue
                 method = getattr(parent, node.func.attr, None)
                 if method is None:
@@ -679,7 +699,7 @@ def check_call_site_signatures() -> bool:
                     if var in klass_by_var:
                         mod_name, attr = klass_by_var[var]
                         parent = _resolve_import(mod_name, attr)
-                        if parent is None:
+                        if parent is _uninstalled or parent is None:
                             continue
                         method = getattr(parent, node.func.attr, None)
                         if method is None:
