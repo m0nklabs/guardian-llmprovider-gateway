@@ -1018,7 +1018,6 @@ async def test_cancel_resistant_read_released_by_distinct_iterator_close():
         def __aiter__(self):
             return LeakIterator()
 
-    stream = Stream([])  # result aclose not needed; iterator owns the close
     result = IterableWithoutAclose()
     session = _StreamSession(result, heartbeat_seconds=0.01, idle_seconds=0.2,
                              cleanup_seconds=0.1, error_payload=error_payload)
@@ -1047,6 +1046,9 @@ async def test_blocked_heartbeat_send_releases_upstream_within_idle_deadline():
             body_text = message.get("body", b"")
             if isinstance(body_text, bytes) and body_text.startswith(b": guardian-keepalive"):
                 heartbeat_blocked.set()
+                await asyncio.sleep(0.4)  # well past idle_seconds (0.2)
+                closure_while_blocked.append(
+                    stream.close_calls == 1 and stream.close_completed)
                 await heartbeat_released.wait()
 
     async def release_late():
@@ -1054,18 +1056,17 @@ async def test_blocked_heartbeat_send_releases_upstream_within_idle_deadline():
         await asyncio.sleep(0.6)
         heartbeat_released.set()
 
-    async def slow_read(seconds):
-        await asyncio.sleep(seconds)
+    async def stalled():
+        await asyncio.Event().wait()  # never completes on its own
 
-    stream = Stream([
-        lambda: slow_read(0.05), lambda: slow_read(0.05), lambda: slow_read(0.05),
-        lambda: slow_read(30),  # the stuck read; its deadline must still fire
-    ])
+    stream = Stream([stalled])
     release_task = asyncio.create_task(release_late())
+    sent: list = []
+    closure_while_blocked: list[bool] = []
     try:
         resp = response(stream)
         try:
-            await asyncio.wait_for(
+            sent = await asyncio.wait_for(
                 run_asgi(resp, send_hook=blocking_send_hook), timeout=1)
         except asyncio.TimeoutError:
             pass  # the stuck read never completes; release the send below
@@ -1073,9 +1074,14 @@ async def test_blocked_heartbeat_send_releases_upstream_within_idle_deadline():
         heartbeat_released.set()
         await release_task
     assert heartbeat_blocked.is_set()
-    # The watchdog cancelled the stuck read and released the upstream within
-    # the idle deadline, independent of the blocked heartbeat send: while this
-    # generator is suspended inside the heartbeat send, its own deadline
-    # checks cannot run, yet close completed.
+    # Asserted WHILE the heartbeat delivery was blocked and the generator
+    # suspended: the watchdog released the upstream within the idle deadline
+    # independent of SSE delivery. Without independent idle enforcement the
+    # stalled read never completes, no error frame exists, and this fails.
+    assert closure_while_blocked == [True]
     assert stream.close_calls == 1 and stream.close_completed
+    assert stream.read_cancelled
+    # After release the client still receives the sanitized timeout frame.
+    assert json.loads(data_frames(body(sent))[-1])["error"]["code"] == "upstream_timeout"
+    assert "[DONE]" not in body(sent)
     assert not stream_tasks()
