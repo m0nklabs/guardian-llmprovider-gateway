@@ -548,41 +548,35 @@ def check_call_site_signatures() -> bool:
     problems: list[str] = []
 
     # Sentinel: the module cannot be verified in *this* interpreter, so the
-    # call site says nothing about drift — not a finding. App code may import
-    # an SDK lazily inside a function (e.g. the Copilot bridge imports
-    # litellm/openai only where it talks to the external runtime), and the
-    # deployment venv deliberately does not carry that SDK. External packages
-    # can also be broken or partially installed in an interpreter (a missing
-    # transitive dependency raises ModuleNotFoundError naming the *dependency*,
-    # not the package); such failures are environment facts, not code drift.
+    # call site says nothing about drift — not a finding. Two environment
+    # shapes produce it: the package root itself is absent/broken here (the
+    # deployment venv deliberately does not carry the Copilot SDK, and an
+    # interpreter can hold a half-installed package whose transitive
+    # dependency is missing), or the requested module exists but its *import
+    # execution* failed on something this interpreter cannot provide. What
+    # stays a drift finding is a requested submodule path that simply does not
+    # exist under an importable root: no environment makes
+    # ``from json.nope import Missing`` work.
     _uninstalled = object()
 
-    # Packages that live in this repository's own tree: import failures there
-    # are genuine drift (a missing/renamed app module), never an environment
-    # fact. App-only scanning makes ``app`` the one that matters, but the
-    # derivation stays generic.
-    repo_local_packages = {
-        p.name for p in REPO.iterdir()
-        if p.is_dir() and (p / "__init__.py").exists()
-    } | {p.stem for p in REPO.glob("*.py")}
-
     def _resolve_import(module_name: str, attr: str | None = None):
-        """Return the callee object, ``_uninstalled``, or None.
-
-        ``_uninstalled``: the import failed for a reason outside the
-        repository's own tree (package absent here, broken/partial install,
-        missing transitive dependency), so this interpreter cannot verify the
-        call site. ``None``: the module is repo-local and failed to import, or
-        it imports but the attribute is missing — those stay drift findings.
-        """
-        module_root = module_name.split(".", 1)[0]
+        """Return the callee object, ``_uninstalled``, or None."""
         try:
             mod = importlib.import_module(module_name)
+        except ModuleNotFoundError as exc:
+            if exc.name is None or module_name == module_name.split(".", 1)[0]:
+                # The root package is absent (or the interpreter reported no
+                # attributable name): nothing here can verify the call site.
+                return _uninstalled
+            if exc.name == module_name:
+                # An importable root lacks exactly the requested submodule
+                # file: drift, whatever the root's origin.
+                return None
+            # The requested module exists but pulled in something else that
+            # is missing: an environment fact, not drift.
+            return _uninstalled
         except Exception:
-            # Repo-local import failures are drift; anything else is this
-            # interpreter's environment, which the call-site check must not
-            # judge.
-            return None if module_root in repo_local_packages else _uninstalled
+            return _uninstalled
         if attr is None:
             return mod
         try:

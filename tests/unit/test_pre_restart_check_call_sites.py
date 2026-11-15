@@ -24,6 +24,22 @@ spec = importlib.util.spec_from_file_location("pre_restart_check_fixture", sys.a
 module = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = module  # dataclass resolution needs the module registered
 spec.loader.exec_module(module)
+
+blocked_roots = set(filter(None, sys.argv[3].split(",")))
+
+
+class _AbsentRoot:
+    # Emulate a package root that is not installed in this interpreter.
+    def find_spec(self, name, path=None, target=None):
+        root = name.split(".")[0]
+        if root in blocked_roots:
+            raise ModuleNotFoundError(f"No module named {root!r}", name=root)
+        return None
+
+
+if blocked_roots:
+    sys.meta_path.insert(0, _AbsentRoot())
+
 module.REPO = pathlib.Path(sys.argv[2])
 module.APP = module.REPO / "app"
 ok = module.check_call_site_signatures()
@@ -47,6 +63,17 @@ MISSING_APP_MODULE = '''\
 
 def load():
     from app.nope import Missing
+
+    return Missing()
+'''
+
+MISSING_STDLIB_SUBMODULE = '''\
+"""References a submodule an importable root does not have - genuine drift,
+whatever the root's origin: no environment ships ``json.nope``."""
+
+
+def load():
+    from json.nope import Missing
 
     return Missing()
 '''
@@ -80,17 +107,22 @@ def _write_tree(tmp_path: Path, *sources: tuple[str, str]) -> Path:
     return tmp_path
 
 
-def _run_gate(root: Path, pythonpath: str | None = None) -> subprocess.CompletedProcess[str]:
+def _run_gate(
+    root: Path, pythonpath: str | None = None, blocked_roots: str = ""
+) -> subprocess.CompletedProcess[str]:
     env = None if pythonpath is None else {**os.environ, "PYTHONPATH": pythonpath}
     return subprocess.run(
-        [sys.executable, "-c", RUNNER, str(CHECKER), str(root)],
+        [sys.executable, "-c", RUNNER, str(CHECKER), str(root), blocked_roots],
         cwd=root, env=env, capture_output=True, text=True, check=False, timeout=120,
     )
 
 
-def test_uninstalled_top_level_package_is_skipped_not_failed(tmp_path):
+def test_absent_root_package_is_skipped_not_failed(tmp_path):
+    """The SDK root is forced absent via a meta-path blocker, so the sentinel
+    is exercised deterministically regardless of what the interpreter has
+    installed (the original checker flagged ``openai.AsyncOpenAI`` here)."""
     root = _write_tree(tmp_path, ("uses_lazy_sdk.py", LAZY_SDK))
-    result = _run_gate(root)
+    result = _run_gate(root, blocked_roots="openai")
     assert result.returncode == 0, result.stdout + result.stderr
     assert "openai.AsyncOpenAI does not exist" not in result.stdout
     assert "OK (all resolved call sites match callee signatures)" in result.stdout
@@ -127,12 +159,14 @@ def test_missing_app_module_and_wrong_attributes_still_fail(tmp_path):
         tmp_path,
         ("uses_lazy_sdk.py", LAZY_SDK),
         ("missing_app_module.py", MISSING_APP_MODULE),
+        ("missing_stdlib_submodule.py", MISSING_STDLIB_SUBMODULE),
         ("wrong_attribute.py", WRONG_ATTRIBUTE),
         ("wrong_from_import.py", WRONG_FROM_IMPORT),
     )
-    result = _run_gate(root)
+    result = _run_gate(root, blocked_roots="openai")
     assert result.returncode == 1, result.stdout + result.stderr
     assert "app.nope.Missing does not exist" in result.stdout
+    assert "json.nope.Missing does not exist" in result.stdout
     assert "not_a_real_method does not exist on json" in result.stdout
     assert "os.not_a_real_name does not exist" in result.stdout
     # The absent-SDK site stays a skip even while other sites fail.
