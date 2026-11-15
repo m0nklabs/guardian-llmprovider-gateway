@@ -57,7 +57,8 @@ async def _close_target(target: Any, deadline: float | None = None) -> None:
 
 
 async def _close_targets_after_read(read_task: asyncio.Task,
-                                    targets: list[Any]) -> None:
+                                    targets: list[Any],
+                                    late_cleanup_seconds: float) -> None:
     """Close deferred generators once they are no longer executing.
 
     A cancel-caught read keeps the generator's frame running even after the
@@ -71,7 +72,11 @@ async def _close_targets_after_read(read_task: asyncio.Task,
             await asyncio.sleep(0.005)
     # Fresh bounded budget once the generator is closable: a cooperative
     # finalizer that waits indefinitely must never hold resources forever.
-    fresh_deadline = asyncio.get_running_loop().time() + 5.0
+    # The session's configured interval sizes the late budget too, so short
+    # settings cancel hung closes quickly and long settings get their full
+    # finalization window.
+    fresh_deadline = (asyncio.get_running_loop().time()
+                      + late_cleanup_seconds)
     close_tasks = {asyncio.create_task(
         _close_target(target, fresh_deadline), name="copilot-stream-close")
         for target in targets}
@@ -360,7 +365,8 @@ class _StreamSession:
                     # finalizer can never hold resources forever.
                     if self.armed_close is None or self.armed_close.done():
                         self.armed_close = asyncio.create_task(
-                            _close_targets_after_read(read_task, deferred),
+                            _close_targets_after_read(
+                                read_task, deferred, self.cleanup.seconds),
                             name="copilot-stream-cleanup")
                         self.armed_close.add_done_callback(_consume_task)
         elif tasks:
