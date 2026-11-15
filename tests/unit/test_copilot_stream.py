@@ -1097,14 +1097,17 @@ async def test_expired_read_returning_eof_still_times_out_without_done():
     eof_seen = asyncio.Event()
 
     async def eof_on_cancel():
-        try:
-            await asyncio.Event().wait()  # would normally never finish
-        except asyncio.CancelledError:
-            # A stuck read that treats cancellation as clean end-of-stream:
-            # tolerate repeated cancellation, report EOF only once released.
-            await released_eof.wait()
-            eof_seen.set()
-            raise StopAsyncIteration
+        # A stuck read that treats cancellation as clean end-of-stream.
+        # Cleanup may cancel repeatedly while the read awaits its release:
+        # shield that wait, tolerate every cancel, and report EOF exactly
+        # once (review finding 0522d52).
+        while True:
+            try:
+                await asyncio.shield(released_eof.wait())
+                eof_seen.set()
+                raise StopAsyncIteration
+            except asyncio.CancelledError:
+                continue
 
     async def blocking_send_hook(message):
         if message.get("type") == "http.response.body":
@@ -1137,8 +1140,7 @@ async def test_expired_read_returning_eof_still_times_out_without_done():
         released_eof.set()
         await release_task
     assert heartbeat_blocked.is_set()
-    assert stream.read_cancelled, "read was never cancelled: no expiry happened"
-    assert eof_seen.is_set() or stream.read_cancelled  # EOF reported after release
+    assert eof_seen.is_set(), "fake read never reported EOF: late-EOF path untested"
     text = body(sent)
     # Expiry is authoritative: the sanitized timeout frame, never a success
     # [DONE] even though the cancelled read eventually reported EOF.
