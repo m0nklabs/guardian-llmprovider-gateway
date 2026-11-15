@@ -1,0 +1,207 @@
+"""Gate 4b must skip uninstalled top-level packages instead of flagging drift.
+
+The cross-module call-site check resolves callees by importing them. App code
+may import a third-party SDK lazily inside a function (the Copilot bridge does),
+and the deployment venv deliberately does not carry that SDK. An absent package
+is not a renamed/removed callable: issue #107.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+CHECKER = Path(__file__).resolve().parents[2] / "scripts" / "pre_restart_check.py"
+
+RUNNER = """\
+import importlib.util
+import pathlib
+import sys
+
+spec = importlib.util.spec_from_file_location("pre_restart_check_fixture", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module  # dataclass resolution needs the module registered
+spec.loader.exec_module(module)
+
+blocked_roots = set(filter(None, sys.argv[3].split(",")))
+
+
+class _AbsentRoot:
+    # Emulate a package root that is not installed in this interpreter.
+    def find_spec(self, name, path=None, target=None):
+        root = name.split(".")[0]
+        if root in blocked_roots:
+            raise ModuleNotFoundError(f"No module named {root!r}", name=root)
+        return None
+
+
+if blocked_roots:
+    sys.meta_path.insert(0, _AbsentRoot())
+
+module.REPO = pathlib.Path(sys.argv[2])
+module.APP = module.REPO / "app"
+ok = module.check_call_site_signatures()
+print("GATE4B", "PASS" if ok else "FAIL")
+sys.exit(0 if ok else 1)
+"""
+
+LAZY_SDK = '''\
+"""Calls an SDK that the deployment venv intentionally does not carry."""
+
+
+def build():
+    from openai import AsyncOpenAI
+
+    return AsyncOpenAI(api_key="k", base_url="http://127.0.0.1:1/v1")
+'''
+
+MISSING_APP_MODULE = '''\
+"""References an app submodule that does not exist - genuine drift."""
+
+
+def load():
+    from app.nope import Missing
+
+    return Missing()
+'''
+
+MISSING_STDLIB_SUBMODULE = '''\
+"""References a submodule an importable root does not have - genuine drift,
+whatever the root's origin: no environment ships ``json.nope``."""
+
+
+def load():
+    from json.nope import Missing
+
+    return Missing()
+'''
+
+MISSING_ANCESTOR = '''\
+"""Targets a child below a missing ancestor of an importable root - the
+interpreter reports the ancestor name, which is still drift."""
+
+
+def load():
+    from app.nope.deep import Missing
+
+    return Missing()
+'''
+
+WRONG_ATTRIBUTE = '''\
+"""Calls an attribute that the installed module does not have."""
+
+import json
+
+
+def dump():
+    return json.not_a_real_method({})
+'''
+
+WRONG_FROM_IMPORT = '''\
+"""Imports a name that the installed module does not export."""
+
+from os import not_a_real_name
+
+
+def go():
+    return not_a_real_name()
+'''
+
+
+def _write_tree(tmp_path: Path, *sources: tuple[str, str], broken_init: bool = False) -> Path:
+    (tmp_path / "app").mkdir()
+    init = "from os import not_a_real_name  # broken repository package\n" if broken_init else ""
+    (tmp_path / "app" / "__init__.py").write_text(init, encoding="utf-8")
+    for name, text in sources:
+        (tmp_path / "app" / name).write_text(text, encoding="utf-8")
+    return tmp_path
+
+
+def _run_gate(
+    root: Path, pythonpath: str | None = None, blocked_roots: str = ""
+) -> subprocess.CompletedProcess[str]:
+    env = None if pythonpath is None else {**os.environ, "PYTHONPATH": pythonpath}
+    return subprocess.run(
+        [sys.executable, "-c", RUNNER, str(CHECKER), str(root), blocked_roots],
+        cwd=root, env=env, capture_output=True, text=True, check=False, timeout=120,
+    )
+
+
+def test_absent_root_package_is_skipped_not_failed(tmp_path):
+    """The SDK root is forced absent via a meta-path blocker, so the sentinel
+    is exercised deterministically regardless of what the interpreter has
+    installed (the original checker flagged ``openai.AsyncOpenAI`` here)."""
+    root = _write_tree(tmp_path, ("uses_lazy_sdk.py", LAZY_SDK))
+    result = _run_gate(root, blocked_roots="openai")
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "openai.AsyncOpenAI does not exist" not in result.stdout
+    assert "OK (all resolved call sites match callee signatures)" in result.stdout
+
+
+def test_broken_or_partial_external_package_stays_a_finding(tmp_path):
+    """Fail-closed per review: only a plain root-absent ModuleNotFoundError is
+    the environment sentinel. A root that exists but raises ImportError on
+    import, and a module whose execution pulls in a missing dependency, were
+    findings before this PR and stay findings — no environment excuse."""
+    external = tmp_path / "external-site"
+    external.mkdir()
+    (external / "broken_external").mkdir()
+    (external / "broken_external" / "__init__.py").write_text(
+        "raise ImportError('broken install')\n", encoding="utf-8")
+    (external / "partial_external").mkdir()
+    (external / "partial_external" / "__init__.py").write_text(
+        "import missing_dependency_of_partial\n", encoding="utf-8")
+    root = _write_tree(
+        tmp_path,
+        ("uses_broken.py", LAZY_SDK.replace(
+            "from openai import", "from broken_external import").replace(
+            "AsyncOpenAI(", "SomeClass(").replace(
+            "AsyncOpenAI", "SomeClass")),
+        ("uses_partial.py", LAZY_SDK.replace(
+            "from openai import", "from partial_external import").replace(
+            "AsyncOpenAI(", "SomeClass(").replace(
+            "AsyncOpenAI", "SomeClass")),
+    )
+    result = _run_gate(root, pythonpath=str(external))
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "broken_external.SomeClass does not exist" in result.stdout
+    assert "partial_external.SomeClass does not exist" in result.stdout
+
+
+def test_missing_app_module_and_wrong_attributes_still_fail(tmp_path):
+    root = _write_tree(
+        tmp_path,
+        ("uses_lazy_sdk.py", LAZY_SDK),
+        ("missing_app_module.py", MISSING_APP_MODULE),
+        ("missing_stdlib_submodule.py", MISSING_STDLIB_SUBMODULE),
+        ("missing_ancestor.py", MISSING_ANCESTOR),
+        ("wrong_attribute.py", WRONG_ATTRIBUTE),
+        ("wrong_from_import.py", WRONG_FROM_IMPORT),
+    )
+    result = _run_gate(root, blocked_roots="openai")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "app.nope.Missing does not exist" in result.stdout
+    assert "json.nope.Missing does not exist" in result.stdout
+    assert "app.nope.deep.Missing does not exist" in result.stdout
+    assert "not_a_real_method does not exist on json" in result.stdout
+    assert "os.not_a_real_name does not exist" in result.stdout
+    # The absent-SDK site stays a skip even while other sites fail.
+    assert "uses_lazy_sdk" not in result.stdout
+    # The absent-SDK site stays a skip even while other sites fail.
+    assert "uses_lazy_sdk" not in result.stdout
+
+
+def test_broken_repository_package_import_is_drift_not_environment(tmp_path):
+    """A repo-local root that fails to import at all (broken __init__ raising
+    ImportError) must stay a drift finding: there is no environment excuse for
+    the repository's own package."""
+    root = _write_tree(
+        tmp_path,
+        ("uses_app.py", "def go():\n    from app import Missing\n\n    return Missing()\n"),
+        broken_init=True,
+    )
+    result = _run_gate(root, blocked_roots="openai")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "app.Missing does not exist" in result.stdout
