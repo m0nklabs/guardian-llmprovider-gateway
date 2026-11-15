@@ -43,6 +43,20 @@ async def _close_target(target: Any) -> None:
     await target.aclose()
 
 
+async def _close_targets_after_read(read_task: asyncio.Task,
+                                    targets: list[Any]) -> None:
+    """Close deferred generators only after their pending read finished,
+    however long it takes; every close stays observed by _consume_task."""
+    try:
+        await read_task
+    except BaseException:
+        pass  # cancellation/exception observed by the read's own consumers
+    close_tasks = {asyncio.create_task(
+        _close_target(target), name="copilot-stream-close")
+        for target in targets}
+    await _finish_tasks(close_tasks, float("inf"))
+
+
 async def _join_cleanup(task: asyncio.Task) -> None:
     """Join the same cleanup even under repeated raw Task.cancel() calls.
 
@@ -277,19 +291,28 @@ class _StreamSession:
         tasks |= parallel_closes
         read_task = self.pending  # the read lives in `tasks` after the swap above
         if deferred:
-            # Generators may only close once their pending read finished: wait
-            # for that read bounded, then close the generators CONCURRENTLY
-            # with ALL unrelated cleanup tasks (including a hanging result
-            # close), so nothing starves the generator finalizer out of its
-            # budget and no close task escapes deadline management.
-            if read_task is not None and not read_task.done():
-                await asyncio.wait({read_task}, timeout=max(
-                    0, deadline - asyncio.get_running_loop().time()))
-            gen_tasks = {asyncio.create_task(
-                _close_target(target), name="copilot-stream-close")
-                for target in deferred}
+            # A generator may only be closed once its anext finished: closing
+            # while an anext that survives cancellation is still running makes
+            # Python reject the close with RuntimeError. The deferred close
+            # tasks are therefore created ONLY once the read finished (or when
+            # no read is outstanding). Everything else (hanging result close,
+            # parallel iterator closes) stays bounded right now. If the read
+            # outlives the budget, the generator close is armed on the read
+            # task: it fires the moment the read finishes, so the finalizer
+            # runs late — never never.
+            gen_tasks: set[asyncio.Task] | None = None
+            if read_task is None or read_task.done():
+                gen_tasks = {asyncio.create_task(
+                    _close_target(target), name="copilot-stream-close")
+                    for target in deferred}
             gen_tasks |= tasks  # result/parallel closes stay owned + bounded
-            await _finish_tasks(gen_tasks, deadline)
+            if gen_tasks:
+                await _finish_tasks(gen_tasks, deadline)
+            if read_task is not None and not read_task.done():
+                armed = asyncio.create_task(
+                    _close_targets_after_read(read_task, deferred),
+                    name="copilot-stream-cleanup")
+                armed.add_done_callback(_consume_task)
         elif tasks:
             await _finish_tasks(tasks, deadline)
 
