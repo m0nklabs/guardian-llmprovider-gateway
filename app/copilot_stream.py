@@ -8,6 +8,8 @@ while sending a chunk (neither path reliably closes a stock async generator).
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import inspect
 import json
 import logging
 import math
@@ -251,32 +253,50 @@ class _StreamSession:
                 # result.aclose may itself be what releases a stuck I/O read.
                 await asyncio.wait({task}, timeout=0)
             tasks.add(task)
+        # Non-generator iterators can be closed in parallel with the read
+        # cancel: their close releases a stuck read without ordering hazards.
+        # A distinct async GENERATOR must NOT: an anext still awaiting after
+        # handling cancellation makes Python reject the concurrent aclose with
+        # RuntimeError, and the read finishing later would never be retried.
+        parallel_closes: set[asyncio.Task] = set()
+        deferred_generator = False
+        if (self.iterator is not None and self.iterator is not self.result
+                and callable(getattr(self.iterator, "aclose", None))):
+            if inspect.isasyncgen(self.iterator):
+                deferred_generator = True
+            else:
+                parallel_closes.add(asyncio.create_task(
+                    _close_target(self.iterator), name="copilot-stream-close"))
         if callable(getattr(self.result, "aclose", None)):
             tasks.add(asyncio.create_task(
                 _close_target(self.result), name="copilot-stream-close"))
-        # A distinct iterator whose close releases the stuck read must start
-        # closing in PARALLEL with the read cancel: waiting for the read first
-        # burns the whole deadline and then skips the iterator close, leaking
-        # the underlying connection (review finding, PR #106 @97a5fe9).
-        iterator_close: asyncio.Task | None = None
-        if (self.iterator is not None and self.iterator is not self.result
-                and callable(getattr(self.iterator, "aclose", None))):
-            iterator_close = asyncio.create_task(
-                _close_target(self.iterator), name="copilot-stream-close")
-            tasks.add(iterator_close)
+        tasks |= parallel_closes
         if tasks:
             await _finish_tasks(tasks, deadline)
-        if iterator_close is not None:
-            # The close task is owned by this cleanup and was already awaited
-            # inside the budget above; observe its outcome without re-awaiting
-            # a finished task beyond the deadline.
-            if not iterator_close.done():
-                try:
-                    await asyncio.wait({iterator_close}, timeout=0)
-                except Exception:
-                    logger.exception("Copilot stream iterator close failed")
-                else:
-                    iterator_close.exception()  # observe, never raise here
+        if deferred_generator and callable(getattr(self.iterator, "aclose", None)):
+            # The read finished (or was released) within the budget; its
+            # generator can now be closed safely. One bounded retry covers the
+            # disconnect path where the read never finished inside the budget.
+            if deadline <= asyncio.get_running_loop().time():
+                logger.warning("Copilot stream iterator close exceeded cleanup budget")
+                return
+            task = asyncio.create_task(
+                _close_target(self.iterator), name="copilot-stream-close")
+            await _finish_tasks({task}, deadline)
+
+    async def _expire_pending(self, idle_deadline: float) -> None:
+        """Release the pending read and the upstream when its deadline passes,
+        even while this generator is suspended inside a blocked ASGI send."""
+        loop = asyncio.get_running_loop()
+        remaining = max(0.0, idle_deadline - loop.time())
+        await asyncio.sleep(remaining)
+        pending = self.pending
+        if pending is not None and not pending.done():
+            pending.cancel()
+            await asyncio.wait({pending}, timeout=0)
+        # One bounded cleanup releases the upstream response and, for
+        # non-generator iterators, their close in parallel with the cancel.
+        await self.close()
 
     async def events(self) -> AsyncIterator[str]:
         succeeded = False
@@ -288,20 +308,38 @@ class _StreamSession:
                 self.pending = asyncio.create_task(
                     _next_chunk(self.iterator), name="copilot-stream-read")
                 idle_deadline = loop.time() + self.idle_seconds
-                while not self.pending.done():
-                    now = loop.time()
-                    if now >= idle_deadline:
-                        raise TimeoutError("Copilot upstream stream idle deadline exceeded")
-                    await asyncio.wait({self.pending}, timeout=max(
-                        0, min(next_heartbeat, idle_deadline) - now))
-                    if self.pending.done():
-                        break
-                    now = loop.time()
-                    if now >= idle_deadline:
-                        raise TimeoutError("Copilot upstream stream idle deadline exceeded")
-                    if now >= next_heartbeat:
-                        next_heartbeat = now + self.heartbeat_seconds
-                        yield ": guardian-keepalive\n\n"
+                # The read's expiry is enforced by a watchdog task independent
+                # of SSE delivery: if an ASGI send blocks on a heartbeat (or
+                # any frame) without a disconnect, this generator stays
+                # suspended and its own deadline checks never run again, but
+                # the watchdog still releases the upstream within idle_seconds
+                # (review finding, PR #106 @6ed955e).
+                read_watchdog: asyncio.Task | None = None
+                try:
+                    while not self.pending.done():
+                        now = loop.time()
+                        if now >= idle_deadline:
+                            raise TimeoutError("Copilot upstream stream idle deadline exceeded")
+                        await asyncio.wait({self.pending}, timeout=max(
+                            0, min(next_heartbeat, idle_deadline) - now))
+                        if self.pending.done():
+                            break
+                        now = loop.time()
+                        if now >= idle_deadline:
+                            raise TimeoutError("Copilot upstream stream idle deadline exceeded")
+                        if now >= next_heartbeat:
+                            next_heartbeat = now + self.heartbeat_seconds
+                            if read_watchdog is None:
+                                read_watchdog = asyncio.create_task(
+                                    self._expire_pending(idle_deadline),
+                                    name="copilot-stream-watchdog")
+                            yield ": guardian-keepalive\n\n"
+                finally:
+                    if read_watchdog is not None and not read_watchdog.done():
+                        read_watchdog.cancel()
+                    if read_watchdog is not None:
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await read_watchdog
                 task, self.pending = self.pending, None
                 try:
                     chunk = task.result()

@@ -1011,8 +1011,15 @@ async def test_cancel_resistant_read_released_by_distinct_iterator_close():
             close_calls.append(asyncio.get_running_loop().time())
             aclose_started.set()
 
+    # The iterable itself must have NO aclose and return a DISTINCT iterator:
+    # otherwise result.aclose releases the read and the distinct-iterator
+    # branch is never exercised (review finding, PR #106 @6ed955e).
+    class IterableWithoutAclose:
+        def __aiter__(self):
+            return LeakIterator()
+
     stream = Stream([])  # result aclose not needed; iterator owns the close
-    result = LeakIterator()
+    result = IterableWithoutAclose()
     session = _StreamSession(result, heartbeat_seconds=0.01, idle_seconds=0.2,
                              cleanup_seconds=0.1, error_payload=error_payload)
     frames = [frame async for frame in session.events()]
@@ -1023,4 +1030,52 @@ async def test_cancel_resistant_read_released_by_distinct_iterator_close():
     payload = json.loads(last)
     assert payload["error"]["type"] == "upstream_error"
     assert close_calls, "iterator aclose never started: connection leaked"
+    assert not stream_tasks()
+
+@pytest.mark.asyncio
+async def test_blocked_heartbeat_send_releases_upstream_within_idle_deadline():
+    """A stalled client can block the ASGI send on a heartbeat frame without a
+    disconnect: the generator stays suspended at that yield and its own
+    idle-deadline checks never run again. The read watchdog must release the
+    upstream within idle_seconds independent of SSE delivery (review finding
+    on PR #106, head 6ed955e)."""
+    heartbeat_blocked = asyncio.Event()
+    heartbeat_released = asyncio.Event()
+
+    async def blocking_send_hook(message):
+        if message.get("type") == "http.response.body":
+            body_text = message.get("body", b"")
+            if isinstance(body_text, bytes) and body_text.startswith(b": guardian-keepalive"):
+                heartbeat_blocked.set()
+                await heartbeat_released.wait()
+
+    async def release_late():
+        # Block far beyond idle_seconds (0.2) and cleanup_seconds (0.1).
+        await asyncio.sleep(0.6)
+        heartbeat_released.set()
+
+    async def slow_read(seconds):
+        await asyncio.sleep(seconds)
+
+    stream = Stream([
+        lambda: slow_read(0.05), lambda: slow_read(0.05), lambda: slow_read(0.05),
+        lambda: slow_read(30),  # the stuck read; its deadline must still fire
+    ])
+    release_task = asyncio.create_task(release_late())
+    try:
+        resp = response(stream)
+        try:
+            await asyncio.wait_for(
+                run_asgi(resp, send_hook=blocking_send_hook), timeout=1)
+        except asyncio.TimeoutError:
+            pass  # the stuck read never completes; release the send below
+    finally:
+        heartbeat_released.set()
+        await release_task
+    assert heartbeat_blocked.is_set()
+    # The watchdog cancelled the stuck read and released the upstream within
+    # the idle deadline, independent of the blocked heartbeat send: while this
+    # generator is suspended inside the heartbeat send, its own deadline
+    # checks cannot run, yet close completed.
+    assert stream.close_calls == 1 and stream.close_completed
     assert not stream_tasks()
