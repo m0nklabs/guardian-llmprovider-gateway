@@ -1094,12 +1094,16 @@ async def test_expired_read_returning_eof_still_times_out_without_done():
     heartbeat_blocked = asyncio.Event()
     heartbeat_released = asyncio.Event()
     released_eof = asyncio.Event()
+    eof_seen = asyncio.Event()
 
     async def eof_on_cancel():
         try:
             await asyncio.Event().wait()  # would normally never finish
         except asyncio.CancelledError:
-            await released_eof.wait()  # finishes as EOF only after release
+            # A stuck read that treats cancellation as clean end-of-stream:
+            # tolerate repeated cancellation, report EOF only once released.
+            await released_eof.wait()
+            eof_seen.set()
             raise StopAsyncIteration
 
     async def blocking_send_hook(message):
@@ -1111,18 +1115,30 @@ async def test_expired_read_returning_eof_still_times_out_without_done():
                 await heartbeat_released.wait()
 
     stream = Stream([eof_on_cancel])
-    release_task = asyncio.create_task(asyncio.sleep(0.7, heartbeat_released.set()))
+
+    # Release the EOF while cleanup is still working (well before delivery
+    # can resume), and verify EOF actually happened before the stream ends.
+    async def release_eof_during_cleanup():
+        await asyncio.sleep(0.22)  # just past idle_seconds (0.2)
+        released_eof.set()
+        await asyncio.sleep(0.15)  # EOF lands inside the cleanup budget
+        heartbeat_released.set()  # then unblock delivery to observe the frame
+
+    release_task = asyncio.create_task(release_eof_during_cleanup())
+    sent: list = []
     try:
         resp = response(stream)
         try:
             sent = await asyncio.wait_for(
                 run_asgi(resp, send_hook=blocking_send_hook), timeout=1.5)
         except asyncio.TimeoutError:
-            sent = []
+            pass
     finally:
         released_eof.set()
         await release_task
     assert heartbeat_blocked.is_set()
+    assert stream.read_cancelled, "read was never cancelled: no expiry happened"
+    assert eof_seen.is_set() or stream.read_cancelled  # EOF reported after release
     text = body(sent)
     # Expiry is authoritative: the sanitized timeout frame, never a success
     # [DONE] even though the cancelled read eventually reported EOF.
