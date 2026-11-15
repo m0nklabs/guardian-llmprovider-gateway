@@ -275,18 +275,20 @@ class _StreamSession:
                 tasks.add(asyncio.create_task(
                     _close_target(self.result), name="copilot-stream-close"))
         tasks |= parallel_closes
+        read_task = self.pending  # the read lives in `tasks` after the swap above
         if deferred:
-            # Generators may only close once their pending read finished; wait
-            # for it bounded, then close the generators CONCURRENTLY with any
-            # unrelated cleanup already in `tasks`, so a hanging result close
-            # cannot starve the generator finalizer out of its budget.
-            read_wait = max(0, deadline - asyncio.get_running_loop().time())
-            if self.pending is not None:
-                await asyncio.wait({self.pending}, timeout=read_wait)
+            # Generators may only close once their pending read finished: wait
+            # for that read bounded, then close the generators CONCURRENTLY
+            # with ALL unrelated cleanup tasks (including a hanging result
+            # close), so nothing starves the generator finalizer out of its
+            # budget and no close task escapes deadline management.
+            if read_task is not None and not read_task.done():
+                await asyncio.wait({read_task}, timeout=max(
+                    0, deadline - asyncio.get_running_loop().time()))
             gen_tasks = {asyncio.create_task(
                 _close_target(target), name="copilot-stream-close")
                 for target in deferred}
-            gen_tasks |= parallel_closes
+            gen_tasks |= tasks  # result/parallel closes stay owned + bounded
             await _finish_tasks(gen_tasks, deadline)
         elif tasks:
             await _finish_tasks(tasks, deadline)
