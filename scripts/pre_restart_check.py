@@ -547,16 +547,29 @@ def check_call_site_signatures() -> bool:
     py_files = sorted(APP.rglob("*.py"))
     problems: list[str] = []
 
+    # Sentinel: the *root* package of the request is absent in this
+    # interpreter (a plain ModuleNotFoundError naming the root), so the call
+    # site cannot be judged here at all — an environment fact (the deployment
+    # venv deliberately does not carry the Copilot SDK, and app code imports
+    # it lazily inside a function). Every other import failure is a drift
+    # finding, fail-closed, exactly as the original checker behaved: a missing
+    # submodule or ancestor of the requested path, a missing transitive
+    # dependency, a root that exists but executes broken code (ImportError),
+    # and any non-import error.
+    _uninstalled = object()
+
     def _resolve_import(module_name: str, attr: str | None = None):
-        """Return the callee object or None."""
+        """Return the callee object, ``_uninstalled``, or None."""
         try:
             mod = importlib.import_module(module_name)
+        except ModuleNotFoundError as exc:
+            if exc.name == module_name.split(".", 1)[0]:
+                return _uninstalled
+            return None
         except Exception:
             return None
-        if attr is None:
-            return mod
         try:
-            return getattr(mod, attr)
+            return getattr(mod, attr) if attr is not None else mod
         except AttributeError:
             return None
 
@@ -627,6 +640,8 @@ def check_call_site_signatures() -> bool:
                     if attr is None:
                         continue  # module alias itself, not a callable import
                     callee = _resolve_import(mod_name, attr)
+                    if callee is _uninstalled:
+                        continue
                     if callee is None:
                         problems.append(
                             f"{path.relative_to(REPO)}:{node.lineno}: {mod_name}.{attr} does not exist")
@@ -645,7 +660,7 @@ def check_call_site_signatures() -> bool:
                     continue
                 mod_name, attr = import_map[base]
                 parent = _resolve_import(mod_name, attr) if attr else _resolve_import(mod_name, None)
-                if parent is None:
+                if parent is _uninstalled or parent is None:
                     continue
                 method = getattr(parent, node.func.attr, None)
                 if method is None:
@@ -679,7 +694,7 @@ def check_call_site_signatures() -> bool:
                     if var in klass_by_var:
                         mod_name, attr = klass_by_var[var]
                         parent = _resolve_import(mod_name, attr)
-                        if parent is None:
+                        if parent is _uninstalled or parent is None:
                             continue
                         method = getattr(parent, node.func.attr, None)
                         if method is None:
