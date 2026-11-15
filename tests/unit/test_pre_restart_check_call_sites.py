@@ -78,6 +78,17 @@ def load():
     return Missing()
 '''
 
+MISSING_ANCESTOR = '''\
+"""Targets a child below a missing ancestor of an importable root - the
+interpreter reports the ancestor name, which is still drift."""
+
+
+def load():
+    from app.nope.deep import Missing
+
+    return Missing()
+'''
+
 WRONG_ATTRIBUTE = '''\
 """Calls an attribute that the installed module does not have."""
 
@@ -99,9 +110,10 @@ def go():
 '''
 
 
-def _write_tree(tmp_path: Path, *sources: tuple[str, str]) -> Path:
+def _write_tree(tmp_path: Path, *sources: tuple[str, str], broken_init: bool = False) -> Path:
     (tmp_path / "app").mkdir()
-    (tmp_path / "app" / "__init__.py").write_text("", encoding="utf-8")
+    init = "from os import not_a_real_name  # broken repository package\n" if broken_init else ""
+    (tmp_path / "app" / "__init__.py").write_text(init, encoding="utf-8")
     for name, text in sources:
         (tmp_path / "app" / name).write_text(text, encoding="utf-8")
     return tmp_path
@@ -160,6 +172,7 @@ def test_missing_app_module_and_wrong_attributes_still_fail(tmp_path):
         ("uses_lazy_sdk.py", LAZY_SDK),
         ("missing_app_module.py", MISSING_APP_MODULE),
         ("missing_stdlib_submodule.py", MISSING_STDLIB_SUBMODULE),
+        ("missing_ancestor.py", MISSING_ANCESTOR),
         ("wrong_attribute.py", WRONG_ATTRIBUTE),
         ("wrong_from_import.py", WRONG_FROM_IMPORT),
     )
@@ -167,7 +180,22 @@ def test_missing_app_module_and_wrong_attributes_still_fail(tmp_path):
     assert result.returncode == 1, result.stdout + result.stderr
     assert "app.nope.Missing does not exist" in result.stdout
     assert "json.nope.Missing does not exist" in result.stdout
+    assert "app.nope.deep.Missing does not exist" in result.stdout
     assert "not_a_real_method does not exist on json" in result.stdout
     assert "os.not_a_real_name does not exist" in result.stdout
     # The absent-SDK site stays a skip even while other sites fail.
     assert "uses_lazy_sdk" not in result.stdout
+
+
+def test_broken_repository_package_import_is_drift_not_environment(tmp_path):
+    """A repo-local root that fails to import at all (broken __init__ raising
+    ImportError) must stay a drift finding: there is no environment excuse for
+    the repository's own package."""
+    root = _write_tree(
+        tmp_path,
+        ("uses_app.py", "def go():\n    from app import Missing\n\n    return Missing()\n"),
+        broken_init=True,
+    )
+    result = _run_gate(root, blocked_roots="openai")
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "app.Missing does not exist" in result.stdout

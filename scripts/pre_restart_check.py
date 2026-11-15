@@ -548,41 +548,63 @@ def check_call_site_signatures() -> bool:
     problems: list[str] = []
 
     # Sentinel: the module cannot be verified in *this* interpreter, so the
-    # call site says nothing about drift — not a finding. Two environment
-    # shapes produce it: the package root itself is absent/broken here (the
-    # deployment venv deliberately does not carry the Copilot SDK, and an
-    # interpreter can hold a half-installed package whose transitive
-    # dependency is missing), or the requested module exists but its *import
-    # execution* failed on something this interpreter cannot provide. What
-    # stays a drift finding is a requested submodule path that simply does not
-    # exist under an importable root: no environment makes
-    # ``from json.nope import Missing`` work.
+    # call site says nothing about drift — not a finding. It covers external
+    # modules only: the root package is absent here, broken/partially
+    # installed (its import pulls in something missing), or an existing
+    # module's import execution fails on something this interpreter cannot
+    # provide. Repository-own modules never reach it: any failure inside the
+    # repo's tree is drift, and a module path below an importable root that
+    # simply does not exist is drift too — no environment makes
+    # ``from app.nope import Missing`` or ``from json.nope import Missing``
+    # work.
     _uninstalled = object()
 
-    def _resolve_import(module_name: str, attr: str | None = None):
-        """Return the callee object, ``_uninstalled``, or None."""
-        try:
-            mod = importlib.import_module(module_name)
-        except ModuleNotFoundError as exc:
-            if exc.name is None or module_name == module_name.split(".", 1)[0]:
-                # The root package is absent (or the interpreter reported no
-                # attributable name): nothing here can verify the call site.
-                return _uninstalled
-            if exc.name == module_name:
-                # An importable root lacks exactly the requested submodule
-                # file: drift, whatever the root's origin.
-                return None
-            # The requested module exists but pulled in something else that
-            # is missing: an environment fact, not drift.
-            return _uninstalled
-        except Exception:
-            return _uninstalled
+    # Packages that live in this repository's own tree.
+    repo_local_packages = {
+        p.name for p in REPO.iterdir() if p.is_dir() and (p / "__init__.py").exists()
+    } | {p.stem for p in REPO.glob("*.py")}
+
+    def _attr_check(mod, attr: str | None, module_name: str):
         if attr is None:
             return mod
         try:
             return getattr(mod, attr)
         except AttributeError:
             return None
+
+    def _resolve_import(module_name: str, attr: str | None = None):
+        """Return the callee object, ``_uninstalled``, or None."""
+        module_root = module_name.split(".", 1)[0]
+        if module_root in repo_local_packages:
+            # Repository code: only a clean import resolves. A broken
+            # __init__, a missing submodule and an unresolvable attribute are
+            # all drift, whatever shape the failure takes.
+            try:
+                mod = importlib.import_module(module_name)
+            except Exception:
+                return None
+            return _attr_check(mod, attr, module_name)
+        try:
+            importlib.import_module(module_root)
+        except Exception:
+            # The external root cannot be loaded in this interpreter
+            # (absent, half-installed with a missing transitive dependency,
+            # raising): environment fact, not drift.
+            return _uninstalled
+        try:
+            mod = importlib.import_module(module_name)
+        except ModuleNotFoundError as exc:
+            missing = exc.name or ""
+            # An ancestor or the requested module itself, below an
+            # importable root, does not exist: no environment provides it.
+            if missing and missing != module_root and module_name.startswith(missing):
+                return None
+            # The requested module exists but its execution pulled in
+            # something else that is missing: environment fact.
+            return _uninstalled
+        except Exception:
+            return _uninstalled
+        return _attr_check(mod, attr, module_name)
 
     for path in py_files:
         try:
