@@ -140,30 +140,34 @@ def test_absent_root_package_is_skipped_not_failed(tmp_path):
     assert "OK (all resolved call sites match callee signatures)" in result.stdout
 
 
-def test_broken_or_partial_external_package_is_skipped_not_failed(tmp_path):
-    """An external package that imports but fails (missing transitive dep,
-    raised error) is an environment fact — exactly what CI's tool-cache Python
-    exposed with a half-installed ``openai`` whose ``distro`` dependency was
-    absent. Outside the repository tree, so never a drift finding."""
+def test_broken_or_partial_external_package_stays_a_finding(tmp_path):
+    """Fail-closed per review: only a plain root-absent ModuleNotFoundError is
+    the environment sentinel. A root that exists but raises ImportError on
+    import, and a module whose execution pulls in a missing dependency, were
+    findings before this PR and stay findings — no environment excuse."""
     external = tmp_path / "external-site"
     external.mkdir()
     (external / "broken_external").mkdir()
     (external / "broken_external" / "__init__.py").write_text(
-        "import distro_not_installed_anywhere_xyz\n", encoding="utf-8")
-    (external / "raising_external").mkdir()
-    (external / "raising_external" / "__init__.py").write_text(
         "raise ImportError('broken install')\n", encoding="utf-8")
-    root = _write_tree(tmp_path, ("uses_broken.py", LAZY_SDK.replace(
-        "from openai import", "from broken_external import").replace(
-        "AsyncOpenAI(", "SomeClass(").replace(
-        "AsyncOpenAI", "SomeClass")))
-    root.joinpath("app/uses_raising.py").write_text(
-        LAZY_SDK.replace("from openai import", "from raising_external import").replace(
-        "AsyncOpenAI(", "SomeClass(").replace("AsyncOpenAI", "SomeClass"),
-        encoding="utf-8")
+    (external / "partial_external").mkdir()
+    (external / "partial_external" / "__init__.py").write_text(
+        "import missing_dependency_of_partial\n", encoding="utf-8")
+    root = _write_tree(
+        tmp_path,
+        ("uses_broken.py", LAZY_SDK.replace(
+            "from openai import", "from broken_external import").replace(
+            "AsyncOpenAI(", "SomeClass(").replace(
+            "AsyncOpenAI", "SomeClass")),
+        ("uses_partial.py", LAZY_SDK.replace(
+            "from openai import", "from partial_external import").replace(
+            "AsyncOpenAI(", "SomeClass(").replace(
+            "AsyncOpenAI", "SomeClass")),
+    )
     result = _run_gate(root, pythonpath=str(external))
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "does not exist" not in result.stdout
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "broken_external.SomeClass does not exist" in result.stdout
+    assert "partial_external.SomeClass does not exist" in result.stdout
 
 
 def test_missing_app_module_and_wrong_attributes_still_fail(tmp_path):
@@ -183,6 +187,8 @@ def test_missing_app_module_and_wrong_attributes_still_fail(tmp_path):
     assert "app.nope.deep.Missing does not exist" in result.stdout
     assert "not_a_real_method does not exist on json" in result.stdout
     assert "os.not_a_real_name does not exist" in result.stdout
+    # The absent-SDK site stays a skip even while other sites fail.
+    assert "uses_lazy_sdk" not in result.stdout
     # The absent-SDK site stays a skip even while other sites fail.
     assert "uses_lazy_sdk" not in result.stdout
 
