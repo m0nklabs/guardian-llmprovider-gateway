@@ -66,10 +66,15 @@ def error_headers(error: BaseException) -> dict[str, str]:
         return {}
     response = getattr(error, "response", None)
     headers = getattr(response, "headers", None)
-    if not headers:
-        headers = getattr(error, "headers", None)
-    if not isinstance(headers, Mapping):
-        return {}
-    value = headers.get("retry-after", headers.get("Retry-After"))
-    accepted = retry_after(value)
+    accepted = retry_after(
+        headers.get("retry-after", headers.get("Retry-After"))) \
+        if isinstance(headers, Mapping) else None
+    if accepted is None:
+        # _invoke attaches its captured hint at the exception level; a
+        # reconstructed response with unrelated headers must not hide it.
+        error_headers_map = getattr(error, "headers", None)
+        accepted = retry_after(
+            error_headers_map.get("retry-after",
+                                  error_headers_map.get("Retry-After"))) \
+            if isinstance(error_headers_map, Mapping) else None
     return {"Retry-After": accepted} if accepted is not None else {}
