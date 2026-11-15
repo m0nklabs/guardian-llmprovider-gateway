@@ -934,3 +934,41 @@ async def test_preheader_inference_error_unchanged_and_watcher_stopped():
 def test_intervals_must_be_positive_finite(key, value):
     with pytest.raises(ValueError, match="positive and finite"):
         response(None, **{key: value})
+
+@pytest.mark.asyncio
+async def test_blocked_error_send_closes_upstream_within_cleanup_budget():
+    """The error frame's ASGI send can block indefinitely on a stalled client.
+    The upstream close must already have completed within cleanup_seconds by
+    the time that yield happens, not wait for the finally that the blocked
+    send delays indefinitely (review finding on PR #106, head 56ebbead)."""
+    send_started = asyncio.Event()
+    send_released = asyncio.Event()
+    release_task: asyncio.Task | None = None
+
+    async def blocking_send_hook(message):
+        if message.get("type") == "http.response.body":
+            body_text = message.get("body", b"")
+            if isinstance(body_text, bytes) and b"upstream_error" in body_text:
+                send_started.set()
+                await send_released.wait()
+
+    async def blocked_then_release():
+        # Real ASGI: send suspension is what a slow client produces. Release
+        # after the cleanup budget has long elapsed.
+        await asyncio.sleep(0.5)
+        send_released.set()
+
+    stream = Stream([RuntimeError("Bearer private-secret upstream failure")])
+    release_task = asyncio.create_task(blocked_then_release())
+    resp = response(stream)
+    sent = await run_asgi(resp, send_hook=blocking_send_hook)
+    assert release_task is not None
+    await release_task
+    frames = data_frames(body(sent))
+    assert json.loads(frames[-1]) == error_payload(RuntimeError())
+    # The upstream response closed while the error send was still blocked:
+    # close completed before the generator could be suspended at the yield.
+    assert stream.close_calls == 1 and stream.close_completed
+    assert "[DONE]" not in body(sent)
+    assert "private" not in body(sent)
+    assert not stream_tasks()

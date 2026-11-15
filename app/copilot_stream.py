@@ -305,6 +305,12 @@ class _StreamSession:
                 encoded = json.dumps(payload, separators=(",", ":"))
             except Exception:
                 encoded = '{"error":{"message":"Copilot upstream stream failed","type":"upstream_error","code":"upstream_error"}}'
+            # Close BEFORE yielding the error frame: close() is idempotent and
+            # bounded by cleanup_seconds, so even if the ASGI send of this frame
+            # blocks on a stalled client, the upstream response and any pending
+            # idle read are already released within the cleanup budget instead
+            # of staying open until an ASGI disconnect nobody may deliver.
+            await self.close()
             yield "data: " + encoded + "\n\n"
         finally:
             await self.close()
