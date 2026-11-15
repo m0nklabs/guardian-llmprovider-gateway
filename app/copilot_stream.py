@@ -275,19 +275,21 @@ class _StreamSession:
                 tasks.add(asyncio.create_task(
                     _close_target(self.result), name="copilot-stream-close"))
         tasks |= parallel_closes
-        if tasks:
-            await _finish_tasks(tasks, deadline)
         if deferred:
-            # The read finished (or was released) within the budget; the
-            # generators can now be closed safely. One bounded retry covers
-            # the disconnect path where the read never finished in budget.
-            if deadline <= asyncio.get_running_loop().time():
-                logger.warning("Copilot stream iterator close exceeded cleanup budget")
-                return
+            # Generators may only close once their pending read finished; wait
+            # for it bounded, then close the generators CONCURRENTLY with any
+            # unrelated cleanup already in `tasks`, so a hanging result close
+            # cannot starve the generator finalizer out of its budget.
+            read_wait = max(0, deadline - asyncio.get_running_loop().time())
+            if self.pending is not None:
+                await asyncio.wait({self.pending}, timeout=read_wait)
             gen_tasks = {asyncio.create_task(
                 _close_target(target), name="copilot-stream-close")
                 for target in deferred}
+            gen_tasks |= parallel_closes
             await _finish_tasks(gen_tasks, deadline)
+        elif tasks:
+            await _finish_tasks(tasks, deadline)
 
     async def _expire_pending(self, idle_deadline: float) -> None:
         """Enforce the read's idle deadline independently of SSE delivery.
@@ -354,18 +356,18 @@ class _StreamSession:
                             await read_watchdog
                 task = self.pending if self.pending is not None else self.expired_read
                 self.pending = None
+                if task is not None and self.expired_read is task:
+                    # The watchdog timed this read out and closed the stream
+                    # while delivery was blocked. Its eventual result (chunk,
+                    # EOF or cancellation) is irrelevant: recorded expiry is
+                    # authoritative, and success output after it would be a
+                    # false [DONE] on a timed-out stream.
+                    raise TimeoutError("Copilot upstream stream idle deadline exceeded") from None
                 if task is None:
-                    # Cleanup expired this read and released the upstream while
-                    # this generator was suspended in a blocked send; the read
-                    # result is owned by that close. Surface the in-band
-                    # timeout instead of iterating a lost chunk.
+                    # Defensive: cleanup released everything while suspended.
                     raise TimeoutError("Copilot upstream stream idle deadline exceeded") from None
                 try:
                     chunk = task.result()
-                except asyncio.CancelledError:
-                    if self.expired_read is task:
-                        raise TimeoutError("Copilot upstream stream idle deadline exceeded") from None
-                    raise
                 except StopAsyncIteration:
                     succeeded = True
                     break

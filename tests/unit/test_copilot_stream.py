@@ -1085,3 +1085,48 @@ async def test_blocked_heartbeat_send_releases_upstream_within_idle_deadline():
     assert json.loads(data_frames(body(sent))[-1])["error"]["code"] == "upstream_timeout"
     assert "[DONE]" not in body(sent)
     assert not stream_tasks()
+
+@pytest.mark.asyncio
+async def test_expired_read_returning_eof_still_times_out_without_done():
+    """A read that handles cancellation by returning EOF must not turn a
+    watchdog-timed-out stream into a success: recorded expiry is authoritative
+    (review finding on PR #106, head 98db191)."""
+    heartbeat_blocked = asyncio.Event()
+    heartbeat_released = asyncio.Event()
+    released_eof = asyncio.Event()
+
+    async def eof_on_cancel():
+        try:
+            await asyncio.Event().wait()  # would normally never finish
+        except asyncio.CancelledError:
+            await released_eof.wait()  # finishes as EOF only after release
+            raise StopAsyncIteration
+
+    async def blocking_send_hook(message):
+        if message.get("type") == "http.response.body":
+            body_text = message.get("body", b"")
+            if isinstance(body_text, bytes) and body_text.startswith(b": guardian-keepalive"):
+                heartbeat_blocked.set()
+                await asyncio.sleep(0.4)  # past idle_seconds (0.2)
+                await heartbeat_released.wait()
+
+    stream = Stream([eof_on_cancel])
+    release_task = asyncio.create_task(asyncio.sleep(0.7, heartbeat_released.set()))
+    try:
+        resp = response(stream)
+        try:
+            sent = await asyncio.wait_for(
+                run_asgi(resp, send_hook=blocking_send_hook), timeout=1.5)
+        except asyncio.TimeoutError:
+            sent = []
+    finally:
+        released_eof.set()
+        await release_task
+    assert heartbeat_blocked.is_set()
+    text = body(sent)
+    # Expiry is authoritative: the sanitized timeout frame, never a success
+    # [DONE] even though the cancelled read eventually reported EOF.
+    assert json.loads(data_frames(text)[-1])["error"]["code"] == "upstream_timeout"
+    assert "[DONE]" not in text
+    assert stream.close_calls == 1 and stream.close_completed
+    assert not stream_tasks()
