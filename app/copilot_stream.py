@@ -254,16 +254,29 @@ class _StreamSession:
         if callable(getattr(self.result, "aclose", None)):
             tasks.add(asyncio.create_task(
                 _close_target(self.result), name="copilot-stream-close"))
-        if tasks:
-            await _finish_tasks(tasks, deadline)
+        # A distinct iterator whose close releases the stuck read must start
+        # closing in PARALLEL with the read cancel: waiting for the read first
+        # burns the whole deadline and then skips the iterator close, leaking
+        # the underlying connection (review finding, PR #106 @97a5fe9).
+        iterator_close: asyncio.Task | None = None
         if (self.iterator is not None and self.iterator is not self.result
                 and callable(getattr(self.iterator, "aclose", None))):
-            if deadline <= asyncio.get_running_loop().time():
-                logger.warning("Copilot stream iterator close exceeded cleanup budget")
-                return
-            task = asyncio.create_task(
+            iterator_close = asyncio.create_task(
                 _close_target(self.iterator), name="copilot-stream-close")
-            await _finish_tasks({task}, deadline)
+            tasks.add(iterator_close)
+        if tasks:
+            await _finish_tasks(tasks, deadline)
+        if iterator_close is not None:
+            # The close task is owned by this cleanup and was already awaited
+            # inside the budget above; observe its outcome without re-awaiting
+            # a finished task beyond the deadline.
+            if not iterator_close.done():
+                try:
+                    await asyncio.wait({iterator_close}, timeout=0)
+                except Exception:
+                    logger.exception("Copilot stream iterator close failed")
+                else:
+                    iterator_close.exception()  # observe, never raise here
 
     async def events(self) -> AsyncIterator[str]:
         succeeded = False

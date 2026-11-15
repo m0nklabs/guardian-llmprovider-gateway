@@ -9,7 +9,7 @@ from starlette.requests import ClientDisconnect, Request
 from starlette.responses import JSONResponse
 
 from app.copilot_stream import (
-    ClientDisconnected, CopilotStreamingResponse, await_inference, stream_events,
+    ClientDisconnected, CopilotStreamingResponse, _StreamSession, await_inference, stream_events,
 )
 
 
@@ -940,16 +940,25 @@ async def test_blocked_error_send_closes_upstream_within_cleanup_budget():
     """The error frame's ASGI send can block indefinitely on a stalled client.
     The upstream close must already have completed within cleanup_seconds by
     the time that yield happens, not wait for the finally that the blocked
-    send delays indefinitely (review finding on PR #106, head 56ebbead)."""
+    send delays indefinitely (review finding on PR #106, head 56ebbead).
+
+    Regression gap per review of 97a5fe9: closure is asserted WHILE the error
+    send is still blocked (send_started awaited, release in finally), so
+    reintroducing the yield-before-close order fails this test."""
     send_started = asyncio.Event()
     send_released = asyncio.Event()
-    release_task: asyncio.Task | None = None
+    closure_seen: list[bool] = []
 
     async def blocking_send_hook(message):
         if message.get("type") == "http.response.body":
             body_text = message.get("body", b"")
             if isinstance(body_text, bytes) and b"upstream_error" in body_text:
                 send_started.set()
+                # Assert the upstream closed BEFORE this send ever completes;
+                # the generator is suspended here and its finally cannot run.
+                await asyncio.wait_for(send_started.wait(), timeout=0.05)
+                closure_seen.append(
+                    stream.close_calls == 1 and stream.close_completed)
                 await send_released.wait()
 
     async def blocked_then_release():
@@ -961,14 +970,57 @@ async def test_blocked_error_send_closes_upstream_within_cleanup_budget():
     stream = Stream([RuntimeError("Bearer private-secret upstream failure")])
     release_task = asyncio.create_task(blocked_then_release())
     resp = response(stream)
-    sent = await run_asgi(resp, send_hook=blocking_send_hook)
-    assert release_task is not None
-    await release_task
-    frames = data_frames(body(sent))
-    assert json.loads(frames[-1]) == error_payload(RuntimeError())
-    # The upstream response closed while the error send was still blocked:
-    # close completed before the generator could be suspended at the yield.
+    try:
+        sent = await run_asgi(resp, send_hook=blocking_send_hook)
+        frames = data_frames(body(sent))
+        assert json.loads(frames[-1]) == error_payload(RuntimeError())
+        assert "[DONE]" not in body(sent)
+        assert "private" not in body(sent)
+    finally:
+        send_released.set()
+        await release_task
+    # Asserted while blocked, then still true afterwards:
+    assert closure_seen == [True]
     assert stream.close_calls == 1 and stream.close_completed
-    assert "[DONE]" not in body(sent)
-    assert "private" not in body(sent)
+    assert not stream_tasks()
+
+
+@pytest.mark.asyncio
+async def test_cancel_resistant_read_released_by_distinct_iterator_close():
+    """A distinct iterator without result aclose can be the only thing that
+    releases a stuck (cancel-shielded) read. The iterator's aclose must start
+    in parallel with the read cancel, not after the read deadline — waiting
+    first burns the cleanup budget and then skips the close, leaking the
+    upstream connection (review finding on PR #106, head 97a5fe9)."""
+    aclose_started = asyncio.Event()
+    close_calls = []
+
+    class LeakIterator:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                await asyncio.shield(aclose_started.wait())
+            except asyncio.CancelledError:
+                pass  # a stuck I/O read ignores cancel until close releases it
+            await aclose_started.wait()
+            raise RuntimeError("Bearer private-secret upstream failure")
+
+        async def aclose(self):
+            close_calls.append(asyncio.get_running_loop().time())
+            aclose_started.set()
+
+    stream = Stream([])  # result aclose not needed; iterator owns the close
+    result = LeakIterator()
+    session = _StreamSession(result, heartbeat_seconds=0.01, idle_seconds=0.2,
+                             cleanup_seconds=0.1, error_payload=error_payload)
+    frames = [frame async for frame in session.events()]
+    last = data_frames("\n\n".join(f for f in frames if f.startswith("data: ")))[-1]
+    # The read is released by the iterator close, so the harness observes an
+    # idle timeout rather than the iterator's own RuntimeError; either way the
+    # error frame is a sanitized upstream_error, never DONE, and the close ran.
+    payload = json.loads(last)
+    assert payload["error"]["type"] == "upstream_error"
+    assert close_calls, "iterator aclose never started: connection leaked"
     assert not stream_tasks()
