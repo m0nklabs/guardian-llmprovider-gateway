@@ -39,18 +39,36 @@ async def _next_chunk(iterator: AsyncIterator) -> Any:
     return await anext(iterator)
 
 
-async def _close_target(target: Any) -> None:
-    await target.aclose()
+async def _close_target(target: Any, deadline: float | None = None) -> None:
+    """aclose a target, retrying the transient RuntimeError of an async
+    generator that is momentarily executing (cancel handling or a yield about
+    to resume). A suspended-at-yield close always succeeds; a running frame
+    becomes closable as soon as it parks. With a deadline, give up at it."""
+    while True:
+        try:
+            await target.aclose()
+            return
+        except RuntimeError as exc:
+            if "already running" not in str(exc):
+                raise
+            if deadline is not None and deadline <= asyncio.get_running_loop().time():
+                raise
+            await asyncio.sleep(0.005)
 
 
 async def _close_targets_after_read(read_task: asyncio.Task,
                                     targets: list[Any]) -> None:
-    """Close deferred generators only after their pending read finished,
-    however long it takes; every close stays observed by _consume_task."""
-    try:
-        await read_task
-    except BaseException:
-        pass  # cancellation/exception observed by the read's own consumers
+    """Close deferred generators once they are no longer executing.
+
+    A cancel-caught read keeps the generator's frame running even after the
+    read task itself is cancelled and observed, so waiting on the task is not
+    enough: Python rejects aclose while the generator is running. Wait until
+    each generator's frame has cleared (finalizer done or suspended at a
+    yield, which aclose finishes legally), then close exactly once."""
+    for target in targets:
+        while (getattr(target, "ag_frame", None) is not None
+               and target.ag_running):
+            await asyncio.sleep(0.005)
     close_tasks = {asyncio.create_task(
         _close_target(target), name="copilot-stream-close")
         for target in targets}
@@ -247,6 +265,7 @@ class _StreamSession:
         self.iterator: AsyncIterator | None = None
         self.pending: asyncio.Task | None = None
         self.expired_read: asyncio.Task | None = None
+        self.armed_close: asyncio.Task | None = None
         self.cleanup = _Cleanup(self._close, cleanup_seconds)
 
     async def close(self) -> None:
@@ -300,19 +319,28 @@ class _StreamSession:
             # outlives the budget, the generator close is armed on the read
             # task: it fires the moment the read finishes, so the finalizer
             # runs late — never never.
-            gen_tasks: set[asyncio.Task] | None = None
+            gen_tasks: set[asyncio.Task] = set()
+            owns_deferred = self.armed_close is None or self.armed_close.done()
             if read_task is None or read_task.done():
-                gen_tasks = {asyncio.create_task(
-                    _close_target(target), name="copilot-stream-close")
-                    for target in deferred}
+                # Safe window: no anext in flight. An earlier armed closer may
+                # still own these targets — creating a second generator close
+                # races it ("already running"), so only the owner creates them.
+                if owns_deferred:
+                    gen_tasks = {asyncio.create_task(
+                        _close_target(target, deadline),
+                        name="copilot-stream-close")
+                        for target in deferred}
             gen_tasks |= tasks  # result/parallel closes stay owned + bounded
             if gen_tasks:
                 await _finish_tasks(gen_tasks, deadline)
             if read_task is not None and not read_task.done():
-                armed = asyncio.create_task(
-                    _close_targets_after_read(read_task, deferred),
-                    name="copilot-stream-cleanup")
-                armed.add_done_callback(_consume_task)
+                # Anext still active past the budget: exactly ONE read-gated
+                # closer may exist; every later close() joins it.
+                if self.armed_close is None or self.armed_close.done():
+                    self.armed_close = asyncio.create_task(
+                        _close_targets_after_read(read_task, deferred),
+                        name="copilot-stream-cleanup")
+                    self.armed_close.add_done_callback(_consume_task)
         elif tasks:
             await _finish_tasks(tasks, deadline)
 
