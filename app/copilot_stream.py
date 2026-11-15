@@ -279,8 +279,10 @@ class _StreamSession:
 
     async def _close(self, deadline: float) -> None:
         tasks: set[asyncio.Task] = set()
+        read_handle: asyncio.Task | None = None
         if self.pending is not None:
             task, self.pending = self.pending, None
+            read_handle = task
             if not task.done():
                 task.cancel()
                 # Allow cooperative read cancellation before closing a generator;
@@ -308,7 +310,7 @@ class _StreamSession:
                 tasks.add(asyncio.create_task(
                     _close_target(self.result), name="copilot-stream-close"))
         tasks |= parallel_closes
-        read_task = self.pending  # the read lives in `tasks` after the swap above
+        read_task = read_handle  # kept: self.pending was already cleared above
         if deferred:
             # A generator may only be closed once its anext finished: closing
             # while an anext that survives cancellation is still running makes

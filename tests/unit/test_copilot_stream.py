@@ -1148,3 +1148,46 @@ async def test_expired_read_returning_eof_still_times_out_without_done():
     assert "[DONE]" not in text
     assert stream.close_calls == 1 and stream.close_completed
     assert not stream_tasks()
+
+@pytest.mark.asyncio
+async def test_after_deadline_generator_read_yields_finalizer_still_runs():
+    """A read that suppresses cancellation and yields after the cleanup
+    deadline must still have its finalizer run: the late-close branch stays
+    reachable and the armed closer fires when the read finishes (review
+    finding on PR #106, head 16fe36a)."""
+    class Chunk:
+        def model_dump_json(self, exclude_none=True):
+            return '{"choices":[]}'
+
+    async def agen():
+        yield Chunk()
+        try:
+            await asyncio.Event().wait()  # the stuck read
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.6)      # yields long after the deadline
+            yield Chunk()
+
+    # Short cleanup budget: the immediate close gives up before the read
+    # parks, so ONLY the read-gated armed closer can run the finalizer.
+    result = agen()
+    session = _StreamSession(result, heartbeat_seconds=0.01, idle_seconds=0.2,
+                             cleanup_seconds=0.05, error_payload=error_payload)
+    gen = session.events()
+    first = await gen.__anext__()
+    assert first.startswith("data:")
+
+    async def consume():
+        try:
+            async for _ in gen:
+                pass
+        except Exception:
+            pass
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.sleep(0.5)  # watchdog expires the read; close armed
+    await asyncio.sleep(0.5)  # read parks long after the deadline
+    await consumer
+    assert result.ag_frame is None, "generator finalizer never ran after late yield"
+    leaked = stream_tasks()
+    for task in leaked:
+        task.cancel()
