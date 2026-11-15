@@ -127,6 +127,19 @@ def create_app(settings: Settings | None = None, client: httpx.AsyncClient | Non
                 await upstream.aclose()
 
     app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None)
+
+    @app.exception_handler(HTTPException)
+    async def unwrap_error_envelope(request: Request, exc: HTTPException):
+        # FastAPI wraps HTTPException.detail in {"detail": ...}. OpenAI-
+        # compatible clients expect a TOP-LEVEL error object, so dict details
+        # carrying one are unwrapped; plain-string details keep the standard
+        # {"detail": ...} shape.
+        from fastapi.responses import JSONResponse
+        if isinstance(exc.detail, dict) and "error" in exc.detail:
+            return JSONResponse(status_code=exc.status_code, content=exc.detail)
+        return JSONResponse(status_code=exc.status_code,
+                            content={"detail": exc.detail},
+                            headers=exc.headers)
     app.state.catalog = catalog
 
     def authorize(request: Request):
