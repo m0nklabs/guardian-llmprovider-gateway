@@ -1161,11 +1161,20 @@ async def test_after_deadline_generator_read_yields_finalizer_still_runs():
 
     async def agen():
         yield Chunk()
-        try:
-            await asyncio.Event().wait()  # the stuck read
-        except asyncio.CancelledError:
-            await asyncio.sleep(0.6)      # yields long after the deadline
-            yield Chunk()
+        cancelled_once = False
+        while True:
+            try:
+                if cancelled_once:
+                    # First cancellation observed: tolerate further deadline
+                    # cancels while sleeping, then yield long after the
+                    # cleanup budget has expired (the armed closer's shape).
+                    await asyncio.shield(asyncio.sleep(0.6))
+                    yield Chunk()
+                    return
+                await asyncio.Event().wait()  # the stuck read
+            except asyncio.CancelledError:
+                cancelled_once = True
+                continue
 
     # Short cleanup budget: the immediate close gives up before the read
     # parks, so ONLY the read-gated armed closer can run the finalizer.
@@ -1191,3 +1200,45 @@ async def test_after_deadline_generator_read_yields_finalizer_still_runs():
     leaked = stream_tasks()
     for task in leaked:
         task.cancel()
+
+@pytest.mark.asyncio
+async def test_read_finishing_in_budget_after_close_still_finalizes():
+    """A pending async-generator read that catches cancellation, briefly
+    awaits, then yields within the cleanup budget: the safe-window check saw
+    the read still active, so the finalizer must come from the late-close
+    branch instead of being skipped until GC (review finding on PR #106,
+    head 0b4dac9)."""
+    class Chunk:
+        def model_dump_json(self, exclude_none=True):
+            return '{"choices":[]}'
+
+    async def agen():
+        yield Chunk()
+        cancelled_once = False
+        while True:
+            try:
+                if cancelled_once:
+                    await asyncio.sleep(0.02)  # finishes INSIDE the budget
+                    yield Chunk()
+                    return
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled_once = True
+                continue
+
+    result = agen()
+    session = _StreamSession(result, heartbeat_seconds=0.01, idle_seconds=0.2,
+                             cleanup_seconds=0.1, error_payload=error_payload)
+    gen = session.events()
+
+    async def consume():
+        try:
+            async for _ in gen:
+                pass
+        except Exception:
+            pass
+
+    consumer = asyncio.create_task(consume())
+    await asyncio.wait_for(consumer, timeout=1.0)
+    assert result.ag_frame is None, "finalizer skipped for in-budget late yield"
+    assert not stream_tasks()

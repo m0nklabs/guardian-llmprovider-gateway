@@ -69,10 +69,13 @@ async def _close_targets_after_read(read_task: asyncio.Task,
         while (getattr(target, "ag_frame", None) is not None
                and target.ag_running):
             await asyncio.sleep(0.005)
+    # Fresh bounded budget once the generator is closable: a cooperative
+    # finalizer that waits indefinitely must never hold resources forever.
+    fresh_deadline = asyncio.get_running_loop().time() + 5.0
     close_tasks = {asyncio.create_task(
-        _close_target(target), name="copilot-stream-close")
+        _close_target(target, fresh_deadline), name="copilot-stream-close")
         for target in targets}
-    await _finish_tasks(close_tasks, float("inf"))
+    await _finish_tasks(close_tasks, fresh_deadline)
 
 
 async def _join_cleanup(task: asyncio.Task) -> None:
@@ -335,14 +338,31 @@ class _StreamSession:
             gen_tasks |= tasks  # result/parallel closes stay owned + bounded
             if gen_tasks:
                 await _finish_tasks(gen_tasks, deadline)
-            if read_task is not None and not read_task.done():
-                # Anext still active past the budget: exactly ONE read-gated
-                # closer may exist; every later close() joins it.
-                if self.armed_close is None or self.armed_close.done():
-                    self.armed_close = asyncio.create_task(
-                        _close_targets_after_read(read_task, deferred),
-                        name="copilot-stream-cleanup")
-                    self.armed_close.add_done_callback(_consume_task)
+            if read_task is not None and owns_deferred and deferred:
+                if read_task.done():
+                    # The read finished INSIDE the budget while this close was
+                    # busy with the unrelated tasks above: the safe-window
+                    # check saw it active, so its generators still need their
+                    # finalizers. Close them now, still bounded.
+                    late = [target for target in deferred
+                            if getattr(target, "ag_frame", None) is not None]
+                    if late:
+                        late_tasks = {asyncio.create_task(
+                            _close_target(target, deadline),
+                            name="copilot-stream-close")
+                            for target in late}
+                        await _finish_tasks(late_tasks, deadline)
+                else:
+                    # Anext still active past the budget: exactly ONE
+                    # read-gated closer may exist; every later close() joins
+                    # it. It waits until the generator stops executing, then
+                    # closes with a FRESH bounded budget so a cooperative
+                    # finalizer can never hold resources forever.
+                    if self.armed_close is None or self.armed_close.done():
+                        self.armed_close = asyncio.create_task(
+                            _close_targets_after_read(read_task, deferred),
+                            name="copilot-stream-cleanup")
+                        self.armed_close.add_done_callback(_consume_task)
         elif tasks:
             await _finish_tasks(tasks, deadline)
 
