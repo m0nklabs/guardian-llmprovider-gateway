@@ -700,3 +700,41 @@ providers:
   `StreamProgressWatchdog` timeout protection as local streams.
 - **No model switching**: Cloud models don't trigger VRAM scheduler or model
   switch logic — each cloud request is fully independent.
+
+## Copilot bridge tool-passthrough contract (#102)
+
+The bridge (`app/copilot_bridge.py`, candidate `:4142`, operator-gated) owns
+**transport preservation**, not schema authoring. Its verified contract:
+
+- The tools JSON array is forwarded **verbatim** into the completion callable:
+  descriptions (non-ASCII, multiline, quotes), nested `properties`/`items`/
+  `anyOf` unions, `enum`, `default`, `required`, `additionalProperties`
+  (boolean or object-form) and the `strict` flag survive deep-equal.
+- `tool_choice` accepts the string variants (`auto`, `none`, `required`) and
+  the named-function object form; `parallel_tool_calls` forwards only when the
+  client sends it (absent stays absent — nothing null-injected).
+- Tool-call/result identity survives the round trip: assistant `tool_calls`
+  (`id`, `name`, raw `arguments` string) and `role: "tool"` results with
+  `tool_call_id` pass through unchanged.
+- Client fields outside `CHAT_FIELDS` are rejected with a top-level `error`
+  envelope (`unsupported_parameter`), never silently repaired.
+
+**Verified split** (what is proven where):
+
+1. *Transport preservation* — proven in-repo by
+   `tests/unit/test_copilot_tool_passthrough.py` (deep-equal pins).
+2. *Downstream protocol conversion* — performed by the deployed LiteLLM
+   service, which converts for the actual Copilot transport. That conversion is
+   **not** exercisable from this repository's test suite: `litellm` is not
+   installed in the gateway venv (verified 2026-11-16: `import litellm` →
+   `ModuleNotFoundError`), and installing it there would change the production
+   interpreter's dependency set, which the issue forbids ("no production state
+   changes"). Conversion semantics must therefore be pinned against the
+   deployed LiteLLM in its own environment before activating the bridge.
+
+**Verification commands**
+
+```bash
+./venv/bin/python -m pytest tests/unit/test_copilot_tool_passthrough.py -q
+./venv/bin/python -c "import litellm"  # must FAIL here by contract; litellm conversion runs in the LiteLLM service
+```
