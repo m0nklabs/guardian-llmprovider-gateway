@@ -1,10 +1,17 @@
-# Dynamic protocol adapter; no per-model aliases or model allowlist.
+# Dynamic discovery/protocol adapter. Guardian onboarding remains explicitly selected.
+# No bridge inference retries or model fallback; the caller owns retry decisions.
 upstream_url: http://127.0.0.1:4141/v1
 upstream_key_env: COPILOT_GATEWAY_KEY
 client_key_env: GITHUB_API_KEY
 refresh_seconds: 300
 catalog_timeout_seconds: 30
 timeout_seconds: 1200
+# Comment-only SSE heartbeats do not generate upstream requests or tokens.
+heartbeat_seconds: 15
+# Preserve the current long-reasoning budget rather than forcing costly replays.
+stream_idle_seconds: 1200
+stream_cleanup_seconds: 5
+catalog_max_age_seconds: 3600
 max_body_bytes: 16777216
 listen_host: 127.0.0.1
 listen_port: 4142
