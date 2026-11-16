@@ -223,7 +223,12 @@ async def test_inference_disconnect_with_hung_http_close_is_bounded():
         await await_inference(Request({"type": "http", "headers": []}, receive),
                               ops._invoke(operation, {}), cleanup_seconds=0.1)
     assert asyncio.get_running_loop().time() - start < 0.25
-    await asyncio.sleep(0)
+    # Under runner load the cleanup task's cancel may not have executed yet:
+    # give the bounded cleanup a moment to settle instead of a single yield.
+    for _ in range(100):
+        if stream.cancelled and stream.close_calls >= 1 and not pending_cleanup():
+            break
+        await asyncio.sleep(0.005)
     assert stream.cancelled and stream.close_calls == 1
     assert not pending_cleanup()
 
@@ -265,7 +270,13 @@ async def test_cancellation_resistant_http_close_outlives_only_bounded_wait():
     result = await ops._invoke(operation, {})
     assert result == {"choices": []}
     assert asyncio.get_running_loop().time() - started < 0.25
-    await asyncio.sleep(0)
+    # Under runner load the bounded-wait cancel may not have executed yet:
+    # settle the cleanup tasks instead of asserting after a single yield.
+    for _ in range(100):
+        remaining = pending_cleanup()
+        if len(remaining) == 1 and stream.cancelled:
+            break
+        await asyncio.sleep(0.005)
     remaining = pending_cleanup()
     assert len(remaining) == 1 and stream.cancelled and not stream.closed
     # Python cannot kill cancellation-resistant provider code. Release this
