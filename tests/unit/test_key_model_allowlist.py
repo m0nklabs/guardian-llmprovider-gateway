@@ -1,8 +1,9 @@
 """Per-key model allowlist (``allowed_models`` in guardian.keys.yaml).
 
-A key without ``allowed_models`` keeps its full reach; a key with a non-empty
-list may only name those exact addresses, both in discovery and on the request
-path. These tests pin the three enforcement points:
+Absent or empty ``allowed_models`` preserves existing reach. A non-empty list
+matches exact public IDs at the cloud resolver and covered discovery routes;
+this is not a universal local-inference gate (see docs/KEY_MODEL_ALLOWLIST.md).
+These tests pin the extracted enforcement points:
 
 * ``app.proxy.auth`` — normalisation and the shared predicate
 * ``app.cloud_inference.routing`` — the request-path 403
@@ -123,20 +124,17 @@ class TestRoutingGate:
         assert exc.value.detail["error"] == "model_not_allowed"
         assert exc.value.detail["model"] == "openrouter/openai/gpt-6.1-sol"
 
-    def test_unrestricted_key_is_not_blocked_by_the_allowlist(self, monkeypatch):
-        """No allowlist → the gate must not fire; the next failure is the real one."""
+    def test_unrestricted_key_gets_normal_unknown_cloud_model_error(self, monkeypatch):
         monkeypatch.setattr(routing, "_get_request_auth_context", lambda request: {})
-        monkeypatch.setattr(routing, "_provider_registry", None)
-        with pytest.raises(Exception) as exc:
-            routing.resolve_cloud_attempts(
-                "openrouter/openai/gpt-6.1-sol", _request_with_ctx({}), "flip"
-            )
-        # Anything but the allowlist 403 proves the gate stayed out of the way.
-        assert not (
-            isinstance(exc.value, HTTPException)
-            and isinstance(exc.value.detail, dict)
-            and exc.value.detail.get("error") == "model_not_allowed"
+        monkeypatch.setattr(routing, "_cloud_provider_for_request", lambda model: None)
+        monkeypatch.setattr(
+            routing, "_cloud_catalog",
+            SimpleNamespace(resolve_cloud_target=lambda model, fallback: None),
         )
+        with pytest.raises(HTTPException) as exc:
+            routing.resolve_cloud_attempts("unknown/model", _request_with_ctx({}), "test")
+        assert exc.value.status_code == 404
+        assert exc.value.detail == "Model 'unknown/model' is not a cloud model"
 
 
 # ── discovery: the filter and the 404 ──────────────────────────────────
@@ -263,6 +261,12 @@ async def test_discovery_routes_hide_unlisted_models_before_lookup(monkeypatch, 
     request.json = request_json
     monkeypatch.setattr(model_discovery, "_get_request_auth_context", lambda request: ctx)
     monkeypatch.setattr(model_endpoints, "_auth_context", lambda request: ctx)
+
+    def unexpected_resolution(*args, **kwargs):
+        pytest.fail("Denied models must be rejected before model resolution")
+
+    monkeypatch.setattr(model_discovery, "_is_failover_address", unexpected_resolution)
+    monkeypatch.setattr(model_endpoints, "_is_failover_address", unexpected_resolution)
     with pytest.raises(HTTPException) as exc:
         if route == "metadata":
             await model_discovery.model_metadata("unlisted/local", request, "test")
@@ -271,3 +275,68 @@ async def test_discovery_routes_hide_unlisted_models_before_lookup(monkeypatch, 
         else:
             await model_endpoints.model_endpoints("unlisted/local", request, "test")
     assert exc.value.status_code == 404
+
+
+@pytest.mark.parametrize("unlisted,grants", [
+    ("OPENROUTER/z-ai/glm-5.3-flash", ALLOWED),  # no case folding
+    ("z-ai/glm-5.3-flash", ALLOWED),  # no provider-prefix stripping
+    (ALLOWED[0], ["openrouter/z-ai/*"]),  # grants do not expand wildcards
+])
+def test_cloud_gate_matches_exact_public_id(monkeypatch, unlisted, grants):
+    monkeypatch.setattr(
+        routing, "_get_request_auth_context", lambda request: {"allowed_models": grants}
+    )
+    with pytest.raises(HTTPException) as exc:
+        routing.resolve_cloud_attempts(unlisted, _request_with_ctx({}), "test")
+    assert exc.value.status_code == 403
+    assert exc.value.detail["error"] == "model_not_allowed"
+
+
+@pytest.mark.parametrize("allowed", [None, [], ["failover/team"]])
+def test_authorized_virtual_group_expands_without_individual_target_grants(monkeypatch, allowed):
+    """Group IDs are public grants; they do not imply per-target grants or checks."""
+    provider = SimpleNamespace(enabled=True, is_configured=True)
+    candidates = [
+        SimpleNamespace(provider="cloud", model="brand/first", modalities=["text"]),
+        SimpleNamespace(provider="cloud", model="brand/second", modalities=["text"]),
+    ]
+    monkeypatch.setattr(
+        routing, "_get_request_auth_context", lambda request: {"allowed_models": allowed}
+    )
+    monkeypatch.setattr(
+        routing, "_failover_registry",
+        SimpleNamespace(get_group=lambda name: SimpleNamespace(candidates=candidates)),
+    )
+    monkeypatch.setattr(
+        routing, "_failover_health", SimpleNamespace(order_candidates=lambda items: items)
+    )
+    monkeypatch.setattr(
+        routing, "_provider_registry", SimpleNamespace(_providers={"cloud": provider})
+    )
+    assert routing.resolve_cloud_attempts("failover/team", _request_with_ctx({}), "test") == (
+        [(provider, "brand/first"), (provider, "brand/second")], "team"
+    )
+
+
+@pytest.mark.parametrize("allowed", [None, [], ["local-public"]])
+async def test_allowed_local_metadata_remains_available(monkeypatch, allowed):
+    monkeypatch.setattr(
+        model_discovery, "_get_request_auth_context",
+        lambda request: {"allowed_models": allowed},
+    )
+    monkeypatch.setattr(
+        model_discovery, "_provider_registry",
+        SimpleNamespace(_provider_from_address=lambda model: None, is_cloud_model=lambda model: False),
+    )
+    monkeypatch.setattr(
+        model_discovery, "_model_manager",
+        SimpleNamespace(get_public_model_map=lambda: {"local-public": "local-canonical"}),
+    )
+
+    async def build_entry(public_name, canonical_name, client_id):
+        return {"id": public_name, "canonical": canonical_name}
+
+    monkeypatch.setattr(model_discovery, "build_model_metadata_entry", build_entry)
+    assert await model_discovery.model_metadata("local-public", _request_with_ctx({}), "test") == {
+        "id": "local-public", "canonical": "local-canonical"
+    }
