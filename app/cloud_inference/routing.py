@@ -195,6 +195,49 @@ def resolve_cloud_vision_fallback(model_name: str) -> str | None:
 # ── Candidate request preparation ──────────────────────────────────
 
 
+class CloudPolicyRequestError(ValueError):
+    """A deterministic request conflict: return 400 without sending/retrying."""
+
+
+def _validate_lowest_cost_request(body: dict[str, Any]) -> None:
+    # These fields can pin tiers, choose another model or override price order.
+    for key in (
+        "service_tier", "speed", "models", "fallbacks", "route", "router",
+        "routing", "order", "sort", "preset", "plugins",
+    ):
+        if key in body:
+            raise CloudPolicyRequestError(f"lowest_cost conflicts with '{key}'")
+    if "provider" in body:
+        preferences = body["provider"]
+        # Explicit allowlist: unknown provider routing options must not become
+        # an accidental bypass as OpenRouter adds new controls. Restrictions
+        # (including privacy, endpoint allow/denylists and price caps) survive.
+        allowed = {
+            "only", "ignore", "data_collection", "zdr", "max_price",
+            "require_parameters", "quantizations", "enforce_distillable_text",
+        }
+        if not isinstance(preferences, dict):
+            raise CloudPolicyRequestError("lowest_cost requires a provider object")
+        for key in ("only", "ignore"):
+            if key in preferences and (
+                not isinstance(preferences[key], list)
+                or not all(isinstance(slug, str) for slug in preferences[key])
+            ):
+                raise CloudPolicyRequestError(f"lowest_cost requires provider.{key} as a string list")
+        # Endpoint selectors can explicitly admit premium tiers. Accept only
+        # base-provider allowlists, rather than maintain a brittle blacklist of
+        # current vendors' tier labels. Endpoint denylists remain safe.
+        if any("/" in slug for slug in preferences.get("only", [])):
+            raise CloudPolicyRequestError(
+                "lowest_cost requires base-provider names in provider.only (no endpoint selectors)"
+            )
+        unsupported = set(preferences) - allowed
+        if unsupported:
+            raise CloudPolicyRequestError(
+                "lowest_cost conflicts with provider options: " + ", ".join(sorted(unsupported))
+            )
+
+
 def prepare_cloud_candidate_request(
     provider: CloudProvider,
     upstream_model: str,
@@ -215,6 +258,29 @@ def prepare_cloud_candidate_request(
         translate_responses_request_to_chat,
     )
 
+    policy = getattr(provider, "service_tier_policy", "disabled")
+    if policy not in ("disabled", "lowest_cost") or (
+        policy == "lowest_cost" and provider.name != "openrouter"
+    ):
+        raise CloudPolicyRequestError("unsupported provider service_tier_policy")
+    lowest_cost = policy == "lowest_cost"
+    model_defaults = _cloud_catalog.get_override(upstream_model) or {}
+    if lowest_cost:
+        if path not in ("chat/completions", "messages", "responses"):
+            raise CloudPolicyRequestError("lowest_cost is unsupported on this endpoint")
+        # Inspect original intent before a protocol translator drops fields.
+        _validate_lowest_cost_request(base_json_body)
+        _validate_lowest_cost_request(model_defaults)
+        # Other variants may select different capabilities or a free-only
+        # model. Do not silently strip them or invent combined suffix syntax.
+        variants = upstream_model.split(":")[1:]
+        if (variants and variants not in (["floor"], ["free"])) or (
+            "@" in upstream_model or upstream_model.startswith("openrouter/")
+        ):
+            raise CloudPolicyRequestError(
+                "lowest_cost requires a concrete model with no variant, :floor or :free"
+            )
+
     candidate_json_body = {**base_json_body, "model": upstream_model}
 
     if client_user_id and provider.name == "openrouter" and "user" not in candidate_json_body:
@@ -233,6 +299,11 @@ def prepare_cloud_candidate_request(
         candidate_json_body = translate_anthropic_request_to_openai(candidate_json_body)
         effective_path = "chat/completions"
 
+    if lowest_cost and "provider" in base_json_body:
+        # The Responses bridge omits OpenRouter-specific preferences. Keep
+        # validated client privacy/allowlists/price caps across translation.
+        candidate_json_body["provider"] = base_json_body["provider"]
+
     # Model defaults from the provider's `models:` block (F2; formerly
     # models.cloud.overrides.yaml) may mix real OpenAI request parameters
     # (max_tokens, temperature, …) with Guardian metadata (context_window, …)
@@ -247,7 +318,6 @@ def prepare_cloud_candidate_request(
         "benchmark_context_limit",
         "advertised_context",
     }
-    model_defaults = _cloud_catalog.get_override(upstream_model) or {}
     candidate_json_body = adapt_nemotron_reasoning_intent(
         provider, upstream_model, candidate_json_body, model_defaults
     )
@@ -278,18 +348,25 @@ def prepare_cloud_candidate_request(
 
     # Provider-level default service tier (e.g. openrouter: flex). Applied
     # AFTER the model defaults so precedence is: client value > model
-    # default > provider default. Rides along only on OpenAI-chat bodies:
-    # "service_tier" has no equivalent on native Anthropic /v1/messages,
-    # legacy /v1/completions or embeddings bodies, and strict endpoints
-    # reject unknown top-level arguments with a 400.
+    # default > provider default. Preserve the legacy injection boundary:
+    # only OpenAI-chat bodies receive this default. OpenRouter's native
+    # Messages API also supports tiers, but direct Anthropic has its own
+    # vocabulary; this policy does not broaden legacy default injection.
     provider_tier = getattr(provider, "service_tier", None)
-    if (effective_path == "chat/completions" and provider_tier
+    if (not lowest_cost and effective_path == "chat/completions" and provider_tier
             and "service_tier" not in candidate_json_body):
         candidate_json_body["service_tier"] = provider_tier
 
     candidate_json_body = _adapt_openai_reasoning_params(
         provider, upstream_model, candidate_json_body
     )
+
+    if lowest_cost:
+        _validate_lowest_cost_request(candidate_json_body)
+        # Lookups/adapters above use the actual catalog id. Only the wire id
+        # gets routing syntax; the client-facing model identity stays intact.
+        if not upstream_model.endswith((":floor", ":free")):
+            candidate_json_body["model"] = upstream_model + ":floor"
 
     candidate_body = json.dumps(candidate_json_body).encode("utf-8")
     return effective_path, candidate_json_body, candidate_body, needs_translation

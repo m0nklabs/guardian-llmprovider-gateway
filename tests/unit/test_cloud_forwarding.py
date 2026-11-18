@@ -677,3 +677,103 @@ async def test_responses_non_stream_echo_uses_original_responses_body(monkeypatc
     assert source_body.get("max_output_tokens") == 32
     assert "messages" not in source_body
     assert "max_tokens" not in source_body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_lowest_cost_conflict_returns_typed_400_without_retry_or_send(monkeypatch, stream):
+    from app.cloud_inference import routing
+    from app.proxy.providers import CloudProvider
+    provider = CloudProvider("openrouter", "https://provider.example/v1", "mock",
+                             service_tier_policy="lowest_cost")
+    client = _FakeNonStreamClient(httpx.Response(200, json={}))
+    _patch_nonstream_common(monkeypatch, [], provider, client)
+    monkeypatch.setattr(routing, "_cloud_catalog", SimpleNamespace(get_override=lambda m: {}))
+    monkeypatch.setattr(forwarding, "_prepare_cloud_candidate_request", routing.prepare_cloud_candidate_request)
+    with patch.object(forwarding, "guarded_async_client") as transport:
+        with pytest.raises(HTTPException) as exc:
+            await forwarding.forward_to_cloud_provider(
+                "chat/completions", b"{}",
+                {"model": "client/identity", "messages": [], "service_tier": "priority", "stream": stream},
+                "client/identity", SimpleNamespace(), "dsh",
+            )
+    assert exc.value.status_code == 400
+    assert exc.value.detail["error"] == "service_tier_policy_conflict"
+    assert "service_tier" in exc.value.detail["message"]
+    transport.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("path", ["chat/completions", "messages"])
+async def test_lowest_cost_reuses_one_preparation_and_existing_retry_contract(monkeypatch, stream, path):
+    from app.cloud_inference import routing
+    from app.proxy.providers import CloudProvider
+    from unittest.mock import Mock
+    provider = CloudProvider("openrouter", "https://provider.example/v1", "mock",
+                             service_tier="flex", service_tier_policy="lowest_cost")
+    payload = {"model": "provider/model:floor", "service_tier": "default",
+               "usage": {"prompt_tokens": 2},
+               "choices": [{"message": {"content": "ok"}}]}
+    response = httpx.Response(200, json=payload)
+    sent = []
+
+    class Client(_FakeNonStreamClient):
+        async def post(self, url, content=None, headers=None):
+            sent.append(json.loads(content))
+            return response
+
+        def build_request(self, method, url, content=None, headers=None):
+            sent.append(json.loads(content))
+            return object()
+
+        async def send(self, request, stream=False):
+            return response
+
+    client = Client(response)
+    _patch_nonstream_common(monkeypatch, [], provider, client)
+    monkeypatch.setattr(routing, "_cloud_catalog", SimpleNamespace(get_override=lambda m: {}))
+    monkeypatch.setattr(routing, "_adapt_openai_reasoning_params", lambda p, m, b: b)
+    preparation = Mock(wraps=routing.prepare_cloud_candidate_request)
+    monkeypatch.setattr(forwarding, "_prepare_cloud_candidate_request", preparation)
+    calls = []
+
+    class Limiter:
+        config = SimpleNamespace(enabled=False)
+
+        async def execute_with_retry(self, fingerprint, name, operation, **kwargs):
+            calls.append(kwargs)
+            return await operation()
+
+    monkeypatch.setattr(forwarding, "cloud_rate_limiter", Limiter())
+    async def lines(*args, **kwargs):
+        if path == "messages":
+            yield 'data: {"type":"message_start","message":{"model":"provider/model:floor","usage":{"input_tokens":2}}}'
+        else:
+            yield 'data: {"model":"provider/model:floor","service_tier":"default","choices":[{"delta":{"content":"ok"}}]}'
+        yield 'data: {"type":"error","model":"error-model","error":{"message":"unchanged"}}'
+        yield 'data: not-json'
+        yield "data: [DONE]"
+    monkeypatch.setattr(forwarding, "_iter_sse_lines_with_watchdog", lines)
+    with patch.object(forwarding, "guarded_async_client", return_value=client):
+        result = await forwarding.forward_to_cloud_provider(
+            path, b"{}", {"messages": [], "stream": stream},
+            "client/identity", SimpleNamespace(), "dsh",
+        )
+        if stream:
+            chunks = b"".join([chunk async for chunk in result.body_iterator]).decode()
+            assert "provider/model:floor" not in chunks
+            assert "client/identity" in chunks
+            assert 'data: {"type":"error","model":"error-model","error":{"message":"unchanged"}}' in chunks
+            assert "data: not-json" in chunks
+        else:
+            result_payload = json.loads(result.body)
+            assert result_payload["model"] == "client/identity"
+            assert result_payload["usage"] == payload["usage"]
+            assert result_payload["service_tier"] == "default"
+    assert result.status_code == 200
+    assert preparation.call_count == 1
+    assert len(sent) == len(calls) == 1
+    assert calls[0]["retry_429"] is True
+    assert sent[0]["model"] == "provider/model:floor"
+    assert "service_tier" not in sent[0]
