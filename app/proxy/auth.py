@@ -156,6 +156,7 @@ def _build_auth_context(
         "key_prefix": _token_prefix(token) if token else None,
         "key_fingerprint": _token_fingerprint(token) if token else None,
         "cloud_gateway_access": bool((user_data or {}).get("cloud_gateway_access", True)),
+        "allowed_models": (user_data or {}).get("allowed_models"),
         "header_name": header_name,
         "source_ip": source_ip,
         "source_port": source_port,
@@ -220,6 +221,18 @@ def build_request_auth_context(
         if resolved_token is None and resolved_header_name is None:
             resolved_token, resolved_header_name = _extract_api_key(request, None)
     return _build_auth_context(request, resolved_token, resolved_header_name, user_data)
+
+
+def key_allows_model(auth_ctx: dict | None, model_name: str) -> bool:
+    """Return whether the key behind *auth_ctx* may use *model_name*.
+
+    An absent or empty ``allowed_models`` means unrestricted, so every existing
+    key keeps its current reach. A non-empty list is an exact-match allowlist.
+    """
+    allowed = (auth_ctx or {}).get("allowed_models")
+    if not allowed:
+        return True
+    return model_name in allowed
 
 
 def _extract_api_key(
@@ -532,6 +545,14 @@ def _normalize_key_entry(token: str, raw: Any) -> dict[str, Any]:
     if not isinstance(entry.get("metadata"), dict):
         entry["metadata"] = {}
     entry.setdefault("cloud_gateway_access", True)
+    # Optional per-key model allowlist. Absent/None means "every model this key
+    # can otherwise reach"; a list restricts the key to exactly those addresses,
+    # both in /v1/models and on the request path.
+    allowed = entry.get("allowed_models")
+    if allowed is not None:
+        if not isinstance(allowed, list):
+            allowed = [allowed]
+        entry["allowed_models"] = [str(m).strip() for m in allowed if str(m).strip()]
     return entry
 
 
