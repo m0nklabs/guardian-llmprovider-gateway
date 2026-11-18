@@ -1,5 +1,33 @@
 # Archived Handoffs — gesloten DSH-sessies
 
+## 2026-11-18 — Superseded product roadmap pointers (verbatim)
+
+Archived before the issue #113 documentation alignment. These are historical,
+not current status or instructions.
+
+Source: `docs/HANDOFF.md`, product roadmap bullet:
+
+```text
+- **Product roadmap:** `docs/ROADMAP.md` is the active policy/traffic-gateway
+  roadmap, expanding beyond LLMs. G0 runtime-baseline reconciliation and selection
+  of the first non-AI HTTP service remain open; no new runtime feature was deployed.
+  Historical F6/F7 are complete (journal Batch 3; active service WorkingDirectory
+  verified as the new checkout). The superseded F7-open entry is preserved
+  verbatim in `docs/ARCHIVED_HANDOFFS.md`, section 2026-10-02.
+```
+
+Source: `docs/ARCHITECTURE.md`, historical topology qualification:
+
+```text
+> Legacy single-host architecture description. Several lifecycle, routing and
+> configuration details below predate provider unification and Caretaker wiring;
+> do not treat these sections as the current complete topology or full product
+> definition. See [the product roadmap](ROADMAP.md) for the target gateway
+> boundaries. Full reconciliation against code is tracked in roadmap phase G0.
+> Statements such as "current" or "today" below refer to this historical view,
+> not a freshly verified description of the broader gateway.
+```
+
 ## 2026-10-02 — Superseded F7 open-item status (archived verbatim)
 
 Source: `docs/HANDOFF.md`, open-points list. Preserved before correcting the

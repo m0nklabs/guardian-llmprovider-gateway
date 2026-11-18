@@ -8,7 +8,12 @@
 Guardian is the policy and traffic gateway for explicitly onboarded services,
 not only an LLM proxy. It mediates client access, security, routing and capacity
 policy; generalized load balancing and non-LLM adapters retain the delivery
-status documented in `docs/ROADMAP.md`.
+status documented in `docs/ROADMAP.md`. The standing ambition includes exceptional
+cross-platform routing, proxying, protocol bridging and privacy-aware logging,
+backed by measured engineering quality, reproducible debugging and bounded
+innovation. These are ongoing goals, not completed-capability claims.
+Caretaker owns authorized lifecycle/resource control and readiness/recovery;
+Guardian owns client policy and traffic. Never introduce competing controllers.
 
 The general conceptual address is `{provider}/{brand}/{service}` (application
 or service). Existing `{provider}/{brand}/{model}` cloud addresses are its
@@ -116,15 +121,14 @@ See `docs/ROADMAP.md` for definitions and compatibility boundaries.
   context.
 - `CLAUDE.md` and `.goosehints` are relative symlinks to this file. Keep hot
   instructions durable; place dated status and tool details in cold documents.
-- The **guardian loop** runs **four times a day** (cron `0 4-22/6 * * *`:
-  04:00, 10:00, 16:00, 22:00 UTC) and follows `docs/GUARDIAN_LOOP.md`, reporting
-  on issue #30; its standing objective is finishing `docs/ROADMAP.md`. Autonomy
-  runs **up to and including merge, but only through the merge gate**: latest
-  review at the merge head with no findings, CI green, every thread resolved,
-  a closing comment with the evidence, squash only. It never approves a PR,
-  never pushes to `main`, never force-pushes, and never restarts Guardian or
-  any systemd unit — merged work that needs a restart goes into a batch the
-  operator executes. In scope: this repo plus `caretaker-llamacpp`.
+- The **guardian loop** follows `docs/GUARDIAN_LOOP.md`, reporting on issue #30.
+  Its standing objective spans both product roadmaps, cross-platform evidence,
+  engineering quality, debugging and measured innovation, not feature closure
+  alone. Schedule identity/cadence live in `docs/GUARDIAN_LOOP_HANDOFF.md`;
+  never change operator-owned timing implicitly. Scope: this repo plus
+  `caretaker-llamacpp`. At most one new issue implementation and one deliberate
+  gated merge per run. Never approve PRs, push to `main`, force-push, deploy or
+  restart services; required restarts go into the operator batch.
 - Reuse the organization-level self-hosted runner pool; never add a project
   runner. GPU jobs use `[self-hosted, Linux, gpu]` and
   `/home/flip/github-action-runners/bin/gpu-run.sh` so GPU work stays serial.
@@ -138,10 +142,17 @@ See `docs/ROADMAP.md` for definitions and compatibility boundaries.
 - PR-Piet is the repository PR-review workflow. Post `/review` from a human
   account after the final commit and after every later push; bot senders are
   ignored. Apply correct suggested changes in sensible batches.
-- Human merge is the default. An agent may merge only when the latest review
-  covers the merge head, CI is green, no findings or threads remain open, and a
-  closing PR comment confirms each finding was resolved or answered with
-  evidence. Never auto-approve.
+- Merge readiness requires a completed independent review of the current head,
+  findings fixed or answered with evidence, resolved threads and passing checks.
+  A closing comment normally records evidence/next action, but is not a prerequisite.
+  This account's waiting window is **2 hours** after the last outstanding review
+  answer (with no findings: later of completed current-head review and green
+  checks), never before the latest push. Read all latest activity before merging;
+  new activity needing an answer/fix/decision restarts the clock after handling.
+  Refresh the base and rerun checks at merge time; a changed head needs fresh
+  review. Authentication, secrets, migrations, deployment and dependency majors
+  remain human-gated. Never auto-approve. See `docs/GUARDIAN_LOOP.md` for the
+  single-merge procedure and pinned-head squash guard.
 - Treat review findings as hypotheses. Verify before accepting or rejecting;
   use independent evidence for uncertain or high-impact conclusions. Preserve
   `if`/`elif` routing chains and pin changed public contracts with tests.

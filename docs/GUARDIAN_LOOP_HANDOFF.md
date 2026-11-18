@@ -1,168 +1,87 @@
-# GUARDIAN LOOP — deployment handoff (cold file)
+# Guardian loop — schedule and delivery handoff
 
-> **Purpose:** hand this file to a *fresh* agent session so it can own the
-> guardian loop: create the durable reminder, verify delivery, and run the
-> procedure. Written 2026-10-25 against dsh `0.2.1-rc.3`; cadence raised to
-> four runs a day on 2026-10-27.
->
-> **Read `docs/GUARDIAN_LOOP.md` for the work procedure itself.** This file only
-> covers deployment: which preset, which tools, the exact task spec, takeover,
-> verification, and the traps that cost time if you rediscover them.
+The [loop procedure](GUARDIAN_LOOP.md) defines work and safety gates. This file
+records operator-owned automation state and safe maintenance. The superseded
+October procedure/spec is [archived verbatim](archive/guardian-loop-2026-11-18-before-strategy.md);
+its cron/tool names, host paths and session-scoped inventory assumptions are not
+current instructions.
 
-## 1. Hard preconditions (verified, not assumed)
+## Verified snapshot — 2026-11-18
 
-| Requirement | Why | Evidence |
-| --- | --- | --- |
-| Session preset must be **`standard`**, `ptc` or `cordis` | Only those presets mount `schedule_create` / `schedule_list` / `schedule_update` / `schedule_delete` | `dsh --profile web --dump-config` → `tool-schedule` appears exactly in `standard`, `ptc`, `cordis` |
-| The session must be **top-level** | A delegated child cannot use reminders at all: every schedule tool refuses with `subagent_session` | `dsh-tool-schedule/lib/index.js` → `subagentCallerRefusal()` rejects `delegationDepth > 0` |
-| The **Web Host must be running** (`dsh-web-next` on `:3040`) | Schedule cannot be mounted in a headless or SDK-only composition; delivery needs the Host session controller | `dsh-schedule` README, "Use this package" |
-| Workspace must be `/home/flip/guardian-llmprovider-gateway` | The reminder prompt and the procedure both assume that repo | — |
+Source: live `schedule_view`, not an inferred cron file or old transcript.
 
-`context-regime` (the operator's custom compaction preset) does **not** mount
-the schedule tools. A session on it can manage nothing schedule-related.
-
-## 2. Live state to inherit (as of 2026-10-27 22:30 UTC)
-
-| Item | Value |
+| Field | Observed value |
 | --- | --- |
-| Reminder id | `schedule-9ddb2f08-3237-4b56-bb6c-69b4f0dd137c` |
-| Bound session | `session-290d375d-726c-4871-9820-5105c9b2d80e` (preset `standard`) |
-| Rule | `cron` `0 4-22/6 * * *` (04:00, 10:00, 16:00, 22:00), zone `UTC`, status `scheduled` |
-| Next fire | `2026-10-28T04:00:00.000Z` |
-| Procedure | `docs/GUARDIAN_LOOP.md` |
-| Run reports | issue **#30** (one comment per run) |
-| Storage | `~/.dsh-next/storages/schedule.json` → `tables.tasks.<id>` |
+| Task | `schedule-c4fa549a-1c4a-4c88-8e77-5e053ad972b8` |
+| Title | Guardian loop — development run |
+| Bound session | `session-290d375d-726c-4871-9820-5105c9b2d80e` |
+| Workspace | `/home/flip/guardian-llmprovider-gateway` |
+| Recurrence | `DTSTART:20261119T060000Z` followed by `RRULE:FREQ=DAILY;BYHOUR=6,18;BYMINUTE=0` |
+| Cadence | Twice daily, 06:00 / 18:00 UTC; do not silently change it |
+| Next occurrence at inspection | 2026-11-19 06:00 UTC |
+| Last observed delivery | 2026-11-18 16:00 UTC, delivered 16:00:00.047 UTC under the previous cadence |
+| Run reports | [Guardian tracking issue #30](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/30) |
 
-Exact reminder spec, verbatim (use this to re-create an identical task):
+The prior delivery proves historical delivery only. It does **not** prove that the
+new recurrence or revised prompt has executed; verify the next natural occurrence
+before claiming that. No new delivery-test schedule is authorized by a prompt edit.
 
-```json
-{
-  "title": "Guardian loop — development run",
-  "prompt": "Guardian loop run. Read /home/flip/guardian-llmprovider-gateway/docs/GUARDIAN_LOOP.md and execute it end-to-end for this slot, exactly as written: preflight, open-PR remediation (merge only through the merge gate), open issues, at most one roadmap row, then post the run report as a comment on tracking issue #30. Standing objective: finish docs/ROADMAP.md. Hard stops: never approve a PR, never push to main, never force-push, never restart Guardian or any systemd unit (put needed restarts in the run report), never touch a repository other than guardian-llmprovider-gateway and caretaker-llamacpp.",
-  "cron": { "expression": "0 4-22/6 * * *", "time_zone": "UTC" }
-}
-```
+## Safe prompt maintenance
 
-## 3. Takeover procedure (move the loop to a new session)
+1. Require explicit operator direction to edit automation. The 2026-11-18 request
+   authorizes updating the existing loop **text**, not its cadence/target.
+2. Read current tool schemas (`tool_help`) and `schedule_view(id)`. Available APIs
+   currently include `schedule_list`, `schedule_view` and `schedule_edit` with
+   RRULE recurrence; do not copy obsolete `cron`/`after_seconds` examples.
+   `schedule_list` includes tasks created from other sessions; filter by exact ID.
+3. Use `schedule_edit` with `action: update`, exact ID, revised `prompt` and the
+   latest `expectedUpdatedAt`. **Omit** `rrule`, `target`, `active` and `title` to
+   preserve them. On conflict reread, reconcile operator changes, never blindly retry.
+4. Re-read the task and compare prompt, recurrence, target and next occurrence.
+   Record the result on issue #30. Do not edit DSH storage files or service units.
 
-A reminder belongs to the session that created it, and the tools are
-session-scoped: `schedule_list` shows **only the caller's own** tasks, and
-`schedule_update` / `schedule_delete` resolve against
-`{sessionId: <caller session>}`, so they answer `schedule_not_found` for
-another session's task. Cross-session management is **GUI-only**.
+## Prompt content and documentation delivery
 
-1. **Create the new session:** new session in the GUI, workspace
-   `guardian-llmprovider-gateway`, preset **Standard mode**.
-2. **Create the replacement task** from inside that session:
-   `schedule_create(<spec from §2>)`. Then `schedule_list()` and report the
-   returned id, status and next UTC target.
-3. **Delete the old task in the GUI** (it cannot be reached from the new
-   session): *Automation tasks* → *Guardian loop — development run* →
-   *Automation task actions* → *Delete task* → *Confirm deletion*. The notice
-   must read `Task deleted.`
-4. **Verify there is exactly one scheduled task for this loop**: the
-   *Automation tasks* list shows one cron row (`0 4-22/6 * * *`, 04:00, 10:00,
-   16:00, 22:00), and this prints `1`:
+The prompt must stand on its own for safety while pointing to the procedure:
 
-   ```bash
-   python3 -c "import json;t=json.load(open('/home/flip/.dsh-next/storages/schedule.json'))['tables']['tasks'];print(sum(1 for v in t.values() if v['record'].get('kind') in ('daily','cron') and v['record'].get('title','').startswith('Guardian loop')))"
-   ```
+- Mission spans both roadmaps: Guardian gateway/router/proxy/protocol bridge/safe
+  traffic logging, Caretaker resource/service management/control, cross-platform
+  quality, reproducible debugging and measured innovation.
+- Preflight, existing PR remediation and high-risk issues precede new feature work;
+  one new implementation and one deliberate merge maximum per run. Dependencies
+  must be satisfied by evidence, not only merged. Bounded isolated experiments.
+- Current-head completed independent review, all findings handled, passing checks,
+  account **2-hour** waiting anchor, latest-activity/base/check revalidation and
+  pinned-head squash. Closing comment normal, not a prerequisite. Authentication,
+  secrets, migrations, deploy and dependency majors stay human-gated.
+- No approvals, main/force pushes, production experiments/config mutations or
+  service restarts. Exact restart batch goes to the operator. Only the two repos.
+- Report implementation/test/deployment status, measurements, unavailable checks,
+  next action and blockers honestly on issue #30; log AAL milestones fail-open.
 
-   `tables.tasks` is a per-host mapping, not a per-session list: it also holds
-   the other loops' tasks (Oelala runs the same four slots; the daily report
-   runs at 05:00 UTC) and any delivered one-shot test task (those stay stored
-   as `inactive` until deleted), so a raw `len()` never proved anything about
-   *this* loop. Filter on the task kind and the title.
+Documentation PRs may not yet be merged or present in the production checkout.
+The scheduled prompt therefore carries the new mission and global safety rules
+**directly**, and explicitly supersedes conflicting old procedure text. At each
+run, inspect the local procedure's revision and current-main documentation. Do
+not checkout an unreviewed docs branch into production or deploy code just to
+obtain updated instructions. Report doc-delivery lag; use reviewed/merged docs
+when available without altering the production worktree. A docs-only process
+update does not need a Guardian restart.
 
-Do **not** run step 2 and skip step 3: two active tasks for this loop mean
-duplicate runs on the same repo, four times a day.
+## Handoff / delivery troubleshooting
 
-## 4. Delivery verification (do this once, every time you move or create the loop)
+Do not recreate, retarget or delete the loop without a new explicit instruction.
+Use current tool schemas rather than assumptions about presets, GUI forms, host
+ports or storage locations. Never start/restart a DSH unit to repair presumed
+schedule trouble without operator authorization.
 
-A reminder that never fires is a silent failure, so prove delivery:
+For a missed run inspect the task's current status, recurrence, next occurrence,
+last delivery and bound-session transcript, then issue #30. Distinguish scheduled,
+delivered and procedure-completed; a delivery timestamp alone proves no work was
+done. Delivery may repeat after a crash; inspect run/claim evidence to avoid
+repeating side effects. After downtime only the latest missed occurrence may be
+delivered; do not manufacture historical runs.
 
-1. In the loop session, create a disposable one-shot:
-   `schedule_create(title: "Loop delivery test", prompt: "Loop delivery test: reply with exactly LOOP-DELIVERY-OK and nothing else.", after_seconds: 120)`.
-2. Wait ~2–3 minutes. Success requires **all three**:
-   - `~/.dsh-next/storages/schedule.json` → that task has
-     `deliveryHistory.records[0].deliveredAt` set and `status: "inactive"`;
-   - the session transcript shows the delivered prompt and the reply
-     `LOOP-DELIVERY-OK`;
-   - the transcript shows a clock icon/`Automation task` entry for the run.
-3. Delete the test task (GUI, same path as §3.3). Only the scheduled loop task
-   may remain.
-
-Reference measurement from the original setup: scheduled `21:25:22.279Z`,
-delivered `21:25:22.402Z`, session replied within 53 s.
-
-## 5. Autonomy boundary — do not re-derive it
-
-Single source of truth: `docs/GUARDIAN_LOOP.md`, "Scope and autonomy
-boundary". Summary as of 2026-10-27 (merge authority granted): the loop may
-**merge a PR, but only through the gate** — latest review at the merge head
-with no findings, CI green, every thread resolved, closing comment with the
-evidence. Squash only. It never approves a PR, never dismisses a review, never
-pushes to `main`, never force-pushes, never closes issues, **never restarts
-Guardian or any systemd unit** (its own model traffic runs through Guardian —
-it merges, gates and batches restarts, the operator executes them), and
-touches only two repositories: `guardian-llmprovider-gateway` and
-`caretaker-llamacpp`.
-
-The standing objective is to finish `docs/ROADMAP.md`; each run may deliver one
-roadmap row (issue → branch → PR → review → merge gate).
-
-## 6. Traps worth knowing before you debug something twice
-
-- **The Automation tasks page has no creation form.** Its *New* action starts
-  a new session; the reminder is created by asking the model in that session.
-  Looking for a form is wasted time.
-- **`schedule_list` is not an inventory.** It shows only the current session's
-  active tasks. Use the GUI (or `schedule.json`) to see the whole Host.
-- **`daily` and `cron` need an explicit IANA zone.** This host's clock is
-  `Etc/UTC` and the operator chose UTC slots (04:00, 10:00, 16:00, 22:00); a
-  bare `04:00:00` or `0 4-22/6 * * *` is rejected without a zone.
-  `every_seconds` (86400 for a day, 21600 for six hours) is *not* a substitute:
-  it is anchored to the creation time and drifts off wall-clock slots, and
-  `schedule_update` re-anchors it to the save time when changed.
-- **Cron normalisation:** `0 4,10,16,22 * * *` is stored as `0 4-22/6 * * *`.
-  That is the same schedule; do not "fix" it back into a list.
-- **Delivery semantics:** a one-shot stays stored as `inactive` after
-  delivery until explicitly deleted; after downtime a recurring reminder
-  delivers only its latest missed occurrence; delivery can repeat after a
-  crash.
-- **`dsh-autoupdate` runs at 04:40 UTC** and skips while session files were
-  written in the last 15 minutes, so a running loop defers it. If the update
-  does land, the reminder survives (it is stored, not in-memory) but the
-  session may need a Host restart to resume delivery.
-- **The operator's working tree is often dirty.** Record the dirty paths,
-  never stash/reset/clean them, and stage explicit paths only (never
-  `git add -A`, `git commit -a`, `git stash`).
-- **Git worktrees + `git push`:** a commit made on a **detached** HEAD in a
-  temporary worktree is not pushed by a bare `git push` (it fails with "You
-  are not currently on a branch", easy to swallow when piping output). Push
-  explicitly — `git push origin <sha>:refs/heads/<branch>` — and verify with
-  `git ls-remote origin <branch>`.
-- **Untracked duplicates:** while these two files are still under review they
-  also exist untracked in the main checkout. After the PR that adds them
-  merges, remove the untracked copies before pulling, otherwise `git merge`
-  refuses with "untracked working tree file would be overwritten". The same
-  applies to any later revision of these files.
-
-## 7. Where to look when something is wrong
-
-| Symptom | Check |
-| --- | --- |
-| No run in the last slot | `schedule.json` → task `status` + `scheduledAt`; GUI *Automation tasks* → *Records* |
-| Task disappeared | Session archived? Archiving with active reminders is refused until they stop, and stopping deletes them |
-| Session will not resume | `systemctl --user status dsh-web-next`; `journalctl --user -u dsh-web-next -n 100` |
-| Run fired but did nothing | The session transcript of the bound session, then issue #30 |
-| Tools missing in a session | Preset is not `standard`/`ptc`/`cordis`, or the caller is a subagent |
-
-## 8. Definition of done for a deployment
-
-- [ ] Exactly one active `cron 0 4-22/6 * * *` (UTC) task, bound to the
-      intended session.
-- [ ] Delivery proven end-to-end with the disposable test (§4), test deleted.
-- [ ] The new session's first turn answered with the task id, status and next
-      UTC target.
-- [ ] Issue #30 records the (re)deployment: task id, session id, next fire.
+Completion of a prompt-only update means: exact intended prompt saved; existing
+recurrence/target/status preserved; read-back verified and report linked. Natural
+next-run delivery and documentation rollout remain separately evidenced states.

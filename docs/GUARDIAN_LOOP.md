@@ -1,277 +1,218 @@
-# Guardian Loop — development procedure (cold file)
+# Guardian Loop — evidence-led development procedure
 
-> Executed by the cron reminder bound to the guardian-loop Session at
-> **04:00, 10:00, 16:00 and 22:00 UTC** (four runs a day, six hours apart).
-> This file is the authoritative procedure: the reminder only says "run the
-> guardian loop", so a compacted or restored Session re-reads this document
-> and continues from here.
+> Standing objective: continuously improve Guardian into an exceptional cross-platform
+> policy gateway, router, proxy, protocol bridge and privacy-aware traffic logger;
+> improve Caretaker into the complementary resource/service manager and controller.
+> These are ambitions, not claims that the capabilities are complete or deployed.
+> Work both canonical roadmaps: [Guardian](ROADMAP.md) and
+> [Caretaker PLAN](https://github.com/m0nklabs/caretaker-llamacpp/blob/main/PLAN.md).
 >
-> Operator decisions baked in (2026-10-25; cadence raised **and** merge
-> authority granted 2026-10-27): autonomy **up to and including merge, but only
-> through the merge gate below**; cadence **4×/day at 04:00, 10:00, 16:00,
-> 22:00 UTC**; scope **guardian-llmprovider-gateway + caretaker-llamacpp**;
-> standing objective **work the roadmap** (`docs/ROADMAP.md`) to completion.
+> Current operator-owned schedule: **06:00 and 18:00 UTC**, twice daily, verified
+> 2026-11-18 for occurrences beginning 2026-11-19. Do not change cadence, target
+> session or create replacement/test tasks without explicit operator direction.
+> [Deployment handoff](GUARDIAN_LOOP_HANDOFF.md) records task identity and delivery.
+> [Previous procedure and handoff](archive/guardian-loop-2026-11-18-before-strategy.md)
+> are preserved verbatim as historical evidence, not active instructions.
 
-## Scope and autonomy boundary
+## 1. Scope, ownership and hard stops
 
-Deployment, preset requirements and the reminder spec live in
-`docs/GUARDIAN_LOOP_HANDOFF.md` (moving the loop to another session,
-delivery verification, known traps).
+Only `m0nklabs/guardian-llmprovider-gateway` and `m0nklabs/caretaker-llamacpp`
+are in scope. Read the target repository's `AGENTS.md` before writing there;
+user-global instructions prevail. Other repositories receive attributed handoffs,
+not fixes. No service or repository renaming is authorized.
 
-**In scope:** two repositories —
+- **Guardian owns** client identity/authorization, traffic admission, route/pool
+  policy, protocol transformation, request telemetry and cost/privacy policy.
+- **Caretaker owns** authorized lifecycle execution, observed readiness/health,
+  host-resource admission/reservations and recovery through platform adapters.
+  Guardian requests readiness/capability through the agreed contract, not direct
+  process control. Caretaker validates feasibility, not client destination policy.
+  One lifecycle/resource authority per resource; no competing watchdog/idle controller.
+- Existing capabilities and pending contracts keep their evidence-labelled roadmap
+  status. A merged change is not live verification or deployment. OS portability
+  is not proof of backend/GPU parity.
 
-- `m0nklabs/guardian-llmprovider-gateway` — gateway core, cloud/local
-  inference, capture, dashboard, config, and the caretaker wiring;
-- `m0nklabs/caretaker-llamacpp` — the lifecycle daemon the roadmap depends on
-  (its own `AGENTS.md`, review loop and conventions apply there).
+Allowed: read issues/PRs/checks; create scoped issues and isolated branches/worktrees;
+implement, test and push branches; request review; answer findings; merge only
+through §3; close an issue only after its merged deliverable satisfies **all**
+acceptance criteria, with evidence. An issue that requires live validation stays open
+until that evidence exists. Do not close merely to tidy the board.
 
-Anything else is out of scope, even when it looks related.
+Hard stops:
 
-**Autonomy granted:**
+1. Never approve a PR, dismiss a review, or merge unreviewed work. Authentication,
+   secrets, migrations, deployment and dependency majors remain **human-gated**,
+   regardless of elapsed time or green checks.
+2. Never push to `main` or another long-lived branch, force-push, rewrite published
+   history, delete branches, or overwrite another agent/operator's work.
+3. **Never restart Guardian or any service/systemd unit**, deploy code or change
+   live service configuration. The loop's model traffic passes through Guardian.
+   For code changes run `scripts/pre_restart_check.py` in an appropriate isolated
+   environment; report unavailable checks, never claim a pass. Put exact required
+   restart/deployment actions and validation in the operator batch, never execute them.
+4. Never commit secrets, weaken TLS/credential isolation, print key maps, or expose
+   private payloads in logs, reports or fixtures. Existing raw capture is separate
+   from metadata audit; do not silently change its operator-configured behavior.
+5. No production fault injection or experiments. Use isolated fixtures/test services;
+   preserve intentional platform policies such as Windows TTS no-auto-return.
 
-- read every issue, PR, review thread and CI result in both repos;
-- create branches, commit, push branches, open and update PRs;
-- apply correct review suggestions, reply on review threads with evidence;
-- post `/review` from the human `gh` account (`m0nk111`) after each push;
-- open issues that describe verified defects or the next roadmap step;
-- **merge a PR once the merge gate below passes** (squash merge, `--squash`);
-- **close an issue** whose merged PR satisfies its acceptance criteria, with a
-  comment naming the merge commit and the evidence (operator rule, 2026-10-28);
-- comment the run report on the tracking issue.
+## 2. Per-run budget and preflight
 
-**Merge gate (all four, per PR, at the current head SHA):**
+Each run starts fresh; unused budget does not accumulate:
 
-1. the latest PR-Piet review **at that SHA** reports no findings;
-2. every CI check is green (skipped/neutral counts as green; a *failed* or
-   cancelled review run is not — rerun it);
-3. every review thread is resolved, and a thread was only resolved after its
-   finding was fixed or answered with evidence;
-4. a closing comment records what changed and the evidence.
+- Remediate open PR findings in coherent tested batches within the run budget.
+- At most **one new issue implementation** across the two repositories.
+- At most **one deliberate PR merge** per run, never a merge sweep.
+- At most **30 minutes of exploratory debugging/evaluation**; if more is needed,
+  record the evidence and next scoped step. No speculative refactor/dependency churn.
+- No mandatory code output: a reproduced defect, rejected hypothesis, measured
+  comparison, documented blocker or honest no-op can be the correct outcome.
 
-Anything short of that stays a PR for the operator. When in doubt, do not
-merge — ask in the report.
+Preflight is read-only apart from fetching remote refs and recording evidence:
 
-**A red CodeQL check is not yet a finding.** Before treating it as one, look at
-*which lines* the alert annotations name: GitHub counts alerts on a PR against a
-base analysis, and when the branch was cut before other merges landed the
-comparison reports standing alerts as new. Observed on #69, where the check
-claimed "32 new alerts including 1 high" for a PR whose four changed files
-contained none of them — merging current `main` into the branch turned it green
-with no change to the flagged files. So: if the flagged lines are outside your
-diff, merge `main` in and re-run; only investigate the alerts when they are
-actually yours. Never dismiss an alert to make a check go green.
+1. Record UTC start, both relevant checkout branches/SHAs and dirty paths. Fetch
+   current remote state. Never stash/reset/clean/switch a production checkout.
+   Use isolated worktrees from current `origin/main`; claim expected write scope
+   and stage explicit paths only (never `git add -A`, `git add .`, `commit -a`).
+2. Check Guardian service health without restarting: `systemctl is-active
+   llama-guardian` plus an unauthenticated `/v1/models` probe (expected 401 on the
+   configured local endpoint). Distinguish HTTP liveness from inference readiness.
+   If unhealthy, report evidence and recovery need; no new code changes this run.
+3. Read targeted current handoff and roadmap sections for the intended task, not
+   entire archives. Identify existing claims, PRs and prerequisite evidence; avoid
+   duplicate work and preserve outstanding auth/deployment findings.
+4. Send `task_started` through the `agent-activity-log` skill (fail-open).
 
-**Not granted (hard stops):**
+## 3. Open PRs first — review and merge gate
 
-1. **Never merge outside the gate.** Never approve a PR (no self-approval),
-   never dismiss a review, never resolve a thread that still has an unanswered
-   finding, never merge your own unreviewed push.
-2. **Never push to `main`** (or any long-lived branch), never force-push,
-   never rewrite published history, never delete branches. Issues are closed
-   only under the rule above — a completed deliverable, never to tidy the board,
-   never with an acceptance criterion unmet. Merge and only merge — through the
-   gate above.
-3. **Never restart `llama-guardian` or any systemd unit.** The loop's own
-   model traffic runs *through* Guardian: a restart kills the run mid-flight
-   and is not self-healing. Run `scripts/pre_restart_check.py` as a validation
-   gate for any code change and put the exact restart batch in the run report —
-   the operator executes it. Waiting work that needs a restart is *merged and
-   batched*, never deployed by the loop.
-4. **Never touch a repository outside the two in scope.** Cross-project
-   findings in any other repo are reported, not fixed.
-5. **Never commit secrets** and never relax the TLS/keys boundaries: keep the
-   cert/key pair rule, private keys `0600`, keys only in `.env` or
-   `config/guardian.keys.yaml`.
+Inventory open PRs in **both** repositories. Read latest comments, reviews, inline
+threads, commits and checks, not only a review-state badge. Give existing findings
+priority over new features. Treat each finding as a hypothesis: reproduce/inspect,
+fix correct in-scope findings; otherwise answer with evidence and an explicit
+handoff/blocker where needed. Do not silently discard unresolved findings.
 
-## Budget per run
+After a coherent change batch: run relevant tests/compile checks, inspect the diff,
+commit with the implementing-model identity and push the branch. Post a PR comment
+whose body is **exactly `/review` after the final push**, including every later
+push. Use the repository's designated sender (currently a human account here;
+bot senders are ignored). A requested, queued, failed, cancelled or incomplete
+review is not a completed independent review. Follow up through the existing loop;
+do not create a new scheduled follow-up without operator authorization.
 
-Bounded so a run stays reviewable and cheap (the budget is **per run**, and
-runs do not accumulate it — each of the four daily runs starts fresh):
+A PR is **merge-ready** only when:
 
-- **all** open-PR remediation (batched: one coherent tested push per PR head);
-- **at most one** new issue implementation, from a branch off `origin/main`;
-- **no** speculative refactors, dependency bumps, or cleanup outside the
-  issue/PR at hand.
+- an independent review of the **current head SHA** is finished;
+- every outstanding review finding is fixed or answered with evidence, and review
+  threads are resolved only after their findings have been handled;
+- all required checks pass on that head; skipped/neutral results need an explicit
+  policy justification and do not replace an absent required test/review;
+- the change satisfies its acceptance criteria and human gates are satisfied.
 
-Stop and report when the budget is spent. A finished short run is better than
-a long speculative one. When nothing needs doing, say so and stop: four runs a
-day makes a no-op run the normal case on a quiet repository.
+A closing comment normally records change, evidence and next action; it is **not**
+a precondition for readiness. Record the waiting anchor explicitly. For this
+account the waiting window is **2 hours**, not 24. It starts after the last
+outstanding review is answered; with no findings, at the later of completed
+current-head review and green checks. Never before the latest push. Any new
+activity needing a reply/fix/decision must be handled first and restarts the
+clock. Quiet/old PRs without completed review never qualify by age.
 
-## Phase 0 — Preflight (evidence only, no writes)
+Before the one deliberate merge:
 
-```bash
-cd /home/flip/guardian-llmprovider-gateway
-git status --porcelain          # record dirty paths; they belong to the operator
-git fetch origin --prune
-git log --oneline -5
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:11434/v1/models   # 401 = alive (auth required)
-systemctl is-active llama-guardian
-```
+1. Refresh against the current base. If refreshing creates a new head, request and
+   finish its review and recalculate the anchor. **Then pin the candidate SHA before
+   any SHA-sensitive verification**:
+   `verified=$(gh pr view <N> --json headRefOid --jq .headRefOid)`.
+2. For **that exact pinned SHA**, read all latest comments/reviews/commits, verify
+   completed review, handled findings/threads and elapsed anchor, rerun relevant
+   checks, and confirm clean merge state against the current base. Handle new
+   information, not merely vetoes. No operator intervention or unmet human gate.
+   Do not replace the pin with a newer head after this verification; if either
+   head or base changes, stop and restart the complete gate for a newly pinned SHA.
+3. Merge only the same verified pin:
+   `gh pr merge <N> --squash --match-head-commit "$verified"`.
+   A head mismatch means stop/revalidate, never blindly retry.
+4. Record anchor, elapsed window, review/check/thread evidence and merge SHA.
+   Fetch and check the resulting main in an isolated worktree. Report any failure
+   as priority remediation; do not repair production or restart a service.
 
-- **Dirty working tree** → the operator is mid-work. Do not stop and do not
-  clean: record the dirty paths, leave every one of them untouched, and skip
-  any change that would need to touch one of them (report that skip). Never
-  stash, checkout, reset, clean or commit someone else's uncommitted work.
-- **Staging is explicit paths only.** Never `git add -A`, `git add .`,
-  `git commit -a`, `git stash` or `git checkout -- <path>`; that is how
-  uncommitted operator work ends up in a loop commit.
-- **Guardian not active** → report blocked; do not change code that needs a
-  restart to be validated.
-- Read `docs/HANDOFF.md` (current open items) and `docs/ROADMAP.md` (next
-  product step). Both are cold files: read on demand, not in full by habit.
+Red CodeQL/CI is not waived because it appears pre-existing. Inspect annotations
+and diff/base evidence, refresh/rerun appropriately and investigate or hand off;
+never dismiss alerts or weaken tests to obtain green. If review infrastructure is
+broken (including Caretaker's tracked infra handoff), report it; no self-review substitute.
 
-## Phase 1 — Open PRs (highest priority)
+## 4. Issues, roadmaps and evidence-led debugging
 
-For each open PR, oldest-updated first:
+After PR remediation, select the highest-risk executable issue not already owned
+or in a PR: security/correctness/reliability and operator incidents before feature
+breadth. Search before creating issues. Every verified fixable defect needs its
+own tracker with sanitized reproduction and acceptance criteria; grouped gap
+registers do not replace those trackers. Do not duplicate an existing issue.
 
-```bash
-gh pr list --state open --json number,title,headRefName,isDraft,reviewDecision,statusCheckRollup
-gh pr view <N> --json reviews,comments,files,commits,statusCheckRollup
-gh api repos/m0nklabs/guardian-llmprovider-gateway/pulls/<N>/comments   # inline review threads
-gh pr checks <N>
-```
+If no higher-priority issue consumes the budget, select one row from either
+canonical roadmap whose dependencies are **satisfied by evidence**, not merely
+merged. G1's live exit gate, for example, is not passed by a merged commit alone.
+Record the choice and why it outranks the alternatives; do not starve Caretaker
+or quality work by treating Guardian feature rows as the only standing objective.
 
-For every finding in the latest PR-Piet review **at the current head SHA**:
+Claim the issue with `loop-claim: <agent> <UTC timestamp>` and expected write scope
+before building. A conflicting claim younger than 24 hours means coordinate or
+choose another row; never race an active owner or edit a sibling's worktree.
 
-1. Treat it as a hypothesis. Verify against the code, the docs and the tests.
-2. Correct and in scope → fix it in the same batch as the other findings for
-   that head.
-3. Wrong, already fixed, or out of scope → reply on the thread with the
-   evidence (file:line, test output, or the commit that already covers it).
-   Leave the thread open for the human; do not silently dismiss it.
-4. Never leave a finding unaddressed and unanswered.
+For debugging: sanitized minimal reproduction → failing regression/contract test
+where feasible → measured cause evidence → smallest fix → same-workload recheck
+and broader regressions. Include non-default settings, cancellation/timeout,
+error/denial paths and fault injection where relevant. Distinguish imported-env,
+fixture, product and deployment failures. Change approach when evidence stops
+improving; no repeated blind retries or unsupported causal claims.
 
-Then, per PR, one coherent batch:
+Open a focused PR and request current-head review. Use bare `Closes #N` only when
+merge fulfills every criterion; use `Refs #N` if operator restart/live verification
+is still needed. Preserve **planned / implemented / tested / deployed** separately.
 
-```bash
-./venv/bin/python -m py_compile <changed files>
-./venv/bin/python -m pytest tests/ -x                 # or the targeted subset
-./venv/bin/python scripts/pre_restart_check.py        # full gate for code changes
-git commit ... && git push                            # branch only
-gh pr comment <N> --body '/review'                    # human account, after each push
-```
+## 5. Bounded innovation and engineering quality
 
-When a PR is settled, walk the **merge gate** (four conditions, at the current
-head SHA) and record it in one closing comment: what changed, the evidence, and
-`Merge gate: passed` (or which condition is unmet and why).
+Innovation is a standing objective, not permission for churn. When no higher-risk
+executable work consumes the run, choose one falsifiable hypothesis tied to a
+roadmap outcome (latency, resource use, reliability, developer diagnosis or a
+capability gap). An investigation can be the run's deliverable without new code.
 
-Gate passed → merge **the exact SHA you verified**, in this order:
+- Reuse local helpers first. For a real external design choice consult dated
+  primary docs/releases/standards; record sources and version/date. “Newest” or
+  “state of the art” alone is not an adoption criterion.
+- Compare the existing baseline with at most **two** alternatives on the **same**
+  reproducible workload and pinned environment. Declare numeric acceptance/stop
+  thresholds, time/resource limits, owner and cleanup before execution. First
+  establish missing baselines; never invent a passing SLO after seeing results.
+- Measure relevant p50/p95/p99 latency, throughput, errors, CPU/RSS/buffer/queue
+  bounds, resource-release/recovery time and cost as appropriate. Preserve protocol,
+  auth/privacy and exact-target invariants; performance does not excuse regressions.
+- For platform work record OS/architecture/Python/backend/hardware and native
+  evidence. Mocked portable tests are not proof of Windows/macOS/GPU support.
+- Record **adopt / reject / defer** with evidence and next issue. Adoption still
+  requires focused tests, PR review/checks, waiting window and human gates.
 
-```bash
-# 1. pin the candidate FIRST
-verified=$(gh pr view <N> --json headRefOid --jq .headRefOid)
-# 2. verify THAT sha: the latest review must name it (`head \`$verified\``),
-#    every check in `gh pr checks <N>` must pass for it, every thread resolved
-# 3. merge that sha — never re-read the head in between
-gh pr merge <N> --squash --match-head-commit "$verified" --subject "<what> (#<N>)"
-```
+## 6. Report and failure handling
 
-The order matters: reading the head *after* the gate walk would pin whatever
-arrived in between, and `--match-head-commit` would then happily accept an
-unverified commit. Pin → verify → merge. If `--match-head-commit` rejects, the
-head moved: walk the gate again from step 1 (fresh review, fresh CI) instead of
-retrying blindly.
-
-Then **verify `main`**: fetch, and run the relevant checks on the merged head
-(the repo suite for code, the guard tests for docs). If the merged head is red,
-fixing it is the next run's first task — report it as such.
-
-Gate not passed → leave it open for the operator, with the failing condition
-named. Never merge on the strength of an older review, never merge with an
-unresolved thread, never merge with a red or failed check.
-
-Draft PRs: keep them draft unless the work is complete and validated.
-
-## Phase 2 — Open issues
-
-```bash
-gh issue list --state open --json number,title,labels,updatedAt
-```
-
-- Triage: does the issue still reproduce? Is it already covered by a PR or a
-  commit on `main`? Stale → say so on the issue with evidence, and close it only
-  under the rule below. An "you may close this" comment in an issue does not
-  lift anything.
-- **Every verified defect becomes an issue of its own** (operator rule,
-  2026-10-28). A finding from a review, a probe, a triage or a stray read is not
-  "noted" in a comment, a document or this session — it gets its own issue with
-  reproduction evidence and acceptance criteria, so a later run can fix it with
-  its own PR. A gap *register* (like #38) may group them, but each fixable
-  defect still needs its own tracker to be closed by its own merge.
-- **Closing an issue** (operator rule, 2026-10-28): allowed once the issue's
-  merged PR satisfies its acceptance criteria — comment the merge commit and the
-  evidence, then close. Never to tidy the board, never with an unmet criterion,
-  never for an issue whose criteria need a live restart (those stay open until
-  the restart is confirmed).
-- Pick the highest-value *executable* issue that is not already in a PR.
-- Implement on `feat/<slug>-<issue>` or `fix/<slug>-<issue>` off
-  `origin/main`, with tests pinning the changed public contract, then open the
-  PR (`Closes #N`) and post `/review`.
-- Review findings are hypotheses: verify before accepting or rejecting, and
-  keep `if`/`elif` routing chains intact.
-
-## Phase 3 — Advance the roadmap (only if phases 1–2 left budget)
-
-The standing objective is to **finish `docs/ROADMAP.md`** (G0 → G5, backlog rows
-in §5). Pick the next row whose dependencies are merged, write a falsifiable
-issue (problem statement, acceptance criteria, evidence links), then implement
-it in the same run — one issue maximum per run.
-
-**Claim before you build.** Other agents work in these repositories outside this
-loop (observed 2026-10-27: a sibling session pushed to an open PR and deleted a
-worktree mid-run). Before writing code for a row, comment on its issue:
-`loop-claim: <who> <UTC timestamp>`; if a claim from someone else is younger
-than 24 h, take the next row instead. Two sessions on one branch is how work
-gets lost.
-
-**Closing keyword: bare, and only when the merge really completes the issue.**
-A PR body declares `Closes #N` **without backticks** — GitHub does not parse
-closing keywords inside inline code, which is how #40 stayed open after its
-deliverable merged.
-
-But do **not** attach `Closes #N` to work whose acceptance criteria need a live
-verification the loop cannot perform, i.e. anything sitting in the restart batch
-(G1-class behaviour changes): the keyword fires on merge and would close the
-issue before the operator has run the restart. Reference it as `Refs #N`
-instead, merge, and close the issue only after the restart is confirmed in the
-run report. Closing is earned by evidence, never by the merge event. A row that changes behaviour
-needs a live restart to be proven: the loop merges it and puts it in the
-restart batch, it never deploys it. Skip when phases 1–2 already consumed the
-budget, and say in the report which row is next.
-
-## Phase 4 — Report
-
-Post one comment on the tracking issue **Guardian loop — run log**
-(tracking issue **#30**; `gh issue comment 30 --body-file <tmp>`):
+Post one factual run report on [tracking issue #30](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/30):
 
 ```markdown
 ## Run <YYYY-MM-DD HH:MM> UTC
-- window: <start> → <end> UTC
-- PRs: #<n> <what changed / settled / merged / blocked> (or "none open")
-- merged: #<n> <merge-gate evidence: review head, CI, threads> (or "none")
-- issues: #<n> <state after the run> (or "no executable issue")
-- roadmap: <row delivered / next row> (or "unchanged")
-- evidence: <commit SHAs, PR links, test result counts, CI state>
-- next intended action: <one line>
-- blockers / operator decisions needed: <one line or "none">
-- restart batch: <exact units/commands the merged code needs, and the
-  validation already run — never executed here>
+- window / owner / both repository SHAs / preserved dirty paths:
+- PR remediation / one merge or none / current-head review and CI evidence:
+- waiting anchor / eligibility / latest activity and base revalidation:
+- issue and roadmap row / dependency evidence / implemented-tested-deployed status:
+- debugging: reproduction, cause evidence, regression result (or not applicable):
+- innovation: hypothesis, baseline/candidates, thresholds, results, adopt/reject/defer:
+- platform / protocol / security coverage, unavailable checks and known gaps:
+- next intended action / blockers / operator decisions:
+- restart batch: exact units/commands and validation, NEVER executed here:
 ```
 
-Report facts, not intentions: failed or unrun checks are named as such. Also
-send the MoniFuse agent-activity events (`task_started`, then
-`task_achieved` / `task_failed` / `blocked`) per the `agent-activity-log`
-skill.
+Name unrun/failed checks honestly. Link commits, issues, PRs and measurements;
+never include secrets or private raw captures. Send AAL `task_achieved`,
+`task_failed` or `blocked` matching the actual outcome (fail-open).
 
-## Failure handling
-
-- Uncertain finding or unclear intent → fail closed: leave it for the human
-  with the evidence, never guess in a merge-bound change.
-- Red CI caused by the loop's own push → fix it in the same run when in
-  scope, otherwise report it.
-- Red CI or failing tests that predate the run → report; do not "fix" the
-  gate by weakening tests.
-- Guardian unhealthy, GitHub or the runner pool down → report blocked, make
-  no code changes.
-- A run that produces nothing is a valid outcome: say so plainly instead of
-  inventing work.
+Unclear authorization or uncertain safety → fail closed for that action and
+continue only independent authorized work. Unhealthy Guardian or unavailable
+GitHub/runners → report the concrete blocker; do not invent successful evidence.
+A no-op is valid; do not manufacture tasks just to fill the slot.

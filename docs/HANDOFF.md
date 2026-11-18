@@ -183,12 +183,24 @@ een cloud-GPU-box):
   bij de legacy-removal.
 - **CI-adoptie (open sinds 20260813_1):** `scripts/pre_restart_check.py` als
   GitHub Action nog niet opgepakt.
-- **Product roadmap:** `docs/ROADMAP.md` is the active policy/traffic-gateway
-  roadmap, expanding beyond LLMs. G0 runtime-baseline reconciliation and selection
-  of the first non-AI HTTP service remain open; no new runtime feature was deployed.
-  Historical F6/F7 are complete (journal Batch 3; active service WorkingDirectory
-  verified as the new checkout). The superseded F7-open entry is preserved
-  verbatim in `docs/ARCHIVED_HANDOFFS.md`, section 2026-10-02.
+- **Product roadmap (2026-11-18 documentation alignment):**
+  [ROADMAP.md](ROADMAP.md) remains the active policy/traffic-gateway roadmap.
+  **G0 is complete** (2026-10-28); the first non-AI HTTP target is the
+  [MoniFuse read API](G0_FIRST_HTTP_SERVICE.md), selected, not implemented as a
+  general adapter. **G1's three rows are merged awaiting documented operator
+  restart/live verification; G2–G5 remain planned/blocked.** Issue #113 adds only
+  planned Q0–Q8 quality tracks: cross-platform support tuples, protocol conformance,
+  safe metadata audit versus opt-in raw capture, Caretaker resource-authority
+  integration, baseline-derived numeric budgets, fault/security/reproducibility
+  evidence, debugging and bounded innovation. No support/performance promotion or
+  new runtime delivery is claimed. Route-level auth evidence gaps remain a
+  priority before generalization. Guardian owns policy/traffic/protocols/admission;
+  Caretaker owns authoritative lifecycle/resources/readiness/recovery, with
+  [companion planning #24](https://github.com/m0nklabs/caretaker-llamacpp/issues/24)
+  in [Caretaker PLAN.md](https://github.com/m0nklabs/caretaker-llamacpp/blob/main/PLAN.md).
+  Historical F6/F7 remain complete (journal Batch 3); the superseded G0-open
+  pointer is preserved [verbatim in the archive](ARCHIVED_HANDOFFS.md#2026-11-18--superseded-product-roadmap-pointers-verbatim),
+  alongside the earlier F7-open entry (2026-10-02). No services/configuration changed.
 - **Parked (operator-besluit 09-02, koelkast):** geheugen-idee (capture →
   agent-geheugen). Kruisbesmetting-over-projectgrenzen is dé eerste-klas eis
   in elke toekomstige uitwerking. Pas oppakken als de operator het weer op

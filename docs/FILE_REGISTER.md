@@ -12,6 +12,14 @@
 > filenames, and the `AGENTS.md` directory map — it is not a substitute for reading
 > the code.
 
+## Product/loop documentation additions (issue #113)
+
+This targeted addition does not refresh the historical generated inventory/count below.
+
+| Path | Function | Related processes/files |
+| --- | --- | --- |
+| `docs/archive/guardian-loop-2026-11-18-before-strategy.md` | Verbatim historical loop, deployment-handoff and agent-context snapshots before mission/quality alignment; not active instructions | `docs/GUARDIAN_LOOP.md`, `docs/GUARDIAN_LOOP_HANDOFF.md`, `AGENTS.md` |
+
 ---
 
 ## app/ — FastAPI inference gateway and capture subsystem (60 files)
