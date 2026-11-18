@@ -237,9 +237,21 @@ def prepare_cloud_candidate_request(
         provider, upstream_model, candidate_json_body, model_defaults
     )
     if model_defaults:
+        # Client-explicit reasoning intent wins over a configured
+        # reasoning_effort model default. The nested ``reasoning.effort``
+        # shape counts as explicit too: injecting the flat key alongside it
+        # makes strict upstreams (OpenRouter) reject the request with a
+        # 400 "conflicting values" error (verified live 2026-11-18, #30
+        # handoff from the DSH session).
+        client_reasoning = candidate_json_body.get("reasoning")
+        client_reasoning_explicit = isinstance(client_reasoning, dict) and "effort" in client_reasoning
+        skip = {"reasoning_effort"} if (
+            client_reasoning_explicit or "reasoning_effort" in candidate_json_body
+        ) else set()
         missing = {
             k: v for k, v in model_defaults.items()
             if k not in candidate_json_body and k not in metadata_keys
+            and k not in skip
         }
         if missing:
             candidate_json_body = {**candidate_json_body, **missing}
