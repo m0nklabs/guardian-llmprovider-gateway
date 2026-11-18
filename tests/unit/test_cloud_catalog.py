@@ -18,6 +18,7 @@ import app.cloud_inference as _cloud_inf
 from app.cloud_inference.routing import resolve_cloud_attempts
 from app.proxy.cloud_catalog import CloudModelCatalog
 from app.proxy.providers import ProviderRegistry
+from types import SimpleNamespace
 
 SAMPLE_SETTINGS = """\
 providers:
@@ -826,3 +827,57 @@ class TestCloudGatewayGate:
         )
         assert attempts[0][0].name == "openrouter"
         assert attempts[0][1] == "openai/gpt-4o"
+
+
+class TestReasoningEffortDefaultPrecedence:
+    """Client-explicit reasoning intent must win over a configured
+    reasoning_effort model default; a nested ``reasoning.effort`` counts as
+    explicit (live 400 'conflicting values' on OpenRouter, verified
+    2026-11-18)."""
+
+    def _prepare(self, body, model_default):
+        import app.cloud_inference.routing as routing
+        from app.cloud_inference.routing import prepare_cloud_candidate_request
+
+        provider = SimpleNamespace(name="openrouter")
+        injected = {"value": model_default}
+
+        class _StubCatalog:
+            def get_override(self, key):
+                return dict(injected["value"]) if injected["value"] else None
+
+        old = (routing._cloud_catalog, routing._adapt_openai_reasoning_params)
+        routing._cloud_catalog = _StubCatalog()
+        routing._adapt_openai_reasoning_params = lambda provider, model, body: body
+        try:
+            _, out, _, _ = prepare_cloud_candidate_request(
+                provider, "openai/gpt-6.1-sol", "chat/completions", body)
+        finally:
+            (routing._cloud_catalog,
+             routing._adapt_openai_reasoning_params) = old
+        return out
+
+    def test_nested_reasoning_effort_blocks_flat_injection(self):
+        out = self._prepare(
+            {"messages": [{"role": "user", "content": "hi"}],
+             "reasoning": {"effort": "medium"}},
+            {"reasoning_effort": "high", "max_tokens": 4096},
+        )
+        assert "reasoning_effort" not in out
+        assert out["reasoning"] == {"effort": "medium"}
+        assert out["max_tokens"] == 4096  # unrelated defaults still apply
+
+    def test_flat_reasoning_effort_blocks_default_injection(self):
+        out = self._prepare(
+            {"messages": [{"role": "user", "content": "hi"}],
+             "reasoning_effort": "medium"},
+            {"reasoning_effort": "high"},
+        )
+        assert out["reasoning_effort"] == "medium"  # client value wins
+
+    def test_default_applies_without_client_reasoning(self):
+        out = self._prepare(
+            {"messages": [{"role": "user", "content": "hi"}]},
+            {"reasoning_effort": "high"},
+        )
+        assert out["reasoning_effort"] == "high"
