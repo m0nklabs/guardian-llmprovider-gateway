@@ -104,6 +104,21 @@ def resolve_cloud_attempts(
             detail="cloud access disabled for this Guardian key",
         )
 
+    # Per-key model allowlist (``allowed_models`` in guardian.keys.yaml). Absent
+    # or empty means unrestricted, so existing keys keep their current reach.
+    # Checked before failover expansion: a restricted key may only name the
+    # exact addresses it was granted, never a group that expands past them.
+    allowed_models = auth_ctx.get("allowed_models")
+    if allowed_models and model_name not in allowed_models:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "model_not_allowed",
+                "model": model_name,
+                "message": "this Guardian key is restricted to a fixed model list",
+            },
+        )
+
     first, sep, rest = model_name.partition("/")
     # Failover group: failover/{group} (guardian/ prefix dropped in redesign).
     if sep and first == "failover":

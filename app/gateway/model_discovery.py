@@ -111,6 +111,28 @@ def _key_can_access_cloud(request: Request, client_id: str) -> bool:
     return bool(auth_ctx.get("cloud_gateway_access", True))
 
 
+def _key_allowed_models(request: Request) -> list[str] | None:
+    """Return the requesting key's model allowlist, or ``None`` when unrestricted.
+
+    Mirrors the request-path gate in ``app.cloud_inference.routing``: an absent
+    or empty ``allowed_models`` means the key keeps its full reach.
+    """
+    auth_ctx = _get_request_auth_context(request) or {}
+    allowed = auth_ctx.get("allowed_models")
+    return list(allowed) if allowed else None
+
+
+def _assert_model_allowed(request: Request, model_id: str) -> None:
+    """Raise 404 when a restricted key asks about a model outside its allowlist.
+
+    404 rather than 403: a restricted key should not learn which models exist
+    beyond the ones it was granted.
+    """
+    allowed = _key_allowed_models(request)
+    if allowed is not None and model_id not in allowed:
+        raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+
+
 def _cloud_entries_for_provider(provider_name: str) -> list[str]:
     """Return the full ``{provider}/{brand}/{model}`` addresses for a provider.
 
@@ -309,11 +331,19 @@ async def list_models(request: Request, client_id: str) -> dict[str, Any]:
     except Exception as e:
         logger.error(f"Failed to list failover groups: {e}")
 
+    # Per-key model allowlist: a restricted key is advertised exactly what it may
+    # call, so discovery clients cannot offer a model the request path rejects.
+    allowed = _key_allowed_models(request)
+    if allowed is not None:
+        allowed_set = set(allowed)
+        models_list = [m for m in models_list if m.get("id") in allowed_set]
+
     return {"object": "list", "data": models_list}
 
 
 async def model_metadata(model_id: str, request: Request, client_id: str) -> dict[str, Any]:
     """Return metadata for a configured canonical model, public alias, or cloud model (Phase 5: delegated)."""
+    _assert_model_allowed(request, model_id)
     # Failover groups surface as failover/{group}; resolve them here so
     # /v1/models/<id> returns a stable shape rather than 404'ing on the discovery
     # entry the list endpoint just advertised.
@@ -382,6 +412,7 @@ async def show_model(request: Request, client_id: str) -> dict[str, Any]:
     if not isinstance(model_name, str) or not model_name.strip():
         raise HTTPException(status_code=400, detail="'model' must be a non-empty string")
     model_name = model_name.strip()
+    _assert_model_allowed(request, model_name)
 
     canonical_name: str | None = None
     cloud_attempts: list[tuple[Any, str]] | None = None
