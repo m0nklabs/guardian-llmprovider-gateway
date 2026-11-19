@@ -37,20 +37,53 @@ adapter. None is a competing address layer. The
 preserves bare aliases, upstream IDs and adapter-specific forms and leaves
 brand-absence policy unresolved; it does not introduce a generic resolver.
 
-Guardian owns traffic policy; Caretaker owns backend lifecycle and execution.
-Legacy direct-management compatibility paths are not the general product
-boundary. Use [LLM routing](LLM_ROUTER.md) for current model-routing contracts
-and [the operator runbook](skills/operator-runbook.md) for deployment.
+### Authority and quality contracts
+
+Guardian owns **identity, authorization, traffic/routing policy, protocols,
+request admission and telemetry**. Caretaker is the **authoritative lifecycle,
+resource, readiness and recovery controller** for its managed backends. Guardian
+may request an authorized target and decide whether a caller's request is
+eligible; Caretaker decides whether and how host resources can realize that
+request and reports observed readiness/refusal. Guardian must not run a competing
+start/stop, resource-reservation or recovery controller. Legacy direct-management
+compatibility paths are migration debt, not a general dual-controller boundary.
+
+A richer desired/observed-state, resource and readiness integration is **planned**
+in [roadmap Q4](ROADMAP.md#6-additive-product-quality-engineering-tracks) and
+[Caretaker #24](https://github.com/m0nklabs/caretaker-llamacpp/issues/24), with its
+[plan](https://github.com/m0nklabs/caretaker-llamacpp/blob/main/PLAN.md) as the
+companion planning source. No new reservation API, lease format or generalized
+service controller is specified as shipped here. The future contract must define
+freshness, stale/unknown state, denial, cancellation, idempotency and recovery;
+a missing or stale observation cannot become permission to overcommit resources.
+Existing optional status/death-signal compatibility below is not that future
+capacity contract and must not silently acquire new requirements.
+
+The aspirational cross-platform gateway/router/proxy/logger/bridge mission is
+qualified by the [planned quality tracks](ROADMAP.md#6-additive-product-quality-engineering-tracks):
+separate OS/architecture/Python/backend support tuples, protocol conformance,
+metadata audit distinct from opt-in raw capture, numeric baseline-derived budgets,
+isolated faults/benchmarks, supply-chain/reproducibility evidence and bounded
+innovation. Native Guardian support cannot be inferred from a remote backend.
+No general HTTP/tool adapter or performance/support certification is added by
+this architecture text. Close route-level authorization evidence gaps before
+generalizing exposure; a protected dependency alone is not complete route coverage.
+Use [LLM routing](LLM_ROUTER.md) for current model-routing contracts and
+[the operator runbook](skills/operator-runbook.md) for deployment.
 
 ## Historical single-host architecture
 
 > Legacy single-host architecture description. Several lifecycle, routing and
 > configuration details below predate provider unification and Caretaker wiring;
 > do not treat these sections as the current complete topology or full product
-> definition. See [the product roadmap](ROADMAP.md) for the target gateway
-> boundaries. Full reconciliation against code is tracked in roadmap phase G0.
-> Statements such as "current" or "today" below refer to this historical view,
-> not a freshly verified description of the broader gateway.
+> definition. The [G0 baseline](G0_BASELINE.md) and
+> [endpoint/auth matrix](G0_ENDPOINT_AUTH_MATRIX.md) completed G0 reconciliation
+> in October 2026; that does not refresh every legacy paragraph below. G1 remains
+> merged awaiting its live exit checks; later G and additive Q tracks retain their
+> [roadmap status](ROADMAP.md). Statements such as "current" or "today" below
+> refer to this historical view, not a freshly verified complete topology.
+> The superseded G0-open pointer is preserved
+> [verbatim in the archive](ARCHIVED_HANDOFFS.md#2026-11-18--superseded-product-roadmap-pointers-verbatim).
 
 ### Legacy overview
 

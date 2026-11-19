@@ -25,6 +25,27 @@ Guardian-only by gateway code alone: credential ownership and client egress
 policy also matter. Privileged operator recovery remains a separate, audited
 control path, not a normal client bypass.
 
+### Aspirational quality mission (planned, issue #113)
+
+Build an **exceptional cross-platform gateway, router, proxy, logger and protocol
+bridge**, judged by reproducible acceptance evidence rather than a best-in-class
+claim. "Logger" means privacy-aware operational metadata and audit by default,
+not unrestricted payload retention. The ambition covers Linux, Windows and macOS;
+it does **not** declare them equally supported today. The additive Q tracks below
+turn that ambition into testable contracts without resetting the G0–G5 history.
+
+Success requires a declared support tuple, protocol behavior and numeric budgets,
+then evidence that those thresholds pass. Core budget values must be established
+in scoped baseline issues using measured workloads, not invented here as SLOs.
+Until those issues accept values and publish results, support/performance promotion
+is blocked; shipped protective defaults are not tuned capacity guarantees.
+
+Companion authority and resource-management planning is tracked in
+[Caretaker #24](https://github.com/m0nklabs/caretaker-llamacpp/issues/24) and its
+[canonical plan](https://github.com/m0nklabs/caretaker-llamacpp/blob/main/PLAN.md).
+These links coordinate planned work, not a claim that new APIs or generalized
+service control have shipped in either repository.
+
 ### Success outcomes
 
 - One client identity and policy surface across heterogeneous services.
@@ -154,10 +175,19 @@ Guardian -> authenticated Caretaker control API -> backend lifecycle
 
 ### Boundary rules
 
-1. **Guardian owns traffic and policy**, not model execution, training, dataset
-   building, or host-wide process supervision. Caretaker owns backend lifecycle;
-   Keanu owns downstream redaction/dataset transformations. Existing raw capture
-   remains explicit and access-restricted, never relabeled as sanitized audit.
+1. **Guardian owns identity, authorization, traffic policy, protocols, request
+   admission and telemetry**, not model execution, training, dataset building or
+   host-wide process supervision. **Caretaker is the authoritative lifecycle,
+   resource, readiness and recovery controller** for the backends it manages.
+   Guardian requests authorized desired outcomes and uses Caretaker's observed
+   readiness/resource decisions to admit or reject traffic; it must not race an
+   independent start/stop, reservation or recovery loop against Caretaker. Guardian
+   remains authoritative for caller eligibility and routing, not host capacity.
+   The richer resource/reconciliation contract is planned in Q4, not a new API
+   defined here; mixed legacy compatibility paths are migration debt, not a dual
+   controller design. Keanu owns downstream redaction/dataset transformations.
+   Existing raw capture remains explicit and access-restricted, never relabeled
+   as sanitized audit.
 2. **Capability is declared, not inferred from geography.** A LAN and a cloud
    service can expose the same capability; actual compatibility must be checked.
 3. **Shared core, specific adapters.** Keep auth, admission, health, telemetry and
@@ -351,7 +381,115 @@ Status column added 2026-10-28 by the guardian loop: it records what is on
 merged and gated but the operator-run restart that proves the behaviour has not
 happened yet; those issues stay open (see `docs/GUARDIAN_LOOP.md`, closing rule).
 
-## 6. Risks, exclusions and decision gates
+## 6. Additive product-quality engineering tracks
+
+**Planning snapshot: 2026-11-18, [issue #113](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/113).**
+All Q rows are **planned**, not implemented, verified or deployed by this update.
+G0 remains complete; G1 remains merged awaiting its documented live exit checks;
+G2–G5 remain planned/blocked as above. Q tracks add acceptance requirements to
+future delivery, not retrospective claims that historical evidence never existed.
+Their IDs are backlog identifiers, not claims that individual execution issues
+have already been created. Specs and isolated fixtures may proceed independently;
+no track authorizes production experimentation or bypasses the G1 live gate.
+
+| ID | Planned deliverable | Depends on | Acceptance evidence before promotion | Status |
+| --- | --- | --- | --- | --- |
+| Q0 | Baseline and numeric budget contracts | G0 evidence | Scoped baseline issues record representative workloads, environment, sample counts, variance and accepted numeric thresholds for each promoted tuple/route; rerunnable artifacts and rationale reviewed | planned |
+| Q1 | Cross-platform support matrix and native verification | Q0; Q6 release/security gate | Versioned Linux/Windows/macOS × architecture × Python × backend matrix; native install/start/stop, TLS, path/encoding, cancellation and recovery evidence for each promoted tuple; unsupported features fail explicitly | planned |
+| Q2 | Protocol and bridge conformance | Q0; G1 live exit before exposure | Positive/negative golden contracts and end-to-end tests for declared ingress/upstream/version pairs, including streaming, errors and unsupported fields; deviations published, no silent semantic loss | planned |
+| Q3 | Metadata logging, audit and explicit raw-capture separation | Q0; G1 audit baseline | Field/retention/access contracts; secret canaries absent from metadata/logs; bounded cardinality, disk/rotation/export and write-failure tests; an incident explained without raw payloads | planned |
+| Q4 | Caretaker resource-authority integration | Q0; companion Caretaker #24; G1 control-plane gates | Joint versioned contract and tests for fresh/stale/unknown readiness, capacity refusal, cancellation, daemon loss/restart and recovery; no double reservation, leaked capacity or competing controller | planned |
+| Q5 | Reproducible benchmarks and fault testing | Q0, Q2–Q4 for the paths measured | Direct-upstream versus gateway measurements and injected failures meet predeclared numeric budgets; reproducible environment/commands, raw aggregate results and regressions published | planned |
+| Q6 | Security coverage, supply chain and release reproducibility | G0 threat model; G1 merged controls | Close route-level auth evidence gaps before broader exposure; adversarial tests, dependency/provenance inventory, vulnerability triage, pinned release inputs and clean-environment reproduction with artifact hashes | planned |
+| Q7 | Evidence-led debugging and regression closure | G0 triage; Q0 for quantitative claims | Minimal sanitized reproducer, competing hypotheses and discriminating checks, attributed cause or explicit unknown, regression test, before/after evidence and rollback/restart impact | planned |
+| Q8 | Bounded innovation/comparison decisions | Q0; Q7 problem statement; applicable Q2–Q6 gates | Dated primary-source review and reproducible comparison of current baseline versus at most two candidates; predeclared hypothesis, budgets, stop/keep criteria and adopt/reject/defer decision | planned |
+
+### Support claims: keep the axes separate
+
+A remote Windows backend is not evidence that the Guardian process runs natively
+on Windows. A Python import is not evidence that TLS, subprocesses or a GPU backend
+work on that OS. Backend/driver support must never be inferred from OS support.
+The starting inventory below is deliberately conservative, not a certification:
+
+| Guardian host OS | Architecture | Python/runtime evidence | Backend axis (independent) | Initial claim |
+| --- | --- | --- | --- | --- |
+| Linux (Ubuntu deployment) | Exact CPU architecture to record in Q1 | Python 3.14 project target; dated [G0 deployment baseline](G0_BASELINE.md), not a fresh native certification | Local llama.cpp/CUDA and remote/cloud paths have historical evidence; exact builds/drivers belong in tuple results | experimental pending Q1 support gate; historically exercised |
+| Windows | x86_64 and arm64 evaluated separately | Native Guardian Python versions/install/service behavior unverified | Remote Windows speech/lifecycle history in [handoff](HANDOFF.md) does not certify native Guardian or every backend | unverified for native Guardian |
+| macOS | arm64 and x86_64 evaluated separately | Native Guardian Python versions/install/service behavior unverified | CPU/Metal and remote backends require separate evidence; none claimed here | unverified |
+| Other Linux architecture/runtime/backend tuples | x86_64 and arm64 evaluated separately | No portability inference from the deployed host or project version | CPU/CUDA/ROCm/Metal, driver and engine versions are separate cells; nonapplicable combinations must say so | unverified unless separately evidenced |
+
+Q1 must record exact OS/version, CPU architecture, Python version, dependency lock
+or resolved manifest, backend engine/build, accelerator/driver, transport/adapter,
+feature exclusions, owner, date and evidence links. Labels are **supported**
+(passes declared native/contract/security/budget gates), **experimental** (limited,
+explicitly scoped evidence), **unverified** (no qualifying evidence) or
+**unsupported** (explicitly excluded). Mocks and cross-compilation are useful but
+cannot replace native verification. No `supported` label is granted in this doc.
+
+### Required measurable contracts
+
+Q0 baseline issues must establish numeric thresholds and measurement methods for
+applicable gateway-added latency (including tail percentiles), time to first byte
+and stream gaps, throughput/concurrency, CPU/RSS/buffer growth, queue/body limits,
+cancellation/lease-release and readiness/recovery time, plus telemetry volume,
+cardinality and storage retention. Define cold/warm states, workload sizes,
+arrival patterns, sample counts, percentile method, repeatability tolerance and
+acceptable regressions. Separate backend inference time from gateway overhead,
+local from cloud variability, and observed values from accepted limits. Missing
+measurements or undecided thresholds block the corresponding promotion; do not
+fill them with arbitrary universal SLOs. Exercise non-default configured bounds.
+
+Q2 covers the declared OpenAI Chat/Responses, Anthropic, Ollama and speech paths
+and their actual upstream capabilities, not an assertion of full upstream parity.
+Pin tool calls, structured output, usage/finish reasons, ordering/termination,
+partial/error streams, disconnect/backpressure, exact-target semantics and typed
+rejections. Proposed HTTP/tool protocols require their own conformance contract
+before being advertised. Q5 adds overload, slow/truncated upstreams, timeouts,
+429/5xx, DNS/TLS failures, audit-disk exhaustion, process loss and cancellation
+races in isolated fixtures. Faults must not leak credentials, replay side effects,
+switch an exact target or turn unknown readiness into available capacity.
+
+Q3 builds on [G1 metadata audit](decisions/G1-03-admission-and-audit.md), not raw
+capture relabeled as safe logs. Audit explains identity pseudonym, operation,
+policy revision/decision, destination/reason, timings, resource refusal and outcome
+using an explicit allowlist; URLs, labels and exception strings can contain secrets
+too. Raw prompts/responses/audio/tools remain a **separate, explicit opt-in** with
+authorized access, retention and deletion/export policy. Preserve existing
+intentional capture configuration; this plan neither disables it nor enables
+capture for new service types. Redaction is defense-in-depth, not proof of secrecy.
+
+**Security before generalization:** the [endpoint matrix](G0_ENDPOINT_AUTH_MATRIX.md#uncovered-routes)
+records app-owned routes with no route-level tests or only delegate tests. Recheck
+that inventory at implementation head and close positive/negative auth, role,
+request-ownership and capture-export coverage gaps before expanding exposure.
+Merged scope machinery is not proof of end-to-end protection on every route.
+Q6 also requires secret-free diagnostics, dependency/license and vulnerability
+review, artifact provenance/hashes, build/install reproduction and rollback
+instructions. Documentation here is not proof of a clean security scan or a
+reproducible build.
+
+### Debugging and bounded innovation operating rule
+
+For Q7, start with observed symptom, affected revision/tuple and expected contract;
+separate observations, hypotheses and unknowns. Reproduce with minimized synthetic
+inputs, correlate metadata, then run the cheapest discriminating check. Attribute
+pre-existing/flaky failures separately, fix the demonstrated cause, and add a
+regression that fails before and passes after. If unreproduced, retain the unknown
+and next check rather than claiming a fix; never collect production raw payloads
+or restart services merely to improve evidence.
+
+For Q8, timebox a concrete question and record the date plus primary-source
+specifications, upstream release/commit/docs and license/security constraints.
+Compare the current baseline against **at most two candidates** under the same
+workload and accepted numeric budgets; preregister benefit, correctness/privacy
+non-regressions, experiment cost/time bounds and stop conditions. Record measured
+trade-offs, uncertainty, integration/migration/rollback cost and an
+**adopt / reject / defer** decision. A negative result is useful evidence; do not
+repeat a failed comparison without new evidence. Adoption requires a scoped issue,
+normal review and applicable gates, never a speculative rewrite or production
+trial. Modernity and popularity alone are not acceptance criteria.
+
+## 7. Risks, exclusions and decision gates
 
 - **Central bottleneck/blast radius:** measure overhead and isolate control-plane
   work; drain/recovery first, replicas only with coherent state ownership.
@@ -366,12 +504,12 @@ happened yet; those issues stay open (see `docs/GUARDIAN_LOOP.md`, closing rule)
   whole service mesh, workflow/agent execution engine, or built-in dataset builder.
 - **Naming:** Guardian is the product name. Keep current repository/package,
   service aliases, ports and public routes until a dedicated migration is justified.
-- **Open decisions:** first HTTP target; identity/OIDC needs; residency rules;
+- **Open decisions:** identity/OIDC needs; residency rules;
   acceptable audit-loss policy; measured SLOs; pool equivalence definition;
   multi-replica consistency/storage. Resolve at their phase gate, not by silently
   adding defaults or changing existing behavior.
 
-## 7. Definition of done and roadmap maintenance
+## 8. Definition of done and roadmap maintenance
 
 Each implementation milestone must provide a scoped spec, configuration and
 compatibility migration, positive/negative tests, measured operational evidence,
