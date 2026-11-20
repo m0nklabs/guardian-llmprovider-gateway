@@ -126,6 +126,7 @@ def _payload(route: str, model: str, *, stream: bool = False) -> dict:
         body["stream"] = stream
     elif route == "responses":
         body["input"] = [{"role": "user", "content": "synthetic"}]
+        body["stream"] = stream
     else:  # embeddings
         body["input"] = "synthetic"
     return body
