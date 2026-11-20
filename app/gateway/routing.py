@@ -48,6 +48,7 @@ logger = logging.getLogger("Guardian")
 _resolve_or_reject_inference_model = None
 _resolve_inference_model = None
 _is_cloud_or_guardian_route = None
+_enforce_key_model_allowed = None
 _resolve_cloud_attempts = None
 _resolve_cloud_vision_fallback = None
 _setup_cloud_capture = None
@@ -110,6 +111,7 @@ def init(
     resolve_or_reject_inference_model,
     resolve_inference_model,
     is_cloud_or_guardian_route,
+    enforce_key_model_allowed,
     resolve_cloud_attempts,
     resolve_cloud_vision_fallback,
     setup_cloud_capture,
@@ -169,7 +171,7 @@ def init(
     """Inject all dependencies. Called once at startup."""
     _vars = [
         "_resolve_or_reject_inference_model", "_resolve_inference_model",
-        "_is_cloud_or_guardian_route",
+        "_is_cloud_or_guardian_route", "_enforce_key_model_allowed",
         "_resolve_cloud_attempts", "_resolve_cloud_vision_fallback",
         "_setup_cloud_capture", "_forward_to_cloud_provider",
         "_apply_anthropic_thinking_to_llama_params", "_apply_request_reasoning_defaults",
@@ -300,6 +302,17 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                 "message": "Inference requests must include a model name.",
             },
         )
+
+    # ── Per-key model allowlist on the direct local path (issue #117) ──
+    # Decided once here, on the public ID the client sent, before any
+    # ``_model_manager`` resolution and before queue admission/forwarding.
+    # An absent model never reaches this point: it is rejected above with 400
+    # ``model_not_specified`` because these endpoints resolve no implicit
+    # default, so no unlisted default can be served. A listed ID is matched
+    # exactly as sent (no alias or case folding); cloud addresses keep the
+    # cloud resolver's gate, which checks ``cloud_gateway_access`` first.
+    if not _is_cloud_or_guardian_route(requested_model):
+        _enforce_key_model_allowed(request, requested_model)
 
     # Client may request a smaller context window than configured. Header is
     # preferred (no OpenAI-spec clash); body field is a fallback for clients
