@@ -379,41 +379,51 @@ unchanged to Responses-ingress traffic.
 
 ## Service Tiers (OpenRouter)
 
-OpenRouter sells the same model at several grades of capacity — `default`
-(standard), `flex` (cheaper, higher latency), `priority`/`fast` (faster,
-higher cost) and, on select OpenAI models, `ultrafast`. Guardian passes
-tier selection through on every cloud ingress:
+OpenRouter offers `default` (standard), `flex` (discounted, lower processing
+priority), `priority`/`fast` (premium), and `ultrafast` on select models.
+**Cheapest available is not a Flex → Fast escalation ladder.**
 
-- **`service_tier` parameter** — accepted as a top-level body parameter on
-  chat/completions, Anthropic Messages, and Responses ingress. On chat and
-  Messages ingress it rides through candidate preparation unchanged; on
-  Responses ingress the bridge translates it into the chat request
-  (`translate_responses_request_to_chat` passes it through).
-- **`service_tier` in the response** — reported to the client on every
-  shape: chat and Messages streams/non-stream bodies pass the upstream
-  field through untouched; the Responses bridge reports the tier that
-  actually served the request (from the upstream chat payload), falling
-  back to the requested tier when upstream does not report one.
-- **Model variants** — `:nitro` (admit priority-tier endpoints into a
-  throughput sort) and `:floor` (admit flex endpoints into a price sort)
-  are model-ID suffixes and survive model resolution and failover
-  unchanged.
-- **Default tier via configuration** — the provider settings file accepts a
-  top-level `service_tier` key (one of `default`/`flex`/`priority`/`fast`/
-  `ultrafast`, invalid values are ignored with a warning). Guardian injects
-  it into every cloud request that does not carry a tier; precedence is
-  client value > per-model default (`models:` block) > provider default.
-  The shipped default pins `flex` on the OpenRouter provider
-  (`config/providers/openrouter.settings.yaml`) — cost first, per operator
-  decision 2026-10-04. Hot-reloadable.
-- `speed: "fast"` (Anthropic's native priority-tier parameter) needs no
-  gateway handling on OpenRouter's native Messages passthrough; the
-  Anthropic→chat bridge does not map it (Anthropic fast mode has no chat
-  equivalent on non-Anthropic providers).
+The tracked OpenRouter provider now enables `service_tier_policy: lowest_cost`.
+Guardian adds `:floor` to the resolved upstream model so Standard and Flex
+endpoints compete by price. OpenRouter owns endpoint fallback at each endpoint's
+price; Guardian adds no inference attempt or retry mechanism. This chooses the
+cheapest eligible price-sorted endpoints under account/request restrictions,
+not a guaranteed minimum bill across all models, token mixes or providers.
 
-See [OpenRouter service tiers](https://openrouter.ai/docs/guides/features/service-tiers)
-for the upstream semantics (fallback behavior, billing at the served tier,
-and the ultrafast eligibility caveats).
+- **Supported ingress:** Chat Completions, native OpenRouter Messages, and
+  Responses via the existing Chat bridge. Original client model identity and
+  validated privacy/provider/price constraints survive protocol translation.
+- **Enforcement:** caller or model-default tier pins, speed/routing overrides,
+  model fallback arrays, plugins, presets and incompatible variants return
+  HTTP 400 before the candidate's upstream send. Provider preferences use a
+  documented allowlist; endpoint-qualified `provider.only` selectors are not
+  supported. Existing `:floor` is idempotent; explicit `:free` catalog models
+  remain free-only, rather than silently becoming paid routes.
+- **Account boundary:** remove pinned workspace tier defaults and allow desired
+  tiers in OpenRouter. Guardian cannot inspect or override account-side tier
+  restrictions. Existing configured Guardian failover groups remain their own
+  model/provider selection policy; this change does not price-sort across them.
+- **Disabled policy:** existing tier/variant passthrough remains. The optional
+  provider `service_tier` default still applies only to effective Chat bodies,
+  after client values and model defaults. It is not injected into native
+  Messages or other endpoints. OpenRouter native Messages itself supports tier
+  parameters; direct Anthropic uses a different contract. The old OpenRouter
+  provider-level `flex` default has been replaced by `lowest_cost` in tracked
+  configuration. Invalid legacy `service_tier` values still warn and are
+  ignored; invalid new policy values reject loading and preserve the last
+  successfully parsed provider registry.
+- **Response evidence:** upstream Chat reports the served tier at top level;
+  native Messages reports it within `usage` (`standard` names the base tier).
+  These fields remain unchanged. The existing Responses bridge falls back to
+  requested tier when served tier is absent; that fallback is not verified
+  billing evidence. Direct Anthropic fast mode is separate from service tiers;
+  no new cross-provider enum or speed translation is introduced here.
+
+See the [complete policy/configuration contract](CONFIG_SCHEMA.md#4c-openrouter-lowest-cost-service-tier-policy),
+[OpenRouter service tiers](https://openrouter.ai/docs/guides/features/service-tiers.md)
+and [Floor](https://openrouter.ai/docs/guides/routing/model-variants/floor.md).
+Tracked code/config changes require separate operator-authorized activation;
+this implementation did not reload or restart production.
 
 ## Configuration
 

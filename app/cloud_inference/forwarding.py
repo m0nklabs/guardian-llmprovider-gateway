@@ -25,6 +25,7 @@ from app.gateway.degeneration import log_cutoff, make_detector
 from fastapi import HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
+from app.cloud_inference.routing import CloudPolicyRequestError
 from app.capture.policy import PolicyResult
 from app.capture.schema import BuildContext
 from app.capture.stream_assembler import StreamResponseAssembler
@@ -612,6 +613,21 @@ async def forward_to_cloud_provider(
             effective_path, candidate_json_body, candidate_body, needs_translation = (
                 _prepare_cloud_candidate_request(provider, upstream_model, path, json_body, cloud_key_fingerprint)
             )
+        except CloudPolicyRequestError as exc:
+            _finish_live_request_usage(request, status_code=400, response_bytes=0)
+            _dispatch_capture_request_failed(
+                capture_ctx,
+                error_code="service_tier_policy_conflict",
+                http_status=400,
+                sanitized_message=str(exc),
+                queue_wait_ms=0,
+                duration_ms=(time.monotonic() - cloud_capture_start_time) * 1000 if cloud_capture_start_time else None,
+                attempts=attempt_index + 1,
+                policy_result=capture_policy_result,
+            ) if capture_ctx is not None else None
+            raise HTTPException(status_code=400, detail={
+                "error": "service_tier_policy_conflict", "message": str(exc),
+            }) from exc
         except ResponsesRequestError as exc:
             logger.info(
                 "🌉 Responses bridge: rejecting /v1/responses request for '%s': %s",
@@ -1170,8 +1186,15 @@ async def forward_to_cloud_provider(
                     headers={"Content-Type": "application/json", **debug_headers},
                 )
 
+            response_content = resp.content
+            if (getattr(provider, "service_tier_policy", "disabled") == "lowest_cost"
+                    and resp.status_code < 400 and isinstance(payload, dict) and "model" in payload
+                    and "error" not in payload and payload.get("type") != "error"):
+                # :floor is upstream routing syntax, not a new client model.
+                payload["model"] = response_model_name
+                response_content = json.dumps(payload).encode("utf-8")
             return Response(
-                content=resp.content,
+                content=response_content,
                 status_code=resp.status_code,
                 headers={**_sanitize_proxied_response_headers(resp.headers), **debug_headers},
             )
@@ -1366,6 +1389,18 @@ async def forward_to_cloud_provider(
                     if line.startswith("data: "):
                         try:
                             data = json.loads(line[6:])
+                            if (getattr(provider, "service_tier_policy", "disabled") == "lowest_cost"
+                                    and isinstance(data, dict) and "error" not in data
+                                    and data.get("type") != "error"):
+                                identity_changed = "model" in data
+                                if identity_changed:
+                                    data["model"] = response_model_name
+                                message = data.get("message")
+                                if isinstance(message, dict) and "model" in message:
+                                    message["model"] = response_model_name
+                                    identity_changed = True
+                                if identity_changed:
+                                    line = "data: " + json.dumps(data)
                             usage = data.get("usage") or {}
                             if isinstance(usage, dict):
                                 usage_totals["prompt_tokens"] = max(

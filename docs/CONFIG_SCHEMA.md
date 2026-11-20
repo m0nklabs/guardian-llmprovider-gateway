@@ -127,6 +127,66 @@ are re-read by `POST /api/config/reload`; the cache lives at
 `data/model_reference_catalog.json` (`app/paths.py:model_reference_catalog_file`).
 Full field contract: `@docs/OPENROUTER_PARITY.md` §2.
 
+### 4c. OpenRouter lowest-cost service-tier policy
+
+Provider files accept `service_tier_policy: disabled` (default) or
+`service_tier_policy: lowest_cost` (OpenRouter only). Unknown values or enabling
+it for another provider reject configuration loading with `ValueError`; the
+cost policy is never silently removed. Failed parsing preserves the previously
+loaded provider/model/prefix/context registry rather than publishing partial
+configuration. This is a provider field, **not** a
+`models:` override or a globally flattened model default. The tracked OpenRouter
+file enables it; production activation is a separate operator action.
+
+`lowest_cost` requests the **cheapest eligible price-sorted upstream endpoints
+under account/request restrictions**, using OpenRouter's `:floor` variant on
+the resolved upstream model. Standard and Flex compete by price; explicitly
+pinning `service_tier: flex` is not equivalent. OpenRouter performs its existing
+endpoint fallback at each endpoint's price. Guardian adds no inference retry,
+changes no retry configuration, and does not guarantee an absolute monetary
+minimum or maximum bill across token mixes, models or providers.
+
+- Supported ingress: Chat Completions, native OpenRouter Messages, and the
+  existing Responses-to-Chat bridge. Other endpoints reject enabled policy
+  with HTTP 400. Disabled policy retains existing endpoint/provider behavior.
+- Plain model IDs get `:floor`; existing `:floor` is idempotent. Separate
+  `:free` catalog models stay exactly `:free` (all their endpoints are free),
+  with no paid-model fallback. Other/combined variants, presets and OpenRouter
+  router pseudo-models reject with HTTP 400, rather than lose capabilities or
+  silently select another model. Successful native JSON/SSE responses retain
+  the client's model identity; the wire-only suffix does not leak into it.
+- Explicit caller **or model-default** `service_tier` (including `default`,
+  `flex`, null), `speed`, `models`, `fallbacks`, `route`, `router`, `routing`,
+  `order`, `sort`, `preset`, or `plugins` conflicts and returns HTTP 400 before
+  that candidate's upstream send. Validation precedes protocol translation too. The policy
+  deliberately rejects even explicit price sorting to keep one routing owner.
+- `provider` must be an object. Allowed keys are `only`, `ignore`,
+  `data_collection`, `zdr`, `max_price`, `require_parameters`, `quantizations`,
+  and `enforce_distillable_text`. They remain unchanged as eligibility/privacy/
+  price constraints, including across Responses translation. Allow/denylists
+  must be string lists. `only` accepts base-provider names only: slash-qualified
+  endpoint selectors reject, because they can admit premium tiers independently
+  of Floor. Endpoint-specific `ignore` denylists survive. Other keys fail closed,
+  including ordering, sorting (also object forms), fallback disabling and
+  preferred throughput/latency thresholds that can deprioritize cheap endpoints.
+- Existing provider-level `service_tier` defaults (such as the old `flex`)
+  are deliberately not injected when this policy is enabled. Remove that old
+  default when migrating; disabling policy restores its legacy precedence.
+  Caller/model tier intent is rejected, not silently rewritten. Direct native
+  Anthropic tier names are not reinterpreted as an OpenAI enum.
+
+**Account-side limitation:** workspace/preset defaults can fill in an absent
+`service_tier` and override Floor tier admission; workspace tier restrictions
+can exclude Flex. Configure the OpenRouter workspace without a pinned default
+and allow desired tiers. Guardian does not inspect or change those settings.
+API response tier metadata remains upstream/bridge behavior; the pre-existing
+Responses tier-echo and ambiguous transport-retry limitations are out of scope.
+No new paid probe is needed to validate this policy's local contract.
+
+Sources: [OpenRouter service tiers](https://openrouter.ai/docs/guides/features/service-tiers.md),
+[provider routing](https://openrouter.ai/docs/guides/routing/provider-selection.md),
+[free variant](https://openrouter.ai/docs/guides/routing/model-variants/free.md).
+
 ## 5. Wie leest de huidige settings.yaml (consumers-impact)
 
 | Key | Reader |

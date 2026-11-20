@@ -133,6 +133,8 @@ class CloudProvider:
     # not send one. Precedence: client value > model-default > this. None =
     # no default (requests without a tier use the provider's standard tier).
     service_tier: str | None = None
+    # Opt-in routing policy, not a request parameter or a model override.
+    service_tier_policy: str = "disabled"
     # G1-02: set when one of this provider's configured URLs is not an approved
     # destination (app/destination_policy.py). The provider stays visible for
     # diagnosis, but no request can reach it: the guarded transport refuses the
@@ -196,13 +198,15 @@ class ProviderRegistry:
 
     def reload(self) -> None:
         """Re-read provider configuration from the providers/ directory."""
-        self._providers.clear()
-        self._model_to_provider.clear()
-        self._prefix_to_provider.clear()
+        # Parse into fresh collections. A failed reload must not replace an
+        # enforced policy with a partially parsed (possibly disabled) one.
+        providers: dict[str, CloudProvider] = {}
+        model_to_provider: dict[str, CloudProvider] = {}
+        prefix_to_provider: list[tuple[str, CloudProvider]] = []
 
         raw_config = self._load_settings_config()
         raw_overrides = raw_config.get("context_overrides", {})
-        self._context_overrides = self._parse_context_overrides(raw_overrides)
+        context_overrides = self._parse_context_overrides(raw_overrides)
         raw_providers = raw_config.get("providers", {})
         if not isinstance(raw_providers, dict):
             logger.warning("⚠️  'providers' in settings.yaml is not a dict; ignoring")
@@ -247,6 +251,15 @@ class ProviderRegistry:
                 allowlist = [str(a).strip() for a in allowlist if isinstance(a, str) and a.strip()] or None
             else:
                 allowlist = None
+
+            # A configured policy must never silently disappear on a typo or
+            # unsupported provider. Reject the configuration rather than route
+            # requests without the operator's cost constraint.
+            service_tier_policy = cfg.get("service_tier_policy", "disabled")
+            if service_tier_policy not in ("disabled", "lowest_cost"):
+                raise ValueError(f"Provider '{provider_name}': invalid service_tier_policy")
+            if service_tier_policy == "lowest_cost" and provider_name != "openrouter":
+                raise ValueError("service_tier_policy lowest_cost is supported only by openrouter")
 
             # Provider-level default service tier (OpenRouter-style). Invalid
             # values are ignored with a warning — fail-open, the request then
@@ -316,8 +329,9 @@ class ProviderRegistry:
                 brand=brand,
                 managed=managed,
                 service_tier=service_tier,
+                service_tier_policy=service_tier_policy,
             )
-            self._providers[provider_name] = provider
+            providers[provider_name] = provider
 
             if not enabled:
                 logger.info("☁️  Provider '%s' is disabled", provider_name)
@@ -355,8 +369,8 @@ class ProviderRegistry:
                     provider_name,
                 )
             for model_name in models:
-                if model_name in self._model_to_provider:
-                    existing = self._model_to_provider[model_name]
+                if model_name in model_to_provider:
+                    existing = model_to_provider[model_name]
                     logger.warning(
                         "⚠️  Model '%s' is registered on both '%s' and '%s'; "
                         "keeping the first ('%s')",
@@ -366,14 +380,19 @@ class ProviderRegistry:
                         existing.name,
                     )
                     continue
-                self._model_to_provider[model_name] = provider
+                model_to_provider[model_name] = provider
 
             # Register namespace prefixes for this enabled provider.  Exact
             # ``models`` entries above take priority at lookup time; prefixes
             # provide key-independent recognition for unlisted cloud models
             # that share a namespace with a configured model.
             for prefix in prefixes:
-                self._prefix_to_provider.append((prefix, provider))
+                prefix_to_provider.append((prefix, provider))
+
+        self._providers = providers
+        self._model_to_provider = model_to_provider
+        self._prefix_to_provider = prefix_to_provider
+        self._context_overrides = context_overrides
 
         if self._model_to_provider:
             logger.info(
