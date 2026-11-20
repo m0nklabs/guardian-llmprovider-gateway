@@ -5,6 +5,32 @@ from pathlib import Path
 
 import pytest
 
+# ── Test isolation ─────────────────────────────────────────────────────
+
+
+@pytest.fixture(autouse=True)
+def _isolate_model_manager_active_requests():
+    """Stop the shared in-flight counter from crossing a test boundary.
+
+    ``proxy_v1_post`` defers the release of its ``active_requests`` slot to the
+    SSE generator once it returns a ``StreamingResponse``, so a streaming test
+    that never consumes the body leaves the counter elevated.  #119: that leak
+    from ``test_v1_path_bound``/``test_server`` made
+    ``test_model_switch_verification``'s before/after accounting start from a
+    stale value and fail only in that module order.  Runtime wiring untouched.
+    """
+    from app.proxy import server
+
+    manager = getattr(server, "model_manager", None)
+    before = getattr(manager, "active_requests", None)
+    yield
+    if isinstance(before, int):
+        try:
+            manager.active_requests = before
+        except AttributeError:  # a test swapped in a stub manager
+            pass
+
+
 # ── Test data ──────────────────────────────────────────────────────────
 
 SAMPLE_API_KEYS: dict[str, dict] = {
