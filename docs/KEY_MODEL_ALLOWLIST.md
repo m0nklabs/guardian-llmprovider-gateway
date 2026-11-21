@@ -44,10 +44,19 @@ requested cloud ID, not a separate grant on the internal fallback target.
 
 ## Known limitations: not a complete isolation boundary
 
-- **Direct local inference has no per-key model gate.** The local paths in
-  `route_v1_post` and the Ollama chat/generate handlers resolve configured local
-  models and proceed to queue admission without consulting `allowed_models`.
-  A key restricted to cloud IDs can still request a configured local model.
+- **Direct local inference is gated in code, not yet deployed.** The local
+  paths in `route_v1_post` (`/v1/chat/completions`, `/v1/completions`,
+  `/v1/embeddings`, `/v1/messages`, `/v1/responses`) and the Ollama
+  `/api/chat` and `/api/generate` bridges now reject an unlisted public model
+  ID with `403 model_not_allowed` before `_model_manager` resolution, queue
+  admission, lifecycle actions and backend or cloud forwarding. The decision is
+  taken once per handler family, on the ID the client sent, and streaming and
+  non-streaming requests share it. A body without `model` keeps its existing
+  `400` (`model_not_specified` / `Model not specified`) because these endpoints
+  resolve no implicit default, so no unlisted default can be served; the
+  gateway-resolved default sentinel `auto` is matched as the public ID it is.
+  This is a source-level change: it is **not merged, deployed or live
+  verified**, and it does not extend to the two limitations below (issue #117).
 - **Separate speech routes do not enforce this field.** TTS/STT handlers use
   their own routing paths rather than the shared cloud inference resolver.
   When speech is enabled, explicit unlisted speech model addresses can reach
@@ -60,19 +69,24 @@ requested cloud ID, not a separate grant on the internal fallback target.
   service-specific APIs, nor inheritance rules for key minting. It must not be
   presented as a universal per-key service/model security boundary.
 
-These are existing limitations retained deliberately during faithful extraction.
-They need separate fixes/contracts before relying on this field for complete
-local-model isolation or discovery confidentiality. A draft PR can preserve and
-review the current semantics without claiming those protections.
+The speech and `/api/tags` limitations are retained deliberately from the
+faithful extraction and still need separate fixes/contracts. The
+local-inference gate above still needs a separately authorized deployment and a
+live denied-request check before enforcement can be claimed as actual; this
+code-only change does not claim it.
 
 ## Focused verification
 
 `tests/unit/test_key_model_allowlist.py` covers normalization, auth-context
 propagation, cloud allow/deny and cloud-access precedence, exact IDs, virtual
 failover authorization, OpenAI listing, and covered metadata denials/allowance.
-It intentionally does not enshrine missing local or tags enforcement as desired
-behavior. Isolated handler probes additionally confirmed an unlisted local model
-reaches queue admission on `/v1/chat/completions`, `/v1/completions`,
-`/v1/embeddings`, `/v1/messages`, `/v1/responses`, `/api/chat` and `/api/generate`;
-they stopped before queue/backend/GPU side effects. No live inference or
-production mutation was performed.
+`tests/unit/test_local_model_allowlist.py` covers the direct local inference
+gate on all seven paths: unlisted local IDs are denied before the manager,
+queue, lifecycle and transport sentinels, listed and unrestricted keys still
+reach admission, matching stays exact and case-sensitive, cloud addresses keep
+the cloud resolver's gate, and a body without `model` keeps its `400`. The
+pre-fix isolated handler probes that confirmed an unlisted local model reached
+queue admission are recorded in the issue:
+[#117](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/117).
+They stopped before queue/backend/GPU side effects. No live inference,
+deployment or production mutation was performed.

@@ -36,6 +36,7 @@ logger = logging.getLogger("Guardian")
 # ── Injected (set once at startup by init()) ─────────────────────────
 _resolve_or_reject_inference_model = None
 _is_cloud_or_guardian_route = None
+_enforce_key_model_allowed = None
 _forward_to_cloud_provider = None
 _begin_queued_request = None
 _request_cancel_http_exception = None
@@ -111,6 +112,7 @@ def init(
     *,
     resolve_or_reject_inference_model,
     is_cloud_or_guardian_route,
+    enforce_key_model_allowed,
     forward_to_cloud_provider,
     begin_queued_request,
     request_cancel_http_exception,
@@ -151,6 +153,7 @@ def init(
 ) -> None:
     """Inject all dependencies. Called once at startup."""
     global _resolve_or_reject_inference_model, _is_cloud_or_guardian_route
+    global _enforce_key_model_allowed
     global _forward_to_cloud_provider, _begin_queued_request
     global _request_cancel_http_exception, _capture_client_fingerprint
     global _dispatch_capture_request_received, _resolve_auto_reload_model
@@ -171,6 +174,7 @@ def init(
     global _grammar_enabled
     _resolve_or_reject_inference_model = resolve_or_reject_inference_model
     _is_cloud_or_guardian_route = is_cloud_or_guardian_route
+    _enforce_key_model_allowed = enforce_key_model_allowed
     _forward_to_cloud_provider = forward_to_cloud_provider
     _begin_queued_request = begin_queued_request
     _request_cancel_http_exception = request_cancel_http_exception
@@ -224,6 +228,20 @@ def _guarded_backend_client(request_timeout: httpx.Timeout | float) -> httpx.Asy
     return guarded_async_client(timeout=request_timeout, purpose="local-inference")
 
 
+def _enforce_local_model_allowed(request: Request, model: str) -> None:
+    """Apply the per-key model allowlist to a direct local model request.
+
+    Shared by ``/api/chat`` and ``/api/generate`` (issue #117): one decision
+    per request, on the public ID the client sent, before ``_model_manager``
+    resolution and before queue admission. A model without an ID is rejected by
+    the caller's existing 400 (these bridges resolve no implicit default). Cloud
+    addresses keep the cloud resolver's gate, which checks
+    ``cloud_gateway_access`` first — this guard never reorders that.
+    """
+    if not _is_cloud_or_guardian_route(model):
+        _enforce_key_model_allowed(request, model)
+
+
 async def chat_ollama(request: Request, client_id: str):
     """Bridge Ollama-style chat requests to OpenAI-style Llama Server"""
     try:
@@ -234,6 +252,7 @@ async def chat_ollama(request: Request, client_id: str):
     model = body.get("model")
     if not model:
         raise HTTPException(status_code=400, detail="Model not specified")
+    _enforce_local_model_allowed(request, model)
 
     current_model = await _model_manager.get_current_model()
     model = _resolve_or_reject_inference_model(model, current_model)
@@ -703,6 +722,7 @@ async def generate_ollama(request: Request, client_id: str):
     model = body.get("model")
     if not model:
         raise HTTPException(status_code=400, detail="Model not specified")
+    _enforce_local_model_allowed(request, model)
 
     current_model = await _model_manager.get_current_model()
     model = _resolve_or_reject_inference_model(model, current_model)

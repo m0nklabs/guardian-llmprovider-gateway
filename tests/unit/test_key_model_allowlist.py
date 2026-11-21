@@ -2,7 +2,8 @@
 
 Absent or empty ``allowed_models`` preserves existing reach. A non-empty list
 matches exact public IDs at the cloud resolver and covered discovery routes;
-this is not a universal local-inference gate (see docs/KEY_MODEL_ALLOWLIST.md).
+the direct local inference gate added for issue #117 is pinned separately in
+``tests/unit/test_local_model_allowlist.py`` (see docs/KEY_MODEL_ALLOWLIST.md).
 These tests pin the extracted enforcement points:
 
 * ``app.proxy.auth`` — normalisation and the shared predicate
