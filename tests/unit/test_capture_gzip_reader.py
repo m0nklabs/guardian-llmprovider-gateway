@@ -8,6 +8,8 @@ member.  These tests pin the reader's recovery behavior across those
 layouts, and that both formats read through the same API.
 """
 
+import asyncio
+import time
 import zlib
 
 import pytest
@@ -175,6 +177,64 @@ class TestPlainReader:
         assert read_all_text(gz_path) == read_all_text(plain_path)
 
 
+async def _wait_for_captured_records(
+    writer,
+    sink,
+    active,
+    expected_seqs,
+    *,
+    timeout: float = 10.0,
+    interval: float = 0.01,
+) -> None:
+    """Wait until the WAL writer has durably captured ``expected_seqs``.
+
+    The writer drains the sink on its own task — one ``asyncio.to_thread`` hop
+    plus an ``fsync`` per record — so sleeping a fixed time bets on scheduler
+    and disk latency.  Under load the buffer can still be empty when
+    ``rotate()`` runs, which then reports "nothing to rotate" (``None``).
+
+    The predicate mirrors what ``rotate()`` and the assertions need:
+
+    * the active file, read through the same crash-tolerant reader the test
+      asserts on, holds exactly ``expected_seqs`` (the records are on disk);
+    * ``sink.queue_depth == 0`` (nothing is left pending in the queue);
+    * the writer's own ``bytes_written`` counter covers the active file's
+      size.  ``rotate()`` refuses to rotate while the internal size counter is
+      zero, and that counter is bumped only *after* ``fsync()`` — i.e. after
+      the bytes are already readable — so counting on content alone can rotate
+      in the window between "record flushed" and "size counted".  The counter
+      is read from the public ``snapshot()``, not from writer internals.
+
+    Fails with ``AssertionError`` after ``timeout`` seconds, so a writer that
+    stops draining fails the test instead of hanging the suite.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            seqs = [record.get("seq") for record in iter_events(active)]
+            active_bytes = active.stat().st_size
+        except OSError:
+            # Active file not opened (or already rotated away) yet.
+            seqs, active_bytes = None, 0
+        written = writer.snapshot()["writer_metrics"]["bytes_written"]
+        queue_depth = sink.queue_depth
+        if (
+            seqs == expected_seqs
+            and active_bytes > 0
+            and written >= active_bytes
+            and queue_depth == 0
+        ):
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"timed out after {timeout:g}s waiting for the capture writer to "
+                f"persist {expected_seqs!r}: records={seqs!r}, "
+                f"active_bytes={active_bytes}, bytes_written={written}, "
+                f"queue_depth={queue_depth}"
+            )
+        await asyncio.sleep(interval)
+
+
 class TestGzipReaderRoundTripWithWriter:
     """End-to-end: CaptureWALWriter output (plain active, gzip rotated) is readable."""
 
@@ -206,7 +266,7 @@ class TestGzipReaderRoundTripWithWriter:
     async def test_writer_rotate_then_read_completed(self, tmp_path):
         from app.capture.config import CaptureConfig
         from app.capture.sink import CaptureEvent, CaptureSink
-        from app.capture.wal_writer import CaptureWALWriter
+        from app.capture.wal_writer import ACTIVE_FILENAME, CaptureWALWriter
 
         cfg = CaptureConfig(
             enabled=True, local_capture=True, cloud_capture=False,
@@ -218,18 +278,16 @@ class TestGzipReaderRoundTripWithWriter:
         sink = CaptureSink(max_pending_events=100)
         writer = CaptureWALWriter(sink, cfg)
         await writer.start()
-        for i in range(5):
+        expected_seqs = list(range(5))
+        for i in expected_seqs:
             sink.try_put(CaptureEvent(data={"seq": i, "event_type": "test"}))
-        await asyncio_tiny_sleep()
-        await asyncio_tiny_sleep()
-        await asyncio_tiny_sleep()
+        # Wait on the writer's real state instead of fixed sleeps (issue #122:
+        # under load the buffer was still empty, so rotate() returned None).
+        await _wait_for_captured_records(
+            writer, sink, tmp_path / ACTIVE_FILENAME, expected_seqs
+        )
         rotated = writer.rotate()
         await writer.stop()
         assert rotated is not None
         recs = list(iter_events(rotated))
-        assert [r["seq"] for r in recs] == list(range(5))
-
-
-async def asyncio_tiny_sleep():
-    import asyncio
-    await asyncio.sleep(0.15)
+        assert [r["seq"] for r in recs] == expected_seqs
