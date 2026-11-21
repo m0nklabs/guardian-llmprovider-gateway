@@ -279,15 +279,20 @@ class TestGzipReaderRoundTripWithWriter:
         writer = CaptureWALWriter(sink, cfg)
         await writer.start()
         expected_seqs = list(range(5))
-        for i in expected_seqs:
-            sink.try_put(CaptureEvent(data={"seq": i, "event_type": "test"}))
-        # Wait on the writer's real state instead of fixed sleeps (issue #122:
-        # under load the buffer was still empty, so rotate() returned None).
-        await _wait_for_captured_records(
-            writer, sink, tmp_path / ACTIVE_FILENAME, expected_seqs
-        )
-        rotated = writer.rotate()
-        await writer.stop()
+        rotated = None
+        try:
+            for i in expected_seqs:
+                sink.try_put(CaptureEvent(data={"seq": i, "event_type": "test"}))
+            # Wait on the writer's real state instead of fixed sleeps (issue #122:
+            # under load the buffer was still empty, so rotate() returned None).
+            await _wait_for_captured_records(
+                writer, sink, tmp_path / ACTIVE_FILENAME, expected_seqs
+            )
+            rotated = writer.rotate()
+        finally:
+            # The wait raises on its deadline, which is the supported way this
+            # test fails; the started writer must still be stopped.
+            await writer.stop()
         assert rotated is not None
         recs = list(iter_events(rotated))
         assert [r["seq"] for r in recs] == expected_seqs
