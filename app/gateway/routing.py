@@ -30,7 +30,7 @@ from app.capture.redactor import (
 )
 from app.capture.schema import BuildContext, _utc_now_iso
 from app.capture.stream_assembler import StreamResponseAssembler
-from app.engine.manager import ModelLoadError
+from app.engine.manager import ActiveRequestSlot, ModelLoadError
 from app.gateway import caretaker_runtime as _caretaker_runtime
 from app.gateway.normalization import openai_error_response
 from app.gateway.streaming import StreamProgressWatchdog
@@ -524,7 +524,14 @@ async def route_v1_post(path: str, request: Request, client_id: str):
             started_at_utc=_capture_started_wall,
         )
 
-    _release_in_finally = True
+    # Active-request accounting (issue #120): this request owns exactly one
+    # in-flight slot.  ``_slot.release()`` is idempotent, so the early exit
+    # paths below and this function's ``finally`` block cannot release the same
+    # slot twice.  The streaming branch transfers the release to the SSE
+    # generator; ``_stream_generator_owns_release`` keeps the ``finally`` block
+    # from releasing before the response body has been consumed.
+    _slot = ActiveRequestSlot(_model_manager)
+    _stream_generator_owns_release = False
     # Model-mismatch contract (incident 2026-09-01): set when a switch/ensure
     # attempt for the REQUESTED local model completed successfully.  Before
     # forwarding, the live backend must actually serve that model — verified
@@ -584,7 +591,7 @@ async def route_v1_post(path: str, request: Request, client_id: str):
 
         # Track last request time for idle-unload
         _model_manager.last_request_time = time.time()
-        _model_manager.active_requests += 1
+        _slot.acquire()
 
         # Auto-switch logic for GPU-backed inference routes (with concurrency lock)
         if path in ("chat/completions", "messages", "completions", "embeddings", "responses"):
@@ -742,7 +749,7 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                 queue_wait_ms,
             )
             if preflight_error is not None:
-                _model_manager.active_requests = max(0, _model_manager.active_requests - 1)
+                _slot.release()
                 return preflight_error
 
         timeout_sec = float(_get_model_timeout(active_model_for_request))
@@ -888,7 +895,7 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                     }
                     await resp.aclose()
                     await client.aclose()
-                    _model_manager.active_requests = max(0, _model_manager.active_requests - 1)
+                    _slot.release()
                     mapped = _map_multimodal_backend_error(
                         active_model_for_request,
                         resp.status_code,
@@ -1023,7 +1030,7 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                         request,
                         status_code=499 if _inference_queue.is_cancel_requested(request_id) else resp.status_code,
                     )
-                    _model_manager.active_requests = max(0, _model_manager.active_requests - 1)
+                    _slot.release()
 
                     # ── Capture: request_completed or request_cancelled ──
                     _dispatch_capture_stream_completed(
@@ -1047,7 +1054,7 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                     if k.lower() not in ("transfer-encoding", "content-length")
                 } | {"X-Request-Id": request_id, "X-Queue-Wait-Ms": str(int(queue_wait_ms))},
             )
-            _release_in_finally = False
+            _stream_generator_owns_release = True
             return response
         else:
             async with guarded_async_client(timeout=timeout, purpose="local-inference") as client:
@@ -1101,7 +1108,7 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                         duration_ms=(time.monotonic() - request_start_time) * 1000,
                     ) if _capture_ctx is not None else None
                     raise HTTPException(status_code=502, detail=f"Backend request failed: {e}")
-                _model_manager.active_requests = max(0, _model_manager.active_requests - 1)
+                _slot.release()
                 _model_manager.last_request_time = time.time()
                 queue_wait_ms = _inference_queue.get_queue_wait_ms(request_id)
                 if path in ("chat/completions", "completions", "embeddings", "messages", "responses"):
@@ -1162,6 +1169,6 @@ async def route_v1_post(path: str, request: Request, client_id: str):
                 )
     finally:
         await _stop_background_task(locals().get("disconnect_task"))
-        if _release_in_finally:
-            _model_manager.active_requests = max(0, _model_manager.active_requests - 1)
+        if not _stream_generator_owns_release:
+            _slot.release()
             _inference_queue.finish(request_id, outcome=_request_outcome(request_id))
