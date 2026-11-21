@@ -26,7 +26,7 @@ from app.capture.config import PROTOCOL_OLLAMA, ROUTE_LOCAL
 from app.capture.schema import BuildContext
 from app.capture.stream_assembler import StreamResponseAssembler
 from app.destination_policy import guarded_async_client
-from app.engine.manager import ModelLoadError
+from app.engine.manager import ActiveRequestSlot, ModelLoadError
 from app.gateway import caretaker_runtime as _caretaker_runtime
 from app.gateway.streaming import StreamProgressWatchdog
 from app.log_safety import clean_log_value
@@ -304,7 +304,12 @@ async def chat_ollama(request: Request, client_id: str):
             client_fingerprint=_capture_client_fp,
         )
 
-    _release_in_finally = True
+    # Active-request accounting (issue #120): one in-flight slot per request;
+    # ``_slot.release()`` is idempotent so early exits and this function's
+    # ``finally`` block cannot release it twice.  The streaming branch hands
+    # the release to the SSE generator.
+    _slot = ActiveRequestSlot(_model_manager)
+    _stream_generator_owns_release = False
     # Model-mismatch contract (incident 2026-09-01): set when a switch/ensure
     # attempt for the REQUESTED local model completed successfully — the live
     # backend must serve that model before this request forwards.
@@ -401,7 +406,7 @@ async def chat_ollama(request: Request, client_id: str):
                             raise HTTPException(status_code=500, detail=f"Model switch failed: {e}")
 
         _model_manager.last_request_time = time.time()
-        _model_manager.active_requests += 1
+        _slot.acquire()
 
         # Model-mismatch contract (incident 2026-09-01): a successful /ensure
         # can still leave the backend serving a DIFFERENT model than the one
@@ -584,7 +589,7 @@ async def chat_ollama(request: Request, client_id: str):
                         request,
                         status_code=499 if _inference_queue.is_cancel_requested(request_id) else r.status_code,
                     )
-                    _model_manager.active_requests = max(0, _model_manager.active_requests - 1)
+                    _slot.release()
                     _model_manager.last_request_time = time.time()
                     # ── Capture: request_completed (streaming) ──
                     if _capture_ctx is not None and _capture_policy_result is not None and _capture_policy_result.should_capture and _ollama_capture_assembler is not None:
@@ -607,7 +612,7 @@ async def chat_ollama(request: Request, client_id: str):
                 media_type="application/x-ndjson",
                 headers={"X-Request-Id": request_id, "X-Queue-Wait-Ms": str(int(queue_wait_ms))},
             )
-            _release_in_finally = False
+            _stream_generator_owns_release = True
             return response
         else:
             # Handle non-streaming response
@@ -644,7 +649,7 @@ async def chat_ollama(request: Request, client_id: str):
                 }
                 await r.aclose()
                 await client.aclose()
-                _model_manager.active_requests = max(0, _model_manager.active_requests - 1)
+                _slot.release()
                 _model_manager.last_request_time = time.time()
                 return ollama_resp
             except _GuardianRequestCancelled as exc:
@@ -669,7 +674,7 @@ async def chat_ollama(request: Request, client_id: str):
                     )
                 await r.aclose()
                 await client.aclose()
-                _model_manager.active_requests = max(0, _model_manager.active_requests - 1)
+                _slot.release()
                 raise e
             else:
                 # ── Capture: request_completed (Ollama non-streaming) ──
@@ -682,8 +687,8 @@ async def chat_ollama(request: Request, client_id: str):
                     )
     finally:
         await _stop_background_task(locals().get("disconnect_task"))
-        if _release_in_finally:
-            _model_manager.active_requests = max(0, _model_manager.active_requests - 1)
+        if not _stream_generator_owns_release:
+            _slot.release()
             _inference_queue.finish(request_id, outcome=_request_outcome(request_id))
 
 # Legacy endpoint for Ollama generate
@@ -764,7 +769,12 @@ async def generate_ollama(request: Request, client_id: str):
             client_fingerprint=_capture_client_fp,
         )
 
-    _release_in_finally = True
+    # Active-request accounting (issue #120): one in-flight slot per request;
+    # ``_slot.release()`` is idempotent so early exits and this function's
+    # ``finally`` block cannot release it twice.  The streaming branch hands
+    # the release to the SSE generator.
+    _slot = ActiveRequestSlot(_model_manager)
+    _stream_generator_owns_release = False
     # Model-mismatch contract (incident 2026-09-01): set when a switch/ensure
     # attempt for the REQUESTED local model completed successfully — the live
     # backend must serve that model before this request forwards.
@@ -856,7 +866,7 @@ async def generate_ollama(request: Request, client_id: str):
                             raise HTTPException(status_code=500, detail=f"Model switch failed: {e}")
 
         _model_manager.last_request_time = time.time()
-        _model_manager.active_requests += 1
+        _slot.acquire()
 
         # Model-mismatch contract (incident 2026-09-01): a successful /ensure
         # can still leave the backend serving a DIFFERENT model than the one
@@ -1037,7 +1047,7 @@ async def generate_ollama(request: Request, client_id: str):
                         request,
                         status_code=499 if _inference_queue.is_cancel_requested(request_id) else r.status_code,
                     )
-                    _model_manager.active_requests = max(0, _model_manager.active_requests - 1)
+                    _slot.release()
                     _model_manager.last_request_time = time.time()
                     # ── Capture: request_completed (streaming) ──
                     if _capture_ctx is not None and _capture_policy_result is not None and _capture_policy_result.should_capture and _ollama_capture_assembler is not None:
@@ -1060,7 +1070,7 @@ async def generate_ollama(request: Request, client_id: str):
                 media_type="application/x-ndjson",
                 headers={"X-Request-Id": request_id, "X-Queue-Wait-Ms": str(int(queue_wait_ms))},
             )
-            _release_in_finally = False
+            _stream_generator_owns_release = True
             return response
         else:
             try:
@@ -1085,7 +1095,7 @@ async def generate_ollama(request: Request, client_id: str):
                 }
                 await r.aclose()
                 await client.aclose()
-                _model_manager.active_requests = max(0, _model_manager.active_requests - 1)
+                _slot.release()
                 _model_manager.last_request_time = time.time()
                 return ollama_resp
             except _GuardianRequestCancelled as exc:
@@ -1110,7 +1120,7 @@ async def generate_ollama(request: Request, client_id: str):
                     )
                 await r.aclose()
                 await client.aclose()
-                _model_manager.active_requests = max(0, _model_manager.active_requests - 1)
+                _slot.release()
                 raise e
             else:
                 # ── Capture: request_completed (Ollama non-streaming) ──
@@ -1123,8 +1133,8 @@ async def generate_ollama(request: Request, client_id: str):
                     )
     finally:
         await _stop_background_task(locals().get("disconnect_task"))
-        if _release_in_finally:
-            _model_manager.active_requests = max(0, _model_manager.active_requests - 1)
+        if not _stream_generator_owns_release:
+            _slot.release()
             _inference_queue.finish(request_id, outcome=_request_outcome(request_id))
 
 

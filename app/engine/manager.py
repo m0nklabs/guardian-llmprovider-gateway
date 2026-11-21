@@ -88,6 +88,50 @@ class ModelLoadError(Exception):
         self.crash_record = crash_record
 
 
+class ActiveRequestSlot:
+    """One in-flight request's ``active_requests`` slot, released at most once.
+
+    The local inference paths acquire a slot before forwarding to llama-server
+    and must give it back on every exit path: success, error response,
+    exception, cancellation and — for streams — when the SSE body ends.  Those
+    exit paths overlap: an early ``return`` still runs the function-level
+    ``finally`` block, so a separate decrement in both places released the same
+    slot twice and drove the in-flight counter below the number of requests
+    actually running (issue #120).  That counter is the idle-unload guard
+    (``app/proxy/lifespan.py``), so an under-count admits an idle-unload or a
+    model switch mid-request.
+
+    This guard makes the release idempotent and refuses to release a slot that
+    was never acquired, so a request that fails before forwarding cannot
+    consume another request's count.  ``max(0, ...)`` stays as a defensive
+    floor only; correctness comes from the guard, never from the clamp.
+
+    A stream whose response body is never started at all is the one remaining
+    transfer gap: the SSE generator owns the release from the moment the
+    ``StreamingResponse`` is returned.
+    """
+
+    __slots__ = ("_manager", "_acquired", "_released")
+
+    def __init__(self, manager: Any) -> None:
+        self._manager = manager
+        self._acquired = False
+        self._released = False
+
+    def acquire(self) -> None:
+        """Take the slot: the single increment of ``active_requests``."""
+        self._manager.active_requests += 1
+        self._acquired = True
+
+    def release(self) -> bool:
+        """Give the slot back once; return whether this call released it."""
+        if not self._acquired or self._released:
+            return False
+        self._released = True
+        self._manager.active_requests = max(0, self._manager.active_requests - 1)
+        return True
+
+
 class ModelManager:
     def __init__(self, config_path: str | None = None):
         if config_path is None:
