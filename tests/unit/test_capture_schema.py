@@ -1325,6 +1325,13 @@ class TestUpstreamModelSanitizer:
         "meta-llama/llama-3.3-70b-instruct",
         "DeepSeek-V3.2-Exp",
         "openrouter/openai/gpt-4o:floor",
+        # Provider ``:variant`` ids keep the colon: a colon alone is not an
+        # address (review finding on PR #128 — the scheme rule must not eat
+        # these).
+        "google/gemini-3-pro:free",
+        "openrouter/meta-llama/llama-3.3-70b-instruct:free",
+        "nvidia/llama-3.1-nemotron-70b-instruct:floor",
+        "model:variant",
         "m",
         "9",
     ])
@@ -1349,6 +1356,22 @@ class TestUpstreamModelSanitizer:
         "https://provider.example/secret",
         "HTTP://provider.example/secret",
         "//provider.example/secret",
+        # Address-carrying schemes that pass the charset (review finding on
+        # PR #128: these used to land as ``upstream_model``).
+        "mailto:alice@example.com",
+        "MAILTO:Alice@Example.com",
+        "file:/private/path",
+        "File:/etc/passwd",
+        "data:text/plain;base64,QQ==",
+        "javascript:alert",
+        "ws://provider.example/secret",
+        "wss://provider.example/secret",
+        "ftp:provider.example/secret",
+        "http:provider.example",
+        # A scheme followed by ``/`` is an address on its face, even for a
+        # scheme name no denylist knows (``ssh://host``, ``file:/p``).
+        "ssh://provider.example/secret",
+        "gopher:/provider.example/secret",
         # Query strings / key-value pairs.
         "k=v&x=y",
         "model=gpt-4o",
@@ -1437,6 +1460,9 @@ class TestCompletedEventUpstreamModel:
             "https://provider.example/secret",
             "k=v&x=y",
             "Provider returned an empty response",
+            # Review finding on PR #128: charset-valid addresses.
+            "mailto:alice@example.com",
+            "file:/private/path",
         ):
             event = build_request_completed_event(
                 capture_config, base_ctx,
@@ -1447,6 +1473,24 @@ class TestCompletedEventUpstreamModel:
             )
             assert event["upstream_model"] is None, bad
             assert "private" not in json.dumps(event), bad
+            assert "alice@example.com" not in json.dumps(event), bad
+
+    def test_provider_free_variant_survives_event_level(self, capture_config, base_ctx):
+        """Regression for the same finding: ``:free``/``:variant`` ids keep
+        their colon and are not mistaken for an address."""
+        for good in (
+            "google/gemini-3-pro:free",
+            "openrouter/meta-llama/llama-3.3-70b-instruct:free",
+            "qwen2.5-coder:32b@q4_k_m",
+        ):
+            event = build_request_completed_event(
+                capture_config, base_ctx,
+                response_content="",
+                upstream_model=good,
+                http_status=200,
+                sequence=1,
+            )
+            assert event["upstream_model"] == good, good
 
     def test_over_long_value_is_not_truncated_on_event(self, capture_config, base_ctx):
         event = build_request_completed_event(

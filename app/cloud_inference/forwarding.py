@@ -1236,8 +1236,10 @@ async def forward_to_cloud_provider(
     # upstream chunks: the Anthropic/Responses cloud branches below hand the
     # client — and therefore the capture assembler — Guardian's own
     # client-facing model name, which is the requested identity, not what
-    # served the request.  The model is constant for a response, so sniffing
-    # stops at the first usable value and costs one extra parse per stream.
+    # served the request.  Every chunk is inspected and the LAST usable value
+    # wins (the assembler's "latest usable wins" contract); a later chunk
+    # without a usable model never erases an earlier one.  Cost: one extra
+    # JSON parse per upstream chunk, and only while capture is on.
     _cloud_reported_model: str | None = None
 
     async def _read_sse_lines():
@@ -1259,8 +1261,7 @@ async def forward_to_cloud_provider(
             heartbeat_interval_s=STREAM_HEARTBEAT_INTERVAL_S,
         ):
             if (
-                _cloud_reported_model is None
-                and _cloud_assembler is not None
+                _cloud_assembler is not None
                 and line.startswith("data: ")
                 and "[DONE]" not in line
             ):
@@ -1269,9 +1270,11 @@ async def forward_to_cloud_provider(
                 except (json.JSONDecodeError, TypeError, ValueError):
                     _model_data = None
                 if isinstance(_model_data, dict):
-                    _cloud_reported_model = sanitize_upstream_model(
-                        _model_data.get("model")
-                    )
+                    _chunk_model = sanitize_upstream_model(_model_data.get("model"))
+                    # Only a usable value overwrites: an earlier valid id is
+                    # never erased by a chunk that carries none.
+                    if _chunk_model is not None:
+                        _cloud_reported_model = _chunk_model
             if (
                 _cloud_deg_detector.enabled
                 and line.startswith("data: ")

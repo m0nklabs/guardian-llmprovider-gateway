@@ -1180,3 +1180,37 @@ async def test_cloud_nonstream_capture_without_model_stays_null(monkeypatch):
 
     assert len(capture_completed) == 1
     assert capture_completed[0]["upstream_model"] is None
+
+
+@pytest.mark.asyncio
+async def test_cloud_streaming_capture_uses_last_reported_model(monkeypatch):
+    """Regression (PR #128 review): the sniffer used to freeze the first
+    usable value while the documented contract is "latest usable wins".  Two
+    different model ids in one stream must record the LATEST one, and a later
+    chunk without a model must not erase it."""
+    response = httpx.Response(200, headers={"content-type": "text/event-stream"})
+    capture_completed = []
+    first_model = "openai/gpt-4o-2024-08-06"
+    second_model = "openai/gpt-4o-2024-11-20"
+    stream_client = _patch_stream_common(
+        monkeypatch, capture_completed, _stream_provider(), _FakeStreamClient(response),
+        [
+            'data: {"model":"' + first_model + '","choices":[{"delta":{"content":"Hi"}}]}',
+            'data: {"model":"' + second_model + '","choices":[{"delta":{"content":" there"}}]}',
+            # Later chunk with no model (usage-only) must not erase the value.
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}],'
+            '"usage":{"prompt_tokens":3,"completion_tokens":2}}',
+            "data: [DONE]",
+        ],
+    )
+    with patch.object(forwarding.httpx, "AsyncClient", return_value=stream_client):
+        result = await forwarding.forward_to_cloud_provider(
+            "chat/completions", b"{}",
+            {"model": "openai/gpt-4o", "messages": [], "stream": True},
+            "openai/gpt-4o", SimpleNamespace(), "dsh",
+            capture_ctx=object(), capture_policy_result=object(), cloud_capture_start_time=0.0,
+        )
+        [chunk async for chunk in result.body_iterator]
+
+    assert len(capture_completed) == 1
+    assert capture_completed[0]["upstream_model"] == second_model

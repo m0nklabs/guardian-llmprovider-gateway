@@ -568,6 +568,9 @@ class TestStreamAssemblerUpstreamModel:
             "http://provider.example/secret",
             "https://provider.example/secret",
             "//provider.example/secret",
+            # Charset-valid addresses (review finding on PR #128).
+            "mailto:alice@example.com",
+            "file:/private/path",
             "model=gpt-4o&key=secret",
             "gpt-4o was not found",
             "gpt-4o\tsecret",
@@ -603,3 +606,12 @@ class TestStreamAssemblerUpstreamModel:
         result = asm.assemble()
         assert result["upstream_model"] == "provider/model-v2"
         assert "leak.example" not in json.dumps(result)
+
+    def test_later_chunk_without_model_keeps_earlier_value(self):
+        """A model-less later chunk (usage-only final chunk) must not erase a
+        model id already captured."""
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"model":"openai/gpt-4o","choices":[{"delta":{"content":"A"}}]}')
+        asm.add_sse_line('data: {"usage":{"prompt_tokens":1,"completion_tokens":1}}')
+        asm.add_sse_line('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}')
+        assert asm.assemble()["upstream_model"] == "openai/gpt-4o"

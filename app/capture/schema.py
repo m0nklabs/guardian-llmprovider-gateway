@@ -80,9 +80,24 @@ UPSTREAM_MODEL_MAX_LEN = 128
 #: alphanumeric at both ends, model-id characters in between, applied to the
 #: **whole** stripped value.  Charset alone cannot separate an id from a
 #: payload — ``:`` and ``/`` are legal inside an id — which is why
-#: :func:`sanitize_upstream_model` additionally rejects scheme and
-#: authority separators.
+#: :func:`sanitize_upstream_model` additionally rejects addresses (a scheme
+#: followed by ``/``, or an address-carrying scheme).
 UPSTREAM_MODEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_.:/@-]*[A-Za-z0-9])?$")
+
+#: A leading ``scheme:`` in a value that is otherwise model-id shaped.
+#: Model ids use ``:`` as a *variant* separator (``google/gemini-3-pro:free``,
+#: ``qwen2.5-coder:32b``), so a colon alone means nothing — the scheme name
+#: and what follows it decide.
+UPSTREAM_MODEL_SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*):(.*)$", re.DOTALL)
+
+#: Scheme names that make a value an address rather than a model id, even
+#: without a ``//`` authority (``mailto:alice@example.com``,
+#: ``file:/private/path``, ``data:image/png;base64,…``).  A model-id variant
+#: such as ``gemini-3-pro:free`` never matches this list, so provider
+#: ``:free``/``:floor`` variants keep working.
+UPSTREAM_MODEL_ADDRESS_SCHEMES = frozenset({
+    "http", "https", "file", "mailto", "data", "javascript", "ftp", "ws", "wss",
+})
 
 
 def _coerce_int(value: Any) -> int | None:
@@ -178,10 +193,11 @@ def sanitize_upstream_model(value: Any) -> str | None:
     The value is what the **provider** says served the request, so it is not
     an enum member and not free text: it is one model-id token
     (:data:`UPSTREAM_MODEL_RE`) of at most :data:`UPSTREAM_MODEL_MAX_LEN`
-    characters.  Payload-shaped values never survive — embedded JSON, URLs
-    (``http://``/``https://``, and any ``//`` authority separator), query
-    strings (``k=v&x=y``), prose with whitespace and pure separator soup are
-    all rejected, because they carry content or route somewhere rather than
+    characters.  Payload-shaped values never survive — embedded JSON,
+    addresses (``http://``/``https://``, any ``//`` authority separator, and
+    address-carrying schemes such as ``mailto:`` or ``file:``), query strings
+    (``k=v&x=y``), prose with whitespace and pure separator soup are all
+    rejected, because they carry content or point somewhere rather than
     naming a model.
 
     The whole stripped value is validated **before** any bounding: an
@@ -203,9 +219,18 @@ def sanitize_upstream_model(value: Any) -> str | None:
     if not UPSTREAM_MODEL_RE.match(candidate):
         return None
     # ``:`` and ``/`` are legal *inside* a model id, so the character rule
-    # alone would let a URL through.  What makes it a URL (or any address) is
-    # the scheme or the ``//`` authority separator, not the separator itself.
-    if "//" in candidate or candidate.lower().startswith(("http:", "https:")):
+    # alone cannot tell an id from an address: ``mailto:alice@example.com``
+    # and ``file:/private/path`` pass the charset.  What makes a value an
+    # address is a scheme that is followed by ``/`` (``file:/p``, ``ssh://h``)
+    # or a scheme that names a transport at all (``mailto:a@b``,
+    # ``data:…``); a model-id *variant* such as ``gemini-3-pro:free`` is
+    # neither, so provider ``:free``/``:floor`` ids keep working.
+    scheme_match = UPSTREAM_MODEL_SCHEME_RE.match(candidate)
+    if scheme_match is not None:
+        scheme, rest = scheme_match.group(1).lower(), scheme_match.group(2)
+        if rest.startswith("/") or scheme in UPSTREAM_MODEL_ADDRESS_SCHEMES:
+            return None
+    if "//" in candidate:
         return None
     return candidate
 

@@ -137,7 +137,10 @@ the client asked for (`requested_model`), not what Guardian routed to
   client — and therefore the stream assembler — sees Guardian's client-facing
   model identity, not the provider's. Cloud forwarding sniffs the model from
   the **raw** upstream chunks and that value wins, so a translated stream can
-  never present the requested identity as the served one.
+  never present the requested identity as the served one. The sniffer applies
+  the same latest-usable-wins rule as the assembler: every chunk is inspected,
+  a later chunk without a usable model never erases an earlier value, and the
+  cost is one extra JSON parse per upstream chunk while capture is on.
 
 The key stays present on **every** event as before; on `request_received`,
 `request_failed` and `request_cancelled` it is `null` (nothing had served the
@@ -147,11 +150,17 @@ The value is a bounded model identifier, not free text and not an enum
 member: it legitimately contains `/ . : - _ @` and digits
 (`openai/gpt-4o-2024-08-06`, `qwen2.5-coder:32b@q4_k_m`,
 `anthropic/claude-sonnet-4.5`). It is one token of at most 128 characters,
-alphanumeric at both ends. Embedded JSON, URLs (`http://`/`https://`, any
-`//` authority separator), query strings (`k=v&x=y`), prose/whitespace and
-pure separator soup are dropped — they are payload or an address, not a model
-id. The rule is applied to the **whole** value before any length cap: an
-over-long value is rejected, never truncated, so an identifier-shaped
+alphanumeric at both ends. Embedded JSON, addresses, query strings
+(`k=v&x=y`), prose/whitespace and pure separator soup are dropped — they are
+payload or an address, not a model id. "Address" means a scheme followed by
+`/` (`file:/private/path`, `ssh://host/x`, any `//` authority) **or** a scheme
+that carries an address even without a slash (`http`, `https`, `file`,
+`mailto`, `data`, `javascript`, `ftp`, `ws`, `wss` → `mailto:alice@example.com`
+is rejected). The colon stays legal where it is a model-id *variant*: provider
+ids such as `google/gemini-3-pro:free` or `openrouter/openai/gpt-4o:floor`
+survive unchanged, because neither their scheme name nor their suffix shape is
+an address. The rule is applied to the **whole** value before any length cap:
+an over-long value is rejected, never truncated, so an identifier-shaped
 credential prefix cannot survive as `upstream_model` (the PR #126 lesson).
 Unknown stays `null` — the field is never inferred from `resolved_model`.
 
