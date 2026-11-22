@@ -88,7 +88,7 @@ UPSTREAM_MODEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_.:/@-]*[A-Za-z0-9])?$
 #: Model ids use ``:`` as a *variant* separator (``google/gemini-3-pro:free``,
 #: ``qwen2.5-coder:32b``), so a colon alone means nothing — the scheme name
 #: and what follows it decide.
-UPSTREAM_MODEL_SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*):(.*)$", re.DOTALL)
+UPSTREAM_MODEL_SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*):(.*)$")
 
 #: Scheme names that make a value an address rather than a model id, even
 #: without a ``//`` authority (``mailto:alice@example.com``,
