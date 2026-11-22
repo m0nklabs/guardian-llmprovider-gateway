@@ -1155,6 +1155,21 @@ class TestCompletedEventStreamError:
         )
         assert "error_code" not in event
 
+    def test_payload_shaped_metadata_is_rejected(self, capture_config, base_ctx):
+        """Finding from PR #126 review: whitespace-free JSON/URL/key-value is
+        payload, not metadata, and must never land on the event."""
+        for bad in ('{"prompt":"private"}', "https://provider.example/secret", "k=v&x=y"):
+            event = build_request_completed_event(
+                capture_config, base_ctx,
+                response_content="",
+                http_status=200,
+                error_code=bad,
+                error_type=bad,
+                sequence=1,
+            )
+            assert "error_code" not in event, bad
+            assert "error_type" not in event, bad
+
     def test_metadata_is_bounded(self, capture_config, base_ctx):
         event = build_request_completed_event(
             capture_config, base_ctx,

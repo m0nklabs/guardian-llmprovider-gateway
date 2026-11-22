@@ -20,6 +20,7 @@ import hmac
 import logging
 import math
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -55,6 +56,15 @@ STREAM_ERROR_METADATA_MAX_LEN = 64
 #: Stable Guardian code used when an in-stream error carries no retainable
 #: code or type, so the failure is never invisible in the capture record.
 STREAM_ERROR_FALLBACK_CODE = "upstream_stream_error"
+
+#: Retained error metadata must be identifier-shaped: a leading alphanumeric
+#: followed by word characters or ``. : -`` (e.g. ``502``,
+#: ``invalid_request_error``, ``google.rpc.Code``).  This is the privacy
+#: boundary, not cosmetics: payload-shaped values must never survive —
+#: whitespace-free JSON (``{"prompt":"private"}``), URLs
+#: (``https://host/secret``) and query strings (``k=v&x=y``) are all
+#: rejected, because they carry content rather than an enum member.
+STREAM_ERROR_METADATA_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
 
 
 def _coerce_int(value: Any) -> int | None:
@@ -108,10 +118,12 @@ def sanitize_stream_error_metadata(value: Any) -> str | None:
 
     Providers report in-stream errors as machine-readable codes/types
     (``{"code": 502, "type": "provider_error"}``), but the same shape may
-    carry a human-readable message.  Only identifier-shaped values survive:
-    an int is stringified, a str must contain no whitespace (prose such as
-    ``"Provider returned an empty response"`` is rejected), and the result is
-    truncated to :data:`STREAM_ERROR_METADATA_MAX_LEN`.
+    carry a human-readable message.  Only identifier-shaped values survive
+    (:data:`STREAM_ERROR_METADATA_RE`): an int is stringified, a str must
+    match the identifier pattern, and the result is truncated to
+    :data:`STREAM_ERROR_METADATA_MAX_LEN`.  Prose
+    (``"Provider returned an empty response"``) and payload-shaped values
+    (embedded JSON, URLs, query strings) are rejected.
 
     ``None`` means "nothing retainable" — the caller omits the field.
     """
@@ -127,10 +139,10 @@ def sanitize_stream_error_metadata(value: Any) -> str | None:
         value = str(int(value))
     if not isinstance(value, str):
         return None
-    candidate = value.strip()
-    if not candidate or any(ch.isspace() for ch in candidate):
+    candidate = value.strip()[:STREAM_ERROR_METADATA_MAX_LEN]
+    if not STREAM_ERROR_METADATA_RE.match(candidate):
         return None
-    return candidate[:STREAM_ERROR_METADATA_MAX_LEN]
+    return candidate
 
 #: Delimiter used in event_id computation — must not appear in any component.
 EVENT_ID_DELIMITER = "|"

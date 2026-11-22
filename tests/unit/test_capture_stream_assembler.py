@@ -389,23 +389,27 @@ class TestStreamAssemblerUpstreamError:
         asm.add_sse_line('data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}')
         asm.add_sse_line("data: [DONE]")
         result = asm.assemble()
-        assert set(result) == {
-            "content",
-            "finish_reason",
-            "native_finish_reason",
-            "completion_tokens_details",
-            "native_tokens_reasoning",
-            "native_tokens_cached",
-            "cost",
-            "provider_name",
-            "tool_calls",
-            "reasoning_content",
-            "prompt_tokens",
-            "completion_tokens",
-            "incomplete",
+        # Full baseline: the pre-#125 assembled dict, compared as a whole so a
+        # dropped/corrupted value (e.g. lost tool arguments) cannot pass.
+        assert result == {
+            "content": "",
+            "finish_reason": "tool_calls",
+            "native_finish_reason": None,
+            "completion_tokens_details": None,
+            "native_tokens_reasoning": None,
+            "native_tokens_cached": None,
+            "cost": None,
+            "provider_name": None,
+            "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "get_weather", "arguments": "{}"},
+            }],
+            "reasoning_content": None,
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "incomplete": False,
         }
-        assert result["finish_reason"] == "tool_calls"
-        assert result["tool_calls"][0]["function"]["name"] == "get_weather"
 
     def test_message_text_is_never_retained(self):
         message = "Provider returned an empty response"
@@ -432,6 +436,29 @@ class TestStreamAssemblerUpstreamError:
         asm.add_sse_line('data: {"error":"rate_limited"}')
         result = asm.assemble()
         assert result["error_code"] == "rate_limited"
+
+    def test_payload_shaped_values_are_rejected(self):
+        """Whitespace-free payload is still payload (review finding #126).
+
+        Embedded JSON, URLs and query strings must never reach the event,
+        even though they contain no whitespace.
+        """
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"error":"{\\"prompt\\":\\"private\\"}"}')
+        result = asm.assemble()
+        assert result["error_code"] == "upstream_stream_error"
+        assert "private" not in json.dumps(result)
+
+    def test_url_and_query_shaped_values_are_rejected(self):
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"error":"https://provider.example/secret"}')
+        assert asm.assemble()["error_code"] == "upstream_stream_error"
+
+        other = StreamResponseAssembler()
+        other.add_sse_line('data: {"error":{"code":"k=v&x=y","type":"a/b"}}')
+        result = other.assemble()
+        assert result["error_code"] == "upstream_stream_error"
+        assert "error_type" not in result
 
     def test_error_metadata_is_bounded(self):
         asm = StreamResponseAssembler()

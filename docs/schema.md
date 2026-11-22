@@ -101,10 +101,11 @@ fields.
 
 `error_code` / `error_type` on `request_completed` are **metadata only**: the
 provider's human-readable message is payload and is never stored, the raw
-error object is never stored, and values are identifier-shaped (no whitespace)
-and truncated to 64 characters. This distinguishes "the upstream answered with
-an in-stream error" from "the stream was truncated" — before 1.3.0 both looked
-like `finish_reason: null` + `incomplete: true`.
+error object is never stored, and values must be identifier-shaped — leading
+alphanumeric plus `A-Za-z0-9_.:-`, at most 64 characters — so embedded JSON,
+URLs, query strings and prose are all rejected. This distinguishes "the
+upstream answered with an in-stream error" from "the stream was truncated" —
+before 1.3.0 both looked like `finish_reason: null` + `incomplete: true`.
 
 ## `upstream_model` — known gap (#125)
 
