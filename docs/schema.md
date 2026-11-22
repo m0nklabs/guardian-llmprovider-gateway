@@ -139,6 +139,10 @@ the client asked for (`requested_model`), not what Guardian routed to
   the **raw** upstream chunks and that value wins, so a translated stream can
   never present the requested identity as the served one.
 
+The key stays present on **every** event as before; on `request_received`,
+`request_failed` and `request_cancelled` it is `null` (nothing had served the
+request yet, or nothing did), and only `request_completed` can carry a value.
+
 The value is a bounded model identifier, not free text and not an enum
 member: it legitimately contains `/ . : - _ @` and digits
 (`openai/gpt-4o-2024-08-06`, `qwen2.5-coder:32b@q4_k_m`,
