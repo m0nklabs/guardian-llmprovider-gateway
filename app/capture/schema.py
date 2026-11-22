@@ -70,6 +70,20 @@ STREAM_ERROR_FALLBACK_CODE = "upstream_stream_error"
 #: rather than an enum member.
 STREAM_ERROR_METADATA_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
 
+#: Maximum length for a provider-reported model identifier retained on a
+#: completed event.  Longer values are rejected outright, never truncated.
+UPSTREAM_MODEL_MAX_LEN = 128
+
+#: A model identifier is **not** an enum member: it legitimately carries
+#: ``/ . : - _ @`` and digits (``openai/gpt-4o``, ``claude-3.5-sonnet``,
+#: ``qwen2.5-coder:32b@q4_k_m``), so it needs its own bounded rule: one token,
+#: alphanumeric at both ends, model-id characters in between, applied to the
+#: **whole** stripped value.  Charset alone cannot separate an id from a
+#: payload — ``:`` and ``/`` are legal inside an id — which is why
+#: :func:`sanitize_upstream_model` additionally rejects scheme and
+#: authority separators.
+UPSTREAM_MODEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_.:/@-]*[A-Za-z0-9])?$")
+
 
 def _coerce_int(value: Any) -> int | None:
     """Best-effort int coercion; returns None when the value is not coercible.
@@ -154,6 +168,44 @@ def sanitize_stream_error_metadata(value: Any) -> str | None:
     if len(candidate) > STREAM_ERROR_METADATA_MAX_LEN:
         return None
     if not STREAM_ERROR_METADATA_RE.match(candidate):
+        return None
+    return candidate
+
+
+def sanitize_upstream_model(value: Any) -> str | None:
+    """Return a provider-reported model id bounded for a capture event.
+
+    The value is what the **provider** says served the request, so it is not
+    an enum member and not free text: it is one model-id token
+    (:data:`UPSTREAM_MODEL_RE`) of at most :data:`UPSTREAM_MODEL_MAX_LEN`
+    characters.  Payload-shaped values never survive — embedded JSON, URLs
+    (``http://``/``https://``, and any ``//`` authority separator), query
+    strings (``k=v&x=y``), prose with whitespace and pure separator soup are
+    all rejected, because they carry content or route somewhere rather than
+    naming a model.
+
+    The whole stripped value is validated **before** any bounding: an
+    over-long value is dropped, never truncated, because truncating first
+    would leave an identifier-shaped prefix while the suffix that proves it
+    is not a model id (prose, a credential fragment) fell off the end — the
+    defect PR #126 had to fix for error metadata.
+
+    ``None`` means "the provider reported no usable model" — the caller omits
+    or nulls the field; it never invents a value from ``resolved_model``.
+    """
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate:
+        return None
+    if len(candidate) > UPSTREAM_MODEL_MAX_LEN:
+        return None
+    if not UPSTREAM_MODEL_RE.match(candidate):
+        return None
+    # ``:`` and ``/`` are legal *inside* a model id, so the character rule
+    # alone would let a URL through.  What makes it a URL (or any address) is
+    # the scheme or the ``//`` authority separator, not the separator itself.
+    if "//" in candidate or candidate.lower().startswith(("http:", "https:")):
         return None
     return candidate
 
@@ -514,6 +566,7 @@ def build_request_completed_event(
     native_tokens_cached: int | None = None,
     cost: float | None = None,
     provider_name: str | None = None,
+    upstream_model: str | None = None,
     queue_wait_ms: float | None = None,
     duration_ms: float | None = None,
     http_status: int | None = None,
@@ -540,7 +593,14 @@ def build_request_completed_event(
         requested_model=ctx.requested_model,
         resolved_model=ctx.resolved_model,
     )
-    event["upstream_model"] = ctx.upstream_model
+    # Provider-reported served model (issue #127), the same provider-reported
+    # shape as ``provider_name``: an explicit value from the upstream payload
+    # wins over anything recorded on the context, only a usable value is
+    # retained, and ``null`` stays the answer when the provider reported
+    # nothing — the field is never inferred from ``resolved_model``.
+    event["upstream_model"] = sanitize_upstream_model(
+        upstream_model if upstream_model is not None else ctx.upstream_model
+    )
     event["provider"] = ctx.provider
     event["failover_group"] = ctx.failover_group
     # Wall-clock lifecycle timestamps: started_at_utc references the request

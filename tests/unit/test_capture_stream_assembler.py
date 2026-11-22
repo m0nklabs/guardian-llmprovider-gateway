@@ -510,3 +510,96 @@ class TestStreamAssemblerUpstreamError:
         result = asm.assemble()
         assert "error_code" not in result
         assert "error_type" not in result
+
+
+class TestStreamAssemblerUpstreamModel:
+    """Issue #127 — the provider-reported served model id.
+
+    ``assemble()`` exposes ``upstream_model`` only when a chunk actually
+    carried a usable model id: absent-stays-absent, so a stream without the
+    field assembles to exactly the dict it produced before.
+    """
+
+    def test_chat_chunks_record_latest_model(self):
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"model":"openai/gpt-4o-1","choices":[{"delta":{"content":"A"}}]}')
+        asm.add_sse_line('data: {"model":"openai/gpt-4o-2","choices":[{"delta":{"content":"B"}}]}')
+        asm.add_sse_line('data: {"model":"openai/gpt-4o-2","choices":[{"delta":{},"finish_reason":"stop"}]}')
+        result = asm.assemble()
+        assert result["upstream_model"] == "openai/gpt-4o-2"
+        assert result["content"] == "AB"
+
+    def test_responses_completed_event_records_response_model(self):
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"type":"response.created","response":{"model":"qwen3.8-27b"}}')
+        asm.add_sse_line('data: {"type":"response.output_text.delta","delta":"Hi"}')
+        asm.add_sse_line(
+            'data: {"type":"response.completed","response":{"model":"qwen3.8-27b",'
+            '"status":"completed","usage":{"input_tokens":3,"output_tokens":1}}}'
+        )
+        result = asm.assemble()
+        assert result["upstream_model"] == "qwen3.8-27b"
+        assert result["content"] == "Hi"
+
+    def test_responses_terminal_event_alone_is_enough(self):
+        asm = StreamResponseAssembler()
+        asm.add_sse_line(
+            'data: {"type":"response.incomplete","response":{"model":"provider/model:floor",'
+            '"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}'
+        )
+        assert asm.assemble()["upstream_model"] == "provider/model:floor"
+
+    def test_stream_without_model_keeps_key_absent(self):
+        """Absent-stays-absent: the key is not added at all, so the dict is
+        byte-identical to the pre-#127 assembly."""
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"choices":[{"delta":{"content":"Hi"}}]}')
+        asm.add_sse_line('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}')
+        asm.add_sse_line("data: [DONE]")
+        result = asm.assemble()
+        assert "upstream_model" not in result
+        assert asm.upstream_model is None
+
+    def test_payload_shaped_model_is_rejected(self):
+        """Embedded JSON, URLs, query strings and prose are payload, not a
+        model id — the value never lands in the assembled dict."""
+        for bad in (
+            '{"prompt":"private"}',
+            "http://provider.example/secret",
+            "https://provider.example/secret",
+            "//provider.example/secret",
+            "model=gpt-4o&key=secret",
+            "gpt-4o was not found",
+            "gpt-4o\tsecret",
+        ):
+            asm = StreamResponseAssembler()
+            asm.add_sse_line(
+                "data: " + json.dumps({"model": bad, "choices": [{"delta": {"content": "x"}}]})
+            )
+            result = asm.assemble()
+            assert "upstream_model" not in result, bad
+            assert "private" not in json.dumps(result), bad
+
+    def test_over_long_model_is_rejected_not_truncated(self):
+        """Whole-value validation before bounding (PR #126 lesson): an
+        over-long value is dropped entirely, so no identifier-shaped prefix
+        leaks into the capture.  The leak class is closed by *rejecting*
+        over-long values, not by guessing which bounded tokens are secrets —
+        a bounded single token (``sk-…`` included) is a model-id-shaped value
+        and cannot be told apart from an id by shape alone."""
+        leak = "sk-" + "a" * 200
+        asm = StreamResponseAssembler()
+        asm.add_sse_line("data: " + json.dumps({"model": leak, "choices": [{"delta": {}}]}))
+        result = asm.assemble()
+        assert "upstream_model" not in result
+        assert "aaaa" not in json.dumps(result)
+
+    def test_adversarial_value_does_not_erase_a_usable_one(self):
+        """A late junk chunk must not overwrite a model id the provider did
+        report — "latest wins" means the latest *usable* value."""
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"model":"provider/model-v2","choices":[{"delta":{"content":"A"}}]}')
+        asm.add_sse_line('data: {"model":"https://leak.example/x","choices":[{"delta":{"content":"B"}}]}')
+        result = asm.assemble()
+        assert result["upstream_model"] == "provider/model-v2"
+        assert "leak.example" not in json.dumps(result)

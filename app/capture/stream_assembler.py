@@ -21,6 +21,7 @@ from app.capture.responses_format import responses_status_to_finish_reason
 from app.capture.schema import (
     STREAM_ERROR_FALLBACK_CODE,
     sanitize_stream_error_metadata,
+    sanitize_upstream_model,
 )
 
 logger = logging.getLogger("Guardian.Capture.StreamAssembler")
@@ -52,6 +53,10 @@ class StreamResponseAssembler:
         # Provider-reported serving provider slug (OpenRouter top-level
         # ``provider`` string on stream chunks).
         self._provider_name: str | None = None
+        # Provider-reported served model id (issue #127) — the same
+        # provider-reported field: a chat chunk or Responses event ``model``,
+        # bounded by ``sanitize_upstream_model``; latest usable value wins.
+        self._upstream_model: str | None = None
         self._has_content: bool = False
         self._line_count: int = 0
         # In-stream upstream error metadata (issue #125).  Providers can
@@ -104,6 +109,19 @@ class StreamResponseAssembler:
         provider_name = data.get("provider")
         if isinstance(provider_name, str) and provider_name:
             self._provider_name = provider_name
+
+        # Provider-reported served model id (issue #127).  Chat-completions
+        # chunks carry it at the top level; OpenAI/llama.cpp Responses events
+        # carry it on the nested ``response`` object.  Only a usable model id
+        # is retained — the sanitiser decides that, so an adversarial or
+        # payload-shaped value never reaches the assembled dict at all.
+        reported_model = sanitize_upstream_model(data.get("model"))
+        if reported_model is None:
+            responses_object = data.get("response")
+            if isinstance(responses_object, dict):
+                reported_model = sanitize_upstream_model(responses_object.get("model"))
+        if reported_model is not None:
+            self._upstream_model = reported_model
 
         # ── OpenAI chat/completions delta ──────────────────────────────
         choices = data.get("choices")
@@ -371,6 +389,11 @@ class StreamResponseAssembler:
         return self._provider_name
 
     @property
+    def upstream_model(self) -> str | None:
+        """Provider-reported served model id (None when not reported)."""
+        return self._upstream_model
+
+    @property
     def prompt_tokens(self) -> int | None:
         return self._prompt_tokens
 
@@ -420,4 +443,10 @@ class StreamResponseAssembler:
             result["error_code"] = self._error_code or STREAM_ERROR_FALLBACK_CODE
             if self._error_type is not None:
                 result["error_type"] = self._error_type
+        # Additive (issue #127): the provider-reported served model id.  The
+        # key stays absent when no chunk carried a usable one, so a stream
+        # without a ``model`` field assembles to the exact same dict as
+        # before — absent-stays-absent, never a fabricated value.
+        if self._upstream_model is not None:
+            result["upstream_model"] = self._upstream_model
         return result

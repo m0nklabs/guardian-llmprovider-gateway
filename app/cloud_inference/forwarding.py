@@ -27,7 +27,7 @@ from fastapi.responses import StreamingResponse
 
 from app.cloud_inference.routing import CloudPolicyRequestError
 from app.capture.policy import PolicyResult
-from app.capture.schema import BuildContext
+from app.capture.schema import BuildContext, sanitize_upstream_model
 from app.capture.stream_assembler import StreamResponseAssembler
 from app.config_loader import CONFIG
 from app.gateway.caretaker_client import (
@@ -367,8 +367,9 @@ def _extract_cloud_usage_mirror(payload: Any) -> dict[str, Any]:
     """Mirror rich upstream usage fields from a non-streaming response.
 
     Returns a dict with any of ``completion_tokens_details``,
-    ``native_tokens_reasoning``, ``native_tokens_cached``, ``cost`` and
-    ``provider_name`` — only the keys the upstream actually reported.
+    ``native_tokens_reasoning``, ``native_tokens_cached``, ``cost``,
+    ``provider_name`` and ``upstream_model`` — only the keys the upstream
+    actually reported.
     """
     mirror: dict[str, Any] = {}
     if not isinstance(payload, dict):
@@ -393,6 +394,11 @@ def _extract_cloud_usage_mirror(payload: Any) -> dict[str, Any]:
     reported_provider = payload.get("provider")
     if isinstance(reported_provider, str) and reported_provider:
         mirror["provider_name"] = reported_provider
+    # Provider-reported served model id (issue #127), the non-streaming twin
+    # of the stream assembler's capture.  Only a usable identifier is kept.
+    reported_model = sanitize_upstream_model(payload.get("model"))
+    if reported_model is not None:
+        mirror["upstream_model"] = reported_model
     return mirror
 
 
@@ -1123,6 +1129,7 @@ async def forward_to_cloud_provider(
                     native_tokens_cached=_cloud_usage_mirror.get("native_tokens_cached"),
                     cost=_cloud_usage_mirror.get("cost"),
                     provider_name=_cloud_usage_mirror.get("provider_name"),
+                    upstream_model=_cloud_usage_mirror.get("upstream_model"),
                     http_status=resp.status_code,
                     degeneration_cutoff=_cloud_degeneration_cut,
                     streamed=False,
@@ -1225,6 +1232,13 @@ async def forward_to_cloud_provider(
 
     _cloud_deg_detector = make_detector()
     _cloud_degeneration_cut = False
+    # Provider-reported served model id (issue #127).  Sniffed from the RAW
+    # upstream chunks: the Anthropic/Responses cloud branches below hand the
+    # client — and therefore the capture assembler — Guardian's own
+    # client-facing model name, which is the requested identity, not what
+    # served the request.  The model is constant for a response, so sniffing
+    # stops at the first usable value and costs one extra parse per stream.
+    _cloud_reported_model: str | None = None
 
     async def _read_sse_lines():
         """Yield raw SSE lines from the upstream response with watchdog.
@@ -1233,6 +1247,7 @@ async def forward_to_cloud_provider(
         repetition loop stop consuming upstream and synthesize a clean
         OpenAI finish (finish_reason "length") so the client sees a normal
         stream end — no budget burned on the loop."""
+        nonlocal _cloud_reported_model
         watchdog = StreamProgressWatchdog(provider.timeout_seconds)
         async for line in _iter_sse_lines_with_watchdog(
             resp,
@@ -1243,6 +1258,20 @@ async def forward_to_cloud_provider(
             model_name=model_name,
             heartbeat_interval_s=STREAM_HEARTBEAT_INTERVAL_S,
         ):
+            if (
+                _cloud_reported_model is None
+                and _cloud_assembler is not None
+                and line.startswith("data: ")
+                and "[DONE]" not in line
+            ):
+                try:
+                    _model_data = json.loads(line[6:])
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    _model_data = None
+                if isinstance(_model_data, dict):
+                    _cloud_reported_model = sanitize_upstream_model(
+                        _model_data.get("model")
+                    )
             if (
                 _cloud_deg_detector.enabled
                 and line.startswith("data: ")
@@ -1511,6 +1540,11 @@ async def forward_to_cloud_provider(
                         native_tokens_cached=_cloud_stream_mirror.get("native_tokens_cached"),
                         cost=_cloud_stream_mirror.get("cost"),
                         provider_name=_cloud_stream_mirror.get("provider_name"),
+                        # Provider-reported model, sniffed from the raw
+                        # upstream chunks — never the assembler's value,
+                        # which can be Guardian's translated client-facing
+                        # model name on the translation branches (#127).
+                        upstream_model=_cloud_reported_model,
                         error_code=_cloud_stream_mirror.get("error_code"),
                         error_type=_cloud_stream_mirror.get("error_type"),
                         prompt_tokens=usage_totals["prompt_tokens"],

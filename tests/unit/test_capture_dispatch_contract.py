@@ -83,6 +83,22 @@ class TestDispatchToControllerContract:
         _dispatch(monkeypatch, sink, base_ctx, policy_result=_policy(False), degeneration_cutoff=True)
         assert sink.events == []
 
+    def test_upstream_model_reaches_event(self, monkeypatch, base_ctx):
+        """Issue #127: the provider-reported model travels dispatcher →
+        controller → event builder, so a missing kwarg on either hop would
+        show up here as a null instead of the provider's value."""
+        sink, _ = _wired_controller(monkeypatch)
+        _dispatch(monkeypatch, sink, base_ctx, upstream_model="openai/gpt-4o-2024-08-06")
+        assert len(sink.events) == 1
+        assert sink.events[0]["upstream_model"] == "openai/gpt-4o-2024-08-06"
+
+    def test_upstream_model_absent_stays_null(self, monkeypatch, base_ctx):
+        """No provider value → the field keeps its pre-#127 contract: null."""
+        sink, _ = _wired_controller(monkeypatch)
+        _dispatch(monkeypatch, sink, base_ctx)
+        assert len(sink.events) == 1
+        assert sink.events[0]["upstream_model"] is None
+
     def test_signature_drift_is_not_silent(self, monkeypatch, caplog, base_ctx):
         """If a future kwarg is added to the dispatcher but not the controller
         (the exact 2026-09-11 defect shape), the fail-open swallow must log a
