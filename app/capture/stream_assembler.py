@@ -18,6 +18,10 @@ import math
 from typing import Any
 
 from app.capture.responses_format import responses_status_to_finish_reason
+from app.capture.schema import (
+    STREAM_ERROR_FALLBACK_CODE,
+    sanitize_stream_error_metadata,
+)
 
 logger = logging.getLogger("Guardian.Capture.StreamAssembler")
 
@@ -50,7 +54,13 @@ class StreamResponseAssembler:
         self._provider_name: str | None = None
         self._has_content: bool = False
         self._line_count: int = 0
-        self._error: str | None = None
+        # In-stream upstream error metadata (issue #125).  Providers can
+        # deliver an error inside an HTTP 200 stream; only the machine-
+        # readable code/type are retained — never the message text and never
+        # the raw payload.
+        self._stream_error_seen: bool = False
+        self._error_code: str | None = None
+        self._error_type: str | None = None
 
     def add_sse_line(self, line: str) -> None:
         """Process one SSE line from the upstream stream.
@@ -81,6 +91,13 @@ class StreamResponseAssembler:
 
         if not isinstance(data, dict):
             return
+
+        # ── Upstream error delivered inside an HTTP 200 stream ─────────
+        # The payload is seen here and would otherwise be discarded,
+        # leaving only ``incomplete=True`` with no reason (issue #125).
+        stream_error = data.get("error")
+        if stream_error is not None:
+            self._absorb_stream_error(stream_error)
 
         # Provider-reported serving provider slug (OpenRouter includes a
         # top-level ``provider`` string on its chunks; latest wins).
@@ -216,6 +233,31 @@ class StreamResponseAssembler:
         usage = data.get("usage")
         if isinstance(usage, dict):
             self._extract_usage(usage)
+
+    def _absorb_stream_error(self, stream_error: Any) -> None:
+        """Retain bounded, sanitised metadata for a top-level stream error.
+
+        Accepts the two shapes providers use in a 200 stream — an error
+        object (``{"code": 502, "type": "provider_error", "message": ...}``)
+        and a bare error string.  Only identifier-shaped code/type values are
+        kept (see
+        :func:`~app.capture.schema.sanitize_stream_error_metadata`); the
+        message is payload and is never retained.  Later usable values win,
+        keeping a single authoritative error per stream.
+        """
+        if isinstance(stream_error, dict):
+            code = sanitize_stream_error_metadata(stream_error.get("code"))
+            error_type = sanitize_stream_error_metadata(stream_error.get("type"))
+        else:
+            # Bare string: a provider identifier when it is code-shaped,
+            # otherwise prose (a message) and deliberately dropped.
+            code = sanitize_stream_error_metadata(stream_error)
+            error_type = None
+        self._stream_error_seen = True
+        if code is not None:
+            self._error_code = code
+        if error_type is not None:
+            self._error_type = error_type
 
     def _merge_tool_calls(self, tool_calls: list[dict[str, Any]]) -> None:
         """Merge incremental tool call deltas into the accumulated list."""
@@ -369,4 +411,13 @@ class StreamResponseAssembler:
             "completion_tokens": self._completion_tokens,
             "incomplete": self._finish_reason is None or self._finish_reason == "null",
         }
+        # Additive (issue #125): an upstream error delivered inside a 200
+        # stream records its bounded metadata.  Both keys stay absent when no
+        # such error was seen, so a normal stream's dict is unchanged; an
+        # error with no retainable code/type still surfaces the stable
+        # fallback code instead of an invisible failure.
+        if self._stream_error_seen:
+            result["error_code"] = self._error_code or STREAM_ERROR_FALLBACK_CODE
+            if self._error_type is not None:
+                result["error_type"] = self._error_type
         return result

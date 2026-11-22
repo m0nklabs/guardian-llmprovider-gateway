@@ -1480,6 +1480,11 @@ async def forward_to_cloud_provider(
                                 "native_tokens_cached",
                                 "cost",
                                 "provider_name",
+                                # In-stream upstream error metadata
+                                # (issue #125) — present only when the
+                                # assembler saw an error payload.
+                                "error_code",
+                                "error_type",
                             ):
                                 _mirror_val = _cloud_assembled.get(_mirror_key)
                                 if _mirror_val is not None:
@@ -1506,6 +1511,8 @@ async def forward_to_cloud_provider(
                         native_tokens_cached=_cloud_stream_mirror.get("native_tokens_cached"),
                         cost=_cloud_stream_mirror.get("cost"),
                         provider_name=_cloud_stream_mirror.get("provider_name"),
+                        error_code=_cloud_stream_mirror.get("error_code"),
+                        error_type=_cloud_stream_mirror.get("error_type"),
                         prompt_tokens=usage_totals["prompt_tokens"],
                         completion_tokens=usage_totals["completion_tokens"],
                         http_status=resp.status_code,

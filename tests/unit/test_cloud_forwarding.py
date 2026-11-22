@@ -152,6 +152,102 @@ async def test_cloud_streaming_with_capture_bypasses_disabled_assembler(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_cloud_streaming_in_stream_error_recorded_as_metadata(monkeypatch):
+    """Issue #125 reproduction through the production cloud path: a provider
+    delivers ``{"error":{"code":502,...}}`` inside an HTTP 200 SSE stream.
+    The completed event must carry the bounded code/type (and never the
+    message), instead of only ``incomplete=True`` with no reason."""
+    response = httpx.Response(200, headers={"content-type": "text/event-stream"})
+    stream_client = _FakeStreamClient(response)
+    provider = SimpleNamespace(
+        name="openrouter",
+        base_url="https://provider.example/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+        extra_headers={},
+    )
+    capture_completed = []
+
+    async def iter_sse_error_stream(*args, **kwargs):
+        yield (
+            'data: {"error":{"code":502,"message":"Provider returned an empty '
+            'response","type":"provider_error"}}'
+        )
+        yield "data: [DONE]"
+
+    monkeypatch.setattr(
+        forwarding,
+        "_resolve_cloud_attempts",
+        lambda *args, **kwargs: ([(provider, "provider/model")], None),
+    )
+    monkeypatch.setattr(
+        forwarding,
+        "_prepare_cloud_candidate_request",
+        lambda provider, upstream_model, path, body, fingerprint: (
+            path,
+            body,
+            b"{}",
+            False,
+        ),
+    )
+    monkeypatch.setattr(forwarding, "_messages_contain_image_input", lambda messages: False)
+    monkeypatch.setattr(forwarding, "_get_cloud_key_fingerprint", lambda request, client_id: "fingerprint")
+    monkeypatch.setattr(forwarding, "_set_request_usage_metadata", lambda *args, **kwargs: None)
+    monkeypatch.setattr(forwarding, "_start_live_request_usage", lambda *args, **kwargs: None)
+    monkeypatch.setattr(forwarding, "_update_live_request_usage", lambda *args, **kwargs: None)
+    monkeypatch.setattr(forwarding, "_finish_live_request_usage", lambda *args, **kwargs: None)
+    monkeypatch.setattr(forwarding, "_record_request_token_usage", lambda *args, **kwargs: None)
+    monkeypatch.setattr(forwarding, "_coerce_usage_int", lambda value: int(value or 0))
+    monkeypatch.setattr(
+        forwarding,
+        "_dispatch_capture_request_completed",
+        lambda *args, **kwargs: capture_completed.append(kwargs),
+    )
+    monkeypatch.setattr(forwarding, "_dispatch_capture_request_cancelled", lambda *args, **kwargs: None)
+    monkeypatch.setattr(forwarding, "_dispatch_capture_request_failed", lambda *args, **kwargs: None)
+    monkeypatch.setattr(forwarding, "_guardian_debug_headers", lambda *args, **kwargs: {})
+    monkeypatch.setattr(forwarding, "_is_retryable_cloud_error", lambda *args, **kwargs: False)
+    monkeypatch.setattr(forwarding, "_sanitize_proxied_response_headers", lambda headers: {})
+    monkeypatch.setattr(forwarding, "_iter_sse_lines_with_watchdog", iter_sse_error_stream)
+    monkeypatch.setattr(forwarding, "cloud_rate_limiter", _FakeRateLimiter())
+    monkeypatch.setattr(forwarding, "failover_health", _FakeHealthTracker())
+    monkeypatch.setattr(forwarding, "_GuardianRequestCancelled", type("RequestCancelled", (Exception,), {}))
+
+    request_body = {
+        "model": "openrouter/provider/model",
+        "messages": [{"role": "user", "content": "Say OK"}],
+        "stream": True,
+    }
+    with patch.object(forwarding.httpx, "AsyncClient", return_value=stream_client):
+        response = await forwarding.forward_to_cloud_provider(
+            "chat/completions",
+            b"{}",
+            request_body,
+            "openrouter/provider/model",
+            SimpleNamespace(),
+            "dsh",
+            capture_ctx=object(),
+            capture_policy_result=object(),
+            cloud_capture_start_time=0.0,
+        )
+        chunks = [chunk async for chunk in response.body_iterator]
+
+    # The client-visible stream is unchanged: the upstream error payload is
+    # still forwarded verbatim, capture only adds metadata.
+    assert b'"code":502' in b"".join(chunks)
+    assert len(capture_completed) == 1
+    completed = capture_completed[0]
+    assert completed["error_code"] == "502"
+    assert completed["error_type"] == "provider_error"
+    assert completed["finish_reason"] is None
+    assert completed["incomplete"] is True
+    # No payload text: the message stays out of the capture event.
+    assert "empty response" not in json.dumps(
+        {k: v for k, v in completed.items() if k != "policy_result"}
+    )
+
+
+@pytest.mark.asyncio
 async def test_cloud_streaming_client_disconnect_during_write_records_cancel(monkeypatch):
     """PR #18 follow-up / G2 companion pin: when the downstream client dies
     mid-stream (the SSE iterator raises StreamClosed while chunks are being

@@ -65,7 +65,7 @@ class TestDispatchToControllerContract:
         assert sink.events[0]["degeneration_cutoff"] is True
 
     def test_cutoff_false_normal_completion_field_absent(self, monkeypatch, base_ctx):
-        """Normal completion: the additive field must stay absent (schema 1.2.0
+        """Normal completion: the additive field must stay absent (the schema
         only emits it when True)."""
         sink, _ = _wired_controller(monkeypatch)
         _dispatch(monkeypatch, sink, base_ctx)
@@ -111,3 +111,32 @@ class TestDispatchToControllerContract:
         )
         assert calls, "controller must be reached"
         assert any("capture dispatch failed" in r.message for r in caplog.records)
+
+
+class TestDispatchStreamErrorMetadataContract:
+    """Issue #125 — in-stream upstream error metadata is additive.
+
+    The dispatcher must carry the assembler's ``error_code`` / ``error_type``
+    to the wire, and a normal completion must keep both keys absent.
+    """
+
+    def test_error_metadata_reaches_event(self, monkeypatch, base_ctx):
+        sink, _ = _wired_controller(monkeypatch)
+        _dispatch(
+            monkeypatch, sink, base_ctx,
+            finish_reason=None, incomplete=True,
+            error_code="502", error_type="provider_error",
+        )
+        assert len(sink.events) == 1
+        assert sink.events[0]["error_code"] == "502"
+        assert sink.events[0]["error_type"] == "provider_error"
+        # Existing keys keep their values: no finish reason, still incomplete.
+        assert sink.events[0]["finish_reason"] is None
+        assert sink.events[0]["incomplete"] is True
+
+    def test_normal_completion_omits_error_metadata(self, monkeypatch, base_ctx):
+        sink, _ = _wired_controller(monkeypatch)
+        _dispatch(monkeypatch, sink, base_ctx)
+        assert len(sink.events) == 1
+        assert "error_code" not in sink.events[0]
+        assert "error_type" not in sink.events[0]

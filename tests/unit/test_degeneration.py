@@ -209,7 +209,10 @@ class TestSchemaField:
             sequence=1,
         )
         assert event["degeneration_cutoff"] is True
-        assert event["schema_version"] == "1.2.0"
+        # The cutoff field is additive within the v1 contract; the schema
+        # version moves on with later additive fields (1.2.0 cutoff,
+        # 1.3.0 in-stream error metadata — issue #125).
+        assert event["schema_version"] == "1.3.0"
 
     def test_completed_event_omits_flag_when_false(self, base_ctx, capture_config):
         from app.capture.schema import build_request_completed_event

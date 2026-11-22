@@ -11,8 +11,10 @@
   reject unknown names.
 - `schema_version` bumps **additively** within the contract: fields are only
   ever added (or made more reliably present), never removed or renamed.
-  Current version: **1.1.0** (2026-08-30). 1.0.0-era records remain readable —
-  every 1.1.0 field is optional per record.
+  Current version: **1.3.0** (2026-11-22). 1.0.0-era records remain readable —
+  every later field is optional per record. History: 1.1.0 (2026-08-30,
+  C1–C11 feedback batch), 1.2.0 (`degeneration_cutoff`), 1.3.0 (in-stream
+  upstream error metadata `error_code` / `error_type`, issue #125).
 
 ## On-disk layout
 
@@ -87,6 +89,8 @@ One inference request produces a small event sequence sharing one `request_id`:
 | `native_tokens_reasoning` / `native_tokens_cached` | int | **1.1.0 (C5)** — upstream native token accounting when reported. |
 | `cost` | float | **1.1.0 (C5)** — upstream-reported cost when available. |
 | `provider_name` | str | **1.1.0 (C5)** — the actual serving backend from the upstream response (e.g. `Baidu`, `Z.AI`), distinct from the configured `provider` (e.g. `openrouter`). |
+| `error_code` | str ≤64 | **1.3.0 (#125)** — a provider error delivered **inside** an HTTP 200 stream (`{"error":{"code":502,…}}`). Provider-defined code, stringified; a normal completion omits the key. When the error carries no retainable code/type, the stable Guardian value `upstream_stream_error` is recorded instead, so the failure is never invisible. |
+| `error_type` | str ≤64 | **1.3.0 (#125)** — the provider-defined error type from the same in-stream error payload (e.g. `provider_error`). Omitted when the provider reported none. |
 | `http_status`, `duration_ms`, `attempts` | — | `attempts` is the winning 1-based provider attempt on cloud routes. |
 | `streamed` | bool | Compatibility flag — **the ingress leg** (client requested streaming). |
 | `streamed_ingress` / `streamed_upstream` | bool | **1.1.0 (C8)** — explicit per-leg flags. |
@@ -94,6 +98,23 @@ One inference request produces a small event sequence sharing one `request_id`:
 `request_failed` adds `error_code` / `sanitized_message`; `request_cancelled`
 adds `cancel_reason`. Terminal events also carry the 1.1.0 timing/correlation
 fields.
+
+`error_code` / `error_type` on `request_completed` are **metadata only**: the
+provider's human-readable message is payload and is never stored, the raw
+error object is never stored, and values are identifier-shaped (no whitespace)
+and truncated to 64 characters. This distinguishes "the upstream answered with
+an in-stream error" from "the stream was truncated" — before 1.3.0 both looked
+like `finish_reason: null` + `incomplete: true`.
+
+## `upstream_model` — known gap (#125)
+
+`upstream_model` is emitted as `null` on every event: no caller outside
+`app/capture/schema.py` ever populates `BuildContext.upstream_model`, so it is
+dead metadata (71/71 completed events in the production WAL at 2026-11-21).
+The key is kept for wire compatibility; populating it requires the resolved
+upstream model from the provider response (both stream chunks and
+non-streaming payloads carry a top-level `model`), which is a separate change
+— it is tracked as a follow-up on issue #125, not invented here.
 
 ## Provider field timing (C11)
 
@@ -141,6 +162,22 @@ resolved during forwarding, so:
 
 Operational CLI: `scripts/guardianctl.py` (`status`, `files`, `rotate`,
 `export`, …) shows capture config, retention, and WAL health.
+
+## Verification
+
+```bash
+# Contract pin for every capture field, including the 1.3.0 in-stream
+# upstream error metadata (`error_code` / `error_type`).
+./venv/bin/python -m pytest tests/unit/ -k capture -q
+```
+
+The streaming error path is pinned end-to-end in
+`tests/unit/test_capture_stream_assembler.py` (error-only, error + `[DONE]`,
+error mixed with content, unchanged tool-call stream),
+`tests/unit/test_capture_schema.py`,
+`tests/unit/test_capture_dispatch_contract.py` (absent-stays-absent on the
+completed event) and `tests/unit/test_cloud_forwarding.py` (the production
+cloud streaming path).
 
 ## Related docs
 
