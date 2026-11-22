@@ -75,29 +75,14 @@ STREAM_ERROR_METADATA_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
 UPSTREAM_MODEL_MAX_LEN = 128
 
 #: A model identifier is **not** an enum member: it legitimately carries
-#: ``/ . : - _ @`` and digits (``openai/gpt-4o``, ``claude-3.5-sonnet``,
-#: ``qwen2.5-coder:32b@q4_k_m``), so it needs its own bounded rule: one token,
+#: ``/ . : - _`` and digits (``openai/gpt-4o``, ``claude-3.5-sonnet``,
+#: ``google/gemini-3-pro:free``), so it needs its own bounded rule: one token,
 #: alphanumeric at both ends, model-id characters in between, applied to the
-#: **whole** stripped value.  Charset alone cannot separate an id from a
-#: payload — ``:`` and ``/`` are legal inside an id — which is why
-#: :func:`sanitize_upstream_model` additionally rejects addresses (a scheme
-#: followed by ``/``, or an address-carrying scheme).
-UPSTREAM_MODEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_.:/@-]*[A-Za-z0-9])?$")
-
-#: A leading ``scheme:`` in a value that is otherwise model-id shaped.
-#: Model ids use ``:`` as a *variant* separator (``google/gemini-3-pro:free``,
-#: ``qwen2.5-coder:32b``), so a colon alone means nothing — the scheme name
-#: and what follows it decide.
-UPSTREAM_MODEL_SCHEME_RE = re.compile(r"^([A-Za-z][A-Za-z0-9+.\-]*):(.*)$")
-
-#: Scheme names that make a value an address rather than a model id, even
-#: without a ``//`` authority (``mailto:alice@example.com``,
-#: ``file:/private/path``, ``data:image/png;base64,…``).  A model-id variant
-#: such as ``gemini-3-pro:free`` never matches this list, so provider
-#: ``:free``/``:floor`` variants keep working.
-UPSTREAM_MODEL_ADDRESS_SCHEMES = frozenset({
-    "http", "https", "file", "mailto", "data", "javascript", "ftp", "ws", "wss",
-})
+#: **whole** stripped value.  ``@`` is deliberately absent: every contact
+#: address carries one (``sip:alice@example.com``) and no model id needs it.
+#: ``:`` stays legal only where :func:`sanitize_upstream_model` allows it — in
+#: a provider-qualified id, after the first ``/``.
+UPSTREAM_MODEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_.:/-]*[A-Za-z0-9])?$")
 
 
 def _coerce_int(value: Any) -> int | None:
@@ -194,11 +179,28 @@ def sanitize_upstream_model(value: Any) -> str | None:
     an enum member and not free text: it is one model-id token
     (:data:`UPSTREAM_MODEL_RE`) of at most :data:`UPSTREAM_MODEL_MAX_LEN`
     characters.  Payload-shaped values never survive — embedded JSON,
-    addresses (``http://``/``https://``, any ``//`` authority separator, and
-    address-carrying schemes such as ``mailto:`` or ``file:``), query strings
-    (``k=v&x=y``), prose with whitespace and pure separator soup are all
-    rejected, because they carry content or point somewhere rather than
-    naming a model.
+    addresses (``tel:…``, ``sip:…``, ``mailto:…``, ``file:/…``, ``data:…``,
+    ``https://…``), query strings (``k=v&x=y``), prose with whitespace and
+    pure separator soup are all rejected, because they carry content or point
+    somewhere rather than naming a model.
+
+    Addresses are rejected **structurally**, not by a scheme denylist — a
+    denylist only ever loses the next scheme someone invents (``mailto:`` was
+    followed by ``file:``, then ``tel:``/``sip:``).  A model id is either
+    plain (``gpt-5.1``) or provider-qualified
+    (``openrouter/openai/gpt-4o:floor``), and neither form carries a scheme:
+
+    * ``@`` cannot occur at all (every contact address has one);
+    * a ``:`` is legal only **after** the first ``/``, so a colon before it
+      is always an address scheme (``tel:1555…``, ``data:…``, ``file:/p``,
+      ``https://h``), whatever the scheme is called;
+    * an empty path segment (``//``) is not a model id either.
+
+    **Deliberate cost:** a provider-less tag id (``qwen2.5-coder:32b``,
+    ``llama3.1:8b``) is rejected and the event records ``null``.  Telling a
+    trusted local tag from an untrusted upstream address needs a
+    provider-aware rule (trusted local configuration vs. the upstream string),
+    which is a later improvement — not something half-built here.
 
     The whole stripped value is validated **before** any bounding: an
     over-long value is dropped, never truncated, because truncating first
@@ -218,17 +220,15 @@ def sanitize_upstream_model(value: Any) -> str | None:
         return None
     if not UPSTREAM_MODEL_RE.match(candidate):
         return None
-    # ``:`` and ``/`` are legal *inside* a model id, so the character rule
-    # alone cannot tell an id from an address: ``mailto:alice@example.com``
-    # and ``file:/private/path`` pass the charset.  What makes a value an
-    # address is a scheme that is followed by ``/`` (``file:/p``, ``ssh://h``)
-    # or a scheme that names a transport at all (``mailto:a@b``,
-    # ``data:…``); a model-id *variant* such as ``gemini-3-pro:free`` is
-    # neither, so provider ``:free``/``:floor`` ids keep working.
-    scheme_match = UPSTREAM_MODEL_SCHEME_RE.match(candidate)
-    if scheme_match is not None:
-        scheme, rest = scheme_match.group(1).lower(), scheme_match.group(2)
-        if rest.startswith("/") or scheme in UPSTREAM_MODEL_ADDRESS_SCHEMES:
+    # A colon is legal only *after* the first slash: before it, it can only be
+    # an address scheme (see the docstring).  This is the rule that closes the
+    # class — ``tel:``, ``sip:``, ``mailto:``, ``file:/p``, ``data:``,
+    # ``javascript:`` and ``https://h`` all fail here, whatever they are
+    # named, while ``google/gemini-3-pro:free`` keeps its variant separator.
+    if ":" in candidate:
+        colon_index = candidate.find(":")
+        slash_index = candidate.find("/")
+        if slash_index == -1 or colon_index < slash_index:
             return None
     if "//" in candidate:
         return None

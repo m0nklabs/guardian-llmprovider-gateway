@@ -147,20 +147,40 @@ The key stays present on **every** event as before; on `request_received`,
 request yet, or nothing did), and only `request_completed` can carry a value.
 
 The value is a bounded model identifier, not free text and not an enum
-member: it legitimately contains `/ . : - _ @` and digits
-(`openai/gpt-4o-2024-08-06`, `qwen2.5-coder:32b@q4_k_m`,
-`anthropic/claude-sonnet-4.5`). It is one token of at most 128 characters,
+member: it legitimately contains `/ . : - _` and digits
+(`openai/gpt-4o-2024-08-06`, `anthropic/claude-4.5-sonnet`,
+`openrouter/openai/gpt-4o:floor`). It is one token of at most 128 characters,
 alphanumeric at both ends. Embedded JSON, addresses, query strings
 (`k=v&x=y`), prose/whitespace and pure separator soup are dropped — they are
-payload or an address, not a model id. "Address" means a scheme followed by
-`/` (`file:/private/path`, `ssh://host/x`, any `//` authority) **or** a scheme
-that carries an address even without a slash (`http`, `https`, `file`,
-`mailto`, `data`, `javascript`, `ftp`, `ws`, `wss` → `mailto:alice@example.com`
-is rejected). The colon stays legal where it is a model-id *variant*: provider
-ids such as `google/gemini-3-pro:free` or `openrouter/openai/gpt-4o:floor`
-survive unchanged, because neither their scheme name nor their suffix shape is
-an address. The rule is applied to the **whole** value before any length cap:
-an over-long value is rejected, never truncated, so an identifier-shaped
+payload or an address, not a model id.
+
+**Addresses are rejected structurally, not by a scheme list.** A deny-list of
+schemes only ever loses the next scheme someone invents (`mailto:` was
+followed by `file:`, then `tel:`/`sip:`), so the rule is shape-based:
+
+- `@` may not occur at all — every contact address carries one
+  (`sip:alice@example.com`, `mailto:alice@example.com`) and no model id needs
+  it;
+- a `:` is legal only **after** the first `/`. A model id is either plain
+  (`openai/gpt-5.1`) or provider-qualified (`google/gemini-3-pro:free`,
+  `openrouter/openai/gpt-4o:floor`), and in the qualified form the colon is a
+  *variant* separator. Before the first slash a colon can only be an address
+  scheme — `tel:15551234567`, `sip:…`, `mailto:…`, `file:/private/path`,
+  `data:…`, `javascript:…`, `https://host` all fail that one rule, whatever
+  the scheme is called;
+- an empty path segment (`//`) is not a model id either.
+
+**Deliberate cost, accepted 2026-11-22 (PR #128 review):** a provider-less tag
+id — Ollama-style `qwen2.5-coder:32b`, `llama3.1:8b` — has a colon before any
+slash, which no shape rule can tell apart from an address scheme, so it is
+rejected and the event records `null`. Provider-qualified forms of the same
+model (`openrouter/qwen/qwen2.5-coder:32b`) still record. Closing the address
+class is worth more than naming a local tag: a provider-aware rule (trusted
+local configuration vs. an unreliable upstream string) is a **later
+improvement, not something half-built here**.
+
+The rule is applied to the **whole** value before any length cap: an
+over-long value is rejected, never truncated, so an identifier-shaped
 credential prefix cannot survive as `upstream_model` (the PR #126 lesson).
 Unknown stays `null` — the field is never inferred from `resolved_model`.
 

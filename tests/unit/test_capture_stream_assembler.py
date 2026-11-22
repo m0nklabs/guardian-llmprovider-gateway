@@ -568,9 +568,12 @@ class TestStreamAssemblerUpstreamModel:
             "http://provider.example/secret",
             "https://provider.example/secret",
             "//provider.example/secret",
-            # Charset-valid addresses (review finding on PR #128).
+            # Charset-valid addresses (review findings on PR #128) — rejected
+            # structurally (colon before the first slash, or any ``@``).
             "mailto:alice@example.com",
             "file:/private/path",
+            "tel:15551234567",
+            "sip:alice@example.com",
             "model=gpt-4o&key=secret",
             "gpt-4o was not found",
             "gpt-4o\tsecret",

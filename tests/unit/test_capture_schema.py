@@ -1317,21 +1317,20 @@ class TestUpstreamModelSanitizer:
     @pytest.mark.parametrize("value", [
         "gpt-4o",
         "gpt-4o-mini",
+        "openai/gpt-5.1",
         "openai/gpt-4o-2024-08-06",
+        "anthropic/claude-4.5-sonnet",
         "anthropic/claude-sonnet-4.5",
         "claude-3.5-sonnet",
-        "qwen2.5-coder:32b@q4_k_m",
         "models/gemini-2.5-flash",
         "meta-llama/llama-3.3-70b-instruct",
         "DeepSeek-V3.2-Exp",
+        # Provider-qualified ``:variant`` ids keep the colon: the colon comes
+        # after the first slash, so it is a variant separator, not a scheme.
         "openrouter/openai/gpt-4o:floor",
-        # Provider ``:variant`` ids keep the colon: a colon alone is not an
-        # address (review finding on PR #128 — the scheme rule must not eat
-        # these).
         "google/gemini-3-pro:free",
         "openrouter/meta-llama/llama-3.3-70b-instruct:free",
         "nvidia/llama-3.1-nemotron-70b-instruct:floor",
-        "model:variant",
         "m",
         "9",
     ])
@@ -1356,22 +1355,39 @@ class TestUpstreamModelSanitizer:
         "https://provider.example/secret",
         "HTTP://provider.example/secret",
         "//provider.example/secret",
-        # Address-carrying schemes that pass the charset (review finding on
-        # PR #128: these used to land as ``upstream_model``).
+        # Addresses are rejected structurally, not by a scheme list, so this
+        # covers every scheme — including ones nobody has invented yet
+        # (review findings on PR #128: ``mailto:``/``file:``, then
+        # ``tel:``/``sip:``).
         "mailto:alice@example.com",
         "MAILTO:Alice@Example.com",
+        "tel:15551234567",
+        "tel:+15551234567",
+        "sip:alice@example.com",
         "file:/private/path",
         "File:/etc/passwd",
         "data:text/plain;base64,QQ==",
         "javascript:alert",
+        "http:provider.example",
         "ws://provider.example/secret",
         "wss://provider.example/secret",
         "ftp:provider.example/secret",
-        "http:provider.example",
-        # A scheme followed by ``/`` is an address on its face, even for a
-        # scheme name no denylist knows (``ssh://host``, ``file:/p``).
         "ssh://provider.example/secret",
         "gopher:/provider.example/secret",
+        "unknownscheme:whatever/next",
+        # Deliberate trade-off of the structural rule: a provider-less tag id
+        # has a colon before any slash, which is indistinguishable from an
+        # address scheme.  ``qwen2.5-coder:32b`` and ``llama3.1:8b`` therefore
+        # yield ``null`` (see the dedicated trade-off test below and
+        # docs/schema.md).
+        "qwen2.5-coder:32b",
+        "llama3.1:8b",
+        # An empty path segment is not a model id either (no scheme needed).
+        "openai//gpt-4o",
+        "openrouter/openai//gpt-4o",
+        # An ``@`` makes a value a contact address; no model id needs one.
+        "qwen2.5-coder:32b@q4_k_m",
+        "openai/gpt-4o@provider",
         # Query strings / key-value pairs.
         "k=v&x=y",
         "model=gpt-4o",
@@ -1460,9 +1476,15 @@ class TestCompletedEventUpstreamModel:
             "https://provider.example/secret",
             "k=v&x=y",
             "Provider returned an empty response",
-            # Review finding on PR #128: charset-valid addresses.
+            # Review findings on PR #128: charset-valid addresses.  The rule is
+            # structural (colon before the first slash, or any ``@``), so these
+            # hold for schemes nobody listed yet.
             "mailto:alice@example.com",
             "file:/private/path",
+            "tel:15551234567",
+            "sip:alice@example.com",
+            "data:text/plain",
+            "javascript:alert",
         ):
             event = build_request_completed_event(
                 capture_config, base_ctx,
@@ -1476,12 +1498,13 @@ class TestCompletedEventUpstreamModel:
             assert "alice@example.com" not in json.dumps(event), bad
 
     def test_provider_free_variant_survives_event_level(self, capture_config, base_ctx):
-        """Regression for the same finding: ``:free``/``:variant`` ids keep
-        their colon and are not mistaken for an address."""
+        """Regression for the same finding: a provider-qualified
+        ``:free``/``:variant`` id keeps its colon — after the first slash the
+        colon is a variant separator, not a scheme."""
         for good in (
             "google/gemini-3-pro:free",
             "openrouter/meta-llama/llama-3.3-70b-instruct:free",
-            "qwen2.5-coder:32b@q4_k_m",
+            "openrouter/openai/gpt-4o:floor",
         ):
             event = build_request_completed_event(
                 capture_config, base_ctx,
@@ -1491,6 +1514,32 @@ class TestCompletedEventUpstreamModel:
                 sequence=1,
             )
             assert event["upstream_model"] == good, good
+
+    def test_providerless_tag_id_is_the_deliberate_tradeoff(self, capture_config, base_ctx):
+        """The structural address rule costs provider-less tag ids.
+
+        ``qwen2.5-coder:32b`` / ``llama3.1:8b`` have a colon before any slash,
+        which no shape rule can tell apart from an address scheme
+        (``tel:15551234567`` has the same shape).  They are rejected and the
+        event records ``null`` — documented in ``docs/schema.md`` as the price
+        for closing the address class; a provider-aware rule (trusted local
+        configuration vs. unreliable upstream string) is a later improvement.
+        """
+        for tag in ("qwen2.5-coder:32b", "llama3.1:8b"):
+            assert sanitize_upstream_model(tag) is None, tag
+            event = build_request_completed_event(
+                capture_config, base_ctx,
+                response_content="",
+                upstream_model=tag,
+                http_status=200,
+                sequence=1,
+            )
+            assert event["upstream_model"] is None, tag
+        # Provider-qualified ids are unaffected, so the loss is bounded to
+        # provider-less tags.
+        assert sanitize_upstream_model("openrouter/qwen/qwen2.5-coder:32b") == (
+            "openrouter/qwen/qwen2.5-coder:32b"
+        )
 
     def test_over_long_value_is_not_truncated_on_event(self, capture_config, base_ctx):
         event = build_request_completed_event(
