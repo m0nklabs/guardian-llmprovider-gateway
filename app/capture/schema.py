@@ -20,6 +20,7 @@ import hmac
 import logging
 import math
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -38,11 +39,36 @@ SCHEMA_NAME = "guardian_capture_v1"
 #: rich upstream usage mirror (completion_tokens_details, native token
 #: counts, cost, provider_name), caller correlation identity
 #: (caller_request_id / app_title / app_referer) and explicit streamed legs.
-SCHEMA_VERSION = "1.2.0"
+#: 1.2.0: additive degeneration_cutoff flag on completed events.
+#: 1.3.0 (issue #125): additive in-stream upstream error metadata on
+#: request_completed (error_code / error_type) — metadata only, never text.
+SCHEMA_VERSION = "1.3.0"
 
 #: Maximum length for caller-supplied identity strings stored on events
 #: (caller_request_id, app_title, app_referer).
 CALLER_IDENTITY_MAX_LEN = 256
+
+#: Maximum length for provider-reported error metadata (code/type) retained
+#: from an error delivered inside an HTTP 200 stream.  The values are
+#: provider-defined enum members, not free text; a longer value is rejected
+#: outright, never truncated (truncating first would strip a prose or
+#: credential suffix and let an identifier-shaped prefix through).
+STREAM_ERROR_METADATA_MAX_LEN = 64
+
+#: Stable Guardian code used when an in-stream error carries no retainable
+#: code or type, so the failure is never invisible in the capture record.
+STREAM_ERROR_FALLBACK_CODE = "upstream_stream_error"
+
+#: Retained error metadata must be identifier-shaped — a leading alphanumeric
+#: followed by word characters or ``. : -`` (e.g. ``502``,
+#: ``invalid_request_error``, ``google.rpc.Code``) — and the rule applies to
+#: the **whole** stripped value.  This is the privacy boundary, not
+#: cosmetics: payload-shaped values must never survive — whitespace-free JSON
+#: (``{"prompt":"private"}``), URLs (``https://host/secret``), query strings
+#: (``k=v&x=y``) and prose after an identifier prefix
+#: (``"sk-aaa… was rejected"``) are all rejected, because they carry content
+#: rather than an enum member.
+STREAM_ERROR_METADATA_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
 
 
 def _coerce_int(value: Any) -> int | None:
@@ -89,6 +115,47 @@ def _coerce_float(value: Any) -> float | None:
     if not math.isfinite(result):
         return None
     return result
+
+
+def sanitize_stream_error_metadata(value: Any) -> str | None:
+    """Return bounded, text-free error metadata for a capture event.
+
+    Providers report in-stream errors as machine-readable codes/types
+    (``{"code": 502, "type": "provider_error"}``), but the same shape may
+    carry a human-readable message.  Only identifier-shaped values survive
+    (:data:`STREAM_ERROR_METADATA_RE`), applied to the **whole** stripped
+    value: an int is stringified, an integral float keeps its numeric
+    identity (``502.0`` → ``"502"``), and a value longer than
+    :data:`STREAM_ERROR_METADATA_MAX_LEN` is rejected rather than truncated.
+    Prose (``"Provider returned an empty response"``), payload-shaped values
+    (embedded JSON, URLs, query strings) and a fractional code (``502.5``,
+    which cannot be stored without changing the provider's code) are all
+    rejected.
+
+    ``None`` means "nothing retainable" — the caller omits the field.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        value = str(value)
+    elif isinstance(value, float):
+        # Integral floats (``502.0``) keep their numeric identity; non-finite
+        # values must not raise on int(), and a fractional code would be
+        # rewritten into a *different* code, so both are dropped.
+        if not math.isfinite(value) or not value.is_integer():
+            return None
+        value = str(int(value))
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    # Validate the whole value *before* any bounding.  Truncating first would
+    # let an identifier-shaped prefix through while the suffix that proves it
+    # is not metadata (prose, or a credential fragment) fell off the end.
+    if len(candidate) > STREAM_ERROR_METADATA_MAX_LEN:
+        return None
+    if not STREAM_ERROR_METADATA_RE.match(candidate):
+        return None
+    return candidate
 
 #: Delimiter used in event_id computation — must not appear in any component.
 EVENT_ID_DELIMITER = "|"
@@ -455,6 +522,8 @@ def build_request_completed_event(
     streamed_upstream: bool | None = None,
     incomplete: bool | None = None,
     degeneration_cutoff: bool | None = None,
+    error_code: str | None = None,
+    error_type: str | None = None,
     attempts: int | None = None,
     sequence: int = 1,
 ) -> dict[str, Any]:
@@ -536,6 +605,17 @@ def build_request_completed_event(
     # guard). Field stays absent unless the cutoff actually fired.
     if degeneration_cutoff:
         event["degeneration_cutoff"] = True
+
+    # Additive 1.3.0 — upstream error delivered inside an HTTP 200 stream
+    # (issue #125).  Metadata only: the provider-defined code and type,
+    # bounded and text-free.  Both keys stay absent when no in-stream error
+    # was seen, and a normal completion is unchanged.
+    stream_error_code = sanitize_stream_error_metadata(error_code)
+    if stream_error_code is not None:
+        event["error_code"] = stream_error_code
+    stream_error_type = sanitize_stream_error_metadata(error_type)
+    if stream_error_type is not None:
+        event["error_type"] = stream_error_type
 
     if queue_wait_ms is not None:
         event["queue_wait_ms"] = float(queue_wait_ms)

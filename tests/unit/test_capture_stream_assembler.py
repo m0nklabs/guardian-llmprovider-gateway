@@ -339,3 +339,174 @@ class TestStreamAssemblerResponses:
         result = asm.assemble()
         assert result["content"] == "AB"
         assert result["finish_reason"] == "stop"
+
+
+class TestStreamAssemblerUpstreamError:
+    """In-stream upstream errors (HTTP 200 carrying an error payload, #125).
+
+    The provider-defined code/type are metadata; the message is payload and
+    must never be retained.
+    """
+
+    def test_error_only_stream_retains_code_and_type(self):
+        asm = StreamResponseAssembler()
+        asm.add_sse_line(
+            'data: {"error":{"code":502,"message":"Provider returned an empty '
+            'response","type":"provider_error"}}'
+        )
+        result = asm.assemble()
+        assert result["error_code"] == "502"
+        assert result["error_type"] == "provider_error"
+        # Existing contract untouched: no finish reason, still incomplete.
+        assert result["finish_reason"] is None
+        assert result["incomplete"] is True
+
+    def test_error_then_done_keeps_metadata(self):
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"error":{"code":502,"type":"provider_error"}}')
+        asm.add_sse_line("data: [DONE]")
+        result = asm.assemble()
+        assert result["error_code"] == "502"
+        assert result["error_type"] == "provider_error"
+
+    def test_error_mixed_with_content_deltas(self):
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"choices":[{"delta":{"content":"partial"}}]}')
+        asm.add_sse_line('data: {"error":{"code":429,"type":"rate_limit_exceeded"}}')
+        asm.add_sse_line('data: [DONE]')
+        result = asm.assemble()
+        assert result["content"] == "partial"
+        assert result["error_code"] == "429"
+        assert result["error_type"] == "rate_limit_exceeded"
+
+    def test_normal_tool_call_stream_is_unchanged(self):
+        """A normal stream keeps today's exact assembled key set (#125 is additive)."""
+        asm = StreamResponseAssembler()
+        asm.add_sse_line(
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1",'
+            '"type":"function","function":{"name":"get_weather","arguments":"{}"}}]}}]}'
+        )
+        asm.add_sse_line('data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}')
+        asm.add_sse_line("data: [DONE]")
+        result = asm.assemble()
+        # Full baseline: the pre-#125 assembled dict, compared as a whole so a
+        # dropped/corrupted value (e.g. lost tool arguments) cannot pass.
+        assert result == {
+            "content": "",
+            "finish_reason": "tool_calls",
+            "native_finish_reason": None,
+            "completion_tokens_details": None,
+            "native_tokens_reasoning": None,
+            "native_tokens_cached": None,
+            "cost": None,
+            "provider_name": None,
+            "tool_calls": [{
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "get_weather", "arguments": "{}"},
+            }],
+            "reasoning_content": None,
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "incomplete": False,
+        }
+
+    def test_message_text_is_never_retained(self):
+        message = "Provider returned an empty response"
+        asm = StreamResponseAssembler()
+        asm.add_sse_line(
+            'data: {"error":{"code":502,"message":"%s","type":"provider_error"}}'
+            % message
+        )
+        result = asm.assemble()
+        assert message not in json.dumps(result)
+        assert message.split()[0] not in json.dumps(result)
+
+    def test_bare_string_error_with_prose_keeps_no_text(self):
+        """A message-shaped bare string is dropped; the failure is still visible."""
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"error":"Provider returned an empty response"}')
+        result = asm.assemble()
+        assert result["error_code"] == "upstream_stream_error"
+        assert "error_type" not in result
+        assert "empty response" not in json.dumps(result)
+
+    def test_bare_string_error_code_shaped_is_retained(self):
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"error":"rate_limited"}')
+        result = asm.assemble()
+        assert result["error_code"] == "rate_limited"
+
+    def test_payload_shaped_values_are_rejected(self):
+        """Whitespace-free payload is still payload (review finding #126).
+
+        Embedded JSON, URLs and query strings must never reach the event,
+        even though they contain no whitespace.
+        """
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"error":"{\\"prompt\\":\\"private\\"}"}')
+        result = asm.assemble()
+        assert result["error_code"] == "upstream_stream_error"
+        assert "private" not in json.dumps(result)
+
+    def test_url_and_query_shaped_values_are_rejected(self):
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"error":"https://provider.example/secret"}')
+        assert asm.assemble()["error_code"] == "upstream_stream_error"
+
+        other = StreamResponseAssembler()
+        other.add_sse_line('data: {"error":{"code":"k=v&x=y","type":"a/b"}}')
+        result = other.assemble()
+        assert result["error_code"] == "upstream_stream_error"
+        assert "error_type" not in result
+
+    def test_error_metadata_is_bounded_not_truncated(self):
+        """Over-long values are rejected, never truncated (PR #126 review)."""
+        asm = StreamResponseAssembler()
+        asm.add_sse_line(
+            'data: {"error":{"code":"%s","type":"%s"}}' % ("9" * 200, "t" * 200)
+        )
+        result = asm.assemble()
+        assert result["error_code"] == "upstream_stream_error"
+        assert "error_type" not in result
+
+    def test_long_identifier_prefix_with_prose_suffix_is_rejected(self):
+        """Review finding 2 (PR #126): validating after truncation let an
+        identifier-shaped 64-char prefix survive while the prose suffix that
+        proves it is not metadata fell off the end — a credential fragment
+        could leak as ``error_code``."""
+        leak = "sk-" + "a" * 80 + " was rejected"
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: ' + json.dumps({"error": leak}))
+        result = asm.assemble()
+        assert result["error_code"] == "upstream_stream_error"
+        assert "sk-" not in json.dumps(result)
+        assert "aaaa" not in json.dumps(result)
+
+    def test_fractional_error_code_is_not_rewritten(self):
+        """Review finding 3 (PR #126): ``502.5`` must not become ``"502"``."""
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"error":{"code":502.5,"type":"provider_error"}}')
+        result = asm.assemble()
+        assert result["error_code"] == "upstream_stream_error"
+        assert result["error_type"] == "provider_error"
+
+    def test_integral_float_error_code_keeps_its_value(self):
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"error":{"code":502.0,"type":"provider_error"}}')
+        assert asm.assemble()["error_code"] == "502"
+
+    def test_error_without_code_or_type_falls_back(self):
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"error":{"message":"boom"}}')
+        result = asm.assemble()
+        assert result["error_code"] == "upstream_stream_error"
+        assert "error_type" not in result
+
+    def test_non_error_payload_does_not_set_error_keys(self):
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"choices":[{"delta":{"content":"ok"}}]}')
+        asm.add_sse_line('data: {"usage":{"prompt_tokens":1,"completion_tokens":1}}')
+        result = asm.assemble()
+        assert "error_code" not in result
+        assert "error_type" not in result

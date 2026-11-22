@@ -236,6 +236,8 @@ def dispatch_capture_request_completed(
     degeneration_cutoff: bool | None = None,
     incomplete: bool | None = None,
     attempts: int | None = None,
+    error_code: str | None = None,
+    error_type: str | None = None,
 ) -> None:
     """Dispatch a request_completed capture event (fail-open)."""
     try:
@@ -265,6 +267,8 @@ def dispatch_capture_request_completed(
             degeneration_cutoff=degeneration_cutoff,
             incomplete=incomplete,
             attempts=attempts,
+            error_code=error_code,
+            error_type=error_type,
         )
     except Exception as exc:
         # Fail-open stays (capture must never break inference), but the
@@ -367,6 +371,10 @@ def dispatch_capture_stream_completed(
             streamed_ingress=True,
             streamed_upstream=True,
             incomplete=assembled.get("incomplete"),
+            # In-stream upstream error metadata (issue #125) — absent from
+            # the assembled dict unless an error was actually seen.
+            error_code=assembled.get("error_code"),
+            error_type=assembled.get("error_type"),
         )
     except Exception:
         pass

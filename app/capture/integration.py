@@ -383,6 +383,8 @@ class CaptureController:
         incomplete: bool | None = None,
         attempts: int | None = None,
         degeneration_cutoff: bool | None = None,
+        error_code: str | None = None,
+        error_type: str | None = None,
         sequence: int = 1,
     ) -> None:
         """Dispatch a request_completed event (fail-open)."""
@@ -419,6 +421,8 @@ class CaptureController:
                 incomplete=incomplete,
                 attempts=attempts,
                 degeneration_cutoff=degeneration_cutoff,
+                error_code=error_code,
+                error_type=error_type,
                 sequence=sequence,
             )
             self._dispatch(event)

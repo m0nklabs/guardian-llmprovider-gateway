@@ -80,9 +80,10 @@ class TestSchemaIdentity:
         assert SCHEMA_VERSION.startswith("1.")
         assert re.match(r"^1\.\d+\.\d+$", SCHEMA_VERSION)
 
-    def test_schema_version_bumped_to_1_2_0(self):
-        # Additive minor bumps: C1-C11 batch (1.1.0), degeneration_cutoff field (1.2.0).
-        assert SCHEMA_VERSION == "1.2.0"
+    def test_schema_version_bumped_to_1_3_0(self):
+        # Additive minor bumps: C1-C11 batch (1.1.0), degeneration_cutoff
+        # (1.2.0), in-stream upstream error metadata (1.3.0, issue #125).
+        assert SCHEMA_VERSION == "1.3.0"
 
 
 # ── Event ID computation ───────────────────────────────────────────────
@@ -1091,3 +1092,215 @@ class TestCaptureDispatchExtractionC4C5C6:
             requested_model="llama3.2-3b",
         )
         assert stub.received_kwargs["caller_request_id"] is None
+
+
+class TestCompletedEventStreamError:
+    """Issue #125 — an upstream error delivered inside an HTTP 200 stream.
+
+    The code/type are metadata and land on ``request_completed``; the
+    message text never does, and a normal completion is byte-identical to
+    before (absent-stays-absent).
+    """
+
+    def test_error_metadata_recorded_when_present(self, capture_config, base_ctx):
+        event = build_request_completed_event(
+            capture_config, base_ctx,
+            response_content="",
+            finish_reason=None,
+            incomplete=True,
+            http_status=200,
+            error_code="502",
+            error_type="provider_error",
+            sequence=1,
+        )
+        assert event["error_code"] == "502"
+        assert event["error_type"] == "provider_error"
+        # Existing keys keep their value/type: the stream really did end
+        # without a finish reason.
+        assert event["finish_reason"] is None
+        assert event["incomplete"] is True
+
+    def test_error_fields_absent_on_normal_completion(self, capture_config, base_ctx):
+        event = build_request_completed_event(
+            capture_config, base_ctx,
+            response_content="Hello!",
+            finish_reason="stop",
+            http_status=200,
+            sequence=1,
+        )
+        assert "error_code" not in event
+        assert "error_type" not in event
+
+    def test_message_text_never_lands_on_event(self, capture_config, base_ctx):
+        message = "Provider returned an empty response"
+        event = build_request_completed_event(
+            capture_config, base_ctx,
+            response_content="",
+            http_status=200,
+            error_code="502",
+            error_type=message,  # prose passed by mistake must not be stored
+            sequence=1,
+        )
+        assert event["error_code"] == "502"
+        assert "error_type" not in event
+        assert message not in json.dumps(event)
+
+    def test_prose_as_code_is_rejected(self, capture_config, base_ctx):
+        event = build_request_completed_event(
+            capture_config, base_ctx,
+            response_content="",
+            http_status=200,
+            error_code="Provider returned an empty response",
+            sequence=1,
+        )
+        assert "error_code" not in event
+
+    def test_payload_shaped_metadata_is_rejected(self, capture_config, base_ctx):
+        """Finding from PR #126 review: whitespace-free JSON/URL/key-value is
+        payload, not metadata, and must never land on the event."""
+        for bad in ('{"prompt":"private"}', "https://provider.example/secret", "k=v&x=y"):
+            event = build_request_completed_event(
+                capture_config, base_ctx,
+                response_content="",
+                http_status=200,
+                error_code=bad,
+                error_type=bad,
+                sequence=1,
+            )
+            assert "error_code" not in event, bad
+            assert "error_type" not in event, bad
+
+    def test_metadata_is_bounded_not_truncated(self, capture_config, base_ctx):
+        """Over-long values are rejected, never truncated (PR #126 review)."""
+        event = build_request_completed_event(
+            capture_config, base_ctx,
+            response_content="",
+            http_status=200,
+            error_code="9" * 200,
+            error_type="t" * 200,
+            sequence=1,
+        )
+        assert "error_code" not in event
+        assert "error_type" not in event
+
+    def test_credential_prefix_with_prose_suffix_is_rejected(self, capture_config, base_ctx):
+        """Review finding 2 (PR #126): the whole stripped value is validated,
+        so truncation cannot leave an identifier-shaped credential prefix."""
+        leak = "sk-" + "a" * 80 + " was rejected"
+        event = build_request_completed_event(
+            capture_config, base_ctx,
+            response_content="",
+            http_status=200,
+            error_code=leak,
+            error_type=leak,
+            sequence=1,
+        )
+        assert "error_code" not in event
+        assert "error_type" not in event
+        assert "sk-" not in json.dumps(event)
+
+    def test_fractional_error_code_is_dropped(self, capture_config, base_ctx):
+        """Review finding 3 (PR #126): a numeric ``502.5`` must not be
+        rewritten into the different code ``"502"``; it is omitted, while
+        ``502.0`` keeps its numeric identity."""
+        dropped = build_request_completed_event(
+            capture_config, base_ctx,
+            response_content="",
+            http_status=200,
+            error_code=502.5,
+            error_type="provider_error",
+            sequence=1,
+        )
+        assert "error_code" not in dropped
+        assert dropped["error_type"] == "provider_error"
+
+        integral = build_request_completed_event(
+            capture_config, base_ctx,
+            response_content="",
+            http_status=200,
+            error_code=502.0,
+            sequence=1,
+        )
+        assert integral["error_code"] == "502"
+
+    def test_string_error_code_stays_opaque(self, capture_config, base_ctx):
+        """A *string* code is metadata as reported — dotted codes are legal
+        provider identifiers and are stored verbatim."""
+        event = build_request_completed_event(
+            capture_config, base_ctx,
+            response_content="",
+            http_status=200,
+            error_code="provider.rate_limited",
+            sequence=1,
+        )
+        assert event["error_code"] == "provider.rate_limited"
+
+    def test_stream_dispatch_pulls_error_metadata_from_assembler(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from app.capture.stream_assembler import StreamResponseAssembler
+        from app.gateway import capture_dispatch
+
+        stub = _StubCaptureController()
+        monkeypatch.setattr(capture_dispatch, "get_capture_controller", lambda: stub)
+        assembler = StreamResponseAssembler()
+        assembler.add_sse_line(
+            'data: {"error":{"code":502,"message":"Provider returned an empty '
+            'response","type":"provider_error"}}'
+        )
+        assembler.add_sse_line("data: [DONE]")
+        ctx = BuildContext(
+            request_id="req-stream-error-1",
+            endpoint="/v1/chat/completions",
+            ingress_protocol=PROTOCOL_OPENAI,
+            route_type=ROUTE_LOCAL,
+            requested_model="llama3.2-3b",
+            resolved_model="llama3.2-3b",
+            capture_policy_version="1.0.0",
+            instance_id=TEST_INSTANCE_ID,
+            client_fingerprint=TEST_FINGERPRINT,
+        )
+        capture_dispatch.dispatch_capture_stream_completed(
+            None, "req-stream-error-1", "cli", "llama3.2-3b",
+            ctx, SimpleNamespace(should_capture=True), assembler,
+            {"prompt_tokens": 0, "completion_tokens": 0}, "chat/completions", 200,
+        )
+        kwargs = stub.completed_kwargs[0]
+        assert kwargs["error_code"] == "502"
+        assert kwargs["error_type"] == "provider_error"
+        # The failure was previously invisible: no finish reason, incomplete.
+        assert kwargs["finish_reason"] is None
+        assert kwargs["incomplete"] is True
+
+    def test_stream_dispatch_omits_error_metadata_on_normal_stream(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from app.capture.stream_assembler import StreamResponseAssembler
+        from app.gateway import capture_dispatch
+
+        stub = _StubCaptureController()
+        monkeypatch.setattr(capture_dispatch, "get_capture_controller", lambda: stub)
+        assembler = StreamResponseAssembler()
+        assembler.add_sse_line('data: {"choices":[{"delta":{"content":"Hi"}}]}')
+        assembler.add_sse_line('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}')
+        assembler.add_sse_line("data: [DONE]")
+        ctx = BuildContext(
+            request_id="req-stream-error-2",
+            endpoint="/v1/chat/completions",
+            ingress_protocol=PROTOCOL_OPENAI,
+            route_type=ROUTE_LOCAL,
+            requested_model="llama3.2-3b",
+            resolved_model="llama3.2-3b",
+            capture_policy_version="1.0.0",
+            instance_id=TEST_INSTANCE_ID,
+            client_fingerprint=TEST_FINGERPRINT,
+        )
+        capture_dispatch.dispatch_capture_stream_completed(
+            None, "req-stream-error-2", "cli", "llama3.2-3b",
+            ctx, SimpleNamespace(should_capture=True), assembler,
+            {"prompt_tokens": 0, "completion_tokens": 0}, "chat/completions", 200,
+        )
+        kwargs = stub.completed_kwargs[0]
+        assert kwargs["error_code"] is None
+        assert kwargs["error_type"] is None
+        assert kwargs["finish_reason"] == "stop"
