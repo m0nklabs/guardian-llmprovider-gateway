@@ -50,20 +50,24 @@ CALLER_IDENTITY_MAX_LEN = 256
 
 #: Maximum length for provider-reported error metadata (code/type) retained
 #: from an error delivered inside an HTTP 200 stream.  The values are
-#: provider-defined enum members, not free text.
+#: provider-defined enum members, not free text; a longer value is rejected
+#: outright, never truncated (truncating first would strip a prose or
+#: credential suffix and let an identifier-shaped prefix through).
 STREAM_ERROR_METADATA_MAX_LEN = 64
 
 #: Stable Guardian code used when an in-stream error carries no retainable
 #: code or type, so the failure is never invisible in the capture record.
 STREAM_ERROR_FALLBACK_CODE = "upstream_stream_error"
 
-#: Retained error metadata must be identifier-shaped: a leading alphanumeric
+#: Retained error metadata must be identifier-shaped — a leading alphanumeric
 #: followed by word characters or ``. : -`` (e.g. ``502``,
-#: ``invalid_request_error``, ``google.rpc.Code``).  This is the privacy
-#: boundary, not cosmetics: payload-shaped values must never survive —
-#: whitespace-free JSON (``{"prompt":"private"}``), URLs
-#: (``https://host/secret``) and query strings (``k=v&x=y``) are all
-#: rejected, because they carry content rather than an enum member.
+#: ``invalid_request_error``, ``google.rpc.Code``) — and the rule applies to
+#: the **whole** stripped value.  This is the privacy boundary, not
+#: cosmetics: payload-shaped values must never survive — whitespace-free JSON
+#: (``{"prompt":"private"}``), URLs (``https://host/secret``), query strings
+#: (``k=v&x=y``) and prose after an identifier prefix
+#: (``"sk-aaa… was rejected"``) are all rejected, because they carry content
+#: rather than an enum member.
 STREAM_ERROR_METADATA_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
 
 
@@ -119,11 +123,14 @@ def sanitize_stream_error_metadata(value: Any) -> str | None:
     Providers report in-stream errors as machine-readable codes/types
     (``{"code": 502, "type": "provider_error"}``), but the same shape may
     carry a human-readable message.  Only identifier-shaped values survive
-    (:data:`STREAM_ERROR_METADATA_RE`): an int is stringified, a str must
-    match the identifier pattern, and the result is truncated to
-    :data:`STREAM_ERROR_METADATA_MAX_LEN`.  Prose
-    (``"Provider returned an empty response"``) and payload-shaped values
-    (embedded JSON, URLs, query strings) are rejected.
+    (:data:`STREAM_ERROR_METADATA_RE`), applied to the **whole** stripped
+    value: an int is stringified, an integral float keeps its numeric
+    identity (``502.0`` → ``"502"``), and a value longer than
+    :data:`STREAM_ERROR_METADATA_MAX_LEN` is rejected rather than truncated.
+    Prose (``"Provider returned an empty response"``), payload-shaped values
+    (embedded JSON, URLs, query strings) and a fractional code (``502.5``,
+    which cannot be stored without changing the provider's code) are all
+    rejected.
 
     ``None`` means "nothing retainable" — the caller omits the field.
     """
@@ -133,13 +140,19 @@ def sanitize_stream_error_metadata(value: Any) -> str | None:
         value = str(value)
     elif isinstance(value, float):
         # Integral floats (``502.0``) keep their numeric identity; non-finite
-        # values carry no metadata and must not raise on int().
-        if not math.isfinite(value):
+        # values must not raise on int(), and a fractional code would be
+        # rewritten into a *different* code, so both are dropped.
+        if not math.isfinite(value) or not value.is_integer():
             return None
         value = str(int(value))
     if not isinstance(value, str):
         return None
-    candidate = value.strip()[:STREAM_ERROR_METADATA_MAX_LEN]
+    candidate = value.strip()
+    # Validate the whole value *before* any bounding.  Truncating first would
+    # let an identifier-shaped prefix through while the suffix that proves it
+    # is not metadata (prose, or a credential fragment) fell off the end.
+    if len(candidate) > STREAM_ERROR_METADATA_MAX_LEN:
+        return None
     if not STREAM_ERROR_METADATA_RE.match(candidate):
         return None
     return candidate

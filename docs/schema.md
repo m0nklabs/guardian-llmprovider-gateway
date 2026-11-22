@@ -89,7 +89,7 @@ One inference request produces a small event sequence sharing one `request_id`:
 | `native_tokens_reasoning` / `native_tokens_cached` | int | **1.1.0 (C5)** — upstream native token accounting when reported. |
 | `cost` | float | **1.1.0 (C5)** — upstream-reported cost when available. |
 | `provider_name` | str | **1.1.0 (C5)** — the actual serving backend from the upstream response (e.g. `Baidu`, `Z.AI`), distinct from the configured `provider` (e.g. `openrouter`). |
-| `error_code` | str ≤64 | **1.3.0 (#125)** — a provider error delivered **inside** an HTTP 200 stream (`{"error":{"code":502,…}}`). Provider-defined code, stringified; a normal completion omits the key. When the error carries no retainable code/type, the stable Guardian value `upstream_stream_error` is recorded instead, so the failure is never invisible. |
+| `error_code` | str ≤64 | **1.3.0 (#125)** — a provider error delivered **inside** an HTTP 200 stream (`{"error":{"code":502,…}}`). Provider-defined code, stringified (an integral `502.0` becomes `"502"`); a normal completion omits the key. Values longer than 64 chars, non-integral numbers, prose and payload-shaped strings are dropped rather than stored or truncated. When the error carries no retainable code/type, the stable Guardian value `upstream_stream_error` is recorded instead, so the failure is never invisible. |
 | `error_type` | str ≤64 | **1.3.0 (#125)** — the provider-defined error type from the same in-stream error payload (e.g. `provider_error`). Omitted when the provider reported none. |
 | `http_status`, `duration_ms`, `attempts` | — | `attempts` is the winning 1-based provider attempt on cloud routes. |
 | `streamed` | bool | Compatibility flag — **the ingress leg** (client requested streaming). |
@@ -102,10 +102,16 @@ fields.
 `error_code` / `error_type` on `request_completed` are **metadata only**: the
 provider's human-readable message is payload and is never stored, the raw
 error object is never stored, and values must be identifier-shaped — leading
-alphanumeric plus `A-Za-z0-9_.:-`, at most 64 characters — so embedded JSON,
-URLs, query strings and prose are all rejected. This distinguishes "the
-upstream answered with an in-stream error" from "the stream was truncated" —
-before 1.3.0 both looked like `finish_reason: null` + `incomplete: true`.
+alphanumeric plus `A-Za-z0-9_.:-`, at most 64 characters. The rule is applied
+to the **whole** value and **before** any length cap, so embedded JSON, URLs,
+query strings, prose, and prose behind an identifier prefix
+(`"sk-aaa… was rejected"`) are all rejected; an over-long value is dropped,
+never truncated, because truncating first would strip exactly the suffix that
+proves the prefix is not metadata. A fractional numeric code (`502.5`) is
+dropped too: storing it would silently change the provider's code. This
+distinguishes "the upstream answered with an in-stream error" from "the stream
+was truncated" — before 1.3.0 both looked like `finish_reason: null` +
+`incomplete: true`.
 
 ## `upstream_model` — known gap (#125)
 

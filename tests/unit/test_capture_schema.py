@@ -1170,7 +1170,8 @@ class TestCompletedEventStreamError:
             assert "error_code" not in event, bad
             assert "error_type" not in event, bad
 
-    def test_metadata_is_bounded(self, capture_config, base_ctx):
+    def test_metadata_is_bounded_not_truncated(self, capture_config, base_ctx):
+        """Over-long values are rejected, never truncated (PR #126 review)."""
         event = build_request_completed_event(
             capture_config, base_ctx,
             response_content="",
@@ -1179,8 +1180,60 @@ class TestCompletedEventStreamError:
             error_type="t" * 200,
             sequence=1,
         )
-        assert event["error_code"] == "9" * 64
-        assert event["error_type"] == "t" * 64
+        assert "error_code" not in event
+        assert "error_type" not in event
+
+    def test_credential_prefix_with_prose_suffix_is_rejected(self, capture_config, base_ctx):
+        """Review finding 2 (PR #126): the whole stripped value is validated,
+        so truncation cannot leave an identifier-shaped credential prefix."""
+        leak = "sk-" + "a" * 80 + " was rejected"
+        event = build_request_completed_event(
+            capture_config, base_ctx,
+            response_content="",
+            http_status=200,
+            error_code=leak,
+            error_type=leak,
+            sequence=1,
+        )
+        assert "error_code" not in event
+        assert "error_type" not in event
+        assert "sk-" not in json.dumps(event)
+
+    def test_fractional_error_code_is_dropped(self, capture_config, base_ctx):
+        """Review finding 3 (PR #126): a numeric ``502.5`` must not be
+        rewritten into the different code ``"502"``; it is omitted, while
+        ``502.0`` keeps its numeric identity."""
+        dropped = build_request_completed_event(
+            capture_config, base_ctx,
+            response_content="",
+            http_status=200,
+            error_code=502.5,
+            error_type="provider_error",
+            sequence=1,
+        )
+        assert "error_code" not in dropped
+        assert dropped["error_type"] == "provider_error"
+
+        integral = build_request_completed_event(
+            capture_config, base_ctx,
+            response_content="",
+            http_status=200,
+            error_code=502.0,
+            sequence=1,
+        )
+        assert integral["error_code"] == "502"
+
+    def test_string_error_code_stays_opaque(self, capture_config, base_ctx):
+        """A *string* code is metadata as reported — dotted codes are legal
+        provider identifiers and are stored verbatim."""
+        event = build_request_completed_event(
+            capture_config, base_ctx,
+            response_content="",
+            http_status=200,
+            error_code="provider.rate_limited",
+            sequence=1,
+        )
+        assert event["error_code"] == "provider.rate_limited"
 
     def test_stream_dispatch_pulls_error_metadata_from_assembler(self, monkeypatch):
         from types import SimpleNamespace

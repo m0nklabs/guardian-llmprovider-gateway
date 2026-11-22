@@ -460,14 +460,41 @@ class TestStreamAssemblerUpstreamError:
         assert result["error_code"] == "upstream_stream_error"
         assert "error_type" not in result
 
-    def test_error_metadata_is_bounded(self):
+    def test_error_metadata_is_bounded_not_truncated(self):
+        """Over-long values are rejected, never truncated (PR #126 review)."""
         asm = StreamResponseAssembler()
         asm.add_sse_line(
             'data: {"error":{"code":"%s","type":"%s"}}' % ("9" * 200, "t" * 200)
         )
         result = asm.assemble()
-        assert result["error_code"] == "9" * 64
-        assert result["error_type"] == "t" * 64
+        assert result["error_code"] == "upstream_stream_error"
+        assert "error_type" not in result
+
+    def test_long_identifier_prefix_with_prose_suffix_is_rejected(self):
+        """Review finding 2 (PR #126): validating after truncation let an
+        identifier-shaped 64-char prefix survive while the prose suffix that
+        proves it is not metadata fell off the end — a credential fragment
+        could leak as ``error_code``."""
+        leak = "sk-" + "a" * 80 + " was rejected"
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: ' + json.dumps({"error": leak}))
+        result = asm.assemble()
+        assert result["error_code"] == "upstream_stream_error"
+        assert "sk-" not in json.dumps(result)
+        assert "aaaa" not in json.dumps(result)
+
+    def test_fractional_error_code_is_not_rewritten(self):
+        """Review finding 3 (PR #126): ``502.5`` must not become ``"502"``."""
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"error":{"code":502.5,"type":"provider_error"}}')
+        result = asm.assemble()
+        assert result["error_code"] == "upstream_stream_error"
+        assert result["error_type"] == "provider_error"
+
+    def test_integral_float_error_code_keeps_its_value(self):
+        asm = StreamResponseAssembler()
+        asm.add_sse_line('data: {"error":{"code":502.0,"type":"provider_error"}}')
+        assert asm.assemble()["error_code"] == "502"
 
     def test_error_without_code_or_type_falls_back(self):
         asm = StreamResponseAssembler()
