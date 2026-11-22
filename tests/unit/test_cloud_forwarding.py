@@ -878,7 +878,7 @@ async def test_lowest_cost_reuses_one_preparation_and_existing_retry_contract(mo
 # ── Issue #127: provider-reported served model (upstream_model) ──────────
 
 
-def test_usage_mirror_carries_provider_reported_model():
+def test_capture_usage_mirror_carries_provider_reported_model():
     """The non-streaming response body's top-level ``model`` is what actually
     served the request; it enters the capture mirror sanitised."""
     from app.cloud_inference.forwarding import _extract_cloud_usage_mirror
@@ -1214,3 +1214,116 @@ async def test_cloud_streaming_capture_uses_last_reported_model(monkeypatch):
 
     assert len(capture_completed) == 1
     assert capture_completed[0]["upstream_model"] == second_model
+
+
+@pytest.mark.asyncio
+async def test_cloud_streaming_capture_reads_model_from_chunk_spelling_done(monkeypatch):
+    """Regression (PR #128 review): the model sniffer used a substring test
+    (``"[DONE]" not in line``), so a valid JSON chunk whose ``delta.content``
+    literally spells the SSE sentinel was skipped — losing the model id it
+    carried.  Only the real sentinel line may be excluded."""
+    response = httpx.Response(200, headers={"content-type": "text/event-stream"})
+    capture_completed = []
+    first_model = "openai/gpt-4o-2024-08-06"
+    marker_chunk_model = "openai/gpt-4o-2024-11-20"
+    stream_client = _patch_stream_common(
+        monkeypatch, capture_completed, _stream_provider(), _FakeStreamClient(response),
+        [
+            'data: {"model":"' + first_model + '","choices":[{"delta":{"content":"Hi"}}]}',
+            # The model writes the marker out as literal text in its output.
+            'data: {"model":"' + marker_chunk_model + '",'
+            '"choices":[{"delta":{"content":"[DONE]"}}]}',
+            # The REAL sentinel: contributes no model.
+            "data: [DONE]",
+        ],
+    )
+    with patch.object(forwarding.httpx, "AsyncClient", return_value=stream_client):
+        result = await forwarding.forward_to_cloud_provider(
+            "chat/completions", b"{}",
+            {"model": "openai/gpt-4o", "messages": [], "stream": True},
+            "openai/gpt-4o", SimpleNamespace(), "dsh",
+            capture_ctx=object(), capture_policy_result=object(), cloud_capture_start_time=0.0,
+        )
+        [chunk async for chunk in result.body_iterator]
+
+    assert len(capture_completed) == 1
+    assert capture_completed[0]["upstream_model"] == marker_chunk_model
+
+
+@pytest.mark.asyncio
+async def test_cloud_streaming_capture_marker_chunk_is_the_only_model_source(monkeypatch):
+    """The sharpest form of the same defect: a stream whose ONLY model-bearing
+    chunk spells ``[DONE]`` in its content must still record that model."""
+    response = httpx.Response(200, headers={"content-type": "text/event-stream"})
+    capture_completed = []
+    only_model = "anthropic/claude-sonnet-4.5"
+    stream_client = _patch_stream_common(
+        monkeypatch, capture_completed, _stream_provider(), _FakeStreamClient(response),
+        [
+            'data: {"model":"' + only_model + '","choices":[{"delta":{"content":"[DONE]"}}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            "data: [DONE]",
+        ],
+    )
+    with patch.object(forwarding.httpx, "AsyncClient", return_value=stream_client):
+        result = await forwarding.forward_to_cloud_provider(
+            "chat/completions", b"{}",
+            {"model": "anthropic/claude-sonnet-4.5", "messages": [], "stream": True},
+            "anthropic/claude-sonnet-4.5", SimpleNamespace(), "dsh",
+            capture_ctx=object(), capture_policy_result=object(), cloud_capture_start_time=0.0,
+        )
+        [chunk async for chunk in result.body_iterator]
+
+    assert len(capture_completed) == 1
+    assert capture_completed[0]["upstream_model"] == only_model
+
+
+@pytest.mark.asyncio
+async def test_cloud_streaming_capture_real_sentinel_contributes_no_model(monkeypatch):
+    """The real ``data: [DONE]`` sentinel must not invent a model: a stream
+    that carries nothing else reports ``null``."""
+    response = httpx.Response(200, headers={"content-type": "text/event-stream"})
+    capture_completed = []
+    stream_client = _patch_stream_common(
+        monkeypatch, capture_completed, _stream_provider(), _FakeStreamClient(response),
+        ["data: [DONE]"],
+    )
+    with patch.object(forwarding.httpx, "AsyncClient", return_value=stream_client):
+        result = await forwarding.forward_to_cloud_provider(
+            "chat/completions", b"{}",
+            {"model": "openai/gpt-4o", "messages": [], "stream": True},
+            "openai/gpt-4o", SimpleNamespace(), "dsh",
+            capture_ctx=object(), capture_policy_result=object(), cloud_capture_start_time=0.0,
+        )
+        [chunk async for chunk in result.body_iterator]
+
+    assert len(capture_completed) == 1
+    assert capture_completed[0]["upstream_model"] is None
+
+
+def test_capture_reported_model_from_line_skips_only_the_real_sentinel():
+    """Unit pin for the sentinel rule (PR #128 review).
+
+    ``data: [DONE]`` is the SSE sentinel and carries no model; a JSON data
+    line whose *content* spells ``[DONE]`` is an ordinary chunk and its model
+    must be read.  The comparison is exact, never a substring test.
+    """
+    from app.cloud_inference.forwarding import _reported_model_from_line
+
+    # The real sentinel, with and without surrounding whitespace.
+    assert _reported_model_from_line("data: [DONE]") is None
+    assert _reported_model_from_line("data:   [DONE]  ") is None
+    # A JSON chunk that merely *contains* the marker as model output.
+    assert _reported_model_from_line(
+        'data: {"model":"openai/gpt-4o-2024-11-20","choices":[{"delta":{"content":"[DONE]"}}]}'
+    ) == "openai/gpt-4o-2024-11-20"
+    assert _reported_model_from_line(
+        'data: {"model":"anthropic/claude-sonnet-4.5","choices":[{"delta":{"content":"x [DONE] y"}}]}'
+    ) == "anthropic/claude-sonnet-4.5"
+    # Non-data lines, payload-shape models and junk contribute nothing.
+    assert _reported_model_from_line("event: ping") is None
+    assert _reported_model_from_line("data: not-json") is None
+    assert _reported_model_from_line("data: [1,2,3]") is None
+    assert _reported_model_from_line('data: {"model":"mailto:alice@example.com"}') is None
+    assert _reported_model_from_line('data: {"choices":[{"delta":{}}]}') is None
+    assert _reported_model_from_line("") is None

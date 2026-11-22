@@ -402,6 +402,30 @@ def _extract_cloud_usage_mirror(payload: Any) -> dict[str, Any]:
     return mirror
 
 
+def _reported_model_from_line(line: str) -> str | None:
+    """Return the usable provider-reported model id of one raw SSE line.
+
+    Only the real ``data: [DONE]`` sentinel is skipped: a JSON chunk whose
+    content happens to spell ``[DONE]`` is an ordinary data line and may carry
+    the model — the payload is compared exactly, the same convention
+    ``StreamResponseAssembler.add_sse_line`` uses, never a substring test
+    (review finding on PR #128: a substring test dropped exactly those
+    chunks, losing their model id).
+    """
+    if not line.startswith("data: "):
+        return None
+    payload = line[6:].strip()
+    if not payload or payload == "[DONE]":
+        return None
+    try:
+        data = json.loads(payload)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return sanitize_upstream_model(data.get("model"))
+
+
 class _CloudClientDisconnected(Exception):
     """Internal signal: the downstream client vanished mid-upstream-call.
 
@@ -1260,21 +1284,12 @@ async def forward_to_cloud_provider(
             model_name=model_name,
             heartbeat_interval_s=STREAM_HEARTBEAT_INTERVAL_S,
         ):
-            if (
-                _cloud_assembler is not None
-                and line.startswith("data: ")
-                and "[DONE]" not in line
-            ):
-                try:
-                    _model_data = json.loads(line[6:])
-                except (json.JSONDecodeError, TypeError, ValueError):
-                    _model_data = None
-                if isinstance(_model_data, dict):
-                    _chunk_model = sanitize_upstream_model(_model_data.get("model"))
-                    # Only a usable value overwrites: an earlier valid id is
-                    # never erased by a chunk that carries none.
-                    if _chunk_model is not None:
-                        _cloud_reported_model = _chunk_model
+            if _cloud_assembler is not None:
+                _chunk_model = _reported_model_from_line(line)
+                # Only a usable value overwrites: an earlier valid id is never
+                # erased by a chunk that carries none.
+                if _chunk_model is not None:
+                    _cloud_reported_model = _chunk_model
             if (
                 _cloud_deg_detector.enabled
                 and line.startswith("data: ")
