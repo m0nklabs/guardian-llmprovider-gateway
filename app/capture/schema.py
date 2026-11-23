@@ -70,6 +70,20 @@ STREAM_ERROR_FALLBACK_CODE = "upstream_stream_error"
 #: rather than an enum member.
 STREAM_ERROR_METADATA_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$")
 
+#: Maximum length for a provider-reported model identifier retained on a
+#: completed event.  Longer values are rejected outright, never truncated.
+UPSTREAM_MODEL_MAX_LEN = 128
+
+#: A model identifier is **not** an enum member: it legitimately carries
+#: ``/ . : - _`` and digits (``openai/gpt-4o``, ``claude-3.5-sonnet``,
+#: ``google/gemini-3-pro:free``), so it needs its own bounded rule: one token,
+#: alphanumeric at both ends, model-id characters in between, applied to the
+#: **whole** stripped value.  ``@`` is deliberately absent: every contact
+#: address carries one (``sip:alice@example.com``) and no model id needs it.
+#: ``:`` stays legal only where :func:`sanitize_upstream_model` allows it — in
+#: a provider-qualified id, after the first ``/``.
+UPSTREAM_MODEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9_.:/-]*[A-Za-z0-9])?$")
+
 
 def _coerce_int(value: Any) -> int | None:
     """Best-effort int coercion; returns None when the value is not coercible.
@@ -154,6 +168,69 @@ def sanitize_stream_error_metadata(value: Any) -> str | None:
     if len(candidate) > STREAM_ERROR_METADATA_MAX_LEN:
         return None
     if not STREAM_ERROR_METADATA_RE.match(candidate):
+        return None
+    return candidate
+
+
+def sanitize_upstream_model(value: Any) -> str | None:
+    """Return a provider-reported model id bounded for a capture event.
+
+    The value is what the **provider** says served the request, so it is not
+    an enum member and not free text: it is one model-id token
+    (:data:`UPSTREAM_MODEL_RE`) of at most :data:`UPSTREAM_MODEL_MAX_LEN`
+    characters.  Payload-shaped values never survive — embedded JSON,
+    addresses (``tel:…``, ``sip:…``, ``mailto:…``, ``file:/…``, ``data:…``,
+    ``https://…``), query strings (``k=v&x=y``), prose with whitespace and
+    pure separator soup are all rejected, because they carry content or point
+    somewhere rather than naming a model.
+
+    Addresses are rejected **structurally**, not by a scheme denylist — a
+    denylist only ever loses the next scheme someone invents (``mailto:`` was
+    followed by ``file:``, then ``tel:``/``sip:``).  A model id is either
+    plain (``gpt-5.1``) or provider-qualified
+    (``openrouter/openai/gpt-4o:floor``), and neither form carries a scheme:
+
+    * ``@`` cannot occur at all (every contact address has one);
+    * a ``:`` is legal only **after** the first ``/``, so a colon before it
+      is always an address scheme (``tel:1555…``, ``data:…``, ``file:/p``,
+      ``https://h``), whatever the scheme is called;
+    * an empty path segment (``//``) is not a model id either.
+
+    **Deliberate cost:** a provider-less tag id (``qwen2.5-coder:32b``,
+    ``llama3.1:8b``) is rejected and the event records ``null``.  Telling a
+    trusted local tag from an untrusted upstream address needs a
+    provider-aware rule (trusted local configuration vs. the upstream string),
+    which is a later improvement — not something half-built here.
+
+    The whole stripped value is validated **before** any bounding: an
+    over-long value is dropped, never truncated, because truncating first
+    would leave an identifier-shaped prefix while the suffix that proves it
+    is not a model id (prose, a credential fragment) fell off the end — the
+    defect PR #126 had to fix for error metadata.
+
+    ``None`` means "the provider reported no usable model" — the caller omits
+    or nulls the field; it never invents a value from ``resolved_model``.
+    """
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate:
+        return None
+    if len(candidate) > UPSTREAM_MODEL_MAX_LEN:
+        return None
+    if not UPSTREAM_MODEL_RE.match(candidate):
+        return None
+    # A colon is legal only *after* the first slash: before it, it can only be
+    # an address scheme (see the docstring).  This is the rule that closes the
+    # class — ``tel:``, ``sip:``, ``mailto:``, ``file:/p``, ``data:``,
+    # ``javascript:`` and ``https://h`` all fail here, whatever they are
+    # named, while ``google/gemini-3-pro:free`` keeps its variant separator.
+    if ":" in candidate:
+        colon_index = candidate.find(":")
+        slash_index = candidate.find("/")
+        if slash_index == -1 or colon_index < slash_index:
+            return None
+    if "//" in candidate:
         return None
     return candidate
 
@@ -514,6 +591,7 @@ def build_request_completed_event(
     native_tokens_cached: int | None = None,
     cost: float | None = None,
     provider_name: str | None = None,
+    upstream_model: str | None = None,
     queue_wait_ms: float | None = None,
     duration_ms: float | None = None,
     http_status: int | None = None,
@@ -540,7 +618,14 @@ def build_request_completed_event(
         requested_model=ctx.requested_model,
         resolved_model=ctx.resolved_model,
     )
-    event["upstream_model"] = ctx.upstream_model
+    # Provider-reported served model (issue #127), the same provider-reported
+    # shape as ``provider_name``: an explicit value from the upstream payload
+    # wins over anything recorded on the context, only a usable value is
+    # retained, and ``null`` stays the answer when the provider reported
+    # nothing — the field is never inferred from ``resolved_model``.
+    event["upstream_model"] = sanitize_upstream_model(
+        upstream_model if upstream_model is not None else ctx.upstream_model
+    )
     event["provider"] = ctx.provider
     event["failover_group"] = ctx.failover_group
     # Wall-clock lifecycle timestamps: started_at_utc references the request

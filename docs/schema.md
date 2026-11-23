@@ -15,6 +15,13 @@
   every later field is optional per record. History: 1.1.0 (2026-08-30,
   C1–C11 feedback batch), 1.2.0 (`degeneration_cutoff`), 1.3.0 (in-stream
   upstream error metadata `error_code` / `error_type`, issue #125).
+- **#127 did not bump the version.** Populating `upstream_model` adds, removes
+  and renames no field: the key already existed on every event and has always
+  been `null`. Its *value* becomes available when the provider reports one —
+  the "more reliably present" case the policy allows within a version, not a
+  new optional field. Readers that handle `null` (all of them, since the field
+  has never been anything else) are unaffected; a reader that needs to know
+  whether a value is real checks for non-`null`, not `schema_version`.
 
 ## On-disk layout
 
@@ -61,7 +68,8 @@ One inference request produces a small event sequence sharing one `request_id`:
 | `guardian_instance_id`, `client_ref`, `endpoint`, `ingress_protocol`, `route_type`, `requested_model`, `resolved_model`, `capture_policy_version` | — | Context; `client_ref` is an HMAC of the key fingerprint (no keys in records). |
 | `caller_request_id` | str ≤256 | **1.1.0 (C6)** — caller-supplied correlation id echoed from the configured inbound headers (`capture.correlation_headers`, default `["x-request-id"]`). Absent when the client did not send one. |
 | `app_title` / `app_referer` | str ≤256 | **1.1.0 (C5)** — the client's `x-title` / `http-referer` headers when present (OpenRouter-style app attribution). Never fabricated. |
-| `upstream_model`, `provider`, `failover_group` | — | Routing metadata; see provider timing below. |
+| `upstream_model` | str ≤128 \| **null** | **Provider-reported** served model id (issue #127) — what the provider says served the request, never what Guardian decided (`requested_model` / `resolved_model`). See the section below. |
+| `provider`, `failover_group` | — | Routing metadata; see provider timing below. |
 | `record_auth` | obj | Per-record HMAC-SHA256 (`{alg, key_id, mac}`) when `GUARDIAN_CAPTURE_RECORD_AUTH_SECRET` is set. MAC is computed over the line without the `record_auth` field. |
 
 ## `request_received` extras
@@ -113,15 +121,82 @@ distinguishes "the upstream answered with an in-stream error" from "the stream
 was truncated" — before 1.3.0 both looked like `finish_reason: null` +
 `incomplete: true`.
 
-## `upstream_model` — known gap (#125)
+## `upstream_model` — provider-reported served model (#127)
 
-`upstream_model` is emitted as `null` on every event: no caller outside
-`app/capture/schema.py` ever populates `BuildContext.upstream_model`, so it is
-dead metadata (71/71 completed events in the production WAL at 2026-11-21).
-The key is kept for wire compatibility; populating it requires the resolved
-upstream model from the provider response (both stream chunks and
-non-streaming payloads carry a top-level `model`), which is a separate change
-— it is tracked as a follow-up on issue #125, not invented here.
+`upstream_model` is **what the provider says served the request** — not what
+the client asked for (`requested_model`), not what Guardian routed to
+(`resolved_model`) and not the configured provider. It is populated on
+`request_completed` only when the provider actually reported a usable value:
+
+- **Non-streaming:** the top-level `model` of the upstream response body.
+- **Streaming:** the top-level `model` of the upstream SSE chunks (OpenAI
+  chat deltas) or of the nested `response` object (Responses-style events).
+  The latest usable value wins; a provider that reports none leaves the field
+  at `null`.
+- **Cloud translation branches** (`/v1/messages`, `/v1/responses`): the
+  client — and therefore the stream assembler — sees Guardian's client-facing
+  model identity, not the provider's. Cloud forwarding sniffs the model from
+  the **raw** upstream chunks and that value wins, so a translated stream can
+  never present the requested identity as the served one. The sniffer applies
+  the same latest-usable-wins rule as the assembler: every chunk is inspected,
+  a later chunk without a usable model never erases an earlier value, and the
+  cost is one extra JSON parse per upstream chunk while capture is on.
+
+The key stays present on **every** event as before; on `request_received`,
+`request_failed` and `request_cancelled` it is `null` (nothing had served the
+request yet, or nothing did), and only `request_completed` can carry a value.
+
+The value is a bounded model identifier, not free text and not an enum
+member: it legitimately contains `/ . : - _` and digits
+(`openai/gpt-4o-2024-08-06`, `anthropic/claude-4.5-sonnet`,
+`openrouter/openai/gpt-4o:floor`). It is one token of at most 128 characters,
+alphanumeric at both ends. Embedded JSON, addresses, query strings
+(`k=v&x=y`), prose/whitespace and pure separator soup are dropped — they are
+payload or an address, not a model id.
+
+**Addresses are rejected structurally, not by a scheme list.** A deny-list of
+schemes only ever loses the next scheme someone invents (`mailto:` was
+followed by `file:`, then `tel:`/`sip:`), so the rule is shape-based:
+
+- `@` may not occur at all — every contact address carries one
+  (`sip:alice@example.com`, `mailto:alice@example.com`) and no model id needs
+  it;
+- a `:` is legal only **after** the first `/`. A model id is either plain
+  (`openai/gpt-5.1`) or provider-qualified (`google/gemini-3-pro:free`,
+  `openrouter/openai/gpt-4o:floor`), and in the qualified form the colon is a
+  *variant* separator. Before the first slash a colon can only be an address
+  scheme — `tel:15551234567`, `sip:…`, `mailto:…`, `file:/private/path`,
+  `data:…`, `javascript:…`, `https://host` all fail that one rule, whatever
+  the scheme is called;
+- an empty path segment (`//`) is not a model id either.
+
+**Deliberate cost, accepted 2026-11-22 (PR #128 review):** a provider-less tag
+id — Ollama-style `qwen2.5-coder:32b`, `llama3.1:8b` — has a colon before any
+slash, which no shape rule can tell apart from an address scheme, so it is
+rejected and the event records `null`. Provider-qualified forms of the same
+model (`openrouter/qwen/qwen2.5-coder:32b`) still record. Closing the address
+class is worth more than naming a local tag: a provider-aware rule (trusted
+local configuration vs. an unreliable upstream string) is a **later
+improvement, not something half-built here**.
+
+The rule is applied to the **whole** value before any length cap: an
+over-long value is rejected, never truncated, so an identifier-shaped
+credential prefix cannot survive as `upstream_model` (the PR #126 lesson).
+Unknown stays `null` — the field is never inferred from `resolved_model`.
+
+Before #127 the field was dead metadata (`null` on 71/71 completed events in
+the production WAL at 2026-11-21) because no caller populated it; see issue
+#127 for the evidence and the routing questions this answers (OpenRouter
+cheapest-eligible selection, alias/prefix drift, and naming the model that
+actually served an incident).
+
+Verification after the next operator-approved restart:
+
+```bash
+# Served-model distribution of completed events (null = provider reported none)
+jq -r 'select(.event_type=="request_completed") | .upstream_model // "null"' \
+  data/capture/guardian_capture_current.jsonl | sort | uniq -c | sort -rn
+```
 
 ## Provider field timing (C11)
 
@@ -174,7 +249,8 @@ Operational CLI: `scripts/guardianctl.py` (`status`, `files`, `rotate`,
 
 ```bash
 # Contract pin for every capture field, including the 1.3.0 in-stream
-# upstream error metadata (`error_code` / `error_type`).
+# upstream error metadata (`error_code` / `error_type`) and the
+# provider-reported `upstream_model` (#127).
 ./venv/bin/python -m pytest tests/unit/ -k capture -q
 ```
 
@@ -185,6 +261,12 @@ error mixed with content, unchanged tool-call stream),
 `tests/unit/test_capture_dispatch_contract.py` (absent-stays-absent on the
 completed event) and `tests/unit/test_cloud_forwarding.py` (the production
 cloud streaming path).
+
+`upstream_model` is pinned in the same suites: stream chunks and
+Responses-style events (latest usable wins, absent-stays-absent),
+non-streaming bodies, the sanitiser contract and its adversarial values, and
+the provenance rule that a translated cloud stream records the raw upstream
+model rather than the client-facing identity.
 
 ## Related docs
 

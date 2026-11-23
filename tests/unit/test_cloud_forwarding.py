@@ -873,3 +873,457 @@ async def test_lowest_cost_reuses_one_preparation_and_existing_retry_contract(mo
     assert calls[0]["retry_429"] is True
     assert sent[0]["model"] == "provider/model:floor"
     assert "service_tier" not in sent[0]
+
+
+# ── Issue #127: provider-reported served model (upstream_model) ──────────
+
+
+def test_capture_usage_mirror_carries_provider_reported_model():
+    """The non-streaming response body's top-level ``model`` is what actually
+    served the request; it enters the capture mirror sanitised."""
+    from app.cloud_inference.forwarding import _extract_cloud_usage_mirror
+
+    mirror = _extract_cloud_usage_mirror({"model": "openai/gpt-4o-2024-08-06"})
+    assert mirror["upstream_model"] == "openai/gpt-4o-2024-08-06"
+
+    assert "upstream_model" not in _extract_cloud_usage_mirror({"usage": {}})
+    for bad in ('{"prompt":"private"}', "https://provider.example/secret", "k=v&x=y", "a b"):
+        assert "upstream_model" not in _extract_cloud_usage_mirror({"model": bad}), bad
+
+
+def _patch_stream_common(
+    monkeypatch, capture_completed, provider, stream_client, sse_lines, *, needs_translation=False
+):
+    """Shared fake wiring for the cloud streaming forward tests."""
+    async def _lines(*args, **kwargs):
+        for line in sse_lines:
+            yield line
+
+    monkeypatch.setattr(
+        forwarding,
+        "_resolve_cloud_attempts",
+        lambda *args, **kwargs: ([(provider, "provider/model")], None),
+    )
+    monkeypatch.setattr(
+        forwarding,
+        "_prepare_cloud_candidate_request",
+        lambda candidate_provider, upstream_model, path, body, fingerprint: (
+            path, body, b"{}", needs_translation
+        ),
+    )
+    monkeypatch.setattr(forwarding, "_messages_contain_image_input", lambda messages: False)
+    monkeypatch.setattr(forwarding, "_get_cloud_key_fingerprint", lambda request, client_id: "fingerprint")
+    monkeypatch.setattr(forwarding, "_set_request_usage_metadata", lambda *args, **kwargs: None)
+    monkeypatch.setattr(forwarding, "_start_live_request_usage", lambda *args, **kwargs: None)
+    monkeypatch.setattr(forwarding, "_update_live_request_usage", lambda *args, **kwargs: None)
+    monkeypatch.setattr(forwarding, "_finish_live_request_usage", lambda *args, **kwargs: None)
+    monkeypatch.setattr(forwarding, "_record_request_token_usage", lambda *args, **kwargs: None)
+    monkeypatch.setattr(forwarding, "_coerce_usage_int", lambda value: int(value or 0))
+    monkeypatch.setattr(
+        forwarding,
+        "_dispatch_capture_request_completed",
+        lambda *args, **kwargs: capture_completed.append(kwargs),
+    )
+    monkeypatch.setattr(forwarding, "_dispatch_capture_request_cancelled", lambda *args, **kwargs: None)
+    monkeypatch.setattr(forwarding, "_dispatch_capture_request_failed", lambda *args, **kwargs: None)
+    monkeypatch.setattr(forwarding, "_guardian_debug_headers", lambda *args, **kwargs: {})
+    monkeypatch.setattr(forwarding, "_is_retryable_cloud_error", lambda *args, **kwargs: False)
+    monkeypatch.setattr(forwarding, "_sanitize_proxied_response_headers", lambda headers: {})
+    monkeypatch.setattr(forwarding, "_iter_sse_lines_with_watchdog", _lines)
+    monkeypatch.setattr(forwarding, "cloud_rate_limiter", _FakeRateLimiter())
+    monkeypatch.setattr(forwarding, "failover_health", _FakeHealthTracker())
+    monkeypatch.setattr(forwarding, "_GuardianRequestCancelled", type("RequestCancelled", (Exception,), {}))
+    return stream_client
+
+
+def _stream_provider():
+    return SimpleNamespace(
+        name="openrouter",
+        base_url="https://provider.example/v1",
+        api_key="test-key",
+        timeout_seconds=30,
+        extra_headers={},
+    )
+
+
+@pytest.mark.asyncio
+async def test_cloud_streaming_capture_records_provider_reported_model(monkeypatch):
+    """Stream chunks carry the served model; capture records it (#127)."""
+    response = httpx.Response(200, headers={"content-type": "text/event-stream"})
+    capture_completed = []
+    stream_client = _patch_stream_common(
+        monkeypatch, capture_completed, _stream_provider(), _FakeStreamClient(response),
+        [
+            'data: {"model":"openai/gpt-4o-2024-08-06","choices":[{"delta":{"content":"Hi"}}]}',
+            'data: {"model":"openai/gpt-4o-2024-08-06","choices":[{"delta":{},"finish_reason":"stop"}],'
+            '"usage":{"prompt_tokens":3,"completion_tokens":1}}',
+            "data: [DONE]",
+        ],
+    )
+    with patch.object(forwarding.httpx, "AsyncClient", return_value=stream_client):
+        result = await forwarding.forward_to_cloud_provider(
+            "chat/completions", b"{}",
+            {"model": "openai/gpt-4o", "messages": [], "stream": True},
+            "openai/gpt-4o", SimpleNamespace(), "dsh",
+            capture_ctx=object(), capture_policy_result=object(), cloud_capture_start_time=0.0,
+        )
+        [chunk async for chunk in result.body_iterator]
+
+    assert len(capture_completed) == 1
+    assert capture_completed[0]["upstream_model"] == "openai/gpt-4o-2024-08-06"
+
+
+@pytest.mark.asyncio
+async def test_cloud_streaming_capture_without_model_stays_null(monkeypatch):
+    """A provider that reports no model leaves the field at null (#127)."""
+    response = httpx.Response(200, headers={"content-type": "text/event-stream"})
+    capture_completed = []
+    stream_client = _patch_stream_common(
+        monkeypatch, capture_completed, _stream_provider(), _FakeStreamClient(response),
+        [
+            'data: {"choices":[{"delta":{"content":"Hi"}}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            "data: [DONE]",
+        ],
+    )
+    with patch.object(forwarding.httpx, "AsyncClient", return_value=stream_client):
+        result = await forwarding.forward_to_cloud_provider(
+            "chat/completions", b"{}",
+            {"model": "openai/gpt-4o", "messages": [], "stream": True},
+            "openai/gpt-4o", SimpleNamespace(), "dsh",
+            capture_ctx=object(), capture_policy_result=object(), cloud_capture_start_time=0.0,
+        )
+        [chunk async for chunk in result.body_iterator]
+
+    assert len(capture_completed) == 1
+    assert capture_completed[0]["upstream_model"] is None
+
+
+@pytest.mark.asyncio
+async def test_cloud_anthropic_streaming_capture_uses_raw_upstream_model(monkeypatch):
+    """Provenance pin: on the translated /v1/messages branch the client — and
+    therefore the capture assembler — sees Guardian's own client-facing model
+    name.  ``upstream_model`` must carry the RAW upstream model, never the
+    translated identity (#127)."""
+    response = httpx.Response(200, headers={"content-type": "text/event-stream"})
+    capture_completed = []
+    client_facing = "claude-sonnet-4-5"
+    raw_upstream = "anthropic/claude-4.5-sonnet-20250929"
+
+    def fake_anthropic_translation(source, model, request_stop_sequences=None):
+        async def _gen():
+            # Mirrors the real translator: it stamps the CLIENT-FACING model.
+            yield 'event: message_start\ndata: ' + json.dumps(
+                {"type": "message_start", "message": {"model": model, "usage": {"input_tokens": 3}}}
+            ) + "\n\n"
+            async for line in source:
+                if not line.startswith("data: "):
+                    continue
+                payload_text = line[6:].strip()
+                if payload_text == "[DONE]":
+                    break
+                try:
+                    data = json.loads(payload_text)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                choices = data.get("choices") or []
+                text = (choices[0].get("delta") or {}).get("content") if choices else None
+                if text:
+                    yield 'event: content_block_delta\ndata: ' + json.dumps(
+                        {"type": "content_block_delta", "delta": {"text": text}}
+                    ) + "\n\n"
+            yield 'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+        return _gen()
+
+    stream_client = _patch_stream_common(
+        monkeypatch, capture_completed, _stream_provider(), _FakeStreamClient(response),
+        [
+            'data: {"model":"' + raw_upstream + '","choices":[{"delta":{"content":"Hi"}}]}',
+            'data: {"model":"' + raw_upstream + '","choices":[{"delta":{},"finish_reason":"stop"}]}',
+            "data: [DONE]",
+        ],
+        needs_translation=True,
+    )
+    monkeypatch.setattr(
+        forwarding, "_translate_openai_stream_to_anthropic", fake_anthropic_translation
+    )
+    with patch.object(forwarding.httpx, "AsyncClient", return_value=stream_client):
+        result = await forwarding.forward_to_cloud_provider(
+            "messages", b"{}",
+            {"model": client_facing, "messages": [], "stream": True},
+            client_facing, SimpleNamespace(), "dsh",
+            capture_ctx=object(), capture_policy_result=object(), cloud_capture_start_time=0.0,
+        )
+        client_stream = b"".join([chunk async for chunk in result.body_iterator]).decode()
+
+    # The client really did see the translated, client-facing identity...
+    assert client_facing in client_stream
+    # ...while capture recorded what the provider said served the request.
+    assert len(capture_completed) == 1
+    assert capture_completed[0]["upstream_model"] == raw_upstream
+    assert capture_completed[0]["upstream_model"] != client_facing
+
+
+@pytest.mark.asyncio
+async def test_cloud_responses_streaming_capture_uses_raw_upstream_model(monkeypatch):
+    """Provenance pin for the translated /v1/responses branch.
+
+    This translator stamps the CLIENT-FACING model into ``response.model`` —
+    the exact key the stream assembler captures — so trusting the assembler
+    here would record the requested identity as if the provider had served
+    it.  The raw-chunk sniffer must win.
+    """
+    response = httpx.Response(200, headers={"content-type": "text/event-stream"})
+    capture_completed = []
+    client_facing = "orion/chat"
+    raw_upstream = "openai/gpt-5.1-mini-2026-01-15"
+
+    def fake_responses_translation(source, model, source_body=None):
+        async def _gen():
+            yield 'event: response.created\ndata: ' + json.dumps(
+                {"type": "response.created", "response": {"id": "r1", "model": model}}
+            ) + "\n\n"
+            async for line in source:
+                if not line.startswith("data: "):
+                    continue
+                payload_text = line[6:].strip()
+                if payload_text == "[DONE]":
+                    break
+                try:
+                    data = json.loads(payload_text)
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                choices = data.get("choices") or []
+                text = (choices[0].get("delta") or {}).get("content") if choices else None
+                if text:
+                    yield 'event: response.output_text.delta\ndata: ' + json.dumps(
+                        {"type": "response.output_text.delta", "delta": text}
+                    ) + "\n\n"
+            yield 'event: response.completed\ndata: ' + json.dumps(
+                {"type": "response.completed", "response": {"model": model, "status": "completed"}}
+            ) + "\n\n"
+        return _gen()
+
+    stream_client = _patch_stream_common(
+        monkeypatch, capture_completed, _stream_provider(), _FakeStreamClient(response),
+        [
+            'data: {"model":"' + raw_upstream + '","choices":[{"delta":{"content":"Hi"}}]}',
+            'data: {"model":"' + raw_upstream + '","choices":[{"delta":{},"finish_reason":"stop"}],'
+            '"usage":{"prompt_tokens":2,"completion_tokens":1}}',
+            "data: [DONE]",
+        ],
+    )
+    monkeypatch.setattr(
+        forwarding, "_translate_openai_stream_to_responses", fake_responses_translation
+    )
+    with patch.object(forwarding.httpx, "AsyncClient", return_value=stream_client):
+        result = await forwarding.forward_to_cloud_provider(
+            "responses", b"{}",
+            {"model": client_facing, "input": "hi", "stream": True},
+            client_facing, SimpleNamespace(), "dsh",
+            capture_ctx=object(), capture_policy_result=object(), cloud_capture_start_time=0.0,
+        )
+        client_stream = b"".join([chunk async for chunk in result.body_iterator]).decode()
+
+    assert client_facing in client_stream
+    assert len(capture_completed) == 1
+    assert capture_completed[0]["upstream_model"] == raw_upstream
+    assert capture_completed[0]["upstream_model"] != client_facing
+
+
+@pytest.mark.asyncio
+async def test_cloud_nonstream_capture_records_provider_reported_model(monkeypatch):
+    """The non-streaming response body's ``model`` reaches the capture
+    dispatch as ``upstream_model`` (#127)."""
+    provider = _stream_provider()
+    payload = {
+        "model": "openai/gpt-4o-2024-08-06",
+        "provider": "OpenAI",
+        "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "Hi"}}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 1},
+    }
+    capture_completed = []
+    http_client = _patch_nonstream_common(
+        monkeypatch, capture_completed, provider, _FakeNonStreamClient(httpx.Response(200, json=payload))
+    )
+    with patch.object(forwarding.httpx, "AsyncClient", return_value=http_client):
+        await forwarding.forward_to_cloud_provider(
+            "chat/completions", b"{}",
+            {"model": "openai/gpt-4o", "messages": [], "stream": False},
+            "openai/gpt-4o", SimpleNamespace(), "dsh",
+            capture_ctx=object(), capture_policy_result=object(), cloud_capture_start_time=0.0,
+        )
+
+    assert len(capture_completed) == 1
+    assert capture_completed[0]["upstream_model"] == "openai/gpt-4o-2024-08-06"
+    assert capture_completed[0]["provider_name"] == "OpenAI"
+
+
+@pytest.mark.asyncio
+async def test_cloud_nonstream_capture_without_model_stays_null(monkeypatch):
+    provider = _stream_provider()
+    payload = {
+        "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "Hi"}}],
+        "usage": {"prompt_tokens": 3, "completion_tokens": 1},
+    }
+    capture_completed = []
+    http_client = _patch_nonstream_common(
+        monkeypatch, capture_completed, provider, _FakeNonStreamClient(httpx.Response(200, json=payload))
+    )
+    with patch.object(forwarding.httpx, "AsyncClient", return_value=http_client):
+        await forwarding.forward_to_cloud_provider(
+            "chat/completions", b"{}",
+            {"model": "openai/gpt-4o", "messages": [], "stream": False},
+            "openai/gpt-4o", SimpleNamespace(), "dsh",
+            capture_ctx=object(), capture_policy_result=object(), cloud_capture_start_time=0.0,
+        )
+
+    assert len(capture_completed) == 1
+    assert capture_completed[0]["upstream_model"] is None
+
+
+@pytest.mark.asyncio
+async def test_cloud_streaming_capture_uses_last_reported_model(monkeypatch):
+    """Regression (PR #128 review): the sniffer used to freeze the first
+    usable value while the documented contract is "latest usable wins".  Two
+    different model ids in one stream must record the LATEST one, and a later
+    chunk without a model must not erase it."""
+    response = httpx.Response(200, headers={"content-type": "text/event-stream"})
+    capture_completed = []
+    first_model = "openai/gpt-4o-2024-08-06"
+    second_model = "openai/gpt-4o-2024-11-20"
+    stream_client = _patch_stream_common(
+        monkeypatch, capture_completed, _stream_provider(), _FakeStreamClient(response),
+        [
+            'data: {"model":"' + first_model + '","choices":[{"delta":{"content":"Hi"}}]}',
+            'data: {"model":"' + second_model + '","choices":[{"delta":{"content":" there"}}]}',
+            # Later chunk with no model (usage-only) must not erase the value.
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}],'
+            '"usage":{"prompt_tokens":3,"completion_tokens":2}}',
+            "data: [DONE]",
+        ],
+    )
+    with patch.object(forwarding.httpx, "AsyncClient", return_value=stream_client):
+        result = await forwarding.forward_to_cloud_provider(
+            "chat/completions", b"{}",
+            {"model": "openai/gpt-4o", "messages": [], "stream": True},
+            "openai/gpt-4o", SimpleNamespace(), "dsh",
+            capture_ctx=object(), capture_policy_result=object(), cloud_capture_start_time=0.0,
+        )
+        [chunk async for chunk in result.body_iterator]
+
+    assert len(capture_completed) == 1
+    assert capture_completed[0]["upstream_model"] == second_model
+
+
+@pytest.mark.asyncio
+async def test_cloud_streaming_capture_reads_model_from_chunk_spelling_done(monkeypatch):
+    """Regression (PR #128 review): the model sniffer used a substring test
+    (``"[DONE]" not in line``), so a valid JSON chunk whose ``delta.content``
+    literally spells the SSE sentinel was skipped — losing the model id it
+    carried.  Only the real sentinel line may be excluded."""
+    response = httpx.Response(200, headers={"content-type": "text/event-stream"})
+    capture_completed = []
+    first_model = "openai/gpt-4o-2024-08-06"
+    marker_chunk_model = "openai/gpt-4o-2024-11-20"
+    stream_client = _patch_stream_common(
+        monkeypatch, capture_completed, _stream_provider(), _FakeStreamClient(response),
+        [
+            'data: {"model":"' + first_model + '","choices":[{"delta":{"content":"Hi"}}]}',
+            # The model writes the marker out as literal text in its output.
+            'data: {"model":"' + marker_chunk_model + '",'
+            '"choices":[{"delta":{"content":"[DONE]"}}]}',
+            # The REAL sentinel: contributes no model.
+            "data: [DONE]",
+        ],
+    )
+    with patch.object(forwarding.httpx, "AsyncClient", return_value=stream_client):
+        result = await forwarding.forward_to_cloud_provider(
+            "chat/completions", b"{}",
+            {"model": "openai/gpt-4o", "messages": [], "stream": True},
+            "openai/gpt-4o", SimpleNamespace(), "dsh",
+            capture_ctx=object(), capture_policy_result=object(), cloud_capture_start_time=0.0,
+        )
+        [chunk async for chunk in result.body_iterator]
+
+    assert len(capture_completed) == 1
+    assert capture_completed[0]["upstream_model"] == marker_chunk_model
+
+
+@pytest.mark.asyncio
+async def test_cloud_streaming_capture_marker_chunk_is_the_only_model_source(monkeypatch):
+    """The sharpest form of the same defect: a stream whose ONLY model-bearing
+    chunk spells ``[DONE]`` in its content must still record that model."""
+    response = httpx.Response(200, headers={"content-type": "text/event-stream"})
+    capture_completed = []
+    only_model = "anthropic/claude-sonnet-4.5"
+    stream_client = _patch_stream_common(
+        monkeypatch, capture_completed, _stream_provider(), _FakeStreamClient(response),
+        [
+            'data: {"model":"' + only_model + '","choices":[{"delta":{"content":"[DONE]"}}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            "data: [DONE]",
+        ],
+    )
+    with patch.object(forwarding.httpx, "AsyncClient", return_value=stream_client):
+        result = await forwarding.forward_to_cloud_provider(
+            "chat/completions", b"{}",
+            {"model": "anthropic/claude-sonnet-4.5", "messages": [], "stream": True},
+            "anthropic/claude-sonnet-4.5", SimpleNamespace(), "dsh",
+            capture_ctx=object(), capture_policy_result=object(), cloud_capture_start_time=0.0,
+        )
+        [chunk async for chunk in result.body_iterator]
+
+    assert len(capture_completed) == 1
+    assert capture_completed[0]["upstream_model"] == only_model
+
+
+@pytest.mark.asyncio
+async def test_cloud_streaming_capture_real_sentinel_contributes_no_model(monkeypatch):
+    """The real ``data: [DONE]`` sentinel must not invent a model: a stream
+    that carries nothing else reports ``null``."""
+    response = httpx.Response(200, headers={"content-type": "text/event-stream"})
+    capture_completed = []
+    stream_client = _patch_stream_common(
+        monkeypatch, capture_completed, _stream_provider(), _FakeStreamClient(response),
+        ["data: [DONE]"],
+    )
+    with patch.object(forwarding.httpx, "AsyncClient", return_value=stream_client):
+        result = await forwarding.forward_to_cloud_provider(
+            "chat/completions", b"{}",
+            {"model": "openai/gpt-4o", "messages": [], "stream": True},
+            "openai/gpt-4o", SimpleNamespace(), "dsh",
+            capture_ctx=object(), capture_policy_result=object(), cloud_capture_start_time=0.0,
+        )
+        [chunk async for chunk in result.body_iterator]
+
+    assert len(capture_completed) == 1
+    assert capture_completed[0]["upstream_model"] is None
+
+
+def test_capture_reported_model_from_line_skips_only_the_real_sentinel():
+    """Unit pin for the sentinel rule (PR #128 review).
+
+    ``data: [DONE]`` is the SSE sentinel and carries no model; a JSON data
+    line whose *content* spells ``[DONE]`` is an ordinary chunk and its model
+    must be read.  The comparison is exact, never a substring test.
+    """
+    from app.cloud_inference.forwarding import _reported_model_from_line
+
+    # The real sentinel, with and without surrounding whitespace.
+    assert _reported_model_from_line("data: [DONE]") is None
+    assert _reported_model_from_line("data:   [DONE]  ") is None
+    # A JSON chunk that merely *contains* the marker as model output.
+    assert _reported_model_from_line(
+        'data: {"model":"openai/gpt-4o-2024-11-20","choices":[{"delta":{"content":"[DONE]"}}]}'
+    ) == "openai/gpt-4o-2024-11-20"
+    assert _reported_model_from_line(
+        'data: {"model":"anthropic/claude-sonnet-4.5","choices":[{"delta":{"content":"x [DONE] y"}}]}'
+    ) == "anthropic/claude-sonnet-4.5"
+    # Non-data lines, payload-shape models and junk contribute nothing.
+    assert _reported_model_from_line("event: ping") is None
+    assert _reported_model_from_line("data: not-json") is None
+    assert _reported_model_from_line("data: [1,2,3]") is None
+    assert _reported_model_from_line('data: {"model":"mailto:alice@example.com"}') is None
+    assert _reported_model_from_line('data: {"choices":[{"delta":{}}]}') is None
+    assert _reported_model_from_line("") is None

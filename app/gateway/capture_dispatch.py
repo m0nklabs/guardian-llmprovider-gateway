@@ -227,6 +227,7 @@ def dispatch_capture_request_completed(
     native_tokens_cached: int | None = None,
     cost: float | None = None,
     provider_name: str | None = None,
+    upstream_model: str | None = None,
     queue_wait_ms: float | None = None,
     duration_ms: float | None = None,
     http_status: int | None = None,
@@ -258,6 +259,7 @@ def dispatch_capture_request_completed(
             native_tokens_cached=native_tokens_cached,
             cost=cost,
             provider_name=provider_name,
+            upstream_model=upstream_model,
             queue_wait_ms=queue_wait_ms,
             duration_ms=duration_ms,
             http_status=http_status,
@@ -361,6 +363,7 @@ def dispatch_capture_stream_completed(
             native_tokens_cached=assembled.get("native_tokens_cached"),
             cost=assembled.get("cost"),
             provider_name=assembled.get("provider_name"),
+            upstream_model=assembled.get("upstream_model"),
             degeneration_cutoff=degeneration_cutoff,
             prompt_tokens=usage_totals.get("prompt_tokens") or None,
             completion_tokens=usage_totals.get("completion_tokens") or None,
@@ -407,6 +410,7 @@ def dispatch_capture_nonstream_completed(
         native_tokens_cached = None
         cost = None
         provider_name = None
+        upstream_model = None
 
         def _accept_usage_mirror(usage: Any) -> None:
             """Fill the rich usage mirror fields from an upstream usage dict."""
@@ -439,6 +443,12 @@ def dispatch_capture_nonstream_completed(
             reported_provider = payload.get("provider")
             if isinstance(reported_provider, str) and reported_provider:
                 provider_name = reported_provider
+            # Provider-reported served model id (issue #127) — the top-level
+            # ``model`` every OpenAI-compatible, Anthropic-shaped and
+            # Responses body carries, sanitised by the event builder.
+            reported_model = payload.get("model")
+            if isinstance(reported_model, str) and reported_model:
+                upstream_model = reported_model
             # OpenAI Responses API object: carries an ``output`` item list
             # (message / function_call / reasoning) instead of ``choices``
             # or a raw Anthropic-style ``content`` array.
@@ -568,6 +578,7 @@ def dispatch_capture_nonstream_completed(
             native_tokens_cached=native_tokens_cached,
             cost=cost,
             provider_name=provider_name,
+            upstream_model=upstream_model,
             tool_calls=tool_calls,
             http_status=status_code,
             streamed=False,

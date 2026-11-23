@@ -25,6 +25,7 @@ from app.capture.schema import (
     compute_client_ref,
     compute_event_id,
     compute_record_auth,
+    sanitize_upstream_model,
 )
 
 # ── Constants ──────────────────────────────────────────────────────────
@@ -1304,3 +1305,338 @@ class TestCompletedEventStreamError:
         assert kwargs["error_code"] is None
         assert kwargs["error_type"] is None
         assert kwargs["finish_reason"] == "stop"
+
+
+class TestUpstreamModelSanitizer:
+    """Issue #127 — a model identifier is not an enum member.
+
+    It legitimately carries ``/ . : - _ @`` and digits, so it gets its own
+    bounded identifier rule instead of the ``error_code`` charset.
+    """
+
+    @pytest.mark.parametrize("value", [
+        "gpt-4o",
+        "gpt-4o-mini",
+        "openai/gpt-5.1",
+        "openai/gpt-4o-2024-08-06",
+        "anthropic/claude-4.5-sonnet",
+        "anthropic/claude-sonnet-4.5",
+        "claude-3.5-sonnet",
+        "models/gemini-2.5-flash",
+        "meta-llama/llama-3.3-70b-instruct",
+        "DeepSeek-V3.2-Exp",
+        # Provider-qualified ``:variant`` ids keep the colon: the colon comes
+        # after the first slash, so it is a variant separator, not a scheme.
+        "openrouter/openai/gpt-4o:floor",
+        "google/gemini-3-pro:free",
+        "openrouter/meta-llama/llama-3.3-70b-instruct:free",
+        "nvidia/llama-3.1-nemotron-70b-instruct:floor",
+        "m",
+        "9",
+    ])
+    def test_accepts_real_model_ids(self, value):
+        assert sanitize_upstream_model(value) == value
+
+    def test_strips_surrounding_whitespace(self):
+        assert sanitize_upstream_model("  openai/gpt-4o\n") == "openai/gpt-4o"
+
+    def test_boundary_length_is_128_and_129_is_rejected(self):
+        longest = "a" * 128
+        assert sanitize_upstream_model(longest) == longest
+        assert sanitize_upstream_model("a" * 129) is None
+
+    @pytest.mark.parametrize("value", [
+        # Embedded JSON.
+        '{"prompt":"private"}',
+        '{"model":"x"}',
+        # URLs — the colon and slash alone are legal *inside* an id, so the
+        # scheme/authority separator is what makes this a URL.
+        "http://provider.example/secret",
+        "https://provider.example/secret",
+        "HTTP://provider.example/secret",
+        "//provider.example/secret",
+        # Addresses are rejected structurally, not by a scheme list, so this
+        # covers every scheme — including ones nobody has invented yet
+        # (review findings on PR #128: ``mailto:``/``file:``, then
+        # ``tel:``/``sip:``).
+        "mailto:alice@example.com",
+        "MAILTO:Alice@Example.com",
+        "tel:15551234567",
+        "tel:+15551234567",
+        "sip:alice@example.com",
+        "file:/private/path",
+        "File:/etc/passwd",
+        "data:text/plain;base64,QQ==",
+        "javascript:alert",
+        "http:provider.example",
+        "ws://provider.example/secret",
+        "wss://provider.example/secret",
+        "ftp:provider.example/secret",
+        "ssh://provider.example/secret",
+        "gopher:/provider.example/secret",
+        "unknownscheme:whatever/next",
+        # Deliberate trade-off of the structural rule: a provider-less tag id
+        # has a colon before any slash, which is indistinguishable from an
+        # address scheme.  ``qwen2.5-coder:32b`` and ``llama3.1:8b`` therefore
+        # yield ``null`` (see the dedicated trade-off test below and
+        # docs/schema.md).
+        "qwen2.5-coder:32b",
+        "llama3.1:8b",
+        # An empty path segment is not a model id either (no scheme needed).
+        "openai//gpt-4o",
+        "openrouter/openai//gpt-4o",
+        # An ``@`` makes a value a contact address; no model id needs one.
+        "qwen2.5-coder:32b@q4_k_m",
+        "openai/gpt-4o@provider",
+        # Query strings / key-value pairs.
+        "k=v&x=y",
+        "model=gpt-4o",
+        # Prose and any whitespace.
+        "Provider returned an empty response",
+        "gpt-4o was not found",
+        "gpt\t4o",
+        "gpt 4o",
+        # Non-id shapes.
+        "",
+        "   ",
+        "/gpt-4o",
+        "gpt-4o/",
+        "-gpt-4o",
+        "gpt-4o,",
+        "openai/gpt-4o;",
+        None,
+        502,
+        4.5,
+        True,
+        ["gpt-4o"],
+        {"model": "gpt-4o"},
+    ])
+    def test_rejects_payload_shapes_and_non_strings(self, value):
+        assert sanitize_upstream_model(value) is None
+
+    def test_whole_value_validated_before_bounding(self):
+        """PR #126 lesson: validating after truncation would keep an
+        identifier-shaped 128-char prefix while the suffix that proves it is
+        not a model id falls off the end — a credential fragment could leak
+        as ``upstream_model``.  Over-long values are rejected outright."""
+        leak = "sk-" + "a" * 200 + " was rejected"
+        assert sanitize_upstream_model(leak) is None
+        # Same shape without the prose suffix is still over-long → rejected,
+        # never truncated to its first 128 characters.
+        assert sanitize_upstream_model("sk-" + "a" * 200) is None
+        assert sanitize_upstream_model("a" * 128 + "B") is None
+
+
+class TestCompletedEventUpstreamModel:
+    """Issue #127 — ``request_completed.upstream_model`` is provider-decided.
+
+    It is populated only when the provider reported a usable value; unknown
+    stays exactly as before (``null``), so no consumer breaks.
+    """
+
+    def test_provider_reported_model_lands_on_event(self, capture_config, base_ctx):
+        event = build_request_completed_event(
+            capture_config, base_ctx,
+            response_content="Hello!",
+            finish_reason="stop",
+            upstream_model="openai/gpt-4o-2024-08-06",
+            http_status=200,
+            sequence=1,
+        )
+        assert event["upstream_model"] == "openai/gpt-4o-2024-08-06"
+
+    def test_absent_when_provider_reported_nothing(self, capture_config, base_ctx):
+        """The key keeps its pre-#127 contract: present, and null."""
+        event = build_request_completed_event(
+            capture_config, base_ctx,
+            response_content="Hello!",
+            finish_reason="stop",
+            http_status=200,
+            sequence=1,
+        )
+        assert event["upstream_model"] is None
+
+    def test_never_inferred_from_resolved_model(self, capture_config, base_ctx):
+        """What Guardian decided (``resolved_model``) is not what served."""
+        event = build_request_completed_event(
+            capture_config, base_ctx,
+            response_content="Hello!",
+            finish_reason="stop",
+            http_status=200,
+            sequence=1,
+        )
+        assert base_ctx.resolved_model == "llama3.2-3b"
+        assert event["upstream_model"] is None
+
+    def test_payload_shaped_values_rejected_at_event_level(self, capture_config, base_ctx):
+        """The event builder is the final guarantee: a payload-shaped value
+        reaching it must not land on the wire."""
+        for bad in (
+            '{"prompt":"private"}',
+            "https://provider.example/secret",
+            "k=v&x=y",
+            "Provider returned an empty response",
+            # Review findings on PR #128: charset-valid addresses.  The rule is
+            # structural (colon before the first slash, or any ``@``), so these
+            # hold for schemes nobody listed yet.
+            "mailto:alice@example.com",
+            "file:/private/path",
+            "tel:15551234567",
+            "sip:alice@example.com",
+            "data:text/plain",
+            "javascript:alert",
+        ):
+            event = build_request_completed_event(
+                capture_config, base_ctx,
+                response_content="",
+                upstream_model=bad,
+                http_status=200,
+                sequence=1,
+            )
+            assert event["upstream_model"] is None, bad
+            assert "private" not in json.dumps(event), bad
+            assert "alice@example.com" not in json.dumps(event), bad
+
+    def test_provider_free_variant_survives_event_level(self, capture_config, base_ctx):
+        """Regression for the same finding: a provider-qualified
+        ``:free``/``:variant`` id keeps its colon — after the first slash the
+        colon is a variant separator, not a scheme."""
+        for good in (
+            "google/gemini-3-pro:free",
+            "openrouter/meta-llama/llama-3.3-70b-instruct:free",
+            "openrouter/openai/gpt-4o:floor",
+        ):
+            event = build_request_completed_event(
+                capture_config, base_ctx,
+                response_content="",
+                upstream_model=good,
+                http_status=200,
+                sequence=1,
+            )
+            assert event["upstream_model"] == good, good
+
+    def test_providerless_tag_id_is_the_deliberate_tradeoff(self, capture_config, base_ctx):
+        """The structural address rule costs provider-less tag ids.
+
+        ``qwen2.5-coder:32b`` / ``llama3.1:8b`` have a colon before any slash,
+        which no shape rule can tell apart from an address scheme
+        (``tel:15551234567`` has the same shape).  They are rejected and the
+        event records ``null`` — documented in ``docs/schema.md`` as the price
+        for closing the address class; a provider-aware rule (trusted local
+        configuration vs. unreliable upstream string) is a later improvement.
+        """
+        for tag in ("qwen2.5-coder:32b", "llama3.1:8b"):
+            assert sanitize_upstream_model(tag) is None, tag
+            event = build_request_completed_event(
+                capture_config, base_ctx,
+                response_content="",
+                upstream_model=tag,
+                http_status=200,
+                sequence=1,
+            )
+            assert event["upstream_model"] is None, tag
+        # Provider-qualified ids are unaffected, so the loss is bounded to
+        # provider-less tags.
+        assert sanitize_upstream_model("openrouter/qwen/qwen2.5-coder:32b") == (
+            "openrouter/qwen/qwen2.5-coder:32b"
+        )
+
+    def test_over_long_value_is_not_truncated_on_event(self, capture_config, base_ctx):
+        event = build_request_completed_event(
+            capture_config, base_ctx,
+            response_content="",
+            upstream_model="sk-" + "a" * 200,
+            http_status=200,
+            sequence=1,
+        )
+        assert event["upstream_model"] is None
+        assert "aaaa" not in json.dumps(event)
+
+    def test_context_value_still_sanitised(self, capture_config, base_ctx):
+        """A routing-time value on the context is bounded the same way."""
+        ctx = replace(base_ctx, upstream_model="https://provider.example/secret")
+        event = build_request_completed_event(
+            capture_config, ctx,
+            response_content="",
+            http_status=200,
+            sequence=1,
+        )
+        assert event["upstream_model"] is None
+
+    def test_stream_dispatch_pulls_model_from_assembler(self, monkeypatch, base_ctx):
+        from types import SimpleNamespace
+
+        from app.capture.stream_assembler import StreamResponseAssembler
+        from app.gateway import capture_dispatch
+
+        stub = _StubCaptureController()
+        monkeypatch.setattr(capture_dispatch, "get_capture_controller", lambda: stub)
+        assembler = StreamResponseAssembler()
+        assembler.add_sse_line('data: {"model":"openai/gpt-4o","choices":[{"delta":{"content":"Hi"}}]}')
+        assembler.add_sse_line('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}')
+        capture_dispatch.dispatch_capture_stream_completed(
+            None, "req-model-1", "cli", "openai/gpt-4o",
+            base_ctx, SimpleNamespace(should_capture=True), assembler,
+            {"prompt_tokens": 0, "completion_tokens": 0}, "chat/completions", 200,
+        )
+        kwargs = stub.completed_kwargs[0]
+        assert kwargs["upstream_model"] == "openai/gpt-4o"
+
+    def test_nonstream_body_model_becomes_upstream_model(self, monkeypatch):
+        import time as _time
+        from types import SimpleNamespace
+
+        from app.gateway import capture_dispatch
+
+        stub = _StubCaptureController()
+        monkeypatch.setattr(capture_dispatch, "get_capture_controller", lambda: stub)
+        ctx = BuildContext(
+            request_id="req-model-2",
+            endpoint="/v1/chat/completions",
+            ingress_protocol=PROTOCOL_OPENAI,
+            route_type=ROUTE_LOCAL,
+            requested_model="orion/chat",
+            resolved_model="orion/chat",
+            capture_policy_version="1.0.0",
+            instance_id=TEST_INSTANCE_ID,
+            client_fingerprint=TEST_FINGERPRINT,
+        )
+        payload = {
+            "model": "meta-llama/llama-3.3-70b-instruct",
+            "choices": [{"message": {"role": "assistant", "content": "Hi"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 1},
+        }
+        capture_dispatch.dispatch_capture_nonstream_completed(
+            None, "req-model-2", "cli", "orion/chat",
+            ctx, SimpleNamespace(should_capture=True), payload, 200,
+            _time.monotonic(),
+        )
+        kwargs = stub.completed_kwargs[0]
+        assert kwargs["upstream_model"] == "meta-llama/llama-3.3-70b-instruct"
+
+    def test_nonstream_body_without_model_reports_none(self, monkeypatch):
+        import time as _time
+        from types import SimpleNamespace
+
+        from app.gateway import capture_dispatch
+
+        stub = _StubCaptureController()
+        monkeypatch.setattr(capture_dispatch, "get_capture_controller", lambda: stub)
+        ctx = BuildContext(
+            request_id="req-model-3",
+            endpoint="/v1/chat/completions",
+            ingress_protocol=PROTOCOL_OPENAI,
+            route_type=ROUTE_LOCAL,
+            requested_model="orion/chat",
+            resolved_model="orion/chat",
+            capture_policy_version="1.0.0",
+            instance_id=TEST_INSTANCE_ID,
+            client_fingerprint=TEST_FINGERPRINT,
+        )
+        payload = {"choices": [{"message": {"content": "Hi"}, "finish_reason": "stop"}]}
+        capture_dispatch.dispatch_capture_nonstream_completed(
+            None, "req-model-3", "cli", "orion/chat",
+            ctx, SimpleNamespace(should_capture=True), payload, 200,
+            _time.monotonic(),
+        )
+        assert stub.completed_kwargs[0]["upstream_model"] is None
