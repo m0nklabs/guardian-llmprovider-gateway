@@ -760,7 +760,7 @@ class TestCmdPermissionsApply:
         def racing_apply(scan):
             victim.unlink()
             os.mkfifo(victim)
-            os.chmod(victim, 0o644)
+            victim.chmod(0o644)  # fixture mode, not a production permission
             return real_apply(scan)
 
         monkeypatch.setattr(gctl, "_apply_permission_fixes", racing_apply)
