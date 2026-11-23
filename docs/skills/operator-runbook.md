@@ -101,17 +101,30 @@ What it does:
 - `--root DIR` inspects another tree instead of the configured capture root;
   use it to rehearse on a copy or on a temporary tree. The root is resolved to
   an absolute path before the scan, and `--json` reports absolute paths.
-- **A correction only ever touches the entry it audited.** `--apply` opens each
-  drifting entry with `O_NOFOLLOW`, re-checks its `st_dev`/`st_ino` against what
-  the scan saw, and `fchmod`s that descriptor — so an entry swapped for a
-  symlink (or for a different file) between scan and correction is refused and
-  reported, and nothing outside the capture tree can be changed by it.
+- **The walk is descriptor-based, so it cannot leave the tree.** Every directory
+  is opened with `O_DIRECTORY | O_NOFOLLOW` relative to its parent's descriptor
+  and its `st_dev`/`st_ino` is compared with what the listing said; children are
+  read with `scandir(fd)` / `stat(name, dir_fd=fd)`. A directory swapped for a
+  symlink mid-walk is therefore never traversed (it is reported as a skipped
+  symlink), and no file outside the capture root can be audited.
+- **A correction only ever touches the entry it audited.** `--apply` re-opens the
+  parent directory (identity-checked), reaches the entry by name relative to it
+  with `O_NOFOLLOW | O_NONBLOCK`, re-checks the entry's own `st_dev`/`st_ino`,
+  and `fchmod`s that descriptor. A symlink or type replacement (`ELOOP`,
+  `ENOTDIR`) and a replaced inode are reported failures with a non-zero exit;
+  nothing outside the capture tree can be changed. `O_NONBLOCK` is why a FIFO
+  swapped in for an entry fails immediately instead of blocking the open.
+- **A stale scan never widens a mode.** The drift is recomputed from the mode
+  read on the descriptor, so an entry someone tightened in the meantime (e.g.
+  `0644` → `0600` after the scan) is left alone and reported as "changed
+  meanwhile"; `--apply` only ever normalises what still drifts.
 - **An entry it cannot open is a reported failure, not a repair**: a file at
   `0000` (or a directory the owner cannot read) denies the open the correction
   needs, so it is listed and the exit status is non-zero; fix those by hand.
   Likewise an **unreadable directory aborts the whole audit** (exit 2) instead
   of reporting a partial tree as clean — a walk that never entered a directory
-  cannot vouch for what is inside it.
+  cannot vouch for what is inside it, and a path replaced by something of another
+  type (`ENOTDIR`) is a replacement, not a disappearance.
 
 `--apply` on production data is the operator's call, and it is a `chmod` on
 user content that is already on disk: run the report first, read the list, then

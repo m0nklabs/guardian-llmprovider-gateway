@@ -15,8 +15,10 @@ import errno
 import importlib.util
 import json
 import os
+import shutil
 import stat
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -321,31 +323,22 @@ class TestScanPermissionDrift:
     def test_entry_vanishing_mid_walk_does_not_crash(self, gctl, tmp_path, monkeypatch):
         root = _make_tree(tmp_path)
         victim = root / "media" / "req_legacy_0.png"
-        media_dir = root / "media"
-        real_scandir = os.scandir
+        real_stat = os.stat
         state = {"unlinked": False}
 
-        class _VanishingScandir:
-            """Lists a directory, then deletes an entry before the walk stats it."""
+        def fake_stat(path, *args, **kwargs):
+            # The descriptor walk lists a directory first and stats each entry
+            # afterwards: delete the victim in exactly that window.
+            if (
+                not state["unlinked"]
+                and path == victim.name
+                and kwargs.get("dir_fd") is not None
+            ):
+                state["unlinked"] = True
+                victim.unlink()
+            return real_stat(path, *args, **kwargs)
 
-            def __init__(self, path):
-                self._entries = list(real_scandir(path))
-                if Path(path) == media_dir and not state["unlinked"]:
-                    state["unlinked"] = True
-                    victim.unlink()
-
-            def __enter__(self):
-                return iter(self._entries)
-
-            def __exit__(self, *exc_info):
-                return False
-
-        def fake_scandir(path):
-            if Path(path) == media_dir:
-                return _VanishingScandir(path)
-            return real_scandir(path)
-
-        monkeypatch.setattr(gctl.os, "scandir", fake_scandir)
+        monkeypatch.setattr(gctl.os, "stat", fake_stat)
 
         scan = gctl._scan_permission_drift(root, file_mode=0o640, directory_mode=0o750)
 
@@ -374,7 +367,7 @@ class TestScanPermissionDrift:
         loose.chmod(0o644)
         hidden.chmod(0o300)  # owner: write + traverse, no read
         try:
-            with pytest.raises(gctl.CaptureTreeError, match="cannot read directory"):
+            with pytest.raises(gctl.CaptureTreeError, match="cannot open directory"):
                 gctl._scan_permission_drift(root, file_mode=0o640, directory_mode=0o750)
         finally:
             hidden.chmod(0o750)
@@ -383,53 +376,115 @@ class TestScanPermissionDrift:
 
     def test_scandir_error_is_not_a_silent_skip(self, gctl, tmp_path, monkeypatch):
         root = _make_tree(tmp_path)
-        media_dir = root / "media"
-        skipped_dirs: list[str] = []
-
-        class _FailingScandir:
-            def __init__(self, path):
-                skipped_dirs.append(str(path))
-                raise PermissionError(errno.EACCES, "Permission denied")
-
         real_scandir = os.scandir
+        calls = {"n": 0}
 
-        def fake_scandir(path):
-            if Path(path) == media_dir:
-                return _FailingScandir(path)
-            return real_scandir(path)
+        def fake_scandir(target):
+            calls["n"] += 1
+            if calls["n"] == 2:  # the root is listed first, then media/
+                raise PermissionError(errno.EACCES, "Permission denied")
+            return real_scandir(target)
 
         monkeypatch.setattr(gctl.os, "scandir", fake_scandir)
 
-        with pytest.raises(gctl.CaptureTreeError, match="cannot read directory"):
+        with pytest.raises(gctl.CaptureTreeError, match="cannot list directory"):
             gctl._scan_permission_drift(root, file_mode=0o640, directory_mode=0o750)
-        assert skipped_dirs == [str(media_dir)]
+        assert calls["n"] == 2
 
     def test_vanished_directory_is_still_tolerated(self, gctl, tmp_path, monkeypatch):
         # The complement: rotation/retention removing a directory mid-walk is
         # not an audit failure, it is skipped.
         root = _make_tree(tmp_path)
-        media_dir = root / "media"
         real_scandir = os.scandir
+        calls = {"n": 0}
 
-        class _VanishingScandir:
-            def __init__(self, path):
+        def fake_scandir(target):
+            calls["n"] += 1
+            if calls["n"] == 2:  # the root is listed first, then media/
                 raise FileNotFoundError(errno.ENOENT, "No such file or directory")
-
-            def __enter__(self):  # pragma: no cover - never reached
-                return iter(())
-
-            def __exit__(self, *exc_info):  # pragma: no cover - never reached
-                return False
-
-        def fake_scandir(path):
-            if Path(path) == media_dir:
-                return _VanishingScandir(path)
-            return real_scandir(path)
+            return real_scandir(target)
 
         monkeypatch.setattr(gctl.os, "scandir", fake_scandir)
 
         scan = gctl._scan_permission_drift(root, file_mode=0o640, directory_mode=0o750)
         assert any("vanished during the walk" in note for note in scan.skipped)
+        # The rest of the tree is still audited.
+        assert str(root / "nested" / "leftover.jsonl") in _names(scan)
+
+    def test_walk_never_audits_through_a_directory_swapped_for_a_symlink(
+        self, gctl, tmp_path, monkeypatch
+    ):
+        """A directory swapped for a symlink after the listing cannot pull the
+        walk outside the capture tree.
+
+        This is the window the path-based walk had: the directory was listed as
+        a directory, pushed on the stack, and popped later as
+        ``os.scandir(path)`` — which follows the symlink and audits (and, with
+        ``--apply``, repairs) files outside the tree.  The descriptor walk never
+        re-resolves a path: the child is opened relative to the parent's
+        descriptor with ``O_NOFOLLOW``, so the swap is refused or seen as a
+        symlink and *never* traversed.
+        """
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        secret = outside / "outside-artefact.png"
+        secret.write_bytes(b"not capture data")
+        secret.chmod(0o644)  # world-readable: it WOULD be repaired if audited
+        outside.chmod(0o755)  # and so would the directory itself
+
+        root = _make_tree(tmp_path)
+        media_dir = root / "media"
+        moved = tmp_path / "media-moved"
+        real_scandir = os.scandir
+        state = {"armed": False, "swapped": False}
+
+        class _SwapAfterListing:
+            """Hands back the listing, then swaps the directory for a symlink."""
+
+            def __init__(self, iterator):
+                self._iterator = iterator
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                self._iterator.close()
+                return False
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                try:
+                    return next(self._iterator)
+                except StopIteration:
+                    if not state["swapped"]:
+                        state["swapped"] = True
+                        media_dir.rename(moved)
+                        media_dir.symlink_to(outside, target_is_directory=True)
+                    raise
+
+        def fake_scandir(target):
+            if not state["armed"]:
+                state["armed"] = True
+                return _SwapAfterListing(real_scandir(target))
+            return real_scandir(target)
+
+        monkeypatch.setattr(gctl.os, "scandir", fake_scandir)
+
+        scan = gctl._scan_permission_drift(root, file_mode=0o640, directory_mode=0o750)
+
+        assert state["swapped"] is True
+        audited = _names(scan)
+        assert str(secret) not in audited, "a file outside the tree was audited"
+        assert str(outside) not in audited, "a directory outside the tree was audited"
+        assert any(
+            "symlink, not followed" in note and str(media_dir) in note
+            for note in scan.skipped
+        )
+        # Nothing outside the tree moved, and nothing there was repaired.
+        assert _mode(secret) == 0o644
+        assert _mode(outside) == 0o755
 
     def test_missing_root_is_an_error(self, gctl, tmp_path):
         with pytest.raises(FileNotFoundError):
@@ -598,7 +653,7 @@ class TestCmdPermissionsReport:
             hidden.chmod(0o750)
 
         assert code == gctl.PERMISSIONS_EXIT_ERROR == 2
-        assert "cannot read directory" in captured.err
+        assert "cannot open directory" in captured.err
         assert "No drift" not in captured.out
         # The hidden child was never audited, so --apply left it alone.
         assert _mode(hidden / "loose.jsonl") == 0o644
@@ -671,6 +726,147 @@ class TestCmdPermissionsApply:
         assert _mode(root) == 0o700
         assert "0600" in capsys.readouterr().out
 
+    def test_apply_refuses_a_file_tightened_meanwhile(
+        self, gctl, monkeypatch, tmp_path, capsys
+    ):
+        """A stale scan result must never widen a mode someone just tightened."""
+        root = _make_tree(tmp_path)
+        victim = root / "media" / "req_legacy_0.png"
+        real_apply = gctl._apply_permission_fixes
+
+        def racing_apply(scan):
+            victim.chmod(0o600)  # another operator tightened it after the scan
+            return real_apply(scan)
+
+        monkeypatch.setattr(gctl, "_apply_permission_fixes", racing_apply)
+        code = _run(gctl, monkeypatch, tmp_path, root, apply=True)
+        captured = capsys.readouterr()
+
+        assert _mode(victim) == 0o600, "the tightened file must not be widened"
+        assert code == gctl.PERMISSIONS_EXIT_CLEAN == 0
+        assert "no longer drifts" in captured.err
+        # The genuine drift is still corrected.
+        assert _mode(root / "nested") == 0o750
+        assert "4 corrected" not in captured.out
+
+    def test_apply_does_not_hang_on_a_fifo_replacement(
+        self, gctl, monkeypatch, tmp_path, capsys
+    ):
+        """A FIFO has no writer: an O_RDONLY open without O_NONBLOCK blocks."""
+        root = _make_tree(tmp_path)
+        victim = root / "media" / "req_legacy_0.png"
+        real_apply = gctl._apply_permission_fixes
+
+        def racing_apply(scan):
+            victim.unlink()
+            os.mkfifo(victim)
+            os.chmod(victim, 0o644)
+            return real_apply(scan)
+
+        monkeypatch.setattr(gctl, "_apply_permission_fixes", racing_apply)
+        started = time.monotonic()
+        code = _run(gctl, monkeypatch, tmp_path, root, apply=True)
+        elapsed = time.monotonic() - started
+        captured = capsys.readouterr()
+
+        assert elapsed < 5.0, f"the correction blocked for {elapsed:.1f}s on a FIFO"
+        assert code == gctl.PERMISSIONS_EXIT_DRIFT == 1
+        # Either the identity moved or the type changed — both are refusals, and
+        # the second is why inode reuse is not enough on its own.
+        assert (
+            "inode changed" in captured.err
+            or "no longer a regular file" in captured.err
+        )
+        assert _mode(victim) == 0o644, "the FIFO was not chmod'ed"
+        assert _mode(root / "nested") == 0o750
+
+    def test_apply_refuses_a_directory_replaced_by_a_file(
+        self, gctl, monkeypatch, tmp_path, capsys
+    ):
+        """ENOTDIR is a replacement, not a disappearance: exit non-zero."""
+        root = _make_tree(tmp_path)
+        nested = root / "nested"
+        real_apply = gctl._apply_permission_fixes
+
+        def racing_apply(scan):
+            shutil.rmtree(nested)
+            nested.write_bytes(b"now a regular file")
+            nested.chmod(0o644)
+            return real_apply(scan)
+
+        monkeypatch.setattr(gctl, "_apply_permission_fixes", racing_apply)
+        code = _run(gctl, monkeypatch, tmp_path, root, apply=True)
+        captured = capsys.readouterr()
+
+        assert code == gctl.PERMISSIONS_EXIT_DRIFT == 1, (
+            "a replacement must not be reported as a clean result"
+        )
+        assert "is now a symlink or a different type" in captured.err
+        assert str(nested) in captured.err
+        # The replacement was never audited, so it keeps its world-readable mode.
+        assert nested.is_file()
+        assert _mode(nested) == 0o644
+        assert "0 failed" not in captured.out
+
+    def test_apply_never_repairs_through_a_swapped_directory_symlink(
+        self, gctl, monkeypatch, tmp_path, capsys
+    ):
+        """The same swap, but with ``--apply``: the outside tree stays untouched."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        secret = outside / "outside-artefact.png"
+        secret.write_bytes(b"not capture data")
+        secret.chmod(0o644)
+        outside.chmod(0o755)
+
+        root = _make_tree(tmp_path)
+        media_dir = root / "media"
+        moved = tmp_path / "media-moved"
+        real_scandir = os.scandir
+        state = {"armed": False, "swapped": False}
+
+        class _SwapAfterListing:
+            def __init__(self, iterator):
+                self._iterator = iterator
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc_info):
+                self._iterator.close()
+                return False
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                try:
+                    return next(self._iterator)
+                except StopIteration:
+                    if not state["swapped"]:
+                        state["swapped"] = True
+                        media_dir.rename(moved)
+                        media_dir.symlink_to(outside, target_is_directory=True)
+                    raise
+
+        def fake_scandir(target):
+            if not state["armed"]:
+                state["armed"] = True
+                return _SwapAfterListing(real_scandir(target))
+            return real_scandir(target)
+
+        monkeypatch.setattr(gctl.os, "scandir", fake_scandir)
+
+        code = _run(gctl, monkeypatch, tmp_path, root, apply=True)
+        capsys.readouterr()
+
+        assert state["swapped"] is True
+        assert _mode(secret) == 0o644, "the correction escaped the capture tree"
+        assert _mode(outside) == 0o755
+        # In-tree drift was still corrected.
+        assert _mode(root / "nested") == 0o750
+        assert code in (gctl.PERMISSIONS_EXIT_CLEAN, gctl.PERMISSIONS_EXIT_DRIFT)
+
     def test_apply_leaves_a_clean_tree_untouched(self, gctl, monkeypatch, tmp_path, capsys):
         root = tmp_path / "capture"
         root.mkdir()
@@ -699,7 +895,9 @@ class TestCmdPermissionsApply:
         failing = {"raised": False}
 
         def fake_open(path, flags, *args, **kwargs):
-            if Path(path) == target:
+            # The correction reaches the entry by name relative to its parent's
+            # descriptor, so that is where the unopenable entry shows up.
+            if path == target.name and kwargs.get("dir_fd") is not None:
                 failing["raised"] = True
                 raise PermissionError(errno.EACCES, "Permission denied")
             return real_open(path, flags, *args, **kwargs)
@@ -761,7 +959,7 @@ class TestCmdPermissionsApply:
 
         assert code == gctl.PERMISSIONS_EXIT_DRIFT == 1
         assert "is now a symlink" in captured.err
-        assert "target was not touched" in captured.err
+        assert "nothing outside the audited entry was touched" in captured.err
         # The whole point: the target outside the tree keeps its mode.
         assert _mode(outside) == 0o600
         # The rest of the tree was still normalised.

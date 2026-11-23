@@ -32,12 +32,14 @@ Note: `status` and `rotate` talk to the running Guardian API.
 """
 
 import argparse
+import contextlib
 import errno
 import json
 import os
 import stat
 import sys
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -372,10 +374,31 @@ _MODE_BIT_NAMES: tuple[tuple[int, str], ...] = (
 #: Errors that mean "this entry disappeared" — routine in a live tree that
 #: rotates and purges between the listing and the stat.  Every *other* error is
 #: a failure to audit, and reporting it as "skipped" would let a partial walk
-#: masquerade as a clean result.
-_VANISHED_ERRNOS = frozenset(
-    {errno.ENOENT, errno.ENOTDIR, getattr(errno, "ESTALE", errno.ENOENT)}
+#: masquerade as a clean result.  ``ENOTDIR`` is deliberately **not** here: a
+#: path that used to be a directory and is now a file (or a symlink) was
+#: *replaced*, and calling that "vanished" would let ``--apply`` exit 0 while
+#: the replacement keeps a world-readable mode.
+_VANISHED_ERRNOS = frozenset({errno.ENOENT, getattr(errno, "ESTALE", errno.ENOENT)})
+
+#: Flags for opening a directory that is part of the walk: read-only (so it can
+#: be listed and used as a ``dir_fd``), a real directory (``O_DIRECTORY``) and
+#: never a symlink (``O_NOFOLLOW``).  A directory swapped for a symlink cannot
+#: pull the walk out of the capture tree, because no path is ever re-resolved —
+#: the child is opened relative to the parent's descriptor.
+_DIRECTORY_OPEN_FLAGS = (
+    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 )
+
+#: Flags for opening one audited entry to change its mode.  ``O_NONBLOCK`` is
+#: load-bearing: a FIFO swapped in for the entry would block a plain
+#: ``O_RDONLY`` open forever, so ``fstat`` — and every check after it — would
+#: never run and the command would hang instead of failing.
+_ENTRY_OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+
+#: Depth guard for the descriptor walk: recursion holds one descriptor per
+#: level, so an unbounded depth would exhaust them.  A capture tree is flat
+#: (root plus ``media/``), so this only fires on something pathological.
+_MAX_WALK_DEPTH = 128
 
 
 class CaptureConfigError(RuntimeError):
@@ -387,29 +410,52 @@ class CaptureTreeError(RuntimeError):
 
 
 @dataclass(frozen=True)
-class PermissionDrift:
-    """One capture artefact whose mode does not match the configuration.
+class FileIdentity:
+    """What identifies one filesystem object: its device and inode.
 
-    ``device``/``inode`` are what the walk actually observed.  They are the
-    identity ``--apply`` re-checks on the descriptor it mutates, so an entry
-    that was replaced between the scan and the correction (the classic
-    replace-with-a-symlink race) is detected and reported instead of being
-    "repaired" — a pathname chmod would have changed whatever the path pointed
-    at by then, possibly a file outside the capture tree.
+    Recorded for every artefact the walk sees *and* for the directory holding
+    it, then re-checked on the descriptor ``--apply`` is about to change.  An
+    entry whose identity moved is not the entry that was audited, whatever the
+    path says by then — inode identity cannot be fooled by a rename, a symlink
+    or a reused name.
     """
+
+    device: int
+    inode: int
+
+    @classmethod
+    def of(cls, stat_result: os.stat_result) -> "FileIdentity":
+        return cls(stat_result.st_dev, stat_result.st_ino)
+
+
+@dataclass(frozen=True)
+class PermissionDrift:
+    """One capture artefact whose mode does not match the configuration."""
 
     path: Path
     kind: str  # "file" | "directory"
     actual_mode: int
     expected_mode: int
     reasons: tuple[str, ...]
-    device: int
-    inode: int
+    #: Identity observed by the walk; ``--apply`` re-checks it on the descriptor.
+    identity: FileIdentity
+    #: Directory holding the entry and the identity the walk saw for it, so the
+    #: correction can re-open that directory and reach the entry by name
+    #: relative to it.  ``None`` for the scan root, which is opened by its own
+    #: (resolved) path.
+    parent: Path | None
+    parent_identity: FileIdentity | None
+    name: str
 
 
 @dataclass(frozen=True)
 class PermissionChange:
-    """One artefact corrected by ``--apply`` (audit trail for the operator)."""
+    """One artefact corrected by ``--apply`` (audit trail for the operator).
+
+    ``old_mode`` is the mode read from the descriptor at correction time, not
+    the mode the scan saw: if anything tightened the entry in between, that is
+    what the operator needs to see next to the new mode.
+    """
 
     path: Path
     kind: str
@@ -529,31 +575,38 @@ def _scan_permission_drift(
 ) -> PermissionScan:
     """Walk ``root`` and collect every drifting file and directory.
 
-    The walk never follows a symlink (a symlink's own mode is meaningless and a
-    mode change would act on its target, possibly outside the tree) and never
-    opens a file, so an owner-unreadable entry is still reported.
+    The walk is **descriptor-based**: the root is opened once, every directory
+    is opened with ``O_DIRECTORY | O_NOFOLLOW`` *relative to its parent's
+    descriptor*, its identity (``st_dev``/``st_ino``) is compared against what
+    the listing said, and the children are read with ``os.scandir(fd)`` and
+    ``os.stat(name, dir_fd=fd)``.  No path is ever re-resolved, so a directory
+    swapped for a symlink between the listing and the descent is refused
+    (``ENOTDIR``/``ELOOP``) instead of pulling the audit — and a later
+    ``--apply`` — into a tree outside the capture root; every child inherits
+    the protection of the descriptor it was reached through.
+
+    Nothing is opened for reading: an entry's mode comes from ``stat``, so an
+    owner-unreadable file is still reported.
 
     Failure discipline: only *disappearance* is tolerated (``ENOENT``,
-    ``ENOTDIR``, ``ESTALE`` — routine in a live tree that rotates and purges)
-    and recorded as skipped.  Any other traversal error — an unreadable
-    directory, an I/O error — raises :class:`CaptureTreeError`.  Treating those
-    as "skipped" would report drift on a directory it never descended into and
-    then let ``--apply`` repair the directory while a hidden child inside it
-    keeps its loose mode; the audit would exit 0 over a tree it did not read.
-
-    The root itself is an error when it is missing or not a directory: a silent
-    "clean" for a tree that was not there is exactly the false confidence this
-    check exists to prevent.
+    ``ESTALE`` — routine in a live tree that rotates and purges) and recorded as
+    skipped.  Any other error — an unreadable directory, a replacement, an I/O
+    error — raises :class:`CaptureTreeError`: a walk that never entered a
+    directory cannot vouch for what is inside it, and reporting a partial tree
+    as clean is exactly the false confidence this check exists to prevent.
     """
-    root_stat = os.stat(root)
-    if not stat.S_ISDIR(root_stat.st_mode):
-        raise NotADirectoryError(f"capture root is not a directory: {root}")
-
     scan = PermissionScan(
         root=root, file_mode=file_mode, directory_mode=directory_mode, drift=[]
     )
 
-    def _consider(path: Path, kind: str, entry_stat: os.stat_result) -> None:
+    def _consider(
+        path: Path,
+        kind: str,
+        entry_stat: os.stat_result,
+        *,
+        parent: Path | None,
+        parent_identity: FileIdentity | None,
+    ) -> None:
         expected = directory_mode if kind == "directory" else file_mode
         if kind == "directory":
             scan.directories_checked += 1
@@ -569,112 +622,247 @@ def _scan_permission_drift(
                     actual_mode=mode,
                     expected_mode=expected,
                     reasons=reasons,
-                    device=entry_stat.st_dev,
-                    inode=entry_stat.st_ino,
+                    identity=FileIdentity.of(entry_stat),
+                    parent=parent,
+                    parent_identity=parent_identity,
+                    name=path.name,
                 )
             )
 
-    _consider(root, "directory", root_stat)
-
-    stack = [root]
-    while stack:
-        current = stack.pop()
+    def _walk(
+        directory_fd: int,
+        directory: Path,
+        directory_identity: FileIdentity,
+        depth: int,
+    ) -> None:
         try:
-            with os.scandir(current) as iterator:
+            with os.scandir(directory_fd) as iterator:
                 children = sorted(iterator, key=lambda entry: entry.name)
         except OSError as exc:
             if exc.errno in _VANISHED_ERRNOS:
-                scan.skipped.append(f"{current}: vanished during the walk")
-                continue
+                scan.skipped.append(f"{directory}: vanished during the walk")
+                return
             raise CaptureTreeError(
-                f"cannot read directory {current}: {exc.strerror or exc}"
+                f"cannot list directory {directory}: {exc.strerror or exc}"
             ) from exc
+
         for child in children:
+            name = child.name
+            path = directory / name
             try:
-                if child.is_symlink():
-                    scan.skipped.append(f"{child.path}: symlink, not followed")
-                    continue
-                if child.is_dir(follow_symlinks=False):
-                    kind = "directory"
-                elif child.is_file(follow_symlinks=False):
-                    kind = "file"
-                else:
-                    scan.skipped.append(
-                        f"{child.path}: not a regular file or directory"
-                    )
-                    continue
-                child_stat = child.stat(follow_symlinks=False)
+                child_stat = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
             except OSError as exc:
                 if exc.errno in _VANISHED_ERRNOS:
-                    scan.skipped.append(f"{child.path}: vanished during the walk")
+                    scan.skipped.append(f"{path}: vanished during the walk")
                     continue
                 raise CaptureTreeError(
-                    f"cannot inspect {child.path}: {exc.strerror or exc}"
+                    f"cannot inspect {path}: {exc.strerror or exc}"
                 ) from exc
-            path = Path(child.path)
-            _consider(path, kind, child_stat)
-            if kind == "directory":
-                stack.append(path)
+
+            if stat.S_ISLNK(child_stat.st_mode):
+                scan.skipped.append(f"{path}: symlink, not followed")
+                continue
+
+            if stat.S_ISDIR(child_stat.st_mode):
+                child_identity = FileIdentity.of(child_stat)
+                try:
+                    child_fd = os.open(
+                        name, _DIRECTORY_OPEN_FLAGS, dir_fd=directory_fd
+                    )
+                except OSError as exc:
+                    if exc.errno in _VANISHED_ERRNOS:
+                        scan.skipped.append(f"{path}: vanished during the walk")
+                        continue
+                    detail = exc.strerror or str(exc)
+                    if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                        detail += (
+                            " — it is no longer the directory that was listed, "
+                            "refusing to follow it"
+                        )
+                    raise CaptureTreeError(
+                        f"cannot open directory {path}: {detail}"
+                    ) from exc
+                try:
+                    if FileIdentity.of(os.fstat(child_fd)) != child_identity:
+                        raise CaptureTreeError(
+                            f"directory {path} was replaced during the walk; "
+                            "refusing to audit it"
+                        )
+                    _consider(
+                        path,
+                        "directory",
+                        child_stat,
+                        parent=directory,
+                        parent_identity=directory_identity,
+                    )
+                    if depth >= _MAX_WALK_DEPTH:
+                        raise CaptureTreeError(
+                            f"capture tree is deeper than {_MAX_WALK_DEPTH} "
+                            f"levels at {path}"
+                        )
+                    _walk(child_fd, path, child_identity, depth + 1)
+                finally:
+                    os.close(child_fd)
+                continue
+
+            if stat.S_ISREG(child_stat.st_mode):
+                _consider(
+                    path,
+                    "file",
+                    child_stat,
+                    parent=directory,
+                    parent_identity=directory_identity,
+                )
+                continue
+
+            scan.skipped.append(f"{path}: not a regular file or directory")
+
+    # The root is opened by its own path — it is the anchor the operator named
+    # (``cmd_permissions`` resolves it first, so it is not a symlink).  A
+    # missing root raises FileNotFoundError and a non-directory NotADirectoryError
+    # (O_DIRECTORY), both reported as scan errors by the caller.
+    root_fd = os.open(root, _DIRECTORY_OPEN_FLAGS)
+    try:
+        root_stat = os.fstat(root_fd)
+        _consider(
+            root,
+            "directory",
+            root_stat,
+            parent=None,
+            parent_identity=None,
+        )
+        _walk(root_fd, root, FileIdentity.of(root_stat), 1)
+    finally:
+        os.close(root_fd)
 
     scan.drift.sort(key=lambda entry: str(entry.path))
     return scan
 
 
-def _open_for_mutation(entry: PermissionDrift) -> int:
-    """Open ``entry.path`` for an ``fchmod`` without following a symlink.
+class _CorrectionRefused(Exception):
+    """A correction was refused before it could change anything."""
 
-    A pathname ``chmod`` follows whatever the path resolves to *at that moment*:
-    a file scanned as a regular ``0644`` entry and swapped for a symlink before
-    the correction would have the mode of its target changed — a file outside
-    the capture tree, e.g. a ``0600`` secret widened because an entry the walk
-    skipped had a different name.  ``O_NOFOLLOW`` refuses the swap outright
-    (``ELOOP``) and hands back a descriptor that cannot be redirected, so the
-    ``fchmod`` can only ever touch the inode the descriptor names.
-    ``O_NOCTTY`` keeps a swapped-in terminal from becoming the controlling
-    terminal, and ``O_DIRECTORY`` for a directory entry keeps a regular file
-    from being opened in its place.
+
+@contextlib.contextmanager
+def _opened_for_correction(entry: PermissionDrift) -> Iterator[int]:
+    """Open the exact object ``entry`` was audited as, for an ``fchmod``.
+
+    The entry is reached through its parent's descriptor: the parent is opened
+    with ``O_DIRECTORY | O_NOFOLLOW``, its identity is re-checked against what
+    the walk saw, and the entry is then opened *by name relative to it* with
+    ``O_NOFOLLOW``.  Nothing is opened through a path that could have been
+    re-pointed since the scan, so a directory swapped for a symlink cannot
+    redirect the mode change at a file outside the capture tree.
+
+    ``O_NONBLOCK`` is load-bearing: a FIFO swapped in for the entry would
+    otherwise block this ``O_RDONLY`` open forever and every check after it
+    would never run.
+
+    The scan root has no audited parent and is opened by its own resolved path;
+    the identity check in :func:`_apply_permission_fixes` still applies to it.
     """
-    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NOCTTY | os.O_CLOEXEC
-    if entry.kind == "directory":
-        flags |= os.O_DIRECTORY
-    return os.open(entry.path, flags)
+    descriptors: list[int] = []
+    try:
+        if entry.parent is None:
+            flags = _DIRECTORY_OPEN_FLAGS if entry.kind == "directory" else _ENTRY_OPEN_FLAGS
+            descriptor = os.open(entry.path, flags)
+        else:
+            parent_fd = os.open(entry.parent, _DIRECTORY_OPEN_FLAGS)
+            descriptors.append(parent_fd)
+            if entry.parent_identity is not None:
+                if FileIdentity.of(os.fstat(parent_fd)) != entry.parent_identity:
+                    raise _CorrectionRefused(
+                        "its directory was replaced since the scan"
+                    )
+            flags = _ENTRY_OPEN_FLAGS
+            if entry.kind == "directory":
+                flags |= os.O_DIRECTORY
+            descriptor = os.open(entry.name, flags, dir_fd=parent_fd)
+        descriptors.append(descriptor)
+        yield descriptor
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
 
 
 def _apply_permission_fixes(
     scan: PermissionScan,
-) -> tuple[list[PermissionChange], list[str], list[str]]:
+) -> tuple[list[PermissionChange], list[str], list[str], list[str]]:
     """Normalise every drifting entry to its configured mode.
 
-    Returns ``(changes, failures, vanished)``.  This is the only function in the
-    CLI that changes a mode on capture data, and it only ever receives entries
-    :func:`_scan_permission_drift` flagged, so a correct entry is never touched.
-    Each drifting entry is set *exactly* to its configured mode — removing the
-    extra bits and restoring the owner access the configuration grants in one
-    step.
+    Returns ``(changes, failures, vanished, unchanged)``.  This is the only
+    function in the CLI that changes a mode on capture data, and it only ever
+    receives entries :func:`_scan_permission_drift` flagged.
 
-    Every change goes through :func:`_open_for_mutation` and is guarded by an
-    identity check: the descriptor's ``st_dev``/``st_ino`` must match what the
-    walk observed, otherwise the path was reused and the entry is reported as a
-    failure rather than "repaired".  A refused symlink (``ELOOP``), an
-    unopenable entry (e.g. mode ``0000``: the same mask that makes it drift also
-    denies the ``O_RDONLY`` the correction needs) and any other error are
-    reported failures with a non-zero exit — never a silent skip.  One failure
-    does not stop the rest; an entry that merely vanished needs no repair and is
-    listed separately.
+    Every correction is checked on the descriptor it is about to change:
+
+    * the identity (``st_dev``/``st_ino``) must be the one the scan recorded,
+      otherwise the path was replaced and the entry is not corrected;
+    * the node must still be the audited *type* (regular file or directory), so
+      a FIFO or a file standing in for a directory is refused;
+    * the drift is **recomputed from the mode read now** against the configured
+      mode — an entry someone else tightened in the meantime no longer drifts
+      and is left alone.  ``--apply`` never widens a mode because of a stale
+      scan result.
+
+    Each drifting entry is then set *exactly* to its configured mode.  A refused
+    symlink or replacement (``ELOOP``/``ENOTDIR``), an unopenable entry
+    (``EACCES``: the same mask that makes it drift also denies the ``O_RDONLY``
+    the correction needs) and any other error are reported failures with a
+    non-zero exit — never a silent skip.  Entries that merely vanished need no
+    repair and are listed separately.
     """
     changes: list[PermissionChange] = []
     failures: list[str] = []
     vanished: list[str] = []
+    unchanged: list[str] = []
+
     for entry in scan.drift:
         try:
-            descriptor = _open_for_mutation(entry)
+            with _opened_for_correction(entry) as descriptor:
+                opened_stat = os.fstat(descriptor)
+                if FileIdentity.of(opened_stat) != entry.identity:
+                    failures.append(
+                        f"{entry.path}: replaced since the scan (inode changed) — not corrected"
+                    )
+                    continue
+                if entry.kind == "directory" and not stat.S_ISDIR(opened_stat.st_mode):
+                    failures.append(
+                        f"{entry.path}: no longer a directory — not corrected"
+                    )
+                    continue
+                if entry.kind == "file" and not stat.S_ISREG(opened_stat.st_mode):
+                    failures.append(
+                        f"{entry.path}: no longer a regular file — not corrected"
+                    )
+                    continue
+                current_mode = stat.S_IMODE(opened_stat.st_mode)
+                if not _permission_drift(current_mode, entry.expected_mode):
+                    unchanged.append(
+                        f"{entry.path}: no longer drifts "
+                        f"({format(current_mode, '04o')} now satisfies "
+                        f"{format(entry.expected_mode, '04o')}) — left untouched"
+                    )
+                    continue
+                os.fchmod(descriptor, entry.expected_mode)
+                changes.append(
+                    PermissionChange(
+                        path=entry.path,
+                        kind=entry.kind,
+                        old_mode=current_mode,
+                        new_mode=entry.expected_mode,
+                    )
+                )
+        except _CorrectionRefused as exc:
+            failures.append(f"{entry.path}: {exc}")
         except OSError as exc:
             if exc.errno in _VANISHED_ERRNOS:
                 vanished.append(f"{entry.path}: vanished before it could be corrected")
-            elif exc.errno == errno.ELOOP:
+            elif exc.errno in (errno.ELOOP, errno.ENOTDIR):
                 failures.append(
-                    f"{entry.path}: is now a symlink — refusing to follow it "
-                    "(its target was not touched)"
+                    f"{entry.path}: is now a symlink or a different type — "
+                    "refusing to follow it (nothing outside the audited entry "
+                    "was touched)"
                 )
             elif exc.errno == errno.EACCES:
                 failures.append(
@@ -683,29 +871,8 @@ def _apply_permission_fixes(
                 )
             else:
                 failures.append(f"{entry.path}: {exc.strerror or exc}")
-            continue
-        try:
-            opened_stat = os.fstat(descriptor)
-            if (opened_stat.st_dev, opened_stat.st_ino) != (entry.device, entry.inode):
-                failures.append(
-                    f"{entry.path}: replaced since the scan (inode changed) — not corrected"
-                )
-                continue
-            os.fchmod(descriptor, entry.expected_mode)
-        except OSError as exc:
-            failures.append(f"{entry.path}: {exc.strerror or exc}")
-            continue
-        finally:
-            os.close(descriptor)
-        changes.append(
-            PermissionChange(
-                path=entry.path,
-                kind=entry.kind,
-                old_mode=entry.actual_mode,
-                new_mode=entry.expected_mode,
-            )
-        )
-    return changes, failures, vanished
+
+    return changes, failures, vanished, unchanged
 
 
 def _display_path(path: Path) -> str:
@@ -716,12 +883,12 @@ def _display_path(path: Path) -> str:
         return str(path)
 
 
-def _print_skipped(notes: list[str]) -> None:
-    """Surface skipped entries on stderr without flooding it."""
+def _print_notes(label: str, notes: list[str]) -> None:
+    """Surface per-entry notes on stderr without flooding it."""
     for note in notes[:10]:
-        print(f"  skipped: {note}", file=sys.stderr)
+        print(f"  {label}: {note}", file=sys.stderr)
     if len(notes) > 10:
-        print(f"  skipped: … and {len(notes) - 10} more", file=sys.stderr)
+        print(f"  {label}: … and {len(notes) - 10} more", file=sys.stderr)
 
 
 def cmd_permissions(args: argparse.Namespace) -> None:
@@ -766,8 +933,9 @@ def cmd_permissions(args: argparse.Namespace) -> None:
     changes: list[PermissionChange] = []
     failures: list[str] = []
     vanished: list[str] = []
+    unchanged: list[str] = []
     if apply and scan.drift:
-        changes, failures, vanished = _apply_permission_fixes(scan)
+        changes, failures, vanished, unchanged = _apply_permission_fixes(scan)
 
     if as_json:
         print(
@@ -804,6 +972,7 @@ def cmd_permissions(args: argparse.Namespace) -> None:
                     ],
                     "failures": failures,
                     "vanished": vanished,
+                    "unchanged": unchanged,
                     "skipped": scan.skipped,
                 },
                 indent=2,
@@ -832,16 +1001,20 @@ def cmd_permissions(args: argparse.Namespace) -> None:
         if not scan.drift:
             print("  No drift: every capture artefact matches the configured modes.")
         print()
+        satisfied = (
+            f", {len(unchanged)} already satisfied" if unchanged else ""
+        )
         print(
             f"  Checked {scan.files_checked} file(s) and "
             f"{scan.directories_checked} directories: {len(scan.drift)} drifting, "
-            f"{len(changes)} corrected, {len(failures)} failed."
+            f"{len(changes)} corrected{satisfied}, {len(failures)} failed."
         )
         if scan.drift and not apply:
             print("  Drift found — exit status 1. --apply normalises it (operator action on production data).")
         print("━" * 66)
 
-    _print_skipped(scan.skipped + vanished)
+    _print_notes("skipped", scan.skipped + vanished)
+    _print_notes("changed meanwhile", unchanged)
     for failure in failures:
         print(f"❌ {failure}", file=sys.stderr)
 
