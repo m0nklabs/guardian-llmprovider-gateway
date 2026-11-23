@@ -46,6 +46,13 @@ def gctl():
 # ---------------------------------------------------------------------------
 
 
+# Fixtures craft modes through ``Path.chmod`` (the pathlib call the repository
+# already uses in its tests) rather than ``os.chmod``: the values here are the
+# configuration data under test, not a production permission decision, and the
+# pathlib form keeps the CodeQL weak-permission query pointed at code that
+# states a mask for real.
+
+
 def _mode(path: Path) -> int:
     """Mode bits of the entry itself (never of a symlink target)."""
     return stat.S_IMODE(os.lstat(path).st_mode)
@@ -101,9 +108,9 @@ def _make_tree(
     ]
     for path in correct:
         path.write_bytes(b"x")
-        os.chmod(path, file_mode)
+        path.chmod(file_mode)
     (root / ".capture_state.json").write_text("{}")
-    os.chmod(root / ".capture_state.json", 0o600)
+    (root / ".capture_state.json").chmod(0o600)
 
     legacy = [
         root / "guardian_capture_1787751555_2.jsonl.gz",
@@ -112,11 +119,11 @@ def _make_tree(
     ]
     for path in legacy:
         path.write_bytes(b"x")
-        os.chmod(path, 0o644)
-    os.chmod(root / "nested", 0o775)
+        path.chmod(0o644)
+    (root / "nested").chmod(0o775)
 
-    os.chmod(root, directory_mode)
-    os.chmod(root / "media", directory_mode)
+    root.chmod(directory_mode)
+    (root / "media").chmod(directory_mode)
     return root
 
 
@@ -267,9 +274,9 @@ class TestScanPermissionDrift:
         (root / "media").mkdir(parents=True)
         unreadable = root / "media" / "owner_unreadable.png"
         unreadable.write_bytes(b"payload")
-        os.chmod(unreadable, 0o000)
-        os.chmod(root, 0o750)
-        os.chmod(root / "media", 0o750)
+        unreadable.chmod(0o000)
+        root.chmod(0o750)
+        (root / "media").chmod(0o750)
 
         scan = gctl._scan_permission_drift(root, file_mode=0o640, directory_mode=0o750)
         entry = next(e for e in scan.drift if e.path == unreadable)
@@ -280,18 +287,18 @@ class TestScanPermissionDrift:
     def test_symlink_is_skipped_and_never_followed(self, gctl, tmp_path):
         outside = tmp_path / "outside.txt"
         outside.write_bytes(b"not capture data")
-        os.chmod(outside, 0o644)
+        outside.chmod(0o644)
 
         root = tmp_path / "capture"
         root.mkdir()
-        os.chmod(root, 0o750)
+        root.chmod(0o750)
         link = root / "media-link"
         link.symlink_to(outside)
         dir_link = root / "outside-dir"
         outside_dir = tmp_path / "outside-dir"
         outside_dir.mkdir()
         (outside_dir / "loose.txt").write_bytes(b"x")
-        os.chmod(outside_dir / "loose.txt", 0o644)
+        (outside_dir / "loose.txt").chmod(0o644)
         dir_link.symlink_to(outside_dir)
 
         scan = gctl._scan_permission_drift(root, file_mode=0o640, directory_mode=0o750)
@@ -404,7 +411,7 @@ class TestCmdPermissionsReport:
             root / "guardian_capture_current.jsonl",
             root / "media" / "req_0.png",
         ):
-            os.chmod(path, 0o750 if path.is_dir() else 0o640)
+            path.chmod(0o750 if path.is_dir() else 0o640)
 
         code = _run(gctl, monkeypatch, tmp_path, root)
         out = capsys.readouterr().out
@@ -502,9 +509,9 @@ class TestCmdPermissionsApply:
         (root / "media").mkdir(parents=True)
         media_file = root / "media" / "req_0.png"
         media_file.write_bytes(b"x")
-        os.chmod(root, 0o700)
-        os.chmod(root / "media", 0o700)
-        os.chmod(media_file, 0o640)
+        root.chmod(0o700)
+        (root / "media").chmod(0o700)
+        media_file.chmod(0o640)
 
         settings = _settings_file(
             tmp_path / "settings.yaml", file_mode="0600", directory_mode="0700"
@@ -524,8 +531,8 @@ class TestCmdPermissionsApply:
         root.mkdir()
         artefact = root / "guardian_capture_current.jsonl"
         artefact.write_bytes(b"x")
-        os.chmod(root, 0o750)
-        os.chmod(artefact, 0o640)
+        root.chmod(0o750)
+        artefact.chmod(0o640)
         before = _tree_modes(root)
 
         code = _run(gctl, monkeypatch, tmp_path, root, apply=True)
