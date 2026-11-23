@@ -402,20 +402,35 @@ def _extract_cloud_usage_mirror(payload: Any) -> dict[str, Any]:
     return mirror
 
 
-def _reported_model_from_line(line: str) -> str | None:
-    """Return the usable provider-reported model id of one raw SSE line.
+def _sse_data_payload(line: str) -> str | None:
+    """Return the payload of one ordinary SSE data line, ``None`` for the rest.
 
-    Only the real ``data: [DONE]`` sentinel is skipped: a JSON chunk whose
-    content happens to spell ``[DONE]`` is an ordinary data line and may carry
-    the model — the payload is compared exactly, the same convention
-    ``StreamResponseAssembler.add_sse_line`` uses, never a substring test
-    (review finding on PR #128: a substring test dropped exactly those
-    chunks, losing their model id).
+    ``None`` means "there is no chunk to parse here": no ``data: `` prefix, an
+    empty payload, or the real ``data: [DONE]`` sentinel.  The sentinel is
+    compared exactly against the whole payload — never as a substring — so a
+    JSON chunk whose content merely spells ``[DONE]`` stays an ordinary data
+    line.  That is the convention ``StreamResponseAssembler.add_sse_line`` uses
+    as well; both consumers in this module (the model sniffer and the
+    degeneration guard) share this one rule rather than hand-rolling it.
     """
     if not line.startswith("data: "):
         return None
     payload = line[6:].strip()
     if not payload or payload == "[DONE]":
+        return None
+    return payload
+
+
+def _reported_model_from_line(line: str) -> str | None:
+    """Return the usable provider-reported model id of one raw SSE line.
+
+    Only the real ``data: [DONE]`` sentinel is skipped: a JSON chunk whose
+    content happens to spell ``[DONE]`` is an ordinary data line and may carry
+    the model (review finding on PR #128: a substring test dropped exactly
+    those chunks, losing their model id).
+    """
+    payload = _sse_data_payload(line)
+    if payload is None:
         return None
     try:
         data = json.loads(payload)
@@ -1269,10 +1284,12 @@ async def forward_to_cloud_provider(
     async def _read_sse_lines():
         """Yield raw SSE lines from the upstream response with watchdog.
 
-        Degeneration guard: feed every content delta; on a detected
-        repetition loop stop consuming upstream and synthesize a clean
-        OpenAI finish (finish_reason "length") so the client sees a normal
-        stream end — no budget burned on the loop."""
+        Degeneration guard: feed every chunk's content delta — the real
+        ``data: [DONE]`` sentinel is the only line skipped, so a chunk whose
+        text merely spells the marker is observed like any other.  On a
+        detected repetition loop stop consuming upstream and synthesize a
+        clean OpenAI finish (finish_reason "length") so the client sees a
+        normal stream end — no budget burned on the loop."""
         nonlocal _cloud_reported_model
         watchdog = StreamProgressWatchdog(provider.timeout_seconds)
         async for line in _iter_sse_lines_with_watchdog(
@@ -1290,13 +1307,14 @@ async def forward_to_cloud_provider(
                 # erased by a chunk that carries none.
                 if _chunk_model is not None:
                     _cloud_reported_model = _chunk_model
-            if (
-                _cloud_deg_detector.enabled
-                and line.startswith("data: ")
-                and "[DONE]" not in line
-            ):
+            # Only a real chunk is fed to the detector: ``_sse_data_payload``
+            # rejects the ``data: [DONE]`` sentinel by exact comparison, so a
+            # chunk whose content merely spells the marker is still observed
+            # (issue #129).
+            _deg_payload = _sse_data_payload(line) if _cloud_deg_detector.enabled else None
+            if _deg_payload is not None:
                 try:
-                    _deg_data = json.loads(line[6:])
+                    _deg_data = json.loads(_deg_payload)
                     _deg_delta = (_deg_data.get("choices") or [{}])[0].get("delta") or {}
                     _deg_text = (
                         _deg_delta.get("content")

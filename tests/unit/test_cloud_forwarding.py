@@ -15,6 +15,7 @@ from app.cloud_inference.routing import (
     extract_cloud_reasoning_content,
     extract_cloud_response_content,
 )
+from app.gateway.degeneration import DegenerationConfig, DegenerationDetector
 
 
 class _FakeStreamClient:
@@ -1327,3 +1328,191 @@ def test_capture_reported_model_from_line_skips_only_the_real_sentinel():
     assert _reported_model_from_line('data: {"model":"mailto:alice@example.com"}') is None
     assert _reported_model_from_line('data: {"choices":[{"delta":{}}]}') is None
     assert _reported_model_from_line("") is None
+
+
+# ── Issue #129: the degeneration guard must see marker chunks ────────────
+
+
+class _SpyDetector:
+    """Detector double that records the text the guard feeds it.
+
+    Verdicts come from a real :class:`DegenerationDetector` with explicit
+    defaults, so the behaviour under test is the production rule rather than a
+    mock's opinion.
+    """
+
+    def __init__(self) -> None:
+        self.inner = DegenerationDetector(DegenerationConfig())
+        self.fed: list[str] = []
+
+    @property
+    def enabled(self) -> bool:
+        return self.inner.enabled
+
+    def feed(self, delta: str):
+        self.fed.append(delta)
+        return self.inner.feed(delta)
+
+    def marker_delta(self) -> str | None:
+        return self.inner.marker_delta()
+
+
+def _install_spy_detector(monkeypatch) -> _SpyDetector:
+    """Route the forwarding module's detector construction to a recording spy."""
+    spy = _SpyDetector()
+    monkeypatch.setattr(forwarding, "make_detector", lambda: spy)
+    return spy
+
+
+def test_sse_data_payload_skips_only_the_real_sentinel():
+    """Unit pin for the shared sentinel rule (issue #129).
+
+    The guard used a substring test (``"[DONE]" not in line``); the rule is an
+    exact comparison of the whole payload, the convention
+    ``StreamResponseAssembler.add_sse_line`` uses.  A chunk that merely spells
+    the marker is an ordinary data line.
+    """
+    from app.cloud_inference.forwarding import _sse_data_payload
+
+    # The real sentinel — with and without surrounding whitespace.
+    assert _sse_data_payload("data: [DONE]") is None
+    assert _sse_data_payload("data:   [DONE]  ") is None
+    # Lines that carry no payload at all.
+    assert _sse_data_payload("data: ") is None
+    assert _sse_data_payload("") is None
+    assert _sse_data_payload("event: ping") is None
+    assert _sse_data_payload("event: [DONE]") is None
+    # A JSON chunk whose content spells the marker is ordinary data.
+    chunk = 'data: {"choices":[{"delta":{"content":"[DONE]"}}]}'
+    assert _sse_data_payload(chunk) == chunk[6:]
+
+
+@pytest.mark.asyncio
+async def test_degeneration_guard_feeds_chunk_whose_content_spells_done(monkeypatch):
+    """Regression (issue #129): a chunk whose ``delta.content`` contains the
+    text ``[DONE]`` must still reach the repetition detector — only the real
+    SSE sentinel line is skipped."""
+    response = httpx.Response(200, headers={"content-type": "text/event-stream"})
+    spy = _install_spy_detector(monkeypatch)
+    stream_client = _patch_stream_common(
+        monkeypatch, [], _stream_provider(), _FakeStreamClient(response),
+        [
+            'data: {"choices":[{"delta":{"content":"the marker is "}}]}',
+            # The model writes the sentinel out as literal output text.
+            'data: {"choices":[{"delta":{"content":"[DONE]"}}]}',
+            'data: {"choices":[{"delta":{"content":" and that is all"}}]}',
+            "data: [DONE]",
+        ],
+    )
+    with patch.object(forwarding.httpx, "AsyncClient", return_value=stream_client):
+        result = await forwarding.forward_to_cloud_provider(
+            "chat/completions", b"{}",
+            {"model": "openai/gpt-4o", "messages": [], "stream": True},
+            "openai/gpt-4o", SimpleNamespace(), "dsh",
+        )
+        [chunk async for chunk in result.body_iterator]
+
+    # The detector saw the marker chunk's text, verbatim and in stream order.
+    assert spy.fed == ["the marker is ", "[DONE]", " and that is all"]
+
+
+@pytest.mark.asyncio
+async def test_degeneration_guard_real_sentinel_contributes_nothing(monkeypatch):
+    """The real ``data: [DONE]`` sentinel feeds the detector nothing, while
+    still being forwarded to the client unchanged."""
+    response = httpx.Response(200, headers={"content-type": "text/event-stream"})
+    spy = _install_spy_detector(monkeypatch)
+    stream_client = _patch_stream_common(
+        monkeypatch, [], _stream_provider(), _FakeStreamClient(response),
+        [
+            'data: {"choices":[{"delta":{"content":"Hi"}}]}',
+            "data: [DONE]",
+            "data:   [DONE]  ",
+        ],
+    )
+    with patch.object(forwarding.httpx, "AsyncClient", return_value=stream_client):
+        result = await forwarding.forward_to_cloud_provider(
+            "chat/completions", b"{}",
+            {"model": "openai/gpt-4o", "messages": [], "stream": True},
+            "openai/gpt-4o", SimpleNamespace(), "dsh",
+        )
+        body = "".join([
+            chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+            async for chunk in result.body_iterator
+        ])
+
+    assert spy.fed == ["Hi"]
+    # The sentinel lines are still part of the client-facing stream.
+    assert body.count("data: [DONE]") == 1
+    assert body.count("data:   [DONE]  ") == 1
+
+
+@pytest.mark.asyncio
+async def test_degeneration_guard_cuts_loop_whose_text_contains_done(monkeypatch):
+    """Behavioural proof (issue #129), the reason the substring test hurt.
+
+    A repetition loop whose repeated unit spells ``[DONE]`` is a real loop: it
+    must be detected and cut with a synthesized ``finish_reason: "length"``.
+    Under the old ``"[DONE]" not in line`` rule every one of these chunk lines
+    was skipped, so the detector never saw the loop and the stream ran on.
+    """
+    loop_unit = "[DONE] payload chunk repeated "
+    assert "[DONE]" in loop_unit
+    response = httpx.Response(200, headers={"content-type": "text/event-stream"})
+    spy = _install_spy_detector(monkeypatch)
+    loop_chunk = "data: " + json.dumps({"choices": [{"delta": {"content": loop_unit * 3}}]})
+    assert "[DONE]" in loop_chunk  # the substring test would have skipped it
+    stream_client = _patch_stream_common(
+        monkeypatch, [], _stream_provider(), _FakeStreamClient(response),
+        [loop_chunk] * 12,
+    )
+    with patch.object(forwarding.httpx, "AsyncClient", return_value=stream_client):
+        result = await forwarding.forward_to_cloud_provider(
+            "chat/completions", b"{}",
+            {"model": "openai/gpt-4o", "messages": [], "stream": True},
+            "openai/gpt-4o", SimpleNamespace(), "dsh",
+        )
+        body = "".join([
+            chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+            async for chunk in result.body_iterator
+        ])
+
+    # The detector saw the loop text and returned a verdict for it.
+    fed_text = "".join(spy.fed)
+    assert "[DONE]" in fed_text
+    assert len(fed_text) >= 240
+    # Upstream consumption stopped after the cutoff and a clean end was synthesized.
+    assert '"finish_reason": "length"' in body or '"finish_reason":"length"' in body
+    assert body.rstrip().endswith("data: [DONE]")
+    assert body.count(loop_chunk) < 12
+
+
+@pytest.mark.asyncio
+async def test_degeneration_guard_feeds_unchanged_text_without_the_marker(monkeypatch):
+    """Same-workload recheck (issue #129): a stream that never spells the
+    marker feeds exactly the same text as before the fix — every content delta
+    in order, ``content`` preferred over ``reasoning_content``, and non-data /
+    junk / empty-delta / sentinel lines contributing nothing."""
+    response = httpx.Response(200, headers={"content-type": "text/event-stream"})
+    spy = _install_spy_detector(monkeypatch)
+    stream_client = _patch_stream_common(
+        monkeypatch, [], _stream_provider(), _FakeStreamClient(response),
+        [
+            'data: {"choices":[{"delta":{"content":"Hello"}}]}',
+            'data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}',
+            'data: {"choices":[{"delta":{"content":" world","reasoning_content":"ignored"}}]}',
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+            "event: ping",
+            "data: not-json",
+            "data: [DONE]",
+        ],
+    )
+    with patch.object(forwarding.httpx, "AsyncClient", return_value=stream_client):
+        result = await forwarding.forward_to_cloud_provider(
+            "chat/completions", b"{}",
+            {"model": "openai/gpt-4o", "messages": [], "stream": True},
+            "openai/gpt-4o", SimpleNamespace(), "dsh",
+        )
+        [chunk async for chunk in result.body_iterator]
+
+    assert spy.fed == ["Hello", "thinking", " world"]
