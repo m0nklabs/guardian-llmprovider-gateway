@@ -73,7 +73,8 @@ trail):
 cd /home/flip/guardian-llmprovider-gateway
 
 # Report drift — the default, and safe: it only reads mode bits.
-# Exit status: 0 clean, 1 drift found, 2 configuration/tree error.
+# Exit status: 0 clean, 1 drift found, 2 configuration/tree error,
+#              130 interrupted (Ctrl-C during --apply; changes so far are listed).
 ./venv/bin/python scripts/guardianctl.py permissions
 ./venv/bin/python scripts/guardianctl.py permissions --json   # machine-readable, absolute paths
 
@@ -117,7 +118,18 @@ What it does:
 - **A stale scan never widens a mode.** The drift is recomputed from the mode
   read on the descriptor, so an entry someone tightened in the meantime (e.g.
   `0644` → `0600` after the scan) is left alone and reported as "changed
-  meanwhile"; `--apply` only ever normalises what still drifts.
+  meanwhile"; `--apply` only ever normalises what still drifts. A corrected entry
+  prints the mode the correction actually replaced, not the scan value.
+- **The audit trail is written as it happens.** Every applied change is printed
+  to **stderr** the moment its `fchmod` succeeds (not at the end), so an
+  interrupted `--apply` — Ctrl-C while a later entry is opened — still lists
+  every mode it already changed, and `--json` keeps stdout one clean document.
+  The run then exits **130** with a partial summary; re-run to finish.
+- **The modes come from one validated read.** The settings file is read and
+  validated once, and the config is built from that document — not re-read. The
+  runtime loader's documented fallback (a writer must keep working) substitutes
+  `0640`/`0750` when the file is unreadable, which would grant group read to a
+  tree configured `0600`/`0700`; the audit never lets that happen mid-run.
 - **An entry it cannot open is a reported failure, not a repair**: a file at
   `0000` (or a directory the owner cannot read) denies the open the correction
   needs, so it is listed and the exit status is non-zero; fix those by hand.

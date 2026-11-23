@@ -162,6 +162,37 @@ class TestCaptureConfigModes:
         assert cfg.file_mode == 0o600
         assert cfg.directory_mode == 0o700
 
+    def test_settings_file_vanishing_after_the_read_cannot_swap_the_modes(
+        self, gctl, tmp_path, monkeypatch
+    ):
+        """One read: the modes audited are the modes that were validated.
+
+        Measured, the runtime loader's documented fallback replaces a configured
+        0600/0700 with its 0640/0750 defaults — which would authorise group read
+        mid-``--apply``.  The audit therefore builds its config from the
+        document it already validated, so a file that disappears after that read
+        cannot change the modes it will chmod to.
+        """
+        settings = _settings_file(
+            tmp_path / "settings.yaml", file_mode="0600", directory_mode="0700"
+        )
+        real_read_text = Path.read_text
+        state = {"reads": 0}
+
+        def read_then_disappear(self_path, *args, **kwargs):
+            text = real_read_text(self_path, *args, **kwargs)
+            if Path(self_path) == settings:
+                state["reads"] += 1
+                settings.unlink()  # vanishes after the validated read
+            return text
+
+        monkeypatch.setattr(Path, "read_text", read_then_disappear)
+
+        cfg = gctl._capture_settings(settings)
+
+        assert state["reads"] == 1
+        assert (cfg.file_mode, cfg.directory_mode) == (0o600, 0o700)
+
     def test_missing_settings_file_is_a_clear_error(self, gctl, tmp_path):
         with pytest.raises(gctl.CaptureConfigError, match="cannot read capture configuration"):
             gctl._capture_settings(tmp_path / "nope.yaml")
@@ -483,6 +514,63 @@ class TestScanPermissionDrift:
             for note in scan.skipped
         )
         # Nothing outside the tree moved, and nothing there was repaired.
+        assert _mode(secret) == 0o644
+        assert _mode(outside) == 0o755
+
+    def test_walk_refuses_a_directory_swapped_just_before_the_open(
+        self, gctl, tmp_path, monkeypatch
+    ):
+        """The stat-to-open race, which is what the descriptor guards cover.
+
+        The entry stat'd as a real directory, and only then is it swapped for a
+        symlink — one step later than ``_SwapAfterListing`` does it.  The walk
+        must refuse to descend (``O_NOFOLLOW`` on the open) instead of auditing
+        the tree the symlink points at.
+        """
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        secret = outside / "outside-artefact.png"
+        secret.write_bytes(b"not capture data")
+        secret.chmod(0o644)
+        outside.chmod(0o755)
+
+        root = _make_tree(tmp_path)
+        media_dir = root / "media"
+        moved = tmp_path / "media-moved"
+        state = {"swapped": False}
+
+        def swap_now():
+            if not state["swapped"]:
+                state["swapped"] = True
+                media_dir.rename(moved)
+                media_dir.symlink_to(outside, target_is_directory=True)
+
+        real_open = os.open
+        real_scandir = os.scandir
+
+        def fake_open(path, flags, *args, **kwargs):
+            # New walk: the child directory is opened relative to its parent.
+            if (
+                path == "media"
+                and kwargs.get("dir_fd") is not None
+                and flags & os.O_DIRECTORY
+            ):
+                swap_now()
+            return real_open(path, flags, *args, **kwargs)
+
+        def fake_scandir(target):
+            # Old path-based walk: the descent is a scandir on the path.
+            if isinstance(target, (str, Path)) and Path(target) == media_dir:
+                swap_now()
+            return real_scandir(target)
+
+        monkeypatch.setattr(gctl.os, "open", fake_open)
+        monkeypatch.setattr(gctl.os, "scandir", fake_scandir)
+
+        with pytest.raises(gctl.CaptureTreeError, match="cannot open directory"):
+            gctl._scan_permission_drift(root, file_mode=0o640, directory_mode=0o750)
+
+        assert state["swapped"] is True
         assert _mode(secret) == 0o644
         assert _mode(outside) == 0o755
 
@@ -866,6 +954,84 @@ class TestCmdPermissionsApply:
         # In-tree drift was still corrected.
         assert _mode(root / "nested") == 0o750
         assert code in (gctl.PERMISSIONS_EXIT_CLEAN, gctl.PERMISSIONS_EXIT_DRIFT)
+
+    def test_apply_prints_each_change_before_a_later_interrupt(
+        self, gctl, monkeypatch, tmp_path, capsys
+    ):
+        """An interrupted run must still have reported what it already changed."""
+        root = _make_tree(tmp_path)
+        first = root / "guardian_capture_1787751555_2.jsonl.gz"  # first drift, sorted
+        real_fchmod = os.fchmod
+        calls = {"n": 0}
+
+        def fake_fchmod(descriptor, mode):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise KeyboardInterrupt  # operator hits Ctrl-C on a later entry
+            return real_fchmod(descriptor, mode)
+
+        monkeypatch.setattr(gctl.os, "fchmod", fake_fchmod)
+        code = _run(gctl, monkeypatch, tmp_path, root, apply=True)
+        captured = capsys.readouterr()
+
+        assert calls["n"] == 2
+        # The first correction really happened, and it is on record.
+        assert _mode(first) == 0o640
+        assert str(first) in captured.err
+        assert "0644 -> 0640" in captured.err
+        # The exit status tells the truth about the interrupted run.
+        assert code == gctl.PERMISSIONS_EXIT_INTERRUPTED == 130
+        assert "INTERRUPTED after 1 correction(s)" in captured.out
+        # Nothing after the interrupt was touched.
+        assert _mode(root / "media" / "req_legacy_0.png") == 0o644
+        assert _mode(root / "nested") == 0o775
+
+    def test_apply_interrupted_json_stays_a_single_document(
+        self, gctl, monkeypatch, tmp_path, capsys
+    ):
+        root = _make_tree(tmp_path)
+        real_apply = gctl._apply_permission_fixes
+
+        def interrupting_apply(scan):
+            result = real_apply(scan)
+            result.interrupted = True
+            return result
+
+        monkeypatch.setattr(gctl, "_apply_permission_fixes", interrupting_apply)
+        code = _run(gctl, monkeypatch, tmp_path, root, apply=True, as_json=True)
+        captured = capsys.readouterr()
+
+        payload = json.loads(captured.out)  # stdout is still one clean document
+        assert payload["interrupted"] is True
+        assert len(payload["changed"]) == 4
+        assert code == gctl.PERMISSIONS_EXIT_INTERRUPTED
+        # The live audit trail went to stderr.
+        assert captured.err.count("FIXED") == 4
+
+    def test_fixed_line_reports_the_mode_actually_replaced(
+        self, gctl, monkeypatch, tmp_path, capsys
+    ):
+        """A correction fixes what it finds, and says so — not the scan value."""
+        root = _make_tree(tmp_path)
+        victim = root / "media" / "req_legacy_0.png"  # scanned as 0644
+        real_apply = gctl._apply_permission_fixes
+
+        def racing_apply(scan):
+            victim.chmod(0o666)  # still drifting, different old mode
+            return real_apply(scan)
+
+        monkeypatch.setattr(gctl, "_apply_permission_fixes", racing_apply)
+        code = _run(gctl, monkeypatch, tmp_path, root, apply=True)
+        out = capsys.readouterr().out
+
+        line = next(
+            (ln for ln in out.splitlines() if str(victim) in ln), None
+        )
+        assert line is not None
+        assert "0666 -> 0640" in line, f"stale scan value reported: {line!r}"
+        assert "0644 -> 0640" not in line
+        assert _mode(victim) == 0o640
+        assert code == gctl.PERMISSIONS_EXIT_CLEAN
 
     def test_apply_leaves_a_clean_tree_untouched(self, gctl, monkeypatch, tmp_path, capsys):
         root = tmp_path / "capture"

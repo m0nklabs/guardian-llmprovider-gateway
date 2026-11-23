@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -337,30 +338,29 @@ def _normalize_correlation_headers(raw: Any) -> list[str]:
     return normalized or list(DEFAULT_CORRELATION_HEADERS)
 
 
-def load_capture_config(settings_path: Path | None = None) -> CaptureConfig:
-    """Load capture configuration from global.settings.yaml with env-var overrides.
+def capture_config_from_section(
+    capture_section: Mapping[str, Any] | None,
+) -> CaptureConfig:
+    """Build a validated :class:`CaptureConfig` from a parsed ``capture:`` section.
 
-    Returns a default (disabled) config if the section is absent or the file
-    is unreadable.
+    Pure: it never touches the filesystem, so the values it produces come from
+    the mapping the caller already holds.  :func:`load_capture_config` reads the
+    settings file and delegates here; a caller that has already parsed and
+    validated a document (the permission audit) uses this directly, so the modes
+    it validated are the modes that get used with no second read in between —
+    the loader's documented fallback would otherwise be able to substitute the
+    0640/0750 defaults for a configured 0600/0700 mid-run.
+
+    ``None`` and an empty mapping mean "nothing configured" and yield the
+    documented defaults (capture disabled, 0640/0750).
     """
-    if settings_path is None:
-        settings_path = global_settings_file()
-
-    capture_section: dict[str, Any] = {}
-    try:
-        if settings_path.exists():
-            with open(settings_path, "r") as f:
-                full_cfg = yaml.safe_load(f) or {}
-            capture_section = full_cfg.get("capture", {}) or {}
-    except Exception as exc:
-        logger.warning("Failed to load capture config from %s: %s — using defaults", settings_path, exc)
-        capture_section = {}
+    section = capture_section or {}
 
     # The client_ref secret is never stored in YAML; read from env at runtime.
     # It is NOT passed into the config object itself.
 
     def _get(key: str, default: Any) -> Any:
-        val = capture_section.get(key, default)
+        val = section.get(key, default)
         if isinstance(val, str) and val.startswith("${") and val.endswith("}"):
             env_var = val[2:-1]
             val = os.environ.get(env_var, "")
@@ -369,7 +369,7 @@ def load_capture_config(settings_path: Path | None = None) -> CaptureConfig:
     file_mode_raw = _get("file_mode", DEFAULT_FILE_MODE)
     dir_mode_raw = _get("directory_mode", DEFAULT_DIRECTORY_MODE)
 
-    config = CaptureConfig(
+    return CaptureConfig(
         enabled=bool(_get("enabled", False)),
         local_capture=bool(_get("local_capture", False)),
         cloud_capture=bool(_get("cloud_capture", False)),
@@ -403,6 +403,30 @@ def load_capture_config(settings_path: Path | None = None) -> CaptureConfig:
             _get("correlation_headers", list(DEFAULT_CORRELATION_HEADERS))
         ),
     )
+
+
+def load_capture_config(settings_path: Path | None = None) -> CaptureConfig:
+    """Load capture configuration from global.settings.yaml with env-var overrides.
+
+    Returns a default (disabled) config if the section is absent or the file
+    is unreadable.  That fail-open behaviour is deliberate for a writer — which
+    is why the permission audit does not use it to resolve the modes it will
+    ``chmod`` to (see :func:`capture_config_from_section`).
+    """
+    if settings_path is None:
+        settings_path = global_settings_file()
+
+    capture_section: Mapping[str, Any] = {}
+    try:
+        if settings_path.exists():
+            with open(settings_path, "r") as f:
+                full_cfg = yaml.safe_load(f) or {}
+            capture_section = full_cfg.get("capture", {}) or {}
+    except Exception as exc:
+        logger.warning("Failed to load capture config from %s: %s — using defaults", settings_path, exc)
+        capture_section = {}
+
+    config = capture_config_from_section(capture_section)
 
     logger.info(
         "Capture config loaded: enabled=%s, local=%s, cloud=%s, cloud_allowlist=%s, "

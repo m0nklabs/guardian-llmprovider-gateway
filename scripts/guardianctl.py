@@ -353,6 +353,7 @@ _OWNER_IMPLIED_BITS = 0o700
 PERMISSIONS_EXIT_CLEAN = 0
 PERMISSIONS_EXIT_DRIFT = 1
 PERMISSIONS_EXIT_ERROR = 2
+PERMISSIONS_EXIT_INTERRUPTED = 130  # 128 + SIGINT
 
 #: Mode-bit names for human drift reasons, widest first.
 _MODE_BIT_NAMES: tuple[tuple[int, str], ...] = (
@@ -464,6 +465,17 @@ class PermissionChange:
 
 
 @dataclass
+class CorrectionResult:
+    """What one ``--apply`` pass did (also when it was interrupted)."""
+
+    changes: list[PermissionChange] = field(default_factory=list)
+    failures: list[str] = field(default_factory=list)
+    vanished: list[str] = field(default_factory=list)
+    unchanged: list[str] = field(default_factory=list)
+    interrupted: bool = False
+
+
+@dataclass
 class PermissionScan:
     """Result of walking the capture tree once."""
 
@@ -482,13 +494,18 @@ def _capture_settings(settings_path: Path | None = None) -> Any:
     Deliberately strict about *reaching* the configuration:
     :func:`app.capture.config.load_capture_config` falls back to its defaults
     when the file is unreadable or unparsable.  That is right for a fail-open
-    writer, and wrong for a permission audit — comparing a live tree against a
-    guessed mode could hide real drift or, worse, authorise a ``chmod`` nobody
-    configured.  So a missing file, a broken YAML document, an absent
-    ``capture:`` section or a rejected mode raises instead, and the caller
-    turns that into a clear error.  Once the document is readable, the modes
-    come from the config object (``file_mode``/``directory_mode``, validated
-    against the no-world-access rule) — never from a literal in this script.
+    writer, and wrong for a permission audit — measured: the fallback replaces a
+    configured ``0600``/``0700`` with ``0640``/``0750``, i.e. it grants group
+    read.  So a missing file, a broken YAML document, an absent ``capture:``
+    section or a rejected mode raises instead, and the caller turns that into a
+    clear error.
+
+    The file is read **once**.  The validated document is handed to
+    :func:`app.capture.config.capture_config_from_section` rather than to the
+    runtime loader, so a file that vanishes or changes after validation cannot
+    swap the modes this audit will ``chmod`` to.  The modes still come from
+    :class:`CaptureConfig` (``file_mode``/``directory_mode``, validated against
+    the no-world-access rule) — never from a literal in this script.
     """
     try:
         import yaml
@@ -523,10 +540,12 @@ def _capture_settings(settings_path: Path | None = None) -> Any:
             f"capture configuration {path} has no 'capture' section"
         )
 
-    from app.capture.config import load_capture_config
+    from app.capture.config import capture_config_from_section
 
+    # Build from the document that was just validated: one read, so nothing can
+    # substitute a different mode between the validation and this line.
     try:
-        return load_capture_config(path)
+        return capture_config_from_section(document["capture"])
     except (TypeError, ValueError) as exc:
         raise CaptureConfigError(
             f"capture configuration {path} is invalid: {exc}"
@@ -785,14 +804,31 @@ def _opened_for_correction(entry: PermissionDrift) -> Iterator[int]:
             os.close(descriptor)
 
 
-def _apply_permission_fixes(
-    scan: PermissionScan,
-) -> tuple[list[PermissionChange], list[str], list[str], list[str]]:
+def _print_change(change: PermissionChange, entry: PermissionDrift) -> None:
+    """Report one applied change immediately, on stderr, flushed.
+
+    The audit trail is written the moment the ``fchmod`` succeeds, not when the
+    run ends: an interrupted ``--apply`` (Ctrl-C while a later entry is being
+    opened) must still leave a record of every mode it already changed.  It goes
+    to stderr so ``--json`` keeps stdout a single clean document.
+    """
+    print(
+        f"  FIXED {change.kind:<9s} "
+        f"{format(change.old_mode, '04o')} -> {format(change.new_mode, '04o')}  "
+        f"{_display_path(change.path)}  ({'; '.join(entry.reasons)})",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
+def _apply_permission_fixes(scan: PermissionScan) -> CorrectionResult:
     """Normalise every drifting entry to its configured mode.
 
-    Returns ``(changes, failures, vanished, unchanged)``.  This is the only
-    function in the CLI that changes a mode on capture data, and it only ever
-    receives entries :func:`_scan_permission_drift` flagged.
+    Returns a :class:`CorrectionResult`; ``interrupted`` is set when the operator
+    stops the run part-way, and the changes made before that point are already
+    on stderr.  This is the only function in the CLI that changes a mode on
+    capture data, and it only ever receives entries
+    :func:`_scan_permission_drift` flagged.
 
     Every correction is checked on the descriptor it is about to change:
 
@@ -805,74 +841,77 @@ def _apply_permission_fixes(
       and is left alone.  ``--apply`` never widens a mode because of a stale
       scan result.
 
-    Each drifting entry is then set *exactly* to its configured mode.  A refused
+    Each drifting entry is then set *exactly* to its configured mode, and the
+    change is printed (stderr, flushed) before the loop moves on.  A refused
     symlink or replacement (``ELOOP``/``ENOTDIR``), an unopenable entry
     (``EACCES``: the same mask that makes it drift also denies the ``O_RDONLY``
     the correction needs) and any other error are reported failures with a
     non-zero exit — never a silent skip.  Entries that merely vanished need no
     repair and are listed separately.
     """
-    changes: list[PermissionChange] = []
-    failures: list[str] = []
-    vanished: list[str] = []
-    unchanged: list[str] = []
-
-    for entry in scan.drift:
-        try:
-            with _opened_for_correction(entry) as descriptor:
-                opened_stat = os.fstat(descriptor)
-                if FileIdentity.of(opened_stat) != entry.identity:
-                    failures.append(
-                        f"{entry.path}: replaced since the scan (inode changed) — not corrected"
-                    )
-                    continue
-                if entry.kind == "directory" and not stat.S_ISDIR(opened_stat.st_mode):
-                    failures.append(
-                        f"{entry.path}: no longer a directory — not corrected"
-                    )
-                    continue
-                if entry.kind == "file" and not stat.S_ISREG(opened_stat.st_mode):
-                    failures.append(
-                        f"{entry.path}: no longer a regular file — not corrected"
-                    )
-                    continue
-                current_mode = stat.S_IMODE(opened_stat.st_mode)
-                if not _permission_drift(current_mode, entry.expected_mode):
-                    unchanged.append(
-                        f"{entry.path}: no longer drifts "
-                        f"({format(current_mode, '04o')} now satisfies "
-                        f"{format(entry.expected_mode, '04o')}) — left untouched"
-                    )
-                    continue
-                os.fchmod(descriptor, entry.expected_mode)
-                changes.append(
-                    PermissionChange(
+    result = CorrectionResult()
+    try:
+        for entry in scan.drift:
+            try:
+                with _opened_for_correction(entry) as descriptor:
+                    opened_stat = os.fstat(descriptor)
+                    if FileIdentity.of(opened_stat) != entry.identity:
+                        result.failures.append(
+                            f"{entry.path}: replaced since the scan (inode changed) — not corrected"
+                        )
+                        continue
+                    if entry.kind == "directory" and not stat.S_ISDIR(opened_stat.st_mode):
+                        result.failures.append(
+                            f"{entry.path}: no longer a directory — not corrected"
+                        )
+                        continue
+                    if entry.kind == "file" and not stat.S_ISREG(opened_stat.st_mode):
+                        result.failures.append(
+                            f"{entry.path}: no longer a regular file — not corrected"
+                        )
+                        continue
+                    current_mode = stat.S_IMODE(opened_stat.st_mode)
+                    if not _permission_drift(current_mode, entry.expected_mode):
+                        result.unchanged.append(
+                            f"{entry.path}: no longer drifts "
+                            f"({format(current_mode, '04o')} now satisfies "
+                            f"{format(entry.expected_mode, '04o')}) — left untouched"
+                        )
+                        continue
+                    os.fchmod(descriptor, entry.expected_mode)
+                    change = PermissionChange(
                         path=entry.path,
                         kind=entry.kind,
                         old_mode=current_mode,
                         new_mode=entry.expected_mode,
                     )
-                )
-        except _CorrectionRefused as exc:
-            failures.append(f"{entry.path}: {exc}")
-        except OSError as exc:
-            if exc.errno in _VANISHED_ERRNOS:
-                vanished.append(f"{entry.path}: vanished before it could be corrected")
-            elif exc.errno in (errno.ELOOP, errno.ENOTDIR):
-                failures.append(
-                    f"{entry.path}: is now a symlink or a different type — "
-                    "refusing to follow it (nothing outside the audited entry "
-                    "was touched)"
-                )
-            elif exc.errno == errno.EACCES:
-                failures.append(
-                    f"{entry.path}: cannot open it to correct it "
-                    f"({exc.strerror or exc}) — fix this one from a shell"
-                )
-            else:
-                failures.append(f"{entry.path}: {exc.strerror or exc}")
-
-    return changes, failures, vanished, unchanged
+                    result.changes.append(change)
+                    _print_change(change, entry)
+            except _CorrectionRefused as exc:
+                result.failures.append(f"{entry.path}: {exc}")
+            except OSError as exc:
+                if exc.errno in _VANISHED_ERRNOS:
+                    result.vanished.append(
+                        f"{entry.path}: vanished before it could be corrected"
+                    )
+                elif exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                    result.failures.append(
+                        f"{entry.path}: is now a symlink or a different type — "
+                        "refusing to follow it (nothing outside the audited entry "
+                        "was touched)"
+                    )
+                elif exc.errno == errno.EACCES:
+                    result.failures.append(
+                        f"{entry.path}: cannot open it to correct it "
+                        f"({exc.strerror or exc}) — fix this one from a shell"
+                    )
+                else:
+                    result.failures.append(f"{entry.path}: {exc.strerror or exc}")
+    except KeyboardInterrupt:
+        # Every change up to this point is already on stderr; report the partial
+        # result honestly instead of dying in a traceback with no audit trail.
+        result.interrupted = True
+    return result
 
 
 def _display_path(path: Path) -> str:
@@ -930,12 +969,13 @@ def cmd_permissions(args: argparse.Namespace) -> None:
         print(f"❌ Cannot scan capture tree {root}: {exc.strerror or exc}", file=sys.stderr)
         raise SystemExit(PERMISSIONS_EXIT_ERROR)
 
-    changes: list[PermissionChange] = []
-    failures: list[str] = []
-    vanished: list[str] = []
-    unchanged: list[str] = []
+    result = CorrectionResult()
     if apply and scan.drift:
-        changes, failures, vanished, unchanged = _apply_permission_fixes(scan)
+        result = _apply_permission_fixes(scan)
+    changes = result.changes
+    failures = result.failures
+    vanished = result.vanished
+    unchanged = result.unchanged
 
     if as_json:
         print(
@@ -970,6 +1010,7 @@ def cmd_permissions(args: argparse.Namespace) -> None:
                         }
                         for change in changes
                     ],
+                    "interrupted": result.interrupted,
                     "failures": failures,
                     "vanished": vanished,
                     "unchanged": unchanged,
@@ -990,12 +1031,16 @@ def cmd_permissions(args: argparse.Namespace) -> None:
         else:
             print("  Mode:           REPORT (default, safe) — nothing is changed; add --apply to fix")
         print()
-        fixed = {change.path for change in changes}
+        applied = {change.path: change for change in changes}
         for entry in scan.drift:
-            marker = "FIXED" if entry.path in fixed else "DRIFT"
+            # A corrected entry reports the mode the correction actually saw —
+            # not the mode the scan saw, which can be stale by then.
+            change = applied.get(entry.path)
+            old_mode = change.old_mode if change is not None else entry.actual_mode
+            marker = "FIXED" if change is not None else "DRIFT"
             print(
                 f"  {marker:<5s} {entry.kind:<9s} "
-                f"{format(entry.actual_mode, '04o')} -> {format(entry.expected_mode, '04o')}  "
+                f"{format(old_mode, '04o')} -> {format(entry.expected_mode, '04o')}  "
                 f"{_display_path(entry.path)}  ({'; '.join(entry.reasons)})"
             )
         if not scan.drift:
@@ -1009,7 +1054,12 @@ def cmd_permissions(args: argparse.Namespace) -> None:
             f"{scan.directories_checked} directories: {len(scan.drift)} drifting, "
             f"{len(changes)} corrected{satisfied}, {len(failures)} failed."
         )
-        if scan.drift and not apply:
+        if result.interrupted:
+            print(
+                f"  INTERRUPTED after {len(changes)} correction(s) — every change "
+                "already made is printed above and on stderr; re-run to finish."
+            )
+        elif scan.drift and not apply:
             print("  Drift found — exit status 1. --apply normalises it (operator action on production data).")
         print("━" * 66)
 
@@ -1018,6 +1068,8 @@ def cmd_permissions(args: argparse.Namespace) -> None:
     for failure in failures:
         print(f"❌ {failure}", file=sys.stderr)
 
+    if result.interrupted:
+        raise SystemExit(PERMISSIONS_EXIT_INTERRUPTED)
     if failures:
         raise SystemExit(PERMISSIONS_EXIT_DRIFT)
     if apply:
