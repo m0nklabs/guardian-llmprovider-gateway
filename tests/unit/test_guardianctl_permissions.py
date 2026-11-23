@@ -11,6 +11,7 @@ production correction is an operator action.
 """
 
 import argparse
+import errno
 import importlib.util
 import json
 import os
@@ -167,6 +168,14 @@ class TestCaptureConfigModes:
         settings = tmp_path / "settings.yaml"
         settings.write_text("capture: [unclosed\n  file_mode: '0640'\n")
         with pytest.raises(gctl.CaptureConfigError, match="cannot parse capture configuration"):
+            gctl._capture_settings(settings)
+
+    def test_undecodable_settings_file_is_a_clear_error(self, gctl, tmp_path):
+        # Invalid UTF-8 raises UnicodeDecodeError (a ValueError, not an
+        # OSError): it must become the documented configuration error.
+        settings = tmp_path / "settings.yaml"
+        settings.write_bytes(b"capture:\n  file_mode: '0640'\n\xff\xfe\n")
+        with pytest.raises(gctl.CaptureConfigError, match="cannot read capture configuration"):
             gctl._capture_settings(settings)
 
     def test_missing_capture_section_is_a_clear_error(self, gctl, tmp_path):
@@ -346,6 +355,82 @@ class TestScanPermissionDrift:
         # The rest of the tree is still scanned.
         assert str(root / "nested" / "leftover.jsonl") in _names(scan)
 
+    def test_unreadable_directory_aborts_the_audit(self, gctl, tmp_path):
+        """A directory it cannot descend into must not become a clean result.
+
+        Reporting drift on the unreadable directory and then repairing it would
+        exit 0 while a hidden child kept its loose mode — the audit would claim
+        a tree it never read.
+        """
+        if os.geteuid() == 0:
+            pytest.skip("root bypasses the permission check this test relies on")
+        root = tmp_path / "capture"
+        root.mkdir()
+        root.chmod(0o750)
+        hidden = root / "hidden"
+        hidden.mkdir()
+        loose = hidden / "loose.jsonl"
+        loose.write_bytes(b"x")
+        loose.chmod(0o644)
+        hidden.chmod(0o300)  # owner: write + traverse, no read
+        try:
+            with pytest.raises(gctl.CaptureTreeError, match="cannot read directory"):
+                gctl._scan_permission_drift(root, file_mode=0o640, directory_mode=0o750)
+        finally:
+            hidden.chmod(0o750)
+        # The hidden child was never audited, so it is still loose.
+        assert _mode(loose) == 0o644
+
+    def test_scandir_error_is_not_a_silent_skip(self, gctl, tmp_path, monkeypatch):
+        root = _make_tree(tmp_path)
+        media_dir = root / "media"
+        skipped_dirs: list[str] = []
+
+        class _FailingScandir:
+            def __init__(self, path):
+                skipped_dirs.append(str(path))
+                raise PermissionError(errno.EACCES, "Permission denied")
+
+        real_scandir = os.scandir
+
+        def fake_scandir(path):
+            if Path(path) == media_dir:
+                return _FailingScandir(path)
+            return real_scandir(path)
+
+        monkeypatch.setattr(gctl.os, "scandir", fake_scandir)
+
+        with pytest.raises(gctl.CaptureTreeError, match="cannot read directory"):
+            gctl._scan_permission_drift(root, file_mode=0o640, directory_mode=0o750)
+        assert skipped_dirs == [str(media_dir)]
+
+    def test_vanished_directory_is_still_tolerated(self, gctl, tmp_path, monkeypatch):
+        # The complement: rotation/retention removing a directory mid-walk is
+        # not an audit failure, it is skipped.
+        root = _make_tree(tmp_path)
+        media_dir = root / "media"
+        real_scandir = os.scandir
+
+        class _VanishingScandir:
+            def __init__(self, path):
+                raise FileNotFoundError(errno.ENOENT, "No such file or directory")
+
+            def __enter__(self):  # pragma: no cover - never reached
+                return iter(())
+
+            def __exit__(self, *exc_info):  # pragma: no cover - never reached
+                return False
+
+        def fake_scandir(path):
+            if Path(path) == media_dir:
+                return _VanishingScandir(path)
+            return real_scandir(path)
+
+        monkeypatch.setattr(gctl.os, "scandir", fake_scandir)
+
+        scan = gctl._scan_permission_drift(root, file_mode=0o640, directory_mode=0o750)
+        assert any("vanished during the walk" in note for note in scan.skipped)
+
     def test_missing_root_is_an_error(self, gctl, tmp_path):
         with pytest.raises(FileNotFoundError):
             gctl._scan_permission_drift(
@@ -439,6 +524,25 @@ class TestCmdPermissionsReport:
         assert any("world-read" in reason for reason in entry["reasons"])
         assert payload["changed"] == []
 
+    def test_relative_root_is_reported_as_absolute(
+        self, gctl, monkeypatch, tmp_path, capsys
+    ):
+        root = _make_tree(tmp_path)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            gctl, "SETTINGS_YAML", _settings_file(tmp_path / "settings.yaml")
+        )
+        args = argparse.Namespace(apply=False, root="./capture", json=True)
+        with pytest.raises(SystemExit) as excinfo:
+            gctl.cmd_permissions(args)
+        payload = json.loads(capsys.readouterr().out)
+
+        assert excinfo.value.code == 1
+        assert payload["root"] == str(root.resolve())
+        assert os.path.isabs(payload["root"])
+        assert payload["drift"], "the crafted tree must report drift"
+        assert all(os.path.isabs(entry["path"]) for entry in payload["drift"])
+
     def test_config_error_exits_two_and_changes_nothing(
         self, gctl, monkeypatch, tmp_path, capsys
     ):
@@ -457,6 +561,47 @@ class TestCmdPermissionsReport:
         assert "cannot parse capture configuration" in err
         assert "Refusing to compare the capture tree against a guessed mode" in err
         assert _tree_modes(root) == before
+
+    def test_undecodable_settings_exits_two(self, gctl, monkeypatch, tmp_path, capsys):
+        root = _make_tree(tmp_path)
+        before = _tree_modes(root)
+        settings = tmp_path / "settings.yaml"
+        settings.write_bytes(b"capture:\n  file_mode: '0640'\n\xff\xfe\n")
+        monkeypatch.setattr(gctl, "SETTINGS_YAML", settings)
+
+        args = argparse.Namespace(apply=True, root=str(root), json=False)
+        with pytest.raises(SystemExit) as excinfo:
+            gctl.cmd_permissions(args)
+        err = capsys.readouterr().err
+
+        assert excinfo.value.code == gctl.PERMISSIONS_EXIT_ERROR == 2
+        assert "cannot read capture configuration" in err
+        assert _tree_modes(root) == before
+
+    def test_unreadable_directory_exits_two_without_a_clean_claim(
+        self, gctl, monkeypatch, tmp_path, capsys
+    ):
+        if os.geteuid() == 0:
+            pytest.skip("root bypasses the permission check this test relies on")
+        root = tmp_path / "capture"
+        root.mkdir()
+        root.chmod(0o750)
+        hidden = root / "hidden"
+        hidden.mkdir()
+        (hidden / "loose.jsonl").write_bytes(b"x")
+        (hidden / "loose.jsonl").chmod(0o644)
+        hidden.chmod(0o300)
+        try:
+            code = _run(gctl, monkeypatch, tmp_path, root, apply=True)
+            captured = capsys.readouterr()
+        finally:
+            hidden.chmod(0o750)
+
+        assert code == gctl.PERMISSIONS_EXIT_ERROR == 2
+        assert "cannot read directory" in captured.err
+        assert "No drift" not in captured.out
+        # The hidden child was never audited, so --apply left it alone.
+        assert _mode(hidden / "loose.jsonl") == 0o644
 
     def test_missing_capture_root_exits_two(self, gctl, monkeypatch, tmp_path, capsys):
         monkeypatch.setattr(gctl, "SETTINGS_YAML", _settings_file(tmp_path / "settings.yaml"))
@@ -543,27 +688,110 @@ class TestCmdPermissionsApply:
         assert "0 corrected" in out
         assert _tree_modes(root) == before
 
-    def test_apply_reports_a_failure_and_exits_one(
+    def test_apply_reports_an_unopenable_entry_and_exits_one(
         self, gctl, monkeypatch, tmp_path, capsys
     ):
+        # The mask that makes an entry drift can also deny the O_RDONLY the
+        # correction needs (owner-unreadable file): report it, never guess.
         root = _make_tree(tmp_path)
         target = root / "media" / "req_legacy_0.png"
-        real_chmod = os.chmod
+        real_open = os.open
         failing = {"raised": False}
 
-        def fake_chmod(path, mode, *args, **kwargs):
+        def fake_open(path, flags, *args, **kwargs):
             if Path(path) == target:
                 failing["raised"] = True
-                raise PermissionError(1, "Operation not permitted")
-            return real_chmod(path, mode, *args, **kwargs)
+                raise PermissionError(errno.EACCES, "Permission denied")
+            return real_open(path, flags, *args, **kwargs)
 
-        monkeypatch.setattr(gctl.os, "chmod", fake_chmod)
+        monkeypatch.setattr(gctl.os, "open", fake_open)
         code = _run(gctl, monkeypatch, tmp_path, root, apply=True)
         captured = capsys.readouterr()
 
         assert failing["raised"] is True
         assert code == gctl.PERMISSIONS_EXIT_DRIFT == 1
-        assert "Operation not permitted" in captured.err
+        assert "cannot open it to correct it" in captured.err
         assert "1 failed" in captured.out
         # The entries that could be fixed still were.
         assert _mode(root / "nested") == 0o750
+
+    def test_apply_reports_an_fchmod_failure_and_exits_one(
+        self, gctl, monkeypatch, tmp_path, capsys
+    ):
+        root = _make_tree(tmp_path)
+        real_fchmod = os.fchmod
+        calls = {"n": 0}
+
+        def fake_fchmod(descriptor, mode):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise PermissionError(errno.EPERM, "Operation not permitted")
+            return real_fchmod(descriptor, mode)
+
+        monkeypatch.setattr(gctl.os, "fchmod", fake_fchmod)
+        code = _run(gctl, monkeypatch, tmp_path, root, apply=True)
+        captured = capsys.readouterr()
+
+        assert calls["n"] >= 1
+        assert code == gctl.PERMISSIONS_EXIT_DRIFT == 1
+        assert "Operation not permitted" in captured.err
+        assert "1 failed" in captured.out
+
+    def test_apply_refuses_a_file_swapped_for_a_symlink(
+        self, gctl, monkeypatch, tmp_path, capsys
+    ):
+        """The symlink race: a pathname chmod would follow the link and change
+        the mode of an unrelated file outside the capture tree."""
+        root = _make_tree(tmp_path)
+        victim = root / "media" / "req_legacy_0.png"
+        outside = tmp_path / "outside-secret.txt"
+        outside.write_bytes(b"not capture data")
+        outside.chmod(0o600)
+
+        real_apply = gctl._apply_permission_fixes
+
+        def racing_apply(scan):
+            victim.unlink()
+            victim.symlink_to(outside)
+            return real_apply(scan)
+
+        monkeypatch.setattr(gctl, "_apply_permission_fixes", racing_apply)
+        code = _run(gctl, monkeypatch, tmp_path, root, apply=True)
+        captured = capsys.readouterr()
+
+        assert code == gctl.PERMISSIONS_EXIT_DRIFT == 1
+        assert "is now a symlink" in captured.err
+        assert "target was not touched" in captured.err
+        # The whole point: the target outside the tree keeps its mode.
+        assert _mode(outside) == 0o600
+        # The rest of the tree was still normalised.
+        assert _mode(root / "nested") == 0o750
+        assert _mode(root / "nested" / "leftover.jsonl") == 0o640
+
+    def test_apply_refuses_an_entry_replaced_by_another_inode(
+        self, gctl, monkeypatch, tmp_path, capsys
+    ):
+        root = _make_tree(tmp_path)
+        victim = root / "media" / "req_legacy_0.png"
+
+        real_apply = gctl._apply_permission_fixes
+
+        # Allocate the replacement while the scanned file still exists, so the
+        # path really names a different inode after the swap (an unlink-then-
+        # create would very likely reuse the just-freed inode number).
+        replacement = tmp_path / "replacement"
+        replacement.write_bytes(b"a different file with the same name")
+        replacement.chmod(0o644)
+
+        def racing_apply(scan):
+            os.replace(replacement, victim)
+            return real_apply(scan)
+
+        monkeypatch.setattr(gctl, "_apply_permission_fixes", racing_apply)
+        code = _run(gctl, monkeypatch, tmp_path, root, apply=True)
+        captured = capsys.readouterr()
+
+        assert code == gctl.PERMISSIONS_EXIT_DRIFT == 1
+        assert "replaced since the scan" in captured.err
+        # The replacement is left alone (it was never audited).
+        assert _mode(victim) == 0o644

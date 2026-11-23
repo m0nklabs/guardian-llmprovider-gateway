@@ -99,7 +99,19 @@ What it does:
   carries a rejected mode is a clear error (exit 2); the command refuses to
   compare a live tree against a guessed default.
 - `--root DIR` inspects another tree instead of the configured capture root;
-  use it to rehearse on a copy or on a temporary tree.
+  use it to rehearse on a copy or on a temporary tree. The root is resolved to
+  an absolute path before the scan, and `--json` reports absolute paths.
+- **A correction only ever touches the entry it audited.** `--apply` opens each
+  drifting entry with `O_NOFOLLOW`, re-checks its `st_dev`/`st_ino` against what
+  the scan saw, and `fchmod`s that descriptor — so an entry swapped for a
+  symlink (or for a different file) between scan and correction is refused and
+  reported, and nothing outside the capture tree can be changed by it.
+- **An entry it cannot open is a reported failure, not a repair**: a file at
+  `0000` (or a directory the owner cannot read) denies the open the correction
+  needs, so it is listed and the exit status is non-zero; fix those by hand.
+  Likewise an **unreadable directory aborts the whole audit** (exit 2) instead
+  of reporting a partial tree as clean — a walk that never entered a directory
+  cannot vouch for what is inside it.
 
 `--apply` on production data is the operator's call, and it is a `chmod` on
 user content that is already on disk: run the report first, read the list, then

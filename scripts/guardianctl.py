@@ -32,6 +32,7 @@ Note: `status` and `rotate` talk to the running Guardian API.
 """
 
 import argparse
+import errno
 import json
 import os
 import stat
@@ -368,19 +369,42 @@ _MODE_BIT_NAMES: tuple[tuple[int, str], ...] = (
 )
 
 
+#: Errors that mean "this entry disappeared" — routine in a live tree that
+#: rotates and purges between the listing and the stat.  Every *other* error is
+#: a failure to audit, and reporting it as "skipped" would let a partial walk
+#: masquerade as a clean result.
+_VANISHED_ERRNOS = frozenset(
+    {errno.ENOENT, errno.ENOTDIR, getattr(errno, "ESTALE", errno.ENOENT)}
+)
+
+
 class CaptureConfigError(RuntimeError):
     """Capture configuration could not be resolved; it is never guessed."""
 
 
+class CaptureTreeError(RuntimeError):
+    """Part of the capture tree could not be audited; the result is incomplete."""
+
+
 @dataclass(frozen=True)
 class PermissionDrift:
-    """One capture artefact whose mode does not match the configuration."""
+    """One capture artefact whose mode does not match the configuration.
+
+    ``device``/``inode`` are what the walk actually observed.  They are the
+    identity ``--apply`` re-checks on the descriptor it mutates, so an entry
+    that was replaced between the scan and the correction (the classic
+    replace-with-a-symlink race) is detected and reported instead of being
+    "repaired" — a pathname chmod would have changed whatever the path pointed
+    at by then, possibly a file outside the capture tree.
+    """
 
     path: Path
     kind: str  # "file" | "directory"
     actual_mode: int
     expected_mode: int
     reasons: tuple[str, ...]
+    device: int
+    inode: int
 
 
 @dataclass(frozen=True)
@@ -430,9 +454,13 @@ def _capture_settings(settings_path: Path | None = None) -> Any:
     path = Path(settings_path if settings_path is not None else SETTINGS_YAML)
     try:
         raw = path.read_text()
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
+        # A settings file that is not valid UTF-8 raises UnicodeDecodeError,
+        # which is a ValueError and not an OSError: unwrapped it escaped as a
+        # traceback with exit 1 instead of the documented config error (exit 2).
+        detail = getattr(exc, "strerror", None) or str(exc)
         raise CaptureConfigError(
-            f"cannot read capture configuration {path}: {exc.strerror or exc}"
+            f"cannot read capture configuration {path}: {detail}"
         ) from exc
     try:
         document = yaml.safe_load(raw)
@@ -501,15 +529,21 @@ def _scan_permission_drift(
 ) -> PermissionScan:
     """Walk ``root`` and collect every drifting file and directory.
 
-    The walk never follows a symlink (a symlink's own mode is meaningless and
-    ``chmod`` would act on its target, possibly outside the tree) and never
-    opens a file, so an owner-unreadable entry is still reported.  An entry that
-    disappears between listing and ``stat`` — routine in a live tree that
-    rotates and purges — is recorded as skipped instead of aborting the walk.
+    The walk never follows a symlink (a symlink's own mode is meaningless and a
+    mode change would act on its target, possibly outside the tree) and never
+    opens a file, so an owner-unreadable entry is still reported.
 
-    The root itself is reported as an error when it is missing or not a
-    directory: a silent "clean" for a tree that was not there is exactly the
-    false confidence this check exists to prevent.
+    Failure discipline: only *disappearance* is tolerated (``ENOENT``,
+    ``ENOTDIR``, ``ESTALE`` — routine in a live tree that rotates and purges)
+    and recorded as skipped.  Any other traversal error — an unreadable
+    directory, an I/O error — raises :class:`CaptureTreeError`.  Treating those
+    as "skipped" would report drift on a directory it never descended into and
+    then let ``--apply`` repair the directory while a hidden child inside it
+    keeps its loose mode; the audit would exit 0 over a tree it did not read.
+
+    The root itself is an error when it is missing or not a directory: a silent
+    "clean" for a tree that was not there is exactly the false confidence this
+    check exists to prevent.
     """
     root_stat = os.stat(root)
     if not stat.S_ISDIR(root_stat.st_mode):
@@ -519,12 +553,13 @@ def _scan_permission_drift(
         root=root, file_mode=file_mode, directory_mode=directory_mode, drift=[]
     )
 
-    def _consider(path: Path, kind: str, mode: int) -> None:
+    def _consider(path: Path, kind: str, entry_stat: os.stat_result) -> None:
         expected = directory_mode if kind == "directory" else file_mode
         if kind == "directory":
             scan.directories_checked += 1
         else:
             scan.files_checked += 1
+        mode = stat.S_IMODE(entry_stat.st_mode)
         reasons = _permission_drift(mode, expected)
         if reasons:
             scan.drift.append(
@@ -534,10 +569,12 @@ def _scan_permission_drift(
                     actual_mode=mode,
                     expected_mode=expected,
                     reasons=reasons,
+                    device=entry_stat.st_dev,
+                    inode=entry_stat.st_ino,
                 )
             )
 
-    _consider(root, "directory", stat.S_IMODE(root_stat.st_mode))
+    _consider(root, "directory", root_stat)
 
     stack = [root]
     while stack:
@@ -546,8 +583,12 @@ def _scan_permission_drift(
             with os.scandir(current) as iterator:
                 children = sorted(iterator, key=lambda entry: entry.name)
         except OSError as exc:
-            scan.skipped.append(f"{current}: {exc.strerror or exc}")
-            continue
+            if exc.errno in _VANISHED_ERRNOS:
+                scan.skipped.append(f"{current}: vanished during the walk")
+                continue
+            raise CaptureTreeError(
+                f"cannot read directory {current}: {exc.strerror or exc}"
+            ) from exc
         for child in children:
             try:
                 if child.is_symlink():
@@ -562,12 +603,16 @@ def _scan_permission_drift(
                         f"{child.path}: not a regular file or directory"
                     )
                     continue
-                mode = stat.S_IMODE(child.stat(follow_symlinks=False).st_mode)
-            except OSError:
-                scan.skipped.append(f"{child.path}: vanished during the walk")
-                continue
+                child_stat = child.stat(follow_symlinks=False)
+            except OSError as exc:
+                if exc.errno in _VANISHED_ERRNOS:
+                    scan.skipped.append(f"{child.path}: vanished during the walk")
+                    continue
+                raise CaptureTreeError(
+                    f"cannot inspect {child.path}: {exc.strerror or exc}"
+                ) from exc
             path = Path(child.path)
-            _consider(path, kind, mode)
+            _consider(path, kind, child_stat)
             if kind == "directory":
                 stack.append(path)
 
@@ -575,30 +620,83 @@ def _scan_permission_drift(
     return scan
 
 
+def _open_for_mutation(entry: PermissionDrift) -> int:
+    """Open ``entry.path`` for an ``fchmod`` without following a symlink.
+
+    A pathname ``chmod`` follows whatever the path resolves to *at that moment*:
+    a file scanned as a regular ``0644`` entry and swapped for a symlink before
+    the correction would have the mode of its target changed — a file outside
+    the capture tree, e.g. a ``0600`` secret widened because an entry the walk
+    skipped had a different name.  ``O_NOFOLLOW`` refuses the swap outright
+    (``ELOOP``) and hands back a descriptor that cannot be redirected, so the
+    ``fchmod`` can only ever touch the inode the descriptor names.
+    ``O_NOCTTY`` keeps a swapped-in terminal from becoming the controlling
+    terminal, and ``O_DIRECTORY`` for a directory entry keeps a regular file
+    from being opened in its place.
+    """
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NOCTTY | os.O_CLOEXEC
+    if entry.kind == "directory":
+        flags |= os.O_DIRECTORY
+    return os.open(entry.path, flags)
+
+
 def _apply_permission_fixes(
     scan: PermissionScan,
-) -> tuple[list[PermissionChange], list[str]]:
+) -> tuple[list[PermissionChange], list[str], list[str]]:
     """Normalise every drifting entry to its configured mode.
 
-    Returns ``(changes, failures)``.  This is the only function in the CLI that
-    chmods capture data, and it only ever receives entries
+    Returns ``(changes, failures, vanished)``.  This is the only function in the
+    CLI that changes a mode on capture data, and it only ever receives entries
     :func:`_scan_permission_drift` flagged, so a correct entry is never touched.
     Each drifting entry is set *exactly* to its configured mode — removing the
     extra bits and restoring the owner access the configuration grants in one
-    step.  One failure does not stop the rest; a vanished entry needs no repair
-    and is reported as such.
+    step.
+
+    Every change goes through :func:`_open_for_mutation` and is guarded by an
+    identity check: the descriptor's ``st_dev``/``st_ino`` must match what the
+    walk observed, otherwise the path was reused and the entry is reported as a
+    failure rather than "repaired".  A refused symlink (``ELOOP``), an
+    unopenable entry (e.g. mode ``0000``: the same mask that makes it drift also
+    denies the ``O_RDONLY`` the correction needs) and any other error are
+    reported failures with a non-zero exit — never a silent skip.  One failure
+    does not stop the rest; an entry that merely vanished needs no repair and is
+    listed separately.
     """
     changes: list[PermissionChange] = []
     failures: list[str] = []
+    vanished: list[str] = []
     for entry in scan.drift:
         try:
-            os.chmod(entry.path, entry.expected_mode)
-        except FileNotFoundError:
-            failures.append(f"{entry.path}: vanished before it could be corrected")
+            descriptor = _open_for_mutation(entry)
+        except OSError as exc:
+            if exc.errno in _VANISHED_ERRNOS:
+                vanished.append(f"{entry.path}: vanished before it could be corrected")
+            elif exc.errno == errno.ELOOP:
+                failures.append(
+                    f"{entry.path}: is now a symlink — refusing to follow it "
+                    "(its target was not touched)"
+                )
+            elif exc.errno == errno.EACCES:
+                failures.append(
+                    f"{entry.path}: cannot open it to correct it "
+                    f"({exc.strerror or exc}) — fix this one from a shell"
+                )
+            else:
+                failures.append(f"{entry.path}: {exc.strerror or exc}")
             continue
+        try:
+            opened_stat = os.fstat(descriptor)
+            if (opened_stat.st_dev, opened_stat.st_ino) != (entry.device, entry.inode):
+                failures.append(
+                    f"{entry.path}: replaced since the scan (inode changed) — not corrected"
+                )
+                continue
+            os.fchmod(descriptor, entry.expected_mode)
         except OSError as exc:
             failures.append(f"{entry.path}: {exc.strerror or exc}")
             continue
+        finally:
+            os.close(descriptor)
         changes.append(
             PermissionChange(
                 path=entry.path,
@@ -607,7 +705,7 @@ def _apply_permission_fixes(
                 new_mode=entry.expected_mode,
             )
         )
-    return changes, failures
+    return changes, failures, vanished
 
 
 def _display_path(path: Path) -> str:
@@ -643,20 +741,33 @@ def cmd_permissions(args: argparse.Namespace) -> None:
         raise SystemExit(PERMISSIONS_EXIT_ERROR)
 
     root = Path(args.root).expanduser() if getattr(args, "root", None) else _capture_root(cfg)
+    # Absolute (and symlink-resolved) before anything scans or reports it: the
+    # JSON contract promises absolute paths, and a relative ``--root`` would
+    # otherwise leak a cwd-relative root and relative entry paths into it.
+    root = root.resolve()
     try:
         scan = _scan_permission_drift(
             root,
             file_mode=int(cfg.file_mode),
             directory_mode=int(cfg.directory_mode),
         )
+    except CaptureTreeError as exc:
+        print(f"❌ {exc}", file=sys.stderr)
+        print(
+            "   The tree was not fully audited — refusing to report a result "
+            "(an incomplete walk can hide drift).",
+            file=sys.stderr,
+        )
+        raise SystemExit(PERMISSIONS_EXIT_ERROR)
     except OSError as exc:
         print(f"❌ Cannot scan capture tree {root}: {exc.strerror or exc}", file=sys.stderr)
         raise SystemExit(PERMISSIONS_EXIT_ERROR)
 
     changes: list[PermissionChange] = []
     failures: list[str] = []
+    vanished: list[str] = []
     if apply and scan.drift:
-        changes, failures = _apply_permission_fixes(scan)
+        changes, failures, vanished = _apply_permission_fixes(scan)
 
     if as_json:
         print(
@@ -692,6 +803,7 @@ def cmd_permissions(args: argparse.Namespace) -> None:
                         for change in changes
                     ],
                     "failures": failures,
+                    "vanished": vanished,
                     "skipped": scan.skipped,
                 },
                 indent=2,
@@ -729,7 +841,7 @@ def cmd_permissions(args: argparse.Namespace) -> None:
             print("  Drift found — exit status 1. --apply normalises it (operator action on production data).")
         print("━" * 66)
 
-    _print_skipped(scan.skipped)
+    _print_skipped(scan.skipped + vanished)
     for failure in failures:
         print(f"❌ {failure}", file=sys.stderr)
 
