@@ -2,18 +2,21 @@
 """guardianctl — CLI for Guardian capture subsystem control.
 
 Subcommands:
-  status     Show capture subsystem status (config + runtime + retention/on-disk inventory)
-  config     Show effective capture configuration
-  files      List capture WAL files on disk
-  rotate     Force rotation of the active capture file
-  enable     Enable capture (modifies settings.yaml, requires server restart)
-  disable    Disable capture (modifies settings.yaml, requires server restart)
-  test-event Emit a synthetic test event to verify the pipeline end-to-end
-  export     Replay raw WAL events (Keanu handoff) with integrity checks
+  status       Show capture subsystem status (config + runtime + retention/on-disk inventory)
+  config       Show effective capture configuration
+  files        List capture WAL files on disk
+  permissions  Report permission drift on the capture tree (report-only unless --apply)
+  rotate       Force rotation of the active capture file
+  enable       Enable capture (modifies settings.yaml, requires server restart)
+  disable      Disable capture (modifies settings.yaml, requires server restart)
+  test-event   Emit a synthetic test event to verify the pipeline end-to-end
+  export       Replay raw WAL events (Keanu handoff) with integrity checks
 
 Usage:
   ./venv/bin/python scripts/guardianctl.py status
   ./venv/bin/python scripts/guardianctl.py files --json
+  ./venv/bin/python scripts/guardianctl.py permissions
+  ./venv/bin/python scripts/guardianctl.py permissions --apply   # operator action on production data
   GUARDIAN_API_KEY=flip... ./venv/bin/python scripts/guardianctl.py rotate
   ./venv/bin/python scripts/guardianctl.py export --verify --out dataset.jsonl
 
@@ -21,16 +24,20 @@ Note: `status` and `rotate` talk to the running Guardian API.
       `status` also reports the configured retention and the on-disk
       capture file inventory (active/rotated files, feedback C11).
       `config`, `enable`, `disable` read/modify settings.yaml directly.
-      `files`, `export` inspect the filesystem.
+      `files`, `export`, `permissions` inspect the filesystem.
       `export` replays the RAW WAL (Guardian stores raw since 2026-08-26;
       redaction is Keanu's job via scripts/keanu_redact.py).
+      `permissions` reports drift only; `--apply` is the single code path
+      that changes a mode, and it prints every change (issue #131).
 """
 
 import argparse
 import json
 import os
+import stat
 import sys
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -316,6 +323,423 @@ def cmd_files(args: argparse.Namespace) -> None:
     print(f"Total size:  {total_bytes / (1024**2):.2f} MB")
 
 
+# ---------------------------------------------------------------------------
+# Permission drift on the capture tree (issue #131)
+# ---------------------------------------------------------------------------
+#
+# Every capture artefact — the plain WAL, the rotated ``.jsonl.gz`` archives,
+# their ``.sha256`` sidecars, extracted media and the directories holding them —
+# is supposed to carry the modes in capture configuration
+# (``CaptureConfig.file_mode``/``directory_mode``).  The writers apply them since
+# commit 5a174dc, but nothing detects artefacts written *before* that (or by an
+# older checkout): the tree is the only record, and "is this right?" was
+# answered with a hand-typed ``chmod -R`` against a hardcoded mode.
+#
+# This subcommand is that check, with the modes taken from configuration and the
+# mutation behind an explicit flag.  Nothing here runs on its own and nothing
+# changes without ``--apply``; ``report`` is the default and reads only mode
+# bits (never file content, so an owner-unreadable file still gets reported).
+
+#: Owner access the configuration implies on any artefact: a file must stay
+#: readable and writable by its owner, a directory traversable by it.  A mode
+#: that lacks those bits drifts even though it is *stricter* than configured —
+#: the WAL writer could no longer append, the consumer could no longer travel.
+_OWNER_IMPLIED_BITS = 0o700
+
+#: Exit status: a check needs a stable contract, so the values are named.
+PERMISSIONS_EXIT_CLEAN = 0
+PERMISSIONS_EXIT_DRIFT = 1
+PERMISSIONS_EXIT_ERROR = 2
+
+#: Mode-bit names for human drift reasons, widest first.
+_MODE_BIT_NAMES: tuple[tuple[int, str], ...] = (
+    (0o4000, "setuid"),
+    (0o2000, "setgid"),
+    (0o1000, "sticky"),
+    (0o400, "owner-read"),
+    (0o200, "owner-write"),
+    (0o100, "owner-execute"),
+    (0o040, "group-read"),
+    (0o020, "group-write"),
+    (0o010, "group-execute"),
+    (0o004, "world-read"),
+    (0o002, "world-write"),
+    (0o001, "world-execute"),
+)
+
+
+class CaptureConfigError(RuntimeError):
+    """Capture configuration could not be resolved; it is never guessed."""
+
+
+@dataclass(frozen=True)
+class PermissionDrift:
+    """One capture artefact whose mode does not match the configuration."""
+
+    path: Path
+    kind: str  # "file" | "directory"
+    actual_mode: int
+    expected_mode: int
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PermissionChange:
+    """One artefact corrected by ``--apply`` (audit trail for the operator)."""
+
+    path: Path
+    kind: str
+    old_mode: int
+    new_mode: int
+
+
+@dataclass
+class PermissionScan:
+    """Result of walking the capture tree once."""
+
+    root: Path
+    file_mode: int
+    directory_mode: int
+    drift: list[PermissionDrift]
+    files_checked: int = 0
+    directories_checked: int = 0
+    skipped: list[str] = field(default_factory=list)
+
+
+def _capture_settings(settings_path: Path | None = None) -> Any:
+    """Return the validated :class:`CaptureConfig` for permission work.
+
+    Deliberately strict about *reaching* the configuration:
+    :func:`app.capture.config.load_capture_config` falls back to its defaults
+    when the file is unreadable or unparsable.  That is right for a fail-open
+    writer, and wrong for a permission audit — comparing a live tree against a
+    guessed mode could hide real drift or, worse, authorise a ``chmod`` nobody
+    configured.  So a missing file, a broken YAML document, an absent
+    ``capture:`` section or a rejected mode raises instead, and the caller
+    turns that into a clear error.  Once the document is readable, the modes
+    come from the config object (``file_mode``/``directory_mode``, validated
+    against the no-world-access rule) — never from a literal in this script.
+    """
+    try:
+        import yaml
+    except ImportError as exc:  # pragma: no cover - venv always has PyYAML
+        raise CaptureConfigError(
+            "PyYAML not installed. Run: ./venv/bin/pip install pyyaml"
+        ) from exc
+
+    path = Path(settings_path if settings_path is not None else SETTINGS_YAML)
+    try:
+        raw = path.read_text()
+    except OSError as exc:
+        raise CaptureConfigError(
+            f"cannot read capture configuration {path}: {exc.strerror or exc}"
+        ) from exc
+    try:
+        document = yaml.safe_load(raw)
+    except yaml.YAMLError as exc:
+        raise CaptureConfigError(
+            f"cannot parse capture configuration {path}: {exc}"
+        ) from exc
+    if not isinstance(document, dict):
+        raise CaptureConfigError(
+            f"capture configuration {path} is not a YAML mapping"
+        )
+    if not isinstance(document.get("capture"), dict):
+        raise CaptureConfigError(
+            f"capture configuration {path} has no 'capture' section"
+        )
+
+    from app.capture.config import load_capture_config
+
+    try:
+        return load_capture_config(path)
+    except (TypeError, ValueError) as exc:
+        raise CaptureConfigError(
+            f"capture configuration {path} is invalid: {exc}"
+        ) from exc
+
+
+def _capture_root(cfg: Any) -> Path:
+    """Resolve ``cfg.capture_root`` the same way the WAL writer does."""
+    root = Path(cfg.capture_root)
+    if not root.is_absolute():
+        root = REPO_ROOT / root
+    return root
+
+
+def _describe_mode_bits(bits: int) -> str:
+    """Human names for a set of mode bits (``0o004`` → ``world-read``)."""
+    names = [name for bit, name in _MODE_BIT_NAMES if bits & bit]
+    return ", ".join(names) if names else format(bits, "04o")
+
+
+def _permission_drift(actual_mode: int, expected_mode: int) -> tuple[str, ...]:
+    """Return why ``actual_mode`` drifts from ``expected_mode`` (empty = clean).
+
+    Drift is exactly two things (issue #131): the entry grants a bit the
+    configured mode does not (looser than configuration), or it lacks owner
+    access the configured mode implies (unusable for the writer/consumer).  A
+    mode that is merely *tighter* — no extra bits, owner access intact — is
+    correct and stays untouched, which is why the owner-only
+    ``.capture_state.json`` (``0600``) and legacy owner-only media files report
+    clean instead of being widened by ``--apply``.
+    """
+    extra = actual_mode & ~expected_mode & 0o7777
+    missing_owner = expected_mode & _OWNER_IMPLIED_BITS & ~actual_mode
+    reasons: list[str] = []
+    if extra:
+        reasons.append(
+            f"looser than {format(expected_mode, '04o')}: {_describe_mode_bits(extra)}"
+        )
+    if missing_owner:
+        reasons.append(f"owner access missing: {_describe_mode_bits(missing_owner)}")
+    return tuple(reasons)
+
+
+def _scan_permission_drift(
+    root: Path, *, file_mode: int, directory_mode: int
+) -> PermissionScan:
+    """Walk ``root`` and collect every drifting file and directory.
+
+    The walk never follows a symlink (a symlink's own mode is meaningless and
+    ``chmod`` would act on its target, possibly outside the tree) and never
+    opens a file, so an owner-unreadable entry is still reported.  An entry that
+    disappears between listing and ``stat`` — routine in a live tree that
+    rotates and purges — is recorded as skipped instead of aborting the walk.
+
+    The root itself is reported as an error when it is missing or not a
+    directory: a silent "clean" for a tree that was not there is exactly the
+    false confidence this check exists to prevent.
+    """
+    root_stat = os.stat(root)
+    if not stat.S_ISDIR(root_stat.st_mode):
+        raise NotADirectoryError(f"capture root is not a directory: {root}")
+
+    scan = PermissionScan(
+        root=root, file_mode=file_mode, directory_mode=directory_mode, drift=[]
+    )
+
+    def _consider(path: Path, kind: str, mode: int) -> None:
+        expected = directory_mode if kind == "directory" else file_mode
+        if kind == "directory":
+            scan.directories_checked += 1
+        else:
+            scan.files_checked += 1
+        reasons = _permission_drift(mode, expected)
+        if reasons:
+            scan.drift.append(
+                PermissionDrift(
+                    path=path,
+                    kind=kind,
+                    actual_mode=mode,
+                    expected_mode=expected,
+                    reasons=reasons,
+                )
+            )
+
+    _consider(root, "directory", stat.S_IMODE(root_stat.st_mode))
+
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as iterator:
+                children = sorted(iterator, key=lambda entry: entry.name)
+        except OSError as exc:
+            scan.skipped.append(f"{current}: {exc.strerror or exc}")
+            continue
+        for child in children:
+            try:
+                if child.is_symlink():
+                    scan.skipped.append(f"{child.path}: symlink, not followed")
+                    continue
+                if child.is_dir(follow_symlinks=False):
+                    kind = "directory"
+                elif child.is_file(follow_symlinks=False):
+                    kind = "file"
+                else:
+                    scan.skipped.append(
+                        f"{child.path}: not a regular file or directory"
+                    )
+                    continue
+                mode = stat.S_IMODE(child.stat(follow_symlinks=False).st_mode)
+            except OSError:
+                scan.skipped.append(f"{child.path}: vanished during the walk")
+                continue
+            path = Path(child.path)
+            _consider(path, kind, mode)
+            if kind == "directory":
+                stack.append(path)
+
+    scan.drift.sort(key=lambda entry: str(entry.path))
+    return scan
+
+
+def _apply_permission_fixes(
+    scan: PermissionScan,
+) -> tuple[list[PermissionChange], list[str]]:
+    """Normalise every drifting entry to its configured mode.
+
+    Returns ``(changes, failures)``.  This is the only function in the CLI that
+    chmods capture data, and it only ever receives entries
+    :func:`_scan_permission_drift` flagged, so a correct entry is never touched.
+    Each drifting entry is set *exactly* to its configured mode — removing the
+    extra bits and restoring the owner access the configuration grants in one
+    step.  One failure does not stop the rest; a vanished entry needs no repair
+    and is reported as such.
+    """
+    changes: list[PermissionChange] = []
+    failures: list[str] = []
+    for entry in scan.drift:
+        try:
+            os.chmod(entry.path, entry.expected_mode)
+        except FileNotFoundError:
+            failures.append(f"{entry.path}: vanished before it could be corrected")
+            continue
+        except OSError as exc:
+            failures.append(f"{entry.path}: {exc.strerror or exc}")
+            continue
+        changes.append(
+            PermissionChange(
+                path=entry.path,
+                kind=entry.kind,
+                old_mode=entry.actual_mode,
+                new_mode=entry.expected_mode,
+            )
+        )
+    return changes, failures
+
+
+def _display_path(path: Path) -> str:
+    """Repo-relative when inside the checkout, absolute otherwise."""
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def _print_skipped(notes: list[str]) -> None:
+    """Surface skipped entries on stderr without flooding it."""
+    for note in notes[:10]:
+        print(f"  skipped: {note}", file=sys.stderr)
+    if len(notes) > 10:
+        print(f"  skipped: … and {len(notes) - 10} more", file=sys.stderr)
+
+
+def cmd_permissions(args: argparse.Namespace) -> None:
+    """Report permission drift on the capture tree; ``--apply`` fixes it."""
+    apply = bool(getattr(args, "apply", False))
+    as_json = bool(getattr(args, "json", False))
+
+    try:
+        cfg = _capture_settings()
+    except CaptureConfigError as exc:
+        print(f"❌ {exc}", file=sys.stderr)
+        print(
+            "   Refusing to compare the capture tree against a guessed mode "
+            "(fix the capture configuration first).",
+            file=sys.stderr,
+        )
+        raise SystemExit(PERMISSIONS_EXIT_ERROR)
+
+    root = Path(args.root).expanduser() if getattr(args, "root", None) else _capture_root(cfg)
+    try:
+        scan = _scan_permission_drift(
+            root,
+            file_mode=int(cfg.file_mode),
+            directory_mode=int(cfg.directory_mode),
+        )
+    except OSError as exc:
+        print(f"❌ Cannot scan capture tree {root}: {exc.strerror or exc}", file=sys.stderr)
+        raise SystemExit(PERMISSIONS_EXIT_ERROR)
+
+    changes: list[PermissionChange] = []
+    failures: list[str] = []
+    if apply and scan.drift:
+        changes, failures = _apply_permission_fixes(scan)
+
+    if as_json:
+        print(
+            json.dumps(
+                {
+                    "root": str(scan.root),
+                    "file_mode": format(scan.file_mode, "04o"),
+                    "directory_mode": format(scan.directory_mode, "04o"),
+                    "apply": apply,
+                    "checked": {
+                        "files": scan.files_checked,
+                        "directories": scan.directories_checked,
+                    },
+                    # Absolute paths: a machine consumer must be able to act
+                    # on an entry without guessing a base directory.
+                    "drift": [
+                        {
+                            "path": str(entry.path),
+                            "kind": entry.kind,
+                            "actual_mode": format(entry.actual_mode, "04o"),
+                            "expected_mode": format(entry.expected_mode, "04o"),
+                            "reasons": list(entry.reasons),
+                        }
+                        for entry in scan.drift
+                    ],
+                    "changed": [
+                        {
+                            "path": str(change.path),
+                            "kind": change.kind,
+                            "old_mode": format(change.old_mode, "04o"),
+                            "new_mode": format(change.new_mode, "04o"),
+                        }
+                        for change in changes
+                    ],
+                    "failures": failures,
+                    "skipped": scan.skipped,
+                },
+                indent=2,
+            )
+        )
+    else:
+        print("━" * 66)
+        print("  Guardian capture permissions")
+        print("━" * 66)
+        print(f"  Capture root:   {_display_path(scan.root)}")
+        print(f"  file_mode:      {format(scan.file_mode, '04o')}  (from capture configuration)")
+        print(f"  directory_mode: {format(scan.directory_mode, '04o')}  (from capture configuration)")
+        if apply:
+            print("  Mode:           APPLY — drifting entries are normalised")
+        else:
+            print("  Mode:           REPORT (default, safe) — nothing is changed; add --apply to fix")
+        print()
+        fixed = {change.path for change in changes}
+        for entry in scan.drift:
+            marker = "FIXED" if entry.path in fixed else "DRIFT"
+            print(
+                f"  {marker:<5s} {entry.kind:<9s} "
+                f"{format(entry.actual_mode, '04o')} -> {format(entry.expected_mode, '04o')}  "
+                f"{_display_path(entry.path)}  ({'; '.join(entry.reasons)})"
+            )
+        if not scan.drift:
+            print("  No drift: every capture artefact matches the configured modes.")
+        print()
+        print(
+            f"  Checked {scan.files_checked} file(s) and "
+            f"{scan.directories_checked} directories: {len(scan.drift)} drifting, "
+            f"{len(changes)} corrected, {len(failures)} failed."
+        )
+        if scan.drift and not apply:
+            print("  Drift found — exit status 1. --apply normalises it (operator action on production data).")
+        print("━" * 66)
+
+    _print_skipped(scan.skipped)
+    for failure in failures:
+        print(f"❌ {failure}", file=sys.stderr)
+
+    if failures:
+        raise SystemExit(PERMISSIONS_EXIT_DRIFT)
+    if apply:
+        raise SystemExit(PERMISSIONS_EXIT_CLEAN)
+    raise SystemExit(PERMISSIONS_EXIT_DRIFT if scan.drift else PERMISSIONS_EXIT_CLEAN)
+
+
 def cmd_rotate(args: argparse.Namespace) -> None:
     """Force rotation of the active capture file."""
     result = _api_request("POST", "/api/capture/rotate")
@@ -560,6 +984,27 @@ def main() -> None:
     p_files = sub.add_parser("files", help="List capture WAL files on disk")
     p_files.add_argument("--json", action="store_true", help="Output as JSON")
     p_files.set_defaults(func=cmd_files)
+
+    # permissions
+    p_perm = sub.add_parser(
+        "permissions",
+        help="Report capture-tree permission drift (report-only unless --apply)",
+        description=(
+            "Compare every capture artefact (WAL files, rotated .gz archives, "
+            "checksum sidecars, media files and the directories holding them) "
+            "against the configured capture.file_mode/capture.directory_mode. "
+            "Report-only by default: nothing is changed and the exit status is "
+            "non-zero when drift is found. --apply normalises the drifting "
+            "entries and prints every change."
+        ),
+    )
+    p_perm.add_argument("--apply", action="store_true",
+                        help="Normalise drifting entries to the configured modes "
+                             "(operator action on production data; dry-run otherwise)")
+    p_perm.add_argument("--root", metavar="DIR",
+                        help="Inspect DIR instead of the configured capture root")
+    p_perm.add_argument("--json", action="store_true", help="Output as JSON")
+    p_perm.set_defaults(func=cmd_permissions)
 
     # rotate
     p_rotate = sub.add_parser("rotate", help="Force rotation of active capture file (requires running server)")

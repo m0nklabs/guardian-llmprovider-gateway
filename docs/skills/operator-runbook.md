@@ -51,32 +51,64 @@ journalctl -u llama-server.service --since "5 min ago" --no-pager | tail -20
 # Named keys exist for: goose, oelala, hydroponics, and others.
 ```
 
-## Capture media permissions
+## Capture permissions — drift check and correction
 
-Capture media (`data/capture/media/`) holds user images verbatim. Since
+Every capture artefact — the plain WAL (`guardian_capture_current.jsonl`), the
+rotated `.jsonl.gz` archives, their `.sha256` sidecars, the extracted media
+files under `media/` and the directories holding them — is supposed to carry
+the modes in capture configuration (`capture.file_mode` /
+`capture.directory_mode`, currently `0640` / `0750`). Since
 [#49](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/49) the
-writer applies explicit modes from configuration
-(`capture.file_mode`/`capture.directory_mode`, currently `0640`/`0750` — the
-same pair the WAL writer uses), so new files no longer depend on the process
-umask. The writer's start also re-applies the mode to the `media/` directory.
+writers apply them explicitly (media since `5a174dc`), so new artefacts no
+longer depend on the process umask.
 
-Files written **before** that fix keep the permissions they were created with.
-They are operator data and are never bulk-corrected by the service; audit and,
-if acceptable, correct them yourself:
+Artefacts written **before** those fixes keep their old, looser mode — the
+live `data/capture/media/` tree still holds files from the pre-fix window that
+are world-readable. That residue is operator data: the service never rewrites
+it. Check it and repair it with `guardianctl`, never with a hand-typed
+`chmod -R` (a hardcoded mode can drift from configuration and leaves no audit
+trail):
+
+```bash
+cd /home/flip/guardian-llmprovider-gateway
+
+# Report drift — the default, and safe: it only reads mode bits.
+# Exit status: 0 clean, 1 drift found, 2 configuration/tree error.
+./venv/bin/python scripts/guardianctl.py permissions
+./venv/bin/python scripts/guardianctl.py permissions --json   # machine-readable, absolute paths
+
+# Normalise the drifting entries — OPERATOR ACTION ON PRODUCTION DATA.
+# Prints every change as path + old mode + new mode; nothing else changes.
+./venv/bin/python scripts/guardianctl.py permissions --apply
+```
+
+What it does:
+
+- **Report mode is the default and changes absolutely nothing.** Drift is an
+  entry that grants a bit the configured mode does not (looser than
+  configuration) or that lacks owner access the configuration implies
+  (`owner-read`/`owner-write`, plus `owner-execute` on directories). It covers
+  files and directories, follows no symlink, and still reports a file the owner
+  cannot read (only mode bits are read, never content).
+- **Artefacts that are tighter than configuration are not drift** and are left
+  alone — e.g. `.capture_state.json` at `0600` against a configured `0640`.
+  `--apply` sets each *drifting* entry exactly to its configured mode and does
+  not touch anything else.
+- **The modes come from `capture.file_mode`/`capture.directory_mode`.** A
+  settings file that is missing, unparsable, has no `capture:` section or
+  carries a rejected mode is a clear error (exit 2); the command refuses to
+  compare a live tree against a guessed default.
+- `--root DIR` inspects another tree instead of the configured capture root;
+  use it to rehearse on a copy or on a temporary tree.
+
+`--apply` on production data is the operator's call, and it is a `chmod` on
+user content that is already on disk: run the report first, read the list, then
+decide. An independent read-only cross-check of the world bits:
 
 ```bash
 cd /home/flip/guardian-llmprovider-gateway/data/capture
-
-# 1. Audit: world-readable (or world-accessible) media files + directory modes
-stat -c '%a %n' . media
-find media -type f -perm -004 | wc -l          # expect 0 on a clean tree
-find media -type f -perm -004 -printf '%TY-%Tm-%Td %TH:%TM %m %p\n' | sort | head
-
-# 2. One-shot correction (dry run first: the -print line, no chmod)
-find media -type f -perm -004 -print
-find media -type f -perm -004 -exec chmod 0640 {} +
-find media -type d -perm -004 -exec chmod 0750 {} +
-chmod 0750 media
+find . -type f -perm -004 | wc -l      # expect 0 on a clean tree
+find . -type f -perm -004 -printf '%TY-%Tm-%Td %TH:%TM %m %p\n' | sort | head
 ```
 
 The service restart that activates a writer change is the usual
