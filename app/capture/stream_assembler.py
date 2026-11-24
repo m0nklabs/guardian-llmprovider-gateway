@@ -23,6 +23,7 @@ from app.capture.schema import (
     sanitize_stream_error_metadata,
     sanitize_upstream_model,
 )
+from app.sse import sse_data_payload
 
 logger = logging.getLogger("Guardian.Capture.StreamAssembler")
 
@@ -80,13 +81,12 @@ class StreamResponseAssembler:
         # Anthropic SSE may have an event-type prefix line:
         #   event: content_block_delta
         #   data: {...}
-        # We handle the data lines.
-        if not line.startswith("data: "):
-            # Could be an Anthropic event-type line or just a blank separator
-            return
-
-        payload = line[6:].strip()
-        if not payload or payload == "[DONE]":
+        # Only data lines carry a chunk: an event-type line, a blank separator
+        # and the real ``data: [DONE]`` sentinel are all rejected by the one
+        # shared rule in :mod:`app.sse` (which this module may import because
+        # it pulls in nothing from ``app.*`` — issue #133).
+        payload = sse_data_payload(line)
+        if payload is None:
             return
 
         try:

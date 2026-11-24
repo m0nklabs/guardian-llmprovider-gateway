@@ -44,6 +44,7 @@ from app.gateway.queue_helpers import (
 from app.gateway.streaming import StreamProgressWatchdog
 from app.log_safety import clean_log_value
 from app.proxy.providers import ProviderRegistry, _expand_env
+from app.sse import sse_data_payload
 
 logger = logging.getLogger("Guardian")
 
@@ -405,20 +406,14 @@ def _extract_cloud_usage_mirror(payload: Any) -> dict[str, Any]:
 def _sse_data_payload(line: str) -> str | None:
     """Return the payload of one ordinary SSE data line, ``None`` for the rest.
 
-    ``None`` means "there is no chunk to parse here": no ``data: `` prefix, an
-    empty payload, or the real ``data: [DONE]`` sentinel.  The sentinel is
-    compared exactly against the whole payload — never as a substring — so a
-    JSON chunk whose content merely spells ``[DONE]`` stays an ordinary data
-    line.  That is the convention ``StreamResponseAssembler.add_sse_line`` uses
-    as well; both consumers in this module (the model sniffer and the
-    degeneration guard) share this one rule rather than hand-rolling it.
+    The rule itself lives in one place — :func:`app.sse.sse_data_payload`,
+    importable from ``app.capture`` without the cycle that kept a third copy
+    alive (issue #133).  This name stays as the cloud-forwarding seam because
+    both consumers here (the model sniffer and the degeneration guard) call it
+    and ``tests/unit/test_cloud_forwarding.py`` pins the rule through it; it
+    holds no rule of its own, so the copies cannot drift apart again.
     """
-    if not line.startswith("data: "):
-        return None
-    payload = line[6:].strip()
-    if not payload or payload == "[DONE]":
-        return None
-    return payload
+    return sse_data_payload(line)
 
 
 def _reported_model_from_line(line: str) -> str | None:
