@@ -46,6 +46,11 @@ from typing import Any
 
 from _paths import DATA_DIR, REPO_ROOT
 
+# The capture-configuration error is defined next to the parser it guards, and
+# imported here so the CLI and the runtime loader raise the identical type
+# instead of two parallel ones (issue #135).
+from app.capture.config import CaptureConfigError
+
 # Capture config lives in the global settings file (config-schema, 2026-08-21).
 # Resolve through app.paths.global_settings_file() so an installation still on
 # the legacy settings.yaml keeps reading/writing its current file instead of a
@@ -400,10 +405,6 @@ _ENTRY_OPEN_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 #: level, so an unbounded depth would exhaust them.  A capture tree is flat
 #: (root plus ``media/``), so this only fires on something pathological.
 _MAX_WALK_DEPTH = 128
-
-
-class CaptureConfigError(RuntimeError):
-    """Capture configuration could not be resolved; it is never guessed."""
 
 
 class CaptureTreeError(RuntimeError):

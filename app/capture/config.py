@@ -25,6 +25,25 @@ from app.paths import global_settings_file
 
 logger = logging.getLogger("Guardian.Capture.Config")
 
+
+class CaptureConfigError(ValueError):
+    """The capture configuration is invalid; a bad value is never guessed around.
+
+    Raised where a configured value cannot be read as the setting it names —
+    a malformed ``capture.file_mode``/``capture.directory_mode`` is the case it
+    exists for.  Callers that want to treat "the configuration is broken"
+    separately from an unrelated failure catch this type instead of matching on
+    message text.
+
+    It subclasses :class:`ValueError` because that is what this module raises
+    for every other misconfiguration, so an existing ``except ValueError``
+    around configuration loading keeps catching it.  The refusal of a
+    world-accessible mode in :meth:`CaptureConfig._validate` stays a plain
+    ``ValueError`` with its own message: it rejects a value that was read
+    correctly, while this error is about a value that cannot be read at all.
+    """
+
+
 DEFAULT_CAPTURE_ROOT = "data/capture"
 DEFAULT_POLICY_VERSION = "1.0.0"
 DEFAULT_RETENTION_DAYS = 7
@@ -338,6 +357,50 @@ def _normalize_correlation_headers(raw: Any) -> list[str]:
     return normalized or list(DEFAULT_CORRELATION_HEADERS)
 
 
+#: Accepted spelling of the two permission modes, repeated verbatim in the
+#: rejection message for a malformed one so the operator sees the fix without
+#: reading this module.  ``416`` and ``0o640`` are the same mode; YAML 1.1
+#: already reads a bare ``0o640`` as the integer, which is why both are named.
+_MODE_ACCEPTED_FORMS = (
+    "give an octal string such as '0640' or '0o640', or an integer "
+    "(416 is 0o640)"
+)
+
+
+def _parse_mode(key: str, raw: Any) -> int:
+    """Read one capture permission mode from its configured value.
+
+    Accepted forms: an octal string — ``'0640'``, ``'0o640'``, ``'640'``, i.e.
+    exactly what :func:`int` accepts with base 8, so every string that was
+    accepted before is still accepted — or an integer (``416``, or YAML 1.1's
+    bare ``0o640``).
+
+    A ``bool`` is refused explicitly.  It is an ``int`` subclass, so ``True``
+    and ``False`` would otherwise be read as ``0o1``/``0o0``: the former tripped
+    the world-access refusal with a message about a mode nobody wrote, and the
+    latter was accepted silently as "no permissions at all".
+
+    Anything else raises :class:`CaptureConfigError` naming the key, the value
+    as written and the accepted forms, so a typo never surfaces as an ``int()``
+    traceback that names neither the setting nor the file it came from.
+    """
+    if isinstance(raw, bool):
+        raise CaptureConfigError(
+            f"capture.{key}={raw!r} is not a valid mode (a bool is not a mode — "
+            f"it would mean {oct(int(raw))}); {_MODE_ACCEPTED_FORMS}"
+        )
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, str):
+        try:
+            return int(raw, 8)
+        except ValueError:
+            pass  # fall through to the shared rejection below
+    raise CaptureConfigError(
+        f"capture.{key}={raw!r} is not a valid mode; {_MODE_ACCEPTED_FORMS}"
+    )
+
+
 def capture_config_from_section(
     capture_section: Mapping[str, Any] | None,
 ) -> CaptureConfig:
@@ -394,8 +457,8 @@ def capture_config_from_section(
         max_pending_events=int(_get("max_pending_events", DEFAULT_MAX_PENDING_EVENTS)),
         max_file_bytes=int(_get("max_file_bytes", DEFAULT_MAX_FILE_BYTES)),
         max_file_age_seconds=int(_get("max_file_age_seconds", DEFAULT_MAX_FILE_AGE_SECONDS)),
-        file_mode=int(file_mode_raw, 8) if isinstance(file_mode_raw, str) else file_mode_raw,
-        directory_mode=int(dir_mode_raw, 8) if isinstance(dir_mode_raw, str) else dir_mode_raw,
+        file_mode=_parse_mode("file_mode", file_mode_raw),
+        directory_mode=_parse_mode("directory_mode", dir_mode_raw),
         capture_root=str(_get("capture_root", DEFAULT_CAPTURE_ROOT)),
         policy_version=str(_get("policy_version", DEFAULT_POLICY_VERSION)),
         instance_id=str(_get("instance_id", str(uuid.uuid4()))),
@@ -412,6 +475,10 @@ def load_capture_config(settings_path: Path | None = None) -> CaptureConfig:
     is unreadable.  That fail-open behaviour is deliberate for a writer — which
     is why the permission audit does not use it to resolve the modes it will
     ``chmod`` to (see :func:`capture_config_from_section`).
+
+    A capture value that *is* readable but invalid is never fail-open: a
+    malformed mode raises :class:`CaptureConfigError` naming the setting, the
+    value as written and the accepted forms, prefixed with this file's path.
     """
     if settings_path is None:
         settings_path = global_settings_file()
@@ -426,7 +493,12 @@ def load_capture_config(settings_path: Path | None = None) -> CaptureConfig:
         logger.warning("Failed to load capture config from %s: %s — using defaults", settings_path, exc)
         capture_section = {}
 
-    config = capture_config_from_section(capture_section)
+    try:
+        config = capture_config_from_section(capture_section)
+    except CaptureConfigError as exc:
+        # This is where a misconfigured startup surfaces, so name the file:
+        # capture_config_from_section() is pure and has no path to name.
+        raise CaptureConfigError(f"{settings_path}: {exc}") from exc
 
     logger.info(
         "Capture config loaded: enabled=%s, local=%s, cloud=%s, cloud_allowlist=%s, "
