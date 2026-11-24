@@ -51,32 +51,101 @@ journalctl -u llama-server.service --since "5 min ago" --no-pager | tail -20
 # Named keys exist for: goose, oelala, hydroponics, and others.
 ```
 
-## Capture media permissions
+## Capture permissions — drift check and correction
 
-Capture media (`data/capture/media/`) holds user images verbatim. Since
+Every capture artefact — the plain WAL (`guardian_capture_current.jsonl`), the
+rotated `.jsonl.gz` archives, their `.sha256` sidecars, the extracted media
+files under `media/` and the directories holding them — is supposed to carry
+the modes in capture configuration (`capture.file_mode` /
+`capture.directory_mode`, currently `0640` / `0750`). Since
 [#49](https://github.com/m0nklabs/guardian-llmprovider-gateway/issues/49) the
-writer applies explicit modes from configuration
-(`capture.file_mode`/`capture.directory_mode`, currently `0640`/`0750` — the
-same pair the WAL writer uses), so new files no longer depend on the process
-umask. The writer's start also re-applies the mode to the `media/` directory.
+writers apply them explicitly (media since `5a174dc`), so new artefacts no
+longer depend on the process umask.
 
-Files written **before** that fix keep the permissions they were created with.
-They are operator data and are never bulk-corrected by the service; audit and,
-if acceptable, correct them yourself:
+Artefacts written **before** those fixes keep their old, looser mode — the
+live `data/capture/media/` tree still holds files from the pre-fix window that
+are world-readable. That residue is operator data: the service never rewrites
+it. Check it and repair it with `guardianctl`, never with a hand-typed
+`chmod -R` (a hardcoded mode can drift from configuration and leaves no audit
+trail):
+
+```bash
+cd /home/flip/guardian-llmprovider-gateway
+
+# Report drift — the default, and safe: it only reads mode bits.
+# Exit status: 0 clean, 1 drift found, 2 configuration/tree error,
+#              130 interrupted (Ctrl-C during --apply; changes so far are listed).
+./venv/bin/python scripts/guardianctl.py permissions
+./venv/bin/python scripts/guardianctl.py permissions --json   # machine-readable, absolute paths
+
+# Normalise the drifting entries — OPERATOR ACTION ON PRODUCTION DATA.
+# Prints every change as path + old mode + new mode; nothing else changes.
+./venv/bin/python scripts/guardianctl.py permissions --apply
+```
+
+What it does:
+
+- **Report mode is the default and changes absolutely nothing.** Drift is an
+  entry that grants a bit the configured mode does not (looser than
+  configuration) or that lacks owner access the configuration implies
+  (`owner-read`/`owner-write`, plus `owner-execute` on directories). It covers
+  files and directories, follows no symlink, and still reports a file the owner
+  cannot read (only mode bits are read, never content).
+- **Artefacts that are tighter than configuration are not drift** and are left
+  alone — e.g. `.capture_state.json` at `0600` against a configured `0640`.
+  `--apply` sets each *drifting* entry exactly to its configured mode and does
+  not touch anything else.
+- **The modes come from `capture.file_mode`/`capture.directory_mode`.** A
+  settings file that is missing, unparsable, has no `capture:` section or
+  carries a rejected mode is a clear error (exit 2); the command refuses to
+  compare a live tree against a guessed default.
+- `--root DIR` inspects another tree instead of the configured capture root;
+  use it to rehearse on a copy or on a temporary tree. The root is resolved to
+  an absolute path before the scan, and `--json` reports absolute paths.
+- **The walk is descriptor-based, so it cannot leave the tree.** Every directory
+  is opened with `O_DIRECTORY | O_NOFOLLOW` relative to its parent's descriptor
+  and its `st_dev`/`st_ino` is compared with what the listing said; children are
+  read with `scandir(fd)` / `stat(name, dir_fd=fd)`. A directory swapped for a
+  symlink mid-walk is therefore never traversed (it is reported as a skipped
+  symlink), and no file outside the capture root can be audited.
+- **A correction only ever touches the entry it audited.** `--apply` re-opens the
+  parent directory (identity-checked), reaches the entry by name relative to it
+  with `O_NOFOLLOW | O_NONBLOCK`, re-checks the entry's own `st_dev`/`st_ino`,
+  and `fchmod`s that descriptor. A symlink or type replacement (`ELOOP`,
+  `ENOTDIR`) and a replaced inode are reported failures with a non-zero exit;
+  nothing outside the capture tree can be changed. `O_NONBLOCK` is why a FIFO
+  swapped in for an entry fails immediately instead of blocking the open.
+- **A stale scan never widens a mode.** The drift is recomputed from the mode
+  read on the descriptor, so an entry someone tightened in the meantime (e.g.
+  `0644` → `0600` after the scan) is left alone and reported as "changed
+  meanwhile"; `--apply` only ever normalises what still drifts. A corrected entry
+  prints the mode the correction actually replaced, not the scan value.
+- **The audit trail is written as it happens.** Every applied change is printed
+  to **stderr** the moment its `fchmod` succeeds (not at the end), so an
+  interrupted `--apply` — Ctrl-C while a later entry is opened — still lists
+  every mode it already changed, and `--json` keeps stdout one clean document.
+  The run then exits **130** with a partial summary; re-run to finish.
+- **The modes come from one validated read.** The settings file is read and
+  validated once, and the config is built from that document — not re-read. The
+  runtime loader's documented fallback (a writer must keep working) substitutes
+  `0640`/`0750` when the file is unreadable, which would grant group read to a
+  tree configured `0600`/`0700`; the audit never lets that happen mid-run.
+- **An entry it cannot open is a reported failure, not a repair**: a file at
+  `0000` (or a directory the owner cannot read) denies the open the correction
+  needs, so it is listed and the exit status is non-zero; fix those by hand.
+  Likewise an **unreadable directory aborts the whole audit** (exit 2) instead
+  of reporting a partial tree as clean — a walk that never entered a directory
+  cannot vouch for what is inside it, and a path replaced by something of another
+  type (`ENOTDIR`) is a replacement, not a disappearance.
+
+`--apply` on production data is the operator's call, and it is a `chmod` on
+user content that is already on disk: run the report first, read the list, then
+decide. An independent read-only cross-check of the world bits:
 
 ```bash
 cd /home/flip/guardian-llmprovider-gateway/data/capture
-
-# 1. Audit: world-readable (or world-accessible) media files + directory modes
-stat -c '%a %n' . media
-find media -type f -perm -004 | wc -l          # expect 0 on a clean tree
-find media -type f -perm -004 -printf '%TY-%Tm-%Td %TH:%TM %m %p\n' | sort | head
-
-# 2. One-shot correction (dry run first: the -print line, no chmod)
-find media -type f -perm -004 -print
-find media -type f -perm -004 -exec chmod 0640 {} +
-find media -type d -perm -004 -exec chmod 0750 {} +
-chmod 0750 media
+find . -type f -perm -004 | wc -l      # expect 0 on a clean tree
+find . -type f -perm -004 -printf '%TY-%Tm-%Td %TH:%TM %m %p\n' | sort | head
 ```
 
 The service restart that activates a writer change is the usual

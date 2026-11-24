@@ -765,6 +765,69 @@ class TestIntCoercionC2:
 # ── Capture-feedback 1.1.0: correlation header config (C6) ──────────────
 
 
+class TestLoadFallbackIsFailOpen:
+    """The runtime loader's fallback is fail-open — deliberately.
+
+    A writer must keep capturing when its settings file is unreadable, so
+    ``load_capture_config`` substitutes the documented defaults.  That means the
+    fallback also substitutes the *modes*: a configured ``0600``/``0700`` becomes
+    ``0640``/``0750``, i.e. group read is granted.  This pins the behaviour (and
+    the reason the permission audit builds its config from the document it
+    validated instead of re-reading the file).
+    """
+
+    def test_missing_file_falls_back_to_the_documented_defaults(self, tmp_path):
+        from app.capture.config import (
+            DEFAULT_DIRECTORY_MODE,
+            DEFAULT_FILE_MODE,
+            load_capture_config,
+        )
+
+        cfg = load_capture_config(tmp_path / "absent.yaml")
+        assert (cfg.file_mode, cfg.directory_mode) == (
+            DEFAULT_FILE_MODE,
+            DEFAULT_DIRECTORY_MODE,
+        )
+
+    def test_unparsable_file_falls_back_to_the_documented_defaults(self, tmp_path):
+        from app.capture.config import (
+            DEFAULT_DIRECTORY_MODE,
+            DEFAULT_FILE_MODE,
+            load_capture_config,
+        )
+
+        settings = tmp_path / "global.settings.yaml"
+        settings.write_text("capture: [unparsable\n")
+        cfg = load_capture_config(settings)
+        assert (cfg.file_mode, cfg.directory_mode) == (
+            DEFAULT_FILE_MODE,
+            DEFAULT_DIRECTORY_MODE,
+        )
+
+    def test_the_fallback_mode_grants_group_read(self):
+        from app.capture.config import DEFAULT_DIRECTORY_MODE, DEFAULT_FILE_MODE
+
+        assert (DEFAULT_FILE_MODE, DEFAULT_DIRECTORY_MODE) == (0o640, 0o750)
+        assert DEFAULT_FILE_MODE & 0o040, "the fallback is fail-open on the mode"
+        assert DEFAULT_DIRECTORY_MODE & 0o050
+
+    def test_a_section_keeps_the_configured_stricter_modes(self, tmp_path):
+        from app.capture.config import (
+            DEFAULT_DIRECTORY_MODE,
+            DEFAULT_FILE_MODE,
+            load_capture_config,
+        )
+
+        settings = tmp_path / "global.settings.yaml"
+        settings.write_text(
+            "capture:\n  file_mode: '0600'\n  directory_mode: '0700'\n"
+        )
+        cfg = load_capture_config(settings)
+        assert (cfg.file_mode, cfg.directory_mode) == (0o600, 0o700)
+        assert cfg.file_mode != DEFAULT_FILE_MODE
+        assert cfg.directory_mode != DEFAULT_DIRECTORY_MODE
+
+
 class TestCorrelationHeaderConfigC6:
     def test_default_is_x_request_id(self):
         cfg = CaptureConfig()
