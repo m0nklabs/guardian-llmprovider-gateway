@@ -19,29 +19,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import yaml
-
+from app.capture.errors import CaptureConfigError
 from app.paths import global_settings_file
 
 logger = logging.getLogger("Guardian.Capture.Config")
-
-
-class CaptureConfigError(ValueError):
-    """The capture configuration is invalid; a bad value is never guessed around.
-
-    Raised where a configured value cannot be read as the setting it names —
-    a malformed ``capture.file_mode``/``capture.directory_mode`` is the case it
-    exists for.  Callers that want to treat "the configuration is broken"
-    separately from an unrelated failure catch this type instead of matching on
-    message text.
-
-    It subclasses :class:`ValueError` because that is what this module raises
-    for every other misconfiguration, so an existing ``except ValueError``
-    around configuration loading keeps catching it.  The refusal of a
-    world-accessible mode in :meth:`CaptureConfig._validate` stays a plain
-    ``ValueError`` with its own message: it rejects a value that was read
-    correctly, while this error is about a value that cannot be read at all.
-    """
 
 
 DEFAULT_CAPTURE_ROOT = "data/capture"
@@ -359,8 +340,12 @@ def _normalize_correlation_headers(raw: Any) -> list[str]:
 
 #: Accepted spelling of the two permission modes, repeated verbatim in the
 #: rejection message for a malformed one so the operator sees the fix without
-#: reading this module.  ``416`` and ``0o640`` are the same mode; YAML 1.1
-#: already reads a bare ``0o640`` as the integer, which is why both are named.
+#: reading this module.  ``416`` and ``0o640`` are the same mode, and both
+#: spellings have to work because PyYAML implements **YAML 1.1**, which has no
+#: ``0o`` integer form (that is YAML 1.2): a bare ``0640`` loads as the integer
+#: 416, while ``0o640`` loads as the *string* ``'0o640'`` and is read by the
+#: octal-string path below.  Dropping either path would reject a value the
+#: settings file can legitimately hold.
 _MODE_ACCEPTED_FORMS = (
     "give an octal string such as '0640' or '0o640', or an integer "
     "(416 is 0o640)"
@@ -372,8 +357,10 @@ def _parse_mode(key: str, raw: Any) -> int:
 
     Accepted forms: an octal string — ``'0640'``, ``'0o640'``, ``'640'``, i.e.
     exactly what :func:`int` accepts with base 8, so every string that was
-    accepted before is still accepted — or an integer (``416``, or YAML 1.1's
-    bare ``0o640``).
+    accepted before is still accepted — or an integer (``416``).  Which one you
+    get depends on YAML: PyYAML is YAML 1.1, so a bare ``0640`` arrives as the
+    integer 416 while ``0o640`` (a YAML 1.2 form PyYAML does not implement)
+    arrives as the string ``'0o640'``.
 
     A ``bool`` is refused explicitly.  It is an ``int`` subclass, so ``True``
     and ``False`` would otherwise be read as ``0o1``/``0o0``: the former tripped
@@ -480,6 +467,13 @@ def load_capture_config(settings_path: Path | None = None) -> CaptureConfig:
     malformed mode raises :class:`CaptureConfigError` naming the setting, the
     value as written and the accepted forms, prefixed with this file's path.
     """
+    # PyYAML is imported here, not at module scope: this package must stay
+    # importable without it so `guardianctl --help` (and the CLI's own
+    # "PyYAML not installed" message for `permissions`) still work on a machine
+    # where the parser is missing.  Everything that really needs YAML arrives
+    # through this function (issue #135).
+    import yaml
+
     if settings_path is None:
         settings_path = global_settings_file()
 

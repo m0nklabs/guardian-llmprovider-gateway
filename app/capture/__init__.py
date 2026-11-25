@@ -13,7 +13,8 @@ Design invariants (never violated):
 - Admin/health/metrics/embedding/key-management endpoints are excluded.
 """
 
-from app.capture.config import CaptureConfig, CaptureConfigError, load_capture_config
+from app.capture.config import CaptureConfig, load_capture_config
+from app.capture.errors import CaptureConfigError
 from app.capture.policy import PolicyResult, evaluate_capture_policy
 from app.capture.redactor import (
     anthropic_messages_to_openai,

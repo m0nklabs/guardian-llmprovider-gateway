@@ -46,10 +46,11 @@ from typing import Any
 
 from _paths import DATA_DIR, REPO_ROOT
 
-# The capture-configuration error is defined next to the parser it guards, and
-# imported here so the CLI and the runtime loader raise the identical type
-# instead of two parallel ones (issue #135).
-from app.capture.config import CaptureConfigError
+# The capture-configuration error lives in a module that imports nothing, so
+# this import cannot pull in PyYAML: `--help` and the CLI's own "PyYAML not
+# installed" message have to work before any configuration is touched (issue
+# #135).  `app.capture.config` re-exports the same class for the parser.
+from app.capture.errors import CaptureConfigError
 
 # Capture config lives in the global settings file (config-schema, 2026-08-21).
 # Resolve through app.paths.global_settings_file() so an installation still on

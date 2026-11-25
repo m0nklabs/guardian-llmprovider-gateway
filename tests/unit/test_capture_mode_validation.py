@@ -10,6 +10,8 @@ message and behaviour.
 
 import argparse
 import importlib.util
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -70,7 +72,7 @@ class TestValidModes:
             ("0640", 0o640),  # octal string
             ("0o640", 0o640),  # 0o-prefixed string
             ("640", 0o640),  # bare octal digits
-            (0o640, 0o640),  # YAML 1.1 reads a bare 0o640 as the integer
+            (0o640, 0o640),  # an int (a bare 0640 loads as exactly this in YAML 1.1)
             (416, 0o640),  # decimal integer for 0o640
             ("0700", 0o700),
             (0o600, 0o600),
@@ -210,3 +212,124 @@ class TestBothCallPathsReportTheSameError:
         assert str(settings) in err, err
         assert "capture.file_mode='rg-r--r--'" in err, err
         assert "'0640'" in err and "'0o640'" in err, err
+
+# ---------------------------------------------------------------------------
+# The CLI must be usable before PyYAML is importable (review finding on #136:
+# a module-scope import of the capture config made `--help` a traceback)
+# ---------------------------------------------------------------------------
+
+_NO_YAML_SITECUSTOMIZE = '''"""Block PyYAML so `import yaml` raises ImportError (test fixture)."""
+import sys
+
+sys.modules["yaml"] = None
+'''
+
+
+class _NoYamlCli:
+    """Run ``scripts/guardianctl.py`` in an interpreter where PyYAML is blocked."""
+
+    def __init__(self, blocker: Path) -> None:
+        self.env = {**os.environ, "PYTHONPATH": str(blocker)}
+        self.argv = [sys.executable, str(SCRIPTS_DIR / "guardianctl.py")]
+
+    def run(self, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [*self.argv, *args],
+            cwd=REPO_ROOT,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+    def run_python(self, code: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=REPO_ROOT,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+
+@pytest.fixture
+def no_yaml_cli(tmp_path):
+    blocker = tmp_path / "no-yaml"
+    blocker.mkdir()
+    (blocker / "sitecustomize.py").write_text(_NO_YAML_SITECUSTOMIZE)
+    return _NoYamlCli(blocker)
+
+
+class TestTheCliReachesArgparseWithoutPyYaml:
+    def test_the_fixture_really_blocks_pyyaml(self, no_yaml_cli):
+        probe = no_yaml_cli.run_python("import yaml")
+        assert probe.returncode != 0, probe.stdout
+        assert "yaml" in probe.stderr.lower(), probe.stderr
+
+    def test_help_succeeds_without_pyyaml(self, no_yaml_cli):
+        result = no_yaml_cli.run("--help")
+        assert result.returncode == 0, result.stderr
+        assert "usage: guardianctl" in result.stdout
+
+    def test_an_unknown_subcommand_is_an_argument_error_without_pyyaml(self, no_yaml_cli):
+        result = no_yaml_cli.run("no-such-subcommand")
+        assert result.returncode == 2, result.stderr
+        assert "invalid choice" in result.stderr
+        assert "ModuleNotFoundError" not in result.stderr
+
+    def test_permissions_reports_missing_pyyaml_instead_of_a_traceback(self, no_yaml_cli):
+        # The command's own degradation, not an import failure: exit 2 with the
+        # documented message (it is what `main` did before the mode refactor).
+        result = no_yaml_cli.run("permissions")
+        assert result.returncode == 2, result.stderr
+        assert "PyYAML not installed" in result.stderr
+        assert "Refusing to compare the capture tree against a guessed mode" in result.stderr
+        assert "Traceback" not in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# What PyYAML (YAML 1.1) actually produces for the accepted forms
+# ---------------------------------------------------------------------------
+
+
+class TestWhatPyYamlActuallyProduces:
+    """Pin the YAML shape the accepted forms rest on.
+
+    An earlier comment claimed PyYAML reads a bare ``0o640`` as an integer.  It
+    does not: ``0o`` octal integers are **YAML 1.2**, while PyYAML implements
+    1.1 — so ``0o640`` arrives as the *string* and is read by the octal-string
+    path, while a bare ``0640`` is the 1.1 integer 416.  This test is what stops
+    the string path from being "simplified" away on the wrong premise.
+    """
+
+    @pytest.mark.parametrize(
+        ("document", "expected"),
+        [
+            ("file_mode: 0640", 0o640),  # YAML 1.1 octal integer
+            ("file_mode: 0o640", "0o640"),  # not a 1.1 integer: a string
+            ("file_mode: '0o640'", "0o640"),  # quoted, same string
+            ("file_mode: 416", 416),  # plain decimal integer
+        ],
+    )
+    def test_the_loaded_value_is_what_the_parser_expects(self, document, expected):
+        import yaml
+
+        loaded = yaml.safe_load(document)["file_mode"]
+        assert isinstance(loaded, type(expected)), (loaded, type(loaded))
+        assert loaded == expected
+        assert capture_config_from_section({"file_mode": loaded}).file_mode == 0o640
+
+
+class TestOneErrorClassNotAReExportChain:
+    def test_config_errors_and_package_expose_the_same_class(self):
+        import app.capture
+        import app.capture.config
+        import app.capture.errors
+
+        assert (
+            app.capture.errors.CaptureConfigError
+            is app.capture.config.CaptureConfigError
+            is app.capture.CaptureConfigError
+            is CaptureConfigError
+        )
