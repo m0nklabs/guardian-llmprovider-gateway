@@ -1064,28 +1064,70 @@ class TestWALWriterCrashRecovery:
 
     @pytest.mark.asyncio
     async def test_writer_survives_disk_full_simulated(self, writer, sink, config, tmp_capture_root):
-        """If writes fail (simulated disk full), the writer logs but doesn't crash."""
-        await writer.start()
-        sink.try_put(CaptureEvent(data={"seq": 1}))
-        await asyncio.sleep(0.1)
+        """If writes fail (simulated disk full), the writer logs but doesn't crash.
 
-        # Patch _write_event_sync to simulate failure
+        The failure is installed by monkeypatching ``_write_event_sync``, and
+        the writer resolves that attribute only when it drains the *next*
+        event — not when the patch is set.  A fixed ``asyncio.sleep`` before
+        the restore therefore races the drain: under load the restore won, the
+        "lost" write went through, and ``assert 2 not in seqs`` failed 3 of 40
+        isolated runs on pristine ``dec09ac`` (#137).  Each step below waits on
+        state this test can observe instead:
+
+        * seq 1 is durable *before* the patch goes in, so the failing write can
+          only ever be attributed to seq 2 — this file's ``_wait_for_records``
+          helper, which also waits for the writer's byte accounting to reach
+          the flushed record;
+        * the failing write has actually been *called* for seq 2, which is what
+          proves the patch was still in place when the writer drained it;
+        * seq 3 is durable after the restore, before the writer is stopped.
+
+        The three assertions are unchanged; waiting for the call makes
+        ``assert 2 not in seqs`` verified instead of assumed.
+        """
+        await writer.start()
+        active = tmp_capture_root / ACTIVE_FILENAME
+
+        sink.try_put(CaptureEvent(data={"seq": 1}))
+        await _wait_for_records(
+            writer,
+            active,
+            '"seq":1',
+            message="seq 1 to be fsynced and accounted before the write is patched",
+        )
+
+        # Patch _write_event_sync to simulate failure.  The call log is the
+        # synchronisation point: it fills in only once the writer has resolved
+        # and invoked the patched method for its event.
         original_write = writer._write_event_sync
+        failed_seqs: list[int | None] = []
 
         def failing_write(event):
+            failed_seqs.append(event.data.get("seq"))
             return False  # Simulate write failure
 
         writer._write_event_sync = failing_write
-        sink.try_put(CaptureEvent(data={"seq": 2}))
-        await asyncio.sleep(0.1)
+        try:
+            sink.try_put(CaptureEvent(data={"seq": 2}))
+            # The patch may only be lifted once the failure has actually fired:
+            # restoring it earlier lets the still-queued write succeed instead.
+            await _wait_until(
+                lambda: 2 in failed_seqs,
+                message="the writer to drain seq 2 through the patched (failing) write",
+            )
+        finally:
+            writer._write_event_sync = original_write
 
         # Restore and verify recovery
-        writer._write_event_sync = original_write
         sink.try_put(CaptureEvent(data={"seq": 3}))
-        await asyncio.sleep(0.1)
+        await _wait_for_records(
+            writer,
+            active,
+            '"seq":3',
+            message="seq 3 to be fsynced and accounted after the write was restored",
+        )
         await writer.stop()
 
-        active = tmp_capture_root / ACTIVE_FILENAME
         lines = [json.loads(line) for line in _read_active_text(active).strip().split("\n") if line.strip()]
         seqs = [e["seq"] for e in lines]
         # seq 1 was written before failure; seq 2 was lost; seq 3 recovered
