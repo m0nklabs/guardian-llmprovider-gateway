@@ -46,10 +46,13 @@ from typing import Any
 
 from _paths import DATA_DIR, REPO_ROOT
 
-# The capture-configuration error lives in a module that imports nothing, so
-# this import cannot pull in PyYAML: `--help` and the CLI's own "PyYAML not
-# installed" message have to work before any configuration is touched (issue
-# #135).  `app.capture.config` re-exports the same class for the parser.
+# The capture-configuration error lives in app.capture.errors, and nothing on
+# the path to it imports PyYAML at module scope: `--help` and the CLI's own
+# "PyYAML not installed" message have to work before any configuration is
+# touched (issue #135).  Importing this module still runs app/capture/__init__.py,
+# so that invariant covers the whole package, not just this file; it is pinned
+# by tests/unit/test_capture_import_path.py.  `app.capture.config` re-exports
+# the same class, so the parser and this import can never drift apart.
 from app.capture.errors import CaptureConfigError
 
 # Capture config lives in the global settings file (config-schema, 2026-08-21).
