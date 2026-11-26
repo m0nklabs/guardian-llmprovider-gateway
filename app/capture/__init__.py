@@ -14,6 +14,7 @@ Design invariants (never violated):
 """
 
 from app.capture.config import CaptureConfig, load_capture_config
+from app.capture.errors import CaptureConfigError
 from app.capture.policy import PolicyResult, evaluate_capture_policy
 from app.capture.redactor import (
     anthropic_messages_to_openai,
@@ -46,6 +47,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "BuildContext",
     "CaptureConfig",
+    "CaptureConfigError",
     "CaptureEvent",
     "CaptureSink",
     "CaptureWALWriter",
