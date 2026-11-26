@@ -400,8 +400,22 @@ class TestWALWriterWriting:
             '"seq":1',
             message="seq 1 to be fsynced and accounted before the disk fills up",
         )
+        # ``_wait_for_records`` gates on ``_active_file_size``, which
+        # ``_write_event_sync`` bumps one line *before* ``bytes_written`` — both
+        # after ``fsync()``, but two separate statements in a worker thread.  A
+        # baseline taken between them would miss seq 1's bytes and make the
+        # exact byte-delta assertion below count them as recovered data, so wait
+        # for the accounting counter itself rather than for the size proxy.
+        await _wait_until(
+            lambda: writer.snapshot()["writer_metrics"]["bytes_written"] > 0,
+            message="seq 1's bytes to be accounted before the baseline is taken",
+        )
         before = writer.snapshot()["writer_metrics"]
         assert before["write_failures"] == 0
+        assert before["bytes_written"] > 0, (
+            "the baseline must be taken after seq 1 is accounted, otherwise the "
+            f"recovery delta below would include it: {before!r}"
+        )
 
         intercepted: list[tuple[int, str | None]] = []
 
