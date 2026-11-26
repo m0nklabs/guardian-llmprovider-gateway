@@ -10,6 +10,7 @@ import asyncio
 import gzip
 import hashlib
 import json
+import logging
 import os
 import time
 from dataclasses import replace
@@ -230,21 +231,85 @@ class TestWALWriterWriting:
             assert line["seq"] == i
 
     @pytest.mark.asyncio
-    async def test_write_failure_is_logged_not_raised(self, writer, sink, config):
-        """Write failures must be counted, not raised (fail-open)."""
+    async def test_write_failure_is_logged_not_raised(self, writer, sink, tmp_capture_root, caplog):
+        """Write failures must be counted and logged, never raised (fail-open).
+
+        Fail-open is the capture contract: an I/O error on the telemetry path
+        is counted and logged, and nothing is raised into the caller.  The
+        pre-fix version of this test slept 200 ms and asserted
+        ``write_failures >= 0``, which holds in every possible state — with
+        the fail-open path removed, with the counter never incremented, and
+        with the writer task never running at all.
+
+        The write fails through the method the loop resolves when it *drains*
+        an event (``_run`` calls ``asyncio.to_thread(self._write_event_sync,
+        event)``), so a sleep decides nothing (same race as the sibling
+        disk-full test fixed in #137).  Each step waits on state this test can
+        observe:
+
+        * seq 1 is durable before the failure is armed, so the loop is
+          provably draining and the active file exists for the last step;
+        * the OSError has actually reached the loop (the patched call log) and
+          has then been *counted* — a writer that swallows the failure
+          uncounted now fails on a bounded timeout instead of passing;
+        * the loop is still alive right after that failure, and seq 3 becomes
+          durable afterwards: fail-open means continue, not fail-stop;
+        * ``stop()`` returns normally and the task ends without an exception,
+          which is where a writer that re-raised the OSError would surface it.
+        """
         await writer.start()
-        sink.try_put(CaptureEvent(data={"test": "data"}))
+        active = tmp_capture_root / ACTIVE_FILENAME
 
-        # Patch the write to fail
-        with patch.object(writer, "_write_event_sync", side_effect=OSError("disk full")):
-            _write_error = writer._write_event_sync  # This will fail
-            # The writer loop catches exceptions
-            await asyncio.sleep(0.2)
+        sink.try_put(CaptureEvent(data={"seq": 1}))
+        await _wait_for_records(
+            writer,
+            active,
+            '"seq":1',
+            message="seq 1 to be fsynced and accounted before the write is armed to fail",
+        )
 
+        with caplog.at_level(logging.WARNING):
+            with patch.object(writer, "_write_event_sync", side_effect=OSError("disk full")) as failing_write:
+                sink.try_put(CaptureEvent(data={"seq": 2}))
+                # The loop resolves _write_event_sync only when it drains the
+                # event: the call log is the proof that the patch was still in
+                # place when the write happened.
+                await _wait_until(
+                    lambda: failing_write.call_count == 1,
+                    message="the writer to drain seq 2 through the failing write",
+                )
+                await _wait_until(
+                    lambda: writer.snapshot()["writer_metrics"]["write_failures"] == 1,
+                    message="the drained OSError to be counted in write_failures",
+                )
+
+                # Fail-open, not fail-stop: the loop survived the error.
+                assert writer._task is not None and not writer._task.done(), (
+                    "the writer loop died on a write failure instead of continuing"
+                )
+
+        # ...and it keeps writing for later events.
+        sink.try_put(CaptureEvent(data={"seq": 3}))
+        await _wait_for_records(
+            writer,
+            active,
+            '"seq":3',
+            message="seq 3 to be fsynced after the failing write, proving the loop continued",
+        )
+
+        # No exception escapes to the caller.  stop() awaits the writer task,
+        # so a re-raising writer fails here instead of being swallowed.
         await writer.stop()
-        # Writer should have recorded the failure
-        snap = writer.snapshot()
-        assert snap["writer_metrics"]["write_failures"] >= 0
+        assert writer._task is not None and writer._task.done()
+        assert writer._task.exception() is None, f"writer loop died with {writer._task.exception()!r}"
+
+        # Counted, exactly: the failing write is the only failure, so ">= 0"
+        # (true in every state) becomes a fact that can be wrong.
+        assert writer.snapshot()["writer_metrics"]["write_failures"] == 1
+
+        # Logged, as the fail-open contract requires.
+        warnings = [rec for rec in caplog.records if rec.levelno >= logging.WARNING]
+        assert any("disk full" in rec.getMessage() for rec in warnings), caplog.text
 
 
 class TestC3PlainActiveFile:
