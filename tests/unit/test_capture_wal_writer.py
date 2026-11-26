@@ -417,11 +417,22 @@ class TestWALWriterWriting:
             f"recovery delta below would include it: {before!r}"
         )
 
-        intercepted: list[tuple[int, str | None]] = []
+        intercepted: list[tuple[int, tuple[int, int] | None, str | None]] = []
 
         def _enospc_fsync(fd: int) -> None:
-            """Stand in for a full disk: fsync on this descriptor reports ENOSPC."""
-            intercepted.append((fd, _fd_path(fd)))
+            """Stand in for a full disk: fsync on this descriptor reports ENOSPC.
+
+            The descriptor is still open here, so this is the only place that can
+            both ``fstat`` it and resolve it through ``/proc``.  The file identity
+            is captured now precisely because the handler closes the descriptor
+            before the assertions run, where an ``fstat`` would only raise EBADF.
+            """
+            try:
+                st = os.fstat(fd)
+                identity: tuple[int, int] | None = (st.st_dev, st.st_ino)
+            except OSError:  # pragma: no cover - fstat on a live fd does not fail
+                identity = None
+            intercepted.append((fd, identity, _fd_path(fd)))
             raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC) + " (injected by the test)")
 
         try:
@@ -441,15 +452,20 @@ class TestWALWriterWriting:
             # The injection happened on the writer's own active file, not on
             # some unrelated fsync elsewhere in the process.
             assert len(intercepted) == 1, f"expected exactly one injected fsync, got {intercepted!r}"
-            injected_fd, injected_path = intercepted[0]
-            assert injected_path is not None, (
-                f"cannot resolve fd {injected_fd} (no /proc/self/fd here), so the injection "
-                "cannot be attributed to the writer's active capture file"
+            injected_fd, injected_identity, injected_path = intercepted[0]
+            # Attribution by file identity works on every platform; the /proc
+            # path is a Linux-only extra that is merely reported when present.
+            expected = active.stat()
+            assert injected_identity == (expected.st_dev, expected.st_ino), (
+                f"the injected ENOSPC fired on fd {injected_fd} "
+                f"(dev/ino {injected_identity!r}, path {injected_path!r}), not on the writer's "
+                f"active capture file ({active}, dev/ino {(expected.st_dev, expected.st_ino)!r})"
             )
-            assert Path(injected_path).resolve() == active.resolve(), (
-                f"the injected ENOSPC fired on fd {injected_fd} -> {injected_path!r}, "
-                "not on the writer's active capture file"
-            )
+            if injected_path is not None:
+                assert Path(injected_path).resolve() == active.resolve(), (
+                    f"the injected ENOSPC fired on fd {injected_fd} -> {injected_path!r}, "
+                    "not on the writer's active capture file"
+                )
 
             # Closed means released, not "attribute cleared": nothing in this
             # process may still hold the file open.  A handler that skipped
