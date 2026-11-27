@@ -1,7 +1,9 @@
 """Actual HTTP resource cleanup without importing LiteLLM or calling a provider."""
 import asyncio
+import time
 from contextvars import ContextVar
 from types import SimpleNamespace
+from typing import Callable
 
 import anyio
 import httpx
@@ -42,7 +44,16 @@ class ClosingBytes(httpx.AsyncByteStream):
         self.closed = True
 
 
-def operations(cleanup_seconds=0.1):
+# The production disconnect-cleanup budget (config/github-copilot-bridge.settings.yaml:
+# `stream_cleanup_seconds: 5`). A test that injects a close delay must not turn
+# "the close finished" into a race against a wall-clock budget: `ClosingBytes`
+# closes in ~36 ms, so a 100 ms budget left a 65 ms margin that a loaded box can
+# eat, cancelling a close the test then reports as a failure (#141). Cleanup
+# *boundedness* has its own tests, which pass a deliberately tight budget.
+CLEANUP_SECONDS = 5
+
+
+def operations(cleanup_seconds=CLEANUP_SECONDS):
     # Constructor needs the separately installed LiteLLM. _invoke and _capture
     # do not: inject only its process-global fallback state, never skip coverage.
     result = LitellmOperations.__new__(LitellmOperations)
@@ -55,6 +66,30 @@ def operations(cleanup_seconds=0.1):
 def pending_cleanup():
     return [task for task in asyncio.all_tasks()
             if task.get_name() in {"copilot-stream-cleanup", "copilot-stream-http-close"}]
+
+
+async def _wait_until(
+    predicate: Callable[[], bool],
+    *,
+    message: str,
+    timeout: float = 10.0,
+    interval: float = 0.01,
+) -> None:
+    """Poll ``predicate`` until true, failing after a bounded deadline.
+
+    Copilot cleanup runs on its own shielded task, so "await the caller, then
+    assert the state" bets on the loop having scheduled that task already. The
+    same bet lost in the capture writer (tests/unit/test_capture_wal_writer.py,
+    #137/#138); polling the observable state is deterministic on a slow runner
+    and returns immediately on a fast one.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        if predicate():
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"timed out after {timeout:g}s waiting for: {message}")
+        await asyncio.sleep(interval)
 
 
 @pytest.mark.asyncio
@@ -106,7 +141,7 @@ async def test_inference_disconnect_during_http_close_keeps_cleanup_owned(status
 
     request = Request({"type": "http", "headers": []}, receive)
     with pytest.raises(ClientDisconnected):
-        await await_inference(request, ops._invoke(operation, {}), cleanup_seconds=0.1)
+        await await_inference(request, ops._invoke(operation, {}), cleanup_seconds=CLEANUP_SECONDS)
     assert response.is_closed and stream.closed and not stream.cancelled
     assert stream.close_calls == 1 and not pending_cleanup()
 
@@ -130,7 +165,7 @@ async def test_outer_inference_repeated_raw_cancel_during_http_cleanup(status):
 
     task = asyncio.create_task(await_inference(
         Request({"type": "http", "headers": []}, receive),
-        ops._invoke(operation, {}), cleanup_seconds=0.1))
+        ops._invoke(operation, {}), cleanup_seconds=CLEANUP_SECONDS))
     await stream.started.wait()
     task.cancel()
     await asyncio.sleep(0)
@@ -172,7 +207,10 @@ async def test_anyio_cancellation_does_not_abort_http_close():
 async def test_hung_close_is_bounded_and_does_not_starve_other_responses(status):
     ops = operations(cleanup_seconds=0.035)
     hung = ClosingBytes(hang=True)
-    fast = ClosingBytes(delay=0.005)
+    # The healthy sibling must be *released* inside the shared budget, so it
+    # does no timed work at all: injected delay inside a fixed budget is exactly
+    # the bet that made #141 flaky.
+    fast = ClosingBytes(delay=0)
     responses = [httpx.Response(status, stream=hung), httpx.Response(200, stream=fast)]
     failure = ValueError("synthetic upstream failure")
 
@@ -191,15 +229,13 @@ async def test_hung_close_is_bounded_and_does_not_starve_other_responses(status)
     else:
         assert await ops._invoke(operation, {}) == {"choices": []}
     assert asyncio.get_running_loop().time() - started < 0.25
-    await asyncio.sleep(0)  # Deliver the bounded child's issued cancellation.
+    # At the shared deadline the response-close waiter is cancelled while its
+    # independently owned physical close finishes that same deadline. Synchronise
+    # on the cleanup tasks being gone instead of assuming one loop tick.
+    await _wait_until(lambda: not pending_cleanup(),
+                      message="the bounded cleanup tasks to settle")
     assert hung.close_calls == fast.close_calls == 1
     assert not hung.closed and fast.closed
-    # At the shared deadline the response-close waiter is cancelled while its
-    # independently owned physical close finishes that same deadline. Join the
-    # already-issued cooperative cancellation rather than assume one loop tick.
-    remaining = pending_cleanup()
-    if remaining:
-        await asyncio.wait_for(asyncio.gather(*remaining, return_exceptions=True), timeout=0.1)
     assert hung.cancelled
     assert not pending_cleanup()
 
@@ -223,12 +259,11 @@ async def test_inference_disconnect_with_hung_http_close_is_bounded():
         await await_inference(Request({"type": "http", "headers": []}, receive),
                               ops._invoke(operation, {}), cleanup_seconds=0.1)
     assert asyncio.get_running_loop().time() - start < 0.25
-    # Under runner load the cleanup task's cancel may not have executed yet:
-    # give the bounded cleanup a moment to settle instead of a single yield.
-    for _ in range(100):
-        if stream.cancelled and stream.close_calls >= 1 and not pending_cleanup():
-            break
-        await asyncio.sleep(0.005)
+    # The bounded cleanup's cancel is issued at its deadline; wait for the
+    # observable settled state instead of betting on a fixed number of yields.
+    await _wait_until(
+        lambda: stream.cancelled and stream.close_calls >= 1 and not pending_cleanup(),
+        message="the bounded http close to be cancelled and settled")
     assert stream.cancelled and stream.close_calls == 1
     assert not pending_cleanup()
 
@@ -270,13 +305,10 @@ async def test_cancellation_resistant_http_close_outlives_only_bounded_wait():
     result = await ops._invoke(operation, {})
     assert result == {"choices": []}
     assert asyncio.get_running_loop().time() - started < 0.25
-    # Under runner load the bounded-wait cancel may not have executed yet:
-    # settle the cleanup tasks instead of asserting after a single yield.
-    for _ in range(100):
-        remaining = pending_cleanup()
-        if len(remaining) == 1 and stream.cancelled:
-            break
-        await asyncio.sleep(0.005)
+    # The cancel is issued at the deadline but delivered on a later tick: wait
+    # for the observable leftover state rather than a fixed number of yields.
+    await _wait_until(lambda: len(pending_cleanup()) == 1 and stream.cancelled,
+                      message="the cancellation-resistant close to be left pending")
     remaining = pending_cleanup()
     assert len(remaining) == 1 and stream.cancelled and not stream.closed
     # Python cannot kill cancellation-resistant provider code. Release this
@@ -333,7 +365,7 @@ async def test_real_nonstream_httpx_autoclose_survives_disconnect_and_raw_cancel
 
         task = asyncio.create_task(await_inference(
             Request({"type": "http", "headers": []}, receive),
-            ops._invoke(operation, {}), cleanup_seconds=0.1))
+            ops._invoke(operation, {}), cleanup_seconds=CLEANUP_SECONDS))
         await stream.started.wait()
         assert response.is_closed  # HTTPX set this BEFORE physical close finished.
         if cancel_mode == "raw_repeated":
@@ -441,7 +473,7 @@ async def test_response_hook_does_not_wrap_unowned_discovery_streams():
 @pytest.mark.asyncio
 async def test_wrapped_stream_iteration_and_close_are_idempotent_with_one_deadline():
     stream = ClosingBytes(delay=0.02)
-    wrapper = _OwnedHTTPStream(stream, 0.1)
+    wrapper = _OwnedHTTPStream(stream, CLEANUP_SECONDS)
     assert [chunk async for chunk in wrapper] == [b"synthetic"]
     first = asyncio.create_task(wrapper.aclose())
     await stream.started.wait()
