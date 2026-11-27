@@ -7,6 +7,7 @@ artifact is gzip (``.jsonl.gz``, produced atomically on rotation) with a
 """
 
 import asyncio
+import errno
 import gzip
 import hashlib
 import json
@@ -93,6 +94,39 @@ async def _wait_for_records(
         lambda: writer._active_file_size > 0 and _active_contains(active, needle),
         message=message,
     )
+
+
+def _fd_path(fd: int) -> str | None:
+    """Filesystem path behind an open descriptor (Linux ``/proc``), else ``None``."""
+    try:
+        return os.readlink(f"/proc/self/fd/{fd}")
+    except OSError:
+        return None
+
+
+def _open_fds_targeting(path: Path) -> list[int] | None:
+    """Descriptors of this process that currently point at ``path``.
+
+    ``None`` means ``/proc/self/fd`` cannot be inspected here, so a caller can
+    tell "no descriptor points at this file" from "not observable on this
+    platform" instead of reading both as an empty list.
+    """
+    fd_dir = Path("/proc/self/fd")
+    if not fd_dir.is_dir():
+        return None
+    wanted = path.resolve()
+    found: list[int] = []
+    for entry in fd_dir.iterdir():
+        try:
+            fd = int(entry.name)
+        except ValueError:
+            continue
+        target = _fd_path(fd)
+        if target is None:
+            continue
+        if Path(target).resolve() == wanted:
+            found.append(fd)
+    return found
 
 
 def _append_partial_line(active: Path, text: str) -> None:
@@ -310,6 +344,195 @@ class TestWALWriterWriting:
         # Logged, as the fail-open contract requires.
         warnings = [rec for rec in caplog.records if rec.levelno >= logging.WARNING]
         assert any("disk full" in rec.getMessage() for rec in warnings), caplog.text
+
+    @pytest.mark.asyncio
+    async def test_in_method_fail_open_handler_counts_closes_and_recovers(
+        self, writer, sink, tmp_capture_root, caplog
+    ):
+        """The writer's own ``except OSError`` handler counts, closes and returns.
+
+        ``_write_event_sync`` carries the writer's in-method fail-open handler
+        (``app/capture/wal_writer.py:699-704``): log, ``write_failures += 1``,
+        ``_close_active_file()``, ``return False``.  Both earlier write-failure
+        tests — ``test_write_failure_is_logged_not_raised`` above and
+        ``test_writer_survives_disk_full_simulated`` — replace
+        ``writer._write_event_sync`` itself, so the injected exception is
+        raised at the *call site* inside ``_run`` and lands in the loop's
+        generic ``except Exception``.  The method body never fails, and that
+        is why rewriting this handler's ``return False`` into ``raise`` left
+        the whole suite green (#143, measured during #140).
+
+        Here nothing on the writer is replaced.  The failure is injected at
+        the last step of the real durable-write sequence (``write`` ->
+        ``flush`` -> ``fsync``): a patched ``os.fsync`` raises
+        ``OSError(ENOSPC)`` for the writer's own descriptor — the syscall a
+        full disk fails at, after the record has travelled the real append
+        handle.  That is the faithful failure for this handler: a storage
+        error reaching the method body, with the writer state production would
+        be in (descriptor open, bytes flushed, durability refused).  Closing
+        the descriptor underneath the writer instead raises ``EBADF`` from
+        ``write()`` — a writer bug rather than the disk-full condition this
+        handler exists for — and it has to poke the writer's private handle to
+        get there.
+
+        Asserted, each synchronised on state this test can observe:
+
+        * the failure is counted exactly once (``write_failures`` +1; a
+          handler that re-raises is counted twice, here and by the loop);
+        * the active file is closed: the public snapshot reports no active
+          file and no descriptor in this process still points at the active
+          path, so the handle was released instead of dropped on the floor;
+        * nothing is raised into the caller: the loop is still running after
+          the failure, the error was handled by the method rather than caught
+          by the loop's generic ``except``, ``stop()`` returns and the task
+          ends without an exception;
+        * the writer recovers: the next event is durably on disk and
+          accounted, which is the entire point of ``return False``.
+        """
+        await writer.start()
+        caplog.set_level(logging.WARNING)
+        active = tmp_capture_root / ACTIVE_FILENAME
+
+        sink.try_put(CaptureEvent(data={"seq": 1}))
+        await _wait_for_records(
+            writer,
+            active,
+            '"seq":1',
+            message="seq 1 to be fsynced and accounted before the disk fills up",
+        )
+        # ``_wait_for_records`` gates on ``_active_file_size``, which
+        # ``_write_event_sync`` bumps one line *before* ``bytes_written`` — both
+        # after ``fsync()``, but two separate statements in a worker thread.  A
+        # baseline taken between them would miss seq 1's bytes and make the
+        # exact byte-delta assertion below count them as recovered data, so wait
+        # for the accounting counter itself rather than for the size proxy.
+        await _wait_until(
+            lambda: writer.snapshot()["writer_metrics"]["bytes_written"] > 0,
+            message="seq 1's bytes to be accounted before the baseline is taken",
+        )
+        before = writer.snapshot()["writer_metrics"]
+        assert before["write_failures"] == 0
+        assert before["bytes_written"] > 0, (
+            "the baseline must be taken after seq 1 is accounted, otherwise the "
+            f"recovery delta below would include it: {before!r}"
+        )
+
+        intercepted: list[tuple[int, tuple[int, int] | None, str | None]] = []
+
+        def _enospc_fsync(fd: int) -> None:
+            """Stand in for a full disk: fsync on this descriptor reports ENOSPC.
+
+            The descriptor is still open here, so this is the only place that can
+            both ``fstat`` it and resolve it through ``/proc``.  The file identity
+            is captured now precisely because the handler closes the descriptor
+            before the assertions run, where an ``fstat`` would only raise EBADF.
+            """
+            try:
+                st = os.fstat(fd)
+                identity: tuple[int, int] | None = (st.st_dev, st.st_ino)
+            except OSError:  # pragma: no cover - fstat on a live fd does not fail
+                identity = None
+            intercepted.append((fd, identity, _fd_path(fd)))
+            raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC) + " (injected by the test)")
+
+        try:
+            with patch.object(os, "fsync", _enospc_fsync):
+                sink.try_put(CaptureEvent(data={"seq": 2}))
+                await _wait_until(
+                    lambda: writer.snapshot()["writer_metrics"]["write_failures"] >= 1,
+                    message="the drained ENOSPC to be counted in write_failures",
+                )
+                # The handler counts before it closes, so the published
+                # snapshot naming no active file is what proves the close ran.
+                await _wait_until(
+                    lambda: writer.snapshot()["capture_active_file"] is None,
+                    message="the in-method handler to close the active file",
+                )
+
+            # The injection happened on the writer's own active file, not on
+            # some unrelated fsync elsewhere in the process.
+            assert len(intercepted) == 1, f"expected exactly one injected fsync, got {intercepted!r}"
+            injected_fd, injected_identity, injected_path = intercepted[0]
+            # Attribution by file identity works on every platform; the /proc
+            # path is a Linux-only extra that is merely reported when present.
+            expected = active.stat()
+            assert injected_identity == (expected.st_dev, expected.st_ino), (
+                f"the injected ENOSPC fired on fd {injected_fd} "
+                f"(dev/ino {injected_identity!r}, path {injected_path!r}), not on the writer's "
+                f"active capture file ({active}, dev/ino {(expected.st_dev, expected.st_ino)!r})"
+            )
+            if injected_path is not None:
+                assert Path(injected_path).resolve() == active.resolve(), (
+                    f"the injected ENOSPC fired on fd {injected_fd} -> {injected_path!r}, "
+                    "not on the writer's active capture file"
+                )
+
+            # Closed means released, not "attribute cleared": nothing in this
+            # process may still hold the file open.  A handler that skipped
+            # _close_active_file() leaks exactly here.
+            open_fds = _open_fds_targeting(active)
+            if open_fds is not None:
+                assert open_fds == [], (
+                    f"the active capture file is still open on descriptors {open_fds!r} "
+                    "after the failed write"
+                )
+            assert writer.snapshot()["capture_active_file_format"] is None
+
+            # Fail-open, not fail-stop: the loop is alive after the failure.
+            assert writer._task is not None and not writer._task.done(), (
+                "the writer loop died inside the failing write instead of returning False"
+            )
+            handled = [
+                rec for rec in caplog.records if "Failed to write capture event" in rec.getMessage()
+            ]
+            assert any("No space left on device" in rec.getMessage() for rec in handled), (
+                f"the handler did not log the real ENOSPC: {caplog.text}"
+            )
+
+            # Recovery: the next event must be written and accounted, i.e. the
+            # writer reopened the file it just closed.  os.fsync is unpatched
+            # again here, so this write takes the real durability path.
+            sink.try_put(CaptureEvent(data={"seq": 3}))
+            # bytes_written is bumped only *after* fsync returns, so waiting on
+            # it waits for a durable record; the file content alone shows up
+            # earlier, when the record has merely been flushed.
+            await _wait_until(
+                lambda: writer.snapshot()["writer_metrics"]["bytes_written"] > before["bytes_written"],
+                message="seq 3 to be fsynced and accounted after the ENOSPC",
+            )
+
+            after = writer.snapshot()["writer_metrics"]
+            # Exact, because ">= 1" is satisfied by the double count a
+            # re-raising handler produces: once here, once in _run's catch.
+            assert after["write_failures"] == before["write_failures"] + 1, (
+                "expected the ENOSPC to be counted exactly once, got "
+                f"{after['write_failures'] - before['write_failures']} counts — an exception "
+                "escaping _write_event_sync is counted again by the writer loop"
+            )
+            escaped = [rec for rec in caplog.records if "unexpected error" in rec.getMessage().lower()]
+            assert escaped == [], (
+                "the OSError escaped the in-method handler into the writer loop: "
+                f"{[rec.getMessage() for rec in escaped]}"
+            )
+            # Durable recovery, exactly accounted: the record is on disk and
+            # bytes_written (bumped only after fsync) grew by that record only.
+            # Every line still parses, so the failed write left no torn record.
+            lines = [line for line in active.read_bytes().decode("utf-8").split("\n") if line]
+            records = [json.loads(line) for line in lines]
+            recovered = lines[-1]
+            assert records[-1]["seq"] == 3, f"the recovered record is not last in the file: {records!r}"
+            assert after["bytes_written"] - before["bytes_written"] == len(recovered.encode("utf-8")) + 1, (
+                "the recovered event was not accounted exactly once "
+                f"(bytes_written +{after['bytes_written'] - before['bytes_written']}, "
+                f"record is {len(recovered.encode('utf-8')) + 1} bytes)"
+            )
+        finally:
+            await writer.stop()
+
+        # Nothing escaped into the caller, and the handler's single count stands.
+        assert writer._task is not None and writer._task.done()
+        assert writer._task.exception() is None, f"writer loop died with {writer._task.exception()!r}"
+        assert writer.snapshot()["writer_metrics"]["write_failures"] == before["write_failures"] + 1
 
 
 class TestC3PlainActiveFile:
