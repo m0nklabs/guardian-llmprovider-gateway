@@ -106,6 +106,7 @@ from app.proxy.responses_bridge import (
 )
 from app.proxy.auth import (
     _token_fingerprint,
+    enforce_key_model_allowed,
     generate_api_key,
     get_request_auth_context,
     load_api_keys,
@@ -1700,6 +1701,7 @@ async def proxy_v1_post(path: str, request: Request, client_id: str = Depends(ve
 _local_ollama.init(
     resolve_or_reject_inference_model=_resolve_or_reject_inference_model,
     is_cloud_or_guardian_route=_is_cloud_or_guardian_route,
+    enforce_key_model_allowed=enforce_key_model_allowed,
     forward_to_cloud_provider=_forward_to_cloud_provider,
     begin_queued_request=_queue_helpers.begin_queued_request,
     request_cancel_http_exception=_queue_helpers.request_cancel_http_exception,
@@ -1744,6 +1746,7 @@ _gw_routing.init(
     resolve_or_reject_inference_model=_resolve_or_reject_inference_model,
     resolve_inference_model=_resolve_inference_model,
     is_cloud_or_guardian_route=_is_cloud_or_guardian_route,
+    enforce_key_model_allowed=enforce_key_model_allowed,
     resolve_cloud_attempts=_cloud_routing.resolve_cloud_attempts,
     resolve_cloud_vision_fallback=_cloud_routing.resolve_cloud_vision_fallback,
     setup_cloud_capture=_cloud_routing.setup_cloud_capture,

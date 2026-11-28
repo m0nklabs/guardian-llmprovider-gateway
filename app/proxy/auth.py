@@ -235,6 +235,27 @@ def key_allows_model(auth_ctx: dict | None, model_name: str) -> bool:
     return model_name in allowed
 
 
+def enforce_key_model_allowed(request: Request, model_name: str) -> None:
+    """Reject *model_name* unless the requesting key's allowlist grants it.
+
+    The direct local inference handlers call this once per request, on the
+    public model ID the client sent, before model resolution and before queue
+    admission. An unlisted ID raises the established cloud-resolver shape:
+    HTTP 403 with ``detail.error == "model_not_allowed"``. Absent, ``null`` or
+    empty ``allowed_models`` stays unrestricted.
+    """
+    if key_allows_model(get_request_auth_context(request), model_name):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "error": "model_not_allowed",
+            "model": model_name,
+            "message": "this Guardian key is restricted to a fixed model list",
+        },
+    )
+
+
 def _extract_api_key(
     request: Request,
     creds: HTTPAuthorizationCredentials | None,
